@@ -1,0 +1,11 @@
+image: alpine/edge
+secrets:
+  - adc208d6-718a-4f72-af7f-0caf11b510c5
+environment:
+  REPO: pi-extensions
+  GH_USER: aussetg
+tasks:
+  - push-to-github: |
+      cd ~/"${REPO}"
+      git config --global credential.helper store
+      git push --mirror "https://github.com/${GH_USER}/${REPO}"
