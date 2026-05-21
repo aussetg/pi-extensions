@@ -3,6 +3,7 @@ import {
   type AgentToolUpdateCallback,
   type ExtensionAPI,
   type ExtensionContext,
+  withFileMutationQueue,
 } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { StringEnum } from "@mariozechner/pi-ai";
@@ -59,8 +60,10 @@ type ApplyPatchDetails =
         path: string;
         status: "completed" | "failed";
         output?: string;
+        diff?: string;
+        firstChangedLine?: number;
       }>;
-      previews?: Array<{ path: string; diff: string }>;
+      previews?: Array<{ path: string; diff: string; firstChangedLine?: number }>;
       warnings?: string[];
     };
 
@@ -236,6 +239,12 @@ interface Chunk {
   origIndex: number;
   delLines: string[];
   insLines: string[];
+}
+
+interface LineReplacement {
+  oldStart: number;
+  oldLines: string[];
+  newLines: string[];
 }
 
 interface LineMatchCache {
@@ -693,10 +702,28 @@ function isEnvelopeOperationMarker(line: string): boolean {
   );
 }
 
+function stripCodexHeredocWrapper(patch: string): string {
+  const trimmed = normalizeLineEndings(patch).trim();
+  const lines = trimmed.split("\n");
+  if (lines.length < 4) return patch;
+
+  const first = lines[0];
+  const last = lines[lines.length - 1];
+  if (
+    (first === "<<EOF" || first === "<<'EOF'" || first === '<<"EOF"') &&
+    typeof last === "string" &&
+    last.endsWith("EOF")
+  ) {
+    return lines.slice(1, -1).join("\n").trim();
+  }
+
+  return patch;
+}
+
 function parseCodexPatchEnvelope(
   patch: string,
 ): ApplyPatchOperation[] | undefined {
-  const lines = normalizeLineEndings(patch).split("\n");
+  const lines = normalizeLineEndings(stripCodexHeredocWrapper(patch)).split("\n");
 
   let lo = 0;
   let hi = lines.length;
@@ -842,6 +869,7 @@ function prepareApplyPatchArguments(input: unknown): unknown {
 interface ApplyUpdateResult {
   output: string;
   fuzz: number;
+  replacements: LineReplacement[];
   normalizedMarkers?: string[];
 }
 
@@ -852,7 +880,11 @@ function applyCodexUpdateWithRecovery(
 ): ApplyUpdateResult {
   try {
     const strict = applyCodexUpdateBody(input, diff);
-    return { output: strict.output, fuzz: strict.fuzz };
+    return {
+      output: strict.output,
+      fuzz: strict.fuzz,
+      replacements: strict.replacements,
+    };
   } catch (err) {
     if (!isEnvelopeMarkerParseError(err)) throw err;
 
@@ -863,6 +895,7 @@ function applyCodexUpdateWithRecovery(
     return {
       output: recovered.output,
       fuzz: recovered.fuzz,
+      replacements: recovered.replacements,
       normalizedMarkers: normalized.markers,
     };
   }
@@ -873,7 +906,7 @@ function applyCodexUpdateWithRecovery(
 function applyCodexUpdateBody(
   input: string,
   diff: string,
-): { output: string; fuzz: number } {
+): { output: string; fuzz: number; replacements: LineReplacement[] } {
   // IMPORTANT: do NOT trim() here. Codex context lines start with a leading space.
   const normalizedDiff = normalizeLineEndings(diff);
   const patchLines = normalizedDiff.split("\n");
@@ -888,6 +921,7 @@ function applyCodexUpdateBody(
   let patchIndex = 0;
   let fileIndex = 0;
   const dest: string[] = [];
+  const replacements: LineReplacement[] = [];
   let origIndex = 0;
   let seenPrefixIndex = 0;
   const seenExact = new Set<string>();
@@ -1007,6 +1041,11 @@ function applyCodexUpdateBody(
         );
       }
 
+      replacements.push({
+        oldStart: chunkOrigIndex,
+        oldLines: expected,
+        newLines: ch.insLines,
+      });
       dest.push(...ch.insLines);
       origIndex += expected.length;
     }
@@ -1017,7 +1056,7 @@ function applyCodexUpdateBody(
 
   // Tail
   dest.push(...fileLines.slice(origIndex));
-  return { output: dest.join("\n"), fuzz };
+  return { output: dest.join("\n"), fuzz, replacements };
 }
 
 // Apply a Codex Add File body (every line starts with '+') and return file content.
@@ -1039,6 +1078,155 @@ function applyCodexCreateBody(diff: string): string {
     out[i] = line.slice(1);
   }
   return out.join("\n");
+}
+
+interface GeneratedDiff {
+  diff: string;
+  firstChangedLine?: number;
+}
+
+function splitDisplayLines(content: string): string[] {
+  const lines = normalizeLineEndings(content).split("\n");
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+function generateDiffFromReplacements(
+  oldContent: string,
+  newContent: string,
+  replacements: LineReplacement[],
+  contextLines = 4,
+): GeneratedDiff {
+  if (normalizeLineEndings(oldContent) === normalizeLineEndings(newContent)) {
+    return { diff: "", firstChangedLine: undefined };
+  }
+
+  const oldLines = splitDisplayLines(oldContent);
+  const newLines = splitDisplayLines(newContent);
+  const maxLineNum = Math.max(oldLines.length, newLines.length, 1);
+  const lineNumWidth = String(maxLineNum).length;
+
+  const sorted = [...replacements].sort((a, b) => a.oldStart - b.oldStart);
+  let delta = 0;
+  const hunks: Array<{
+    oldStart: number;
+    oldEnd: number;
+    newStart: number;
+    newEnd: number;
+    oldSegment: string[];
+    newSegment: string[];
+  }> = [];
+
+  for (const replacement of sorted) {
+    const oldStart = Math.max(0, Math.min(replacement.oldStart, oldLines.length));
+    const oldLen = Math.max(
+      0,
+      Math.min(replacement.oldLines.length, oldLines.length - oldStart),
+    );
+    const newStart = Math.max(0, Math.min(oldStart + delta, newLines.length));
+    const newLen = Math.max(
+      0,
+      Math.min(replacement.newLines.length, newLines.length - newStart),
+    );
+    const oldSegment = oldLines.slice(oldStart, oldStart + oldLen);
+    const newSegment = newLines.slice(newStart, newStart + newLen);
+    delta += newSegment.length - oldSegment.length;
+
+    if (oldSegment.length === 0 && newSegment.length === 0) continue;
+    if (
+      oldSegment.length === newSegment.length &&
+      oldSegment.every((line, i) => line === newSegment[i])
+    ) {
+      continue;
+    }
+
+    hunks.push({
+      oldStart,
+      oldEnd: oldStart + oldSegment.length,
+      newStart,
+      newEnd: newStart + newSegment.length,
+      oldSegment,
+      newSegment,
+    });
+  }
+
+  if (hunks.length === 0) return { diff: "", firstChangedLine: undefined };
+
+  const groups: Array<typeof hunks> = [];
+  let currentGroup: typeof hunks = [];
+  let currentOldEnd = -1;
+  for (const hunk of hunks) {
+    if (
+      currentGroup.length === 0 ||
+      hunk.oldStart <= currentOldEnd + contextLines * 2
+    ) {
+      currentGroup.push(hunk);
+      currentOldEnd = Math.max(currentOldEnd, hunk.oldEnd);
+      continue;
+    }
+    groups.push(currentGroup);
+    currentGroup = [hunk];
+    currentOldEnd = hunk.oldEnd;
+  }
+  if (currentGroup.length > 0) groups.push(currentGroup);
+
+  const output: string[] = [];
+  const pushContext = (oldIndex: number) => {
+    const lineNum = String(oldIndex + 1).padStart(lineNumWidth, " ");
+    output.push(` ${lineNum} ${oldLines[oldIndex] ?? ""}`);
+  };
+  const pushRemoval = (oldIndex: number, line: string) => {
+    const lineNum = String(oldIndex + 1).padStart(lineNumWidth, " ");
+    output.push(`-${lineNum} ${line}`);
+  };
+  const pushAddition = (newIndex: number, line: string) => {
+    const lineNum = String(newIndex + 1).padStart(lineNumWidth, " ");
+    output.push(`+${lineNum} ${line}`);
+  };
+  const pushEllipsis = () => {
+    output.push(` ${"".padStart(lineNumWidth, " ")} ...`);
+  };
+
+  let previousContextEnd = 0;
+  for (const group of groups) {
+    const first = group[0]!;
+    const last = group[group.length - 1]!;
+    const contextStart = Math.max(0, first.oldStart - contextLines);
+    const contextEnd = Math.min(oldLines.length, last.oldEnd + contextLines);
+
+    if (contextStart > previousContextEnd) pushEllipsis();
+
+    let oldCursor = contextStart;
+    for (const hunk of group) {
+      while (oldCursor < hunk.oldStart) {
+        pushContext(oldCursor);
+        oldCursor++;
+      }
+
+      for (let i = 0; i < hunk.oldSegment.length; i++) {
+        pushRemoval(hunk.oldStart + i, hunk.oldSegment[i]!);
+      }
+      for (let i = 0; i < hunk.newSegment.length; i++) {
+        pushAddition(hunk.newStart + i, hunk.newSegment[i]!);
+      }
+
+      oldCursor = hunk.oldEnd;
+    }
+
+    while (oldCursor < contextEnd) {
+      pushContext(oldCursor);
+      oldCursor++;
+    }
+
+    previousContextEnd = contextEnd;
+  }
+
+  if (previousContextEnd < oldLines.length) pushEllipsis();
+
+  return {
+    diff: output.join("\n"),
+    firstChangedLine: hunks[0]!.newStart + 1,
+  };
 }
 
 // Atomic write using a temp file in the same directory. Best-effort mode preservation.
@@ -1081,11 +1269,31 @@ async function writeFileAtomic(
   }
 }
 
+async function withMutationQueues<T>(
+  touchedPaths: string[],
+  fn: () => Promise<T>,
+): Promise<T> {
+  const uniquePaths = [...new Set(touchedPaths)].sort();
+  let run = fn;
+
+  // Acquire in stable order so multi-file patches and moves cannot deadlock
+  // against another apply_patch call that touches the same files in reverse.
+  for (let i = uniquePaths.length - 1; i >= 0; i--) {
+    const filePath = uniquePaths[i]!;
+    const next = run;
+    run = () => withFileMutationQueue(filePath, next);
+  }
+
+  return run();
+}
+
 interface ApplyOperationResult {
   type: ApplyPatchOpType;
   path: string;
   status: "completed" | "failed";
   output?: string;
+  diff?: string;
+  firstChangedLine?: number;
 }
 
 interface PreparedApplyTask {
@@ -1329,14 +1537,16 @@ async function applyOperations(
         const { bom, text: current } = stripBom(rawCurrent);
         const originalEnding = detectLineEnding(current);
 
-        const { output, fuzz, normalizedMarkers } = applyCodexUpdateWithRecovery(
-          current,
-          diff,
-          rel,
-        );
+        const { output, fuzz, replacements, normalizedMarkers } =
+          applyCodexUpdateWithRecovery(current, diff, rel);
         if (!task.moveAbs && normalizeLineEndings(current) === output) {
           throw new DiffError(`No changes made to ${rel}.`);
         }
+        const generatedDiff = generateDiffFromReplacements(
+          current,
+          output,
+          replacements,
+        );
         const finalOutput = bom + restoreLineEndings(output, originalEnding);
         const warning =
           normalizedMarkers && normalizedMarkers.length > 0
@@ -1360,6 +1570,8 @@ async function applyOperations(
               path: relTo,
               status: "completed",
               output: `Moved from ${rel}`,
+              diff: generatedDiff.diff,
+              firstChangedLine: generatedDiff.firstChangedLine,
             },
             fuzz,
             warning,
@@ -1370,7 +1582,13 @@ async function applyOperations(
         await writeFileAtomic(abs, finalOutput, st.mode);
         markPathExists(abs, true);
         return {
-          result: { type, path: rel, status: "completed" },
+          result: {
+            type,
+            path: rel,
+            status: "completed",
+            diff: generatedDiff.diff,
+            firstChangedLine: generatedDiff.firstChangedLine,
+          },
           fuzz,
           warning,
         };
@@ -1540,17 +1758,37 @@ const diffPreviewCache = new Map<string, string>();
 const FIRST_CHANGED_LINE_CACHE_LIMIT = 256;
 const firstChangedLineCache = new Map<string, number>();
 
-function diffPreviewCacheKey(diff: string, filePath?: string): string {
-  return `${filePath ?? ""}\u0000${diff}`;
+function diffPreviewCacheKey(
+  kind: "codex-body" | "rendered",
+  diff: string,
+  filePath?: string,
+): string {
+  return `${kind}\u0000${filePath ?? ""}\u0000${diff}`;
 }
 
-function getCachedDiffPreview(diff: string, filePath?: string): string {
-  const key = diffPreviewCacheKey(diff, filePath);
+function getCachedCodexBodyDiffPreview(diff: string, filePath?: string): string {
+  const key = diffPreviewCacheKey("codex-body", diff, filePath);
   const cached = diffPreviewCache.get(key);
   if (cached !== undefined) return cached;
 
   const nativeDiff = codexBodyToNativeDiffText(diff);
   const rendered = nativeDiff ? renderDiff(nativeDiff, { filePath }) : "";
+  diffPreviewCache.set(key, rendered);
+
+  if (diffPreviewCache.size > DIFF_PREVIEW_CACHE_LIMIT) {
+    const oldestKey = diffPreviewCache.keys().next().value;
+    if (typeof oldestKey === "string") diffPreviewCache.delete(oldestKey);
+  }
+
+  return rendered;
+}
+
+function getCachedRenderedDiffPreview(diff: string, filePath?: string): string {
+  const key = diffPreviewCacheKey("rendered", diff, filePath);
+  const cached = diffPreviewCache.get(key);
+  if (cached !== undefined) return cached;
+
+  const rendered = diff ? renderDiff(diff, { filePath }) : "";
   diffPreviewCache.set(key, rendered);
 
   if (diffPreviewCache.size > DIFF_PREVIEW_CACHE_LIMIT) {
@@ -1650,12 +1888,22 @@ function firstChangedLineFromDiff(diff: string): number {
   return result;
 }
 
-function makeDiffPreview(
+function makeCodexBodyDiffPreview(
   diff: string,
   theme: { fg: (color: string, text: string) => string },
   filePath?: string,
 ): string {
-  const rendered = getCachedDiffPreview(diff, filePath);
+  const rendered = getCachedCodexBodyDiffPreview(diff, filePath);
+  if (!rendered) return theme.fg("muted", "(no diff preview)");
+  return rendered;
+}
+
+function makeRenderedDiffPreview(
+  diff: string,
+  theme: { fg: (color: string, text: string) => string },
+  filePath?: string,
+): string {
+  const rendered = getCachedRenderedDiffPreview(diff, filePath);
   if (!rendered) return theme.fg("muted", "(no diff preview)");
   return rendered;
 }
@@ -1727,23 +1975,28 @@ function renderOperationLine(
 }
 
 function collectSuccessPreviews(
-  ops: ApplyPatchOperation[],
   results: Array<{
     type: ApplyPatchOpType;
     path: string;
     status: "completed" | "failed";
     output?: string;
+    diff?: string;
+    firstChangedLine?: number;
   }>,
-): Array<{ path: string; diff: string }> {
-  const previews: Array<{ path: string; diff: string }> = [];
-  const n = Math.min(ops.length, results.length);
-  for (let i = 0; i < n; i++) {
-    const op = ops[i]!;
-    const res = results[i]!;
-    if (op.type !== "update_file" || res.status !== "completed") continue;
-    if (typeof op.diff !== "string" || op.diff.length === 0) continue;
-    const displayPath = shortenPathForDisplay(res.path || op.path);
-    previews.push({ path: displayPath, diff: op.diff });
+): Array<{ path: string; diff: string; firstChangedLine?: number }> {
+  const previews: Array<{
+    path: string;
+    diff: string;
+    firstChangedLine?: number;
+  }> = [];
+  for (const res of results) {
+    if (res.type !== "update_file" || res.status !== "completed") continue;
+    if (typeof res.diff !== "string" || res.diff.length === 0) continue;
+    previews.push({
+      path: shortenPathForDisplay(res.path),
+      diff: res.diff,
+      firstChangedLine: res.firstChangedLine,
+    });
   }
   return previews;
 }
@@ -1843,7 +2096,11 @@ export default function (pi: ExtensionAPI) {
           out +=
             "\n\n" +
             previewPath +
-            makeDiffPreview(details.previewDiff, theme, details.previewPath);
+            makeCodexBodyDiffPreview(
+              details.previewDiff,
+              theme,
+              details.previewPath,
+            );
         }
         return new Text(withResultSpacing(out), 0, 0);
       }
@@ -1894,9 +2151,9 @@ export default function (pi: ExtensionAPI) {
 
           const out = previews
             .map((p) => {
-              const diff = makeDiffPreview(p.diff, theme, p.path);
+              const diff = makeRenderedDiffPreview(p.diff, theme, p.path);
               if (singleUpdateOnly) return diff;
-              const line = firstChangedLineFromDiff(p.diff);
+              const line = p.firstChangedLine ?? firstChangedLineFromDiff(p.diff);
               const header = `${theme.fg("accent", p.path)}${theme.fg("warning", `:${line}`)}`;
               return `${header}\n${diff}`;
             })
@@ -1932,15 +2189,21 @@ export default function (pi: ExtensionAPI) {
       const progressEmitter = createThrottledProgressEmitter(update, 40);
 
       const ops = params.operations as ApplyPatchOperation[];
+      const queueTasks = prepareApplyTasks(ops, ctx.cwd).tasks;
+      const queuePaths = queueTasks.flatMap((task) => task.touchedPaths);
       const preview = collectProgressPreview(ops);
       progressEmitter.emit("Applying patch operations...", preview, true);
       const { fuzz, results, warnings } = await (async () => {
         try {
-          return await applyOperations(
-            ops,
-            ctx.cwd,
-            signal,
-            (msg, stepPreview) => progressEmitter.emit(msg, stepPreview),
+          return await withMutationQueues(
+            queuePaths,
+            () =>
+              applyOperations(
+                ops,
+                ctx.cwd,
+                signal,
+                (msg, stepPreview) => progressEmitter.emit(msg, stepPreview),
+              ),
           );
         } finally {
           progressEmitter.flush();
@@ -1981,7 +2244,7 @@ export default function (pi: ExtensionAPI) {
         );
       }
 
-      const previews = collectSuccessPreviews(ops, results);
+      const previews = collectSuccessPreviews(results);
       const contentText = normalizationNotice
         ? `${summaryLines || "✓"}\n${normalizationNotice}`
         : summaryLines || "✓";
