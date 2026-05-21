@@ -1,0 +1,7 @@
+{
+  "name": "pi-exa-tools",
+  "version": "1.0.0",
+  "dependencies": {
+    "exa-js": "^1.0.12"
+  }
+}
