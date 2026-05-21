@@ -6,7 +6,7 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { StringEnum } from "@mariozechner/pi-ai";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -35,12 +35,12 @@ interface ApplyPatchOperation {
   type: ApplyPatchOpType;
   path: string;
   /**
-   * V4A diff.
-   * - create_file: full file content (each line starts with '+')
-   * - update_file: @@ sections with +/-/space lines
+   * Codex apply_patch section body, not a full *** Begin/End Patch envelope.
+   * - create_file: Add File body; every content line starts with '+'
+   * - update_file: Update File hunks; @@ sections with +/-/space lines
    */
   diff?: string;
-  /** Optional move target (non-standard, but some Codex outputs include it). */
+  /** Optional move target, equivalent to Codex's `*** Move to:` subheader. */
   move_path?: string;
 }
 
@@ -153,6 +153,24 @@ class DiffError extends Error {
 function normalizeLineEndings(text: string): string {
   if (!text.includes("\r")) return text;
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function detectLineEnding(content: string): "\r\n" | "\n" {
+  const crlfIdx = content.indexOf("\r\n");
+  const lfIdx = content.indexOf("\n");
+  if (lfIdx === -1) return "\n";
+  if (crlfIdx === -1) return "\n";
+  return crlfIdx < lfIdx ? "\r\n" : "\n";
+}
+
+function restoreLineEndings(text: string, ending: "\r\n" | "\n"): string {
+  return ending === "\r\n" ? text.replace(/\n/g, "\r\n") : text;
+}
+
+function stripBom(content: string): { bom: string; text: string } {
+  return content.startsWith("\uFEFF")
+    ? { bom: "\uFEFF", text: content.slice(1) }
+    : { bom: "", text: content };
 }
 
 // Normalize patch paths to POSIX-style and trim whitespace.
@@ -369,7 +387,7 @@ function findLineFrom(lines: string[], start: number, target: string): number {
   return -1;
 }
 
-// Parse a single V4A section into context + chunks, returning the next index.
+// Parse a single Codex update hunk section into context + chunks, returning the next index.
 function peekNextSection(
   lines: string[],
   startIndex: number,
@@ -573,7 +591,26 @@ function findContext(
 
 const ENVELOPE_BEGIN_MARKER = "*** Begin Patch";
 const ENVELOPE_END_MARKER = "*** End Patch";
+const ENVELOPE_ENVIRONMENT_PREFIX = "*** Environment ID: ";
 const ENVELOPE_UPDATE_PREFIX = "*** Update File:";
+const ENVELOPE_ADD_PREFIX = "*** Add File:";
+const ENVELOPE_DELETE_PREFIX = "*** Delete File:";
+const ENVELOPE_MOVE_PREFIX = "*** Move to:";
+
+/*
+ * Codex apply_patch reference implementation:
+ * - Format instructions/grammar:
+ *   https://github.com/openai/codex/blob/main/codex-rs/apply-patch/apply_patch_tool_instructions.md
+ * - Parser:
+ *   https://github.com/openai/codex/blob/main/codex-rs/apply-patch/src/parser.rs
+ * - Applier:
+ *   https://github.com/openai/codex/blob/main/codex-rs/apply-patch/src/lib.rs
+ *
+ * The *** Add/Update/Delete File headers are Codex apply_patch envelope file
+ * operations. *** Move to is an optional subheader of Update File, not a
+ * standalone file operation. Our public JSON `operations[]` shape is Pi-specific
+ * and stores each Codex section body in `diff`.
+ */
 
 function isEnvelopeMarkerParseError(err: unknown): boolean {
   if (!(err instanceof DiffError)) return false;
@@ -646,19 +683,175 @@ function tryNormalizeUpdateDiffEnvelope(
   return { diff: candidateLines.join("\n"), markers };
 }
 
+function isEnvelopeOperationMarker(line: string): boolean {
+  return (
+    line === ENVELOPE_BEGIN_MARKER ||
+    line === ENVELOPE_END_MARKER ||
+    line.startsWith(ENVELOPE_UPDATE_PREFIX) ||
+    line.startsWith(ENVELOPE_ADD_PREFIX) ||
+    line.startsWith(ENVELOPE_DELETE_PREFIX)
+  );
+}
+
+function parseCodexPatchEnvelope(
+  patch: string,
+): ApplyPatchOperation[] | undefined {
+  const lines = normalizeLineEndings(patch).split("\n");
+
+  let lo = 0;
+  let hi = lines.length;
+  while (lo < hi && lines[lo] === "") lo++;
+  while (hi > lo && lines[hi - 1] === "") hi--;
+  if (lo >= hi) return undefined;
+
+  const ops: ApplyPatchOperation[] = [];
+  let i = lo;
+  if (lines[i] === ENVELOPE_BEGIN_MARKER) i++;
+  if (i < hi && lines[i]!.trimStart().startsWith(ENVELOPE_ENVIRONMENT_PREFIX)) {
+    i++;
+  }
+
+  while (i < hi) {
+    while (i < hi && lines[i] === "") i++;
+    if (i >= hi) break;
+
+    const line = lines[i]!;
+    if (line === ENVELOPE_END_MARKER) break;
+
+    if (line.startsWith(ENVELOPE_ADD_PREFIX)) {
+      const rawPath = line.slice(ENVELOPE_ADD_PREFIX.length).trim();
+      if (!rawPath) return undefined;
+      i++;
+
+      const diffLines: string[] = [];
+      while (i < hi && !isEnvelopeOperationMarker(lines[i]!)) {
+        diffLines.push(lines[i]!);
+        i++;
+      }
+
+      ops.push({
+        type: "create_file",
+        path: rawPath,
+        diff: diffLines.join("\n"),
+      });
+      continue;
+    }
+
+    if (line.startsWith(ENVELOPE_UPDATE_PREFIX)) {
+      const rawPath = line.slice(ENVELOPE_UPDATE_PREFIX.length).trim();
+      if (!rawPath) return undefined;
+      i++;
+
+      let movePath: string | undefined;
+      if (i < hi && lines[i]!.startsWith(ENVELOPE_MOVE_PREFIX)) {
+        movePath = lines[i]!.slice(ENVELOPE_MOVE_PREFIX.length).trim();
+        if (!movePath) return undefined;
+        i++;
+      }
+
+      const diffLines: string[] = [];
+      while (i < hi && !isEnvelopeOperationMarker(lines[i]!)) {
+        diffLines.push(lines[i]!);
+        i++;
+      }
+
+      ops.push({
+        type: "update_file",
+        path: rawPath,
+        diff: diffLines.join("\n"),
+        ...(movePath ? { move_path: movePath } : {}),
+      });
+      continue;
+    }
+
+    if (line.startsWith(ENVELOPE_DELETE_PREFIX)) {
+      const rawPath = line.slice(ENVELOPE_DELETE_PREFIX.length).trim();
+      if (!rawPath) return undefined;
+      i++;
+
+      const bodyLines: string[] = [];
+      while (i < hi && !isEnvelopeOperationMarker(lines[i]!)) {
+        bodyLines.push(lines[i]!);
+        i++;
+      }
+      if (bodyLines.some((bodyLine) => bodyLine.trim().length > 0)) {
+        return undefined;
+      }
+
+      ops.push({ type: "delete_file", path: rawPath });
+      continue;
+    }
+
+    return undefined;
+  }
+
+  return ops.length > 0 ? ops : undefined;
+}
+
+function prepareApplyPatchArguments(input: unknown): unknown {
+  if (typeof input === "string") {
+    const envelopeOps = parseCodexPatchEnvelope(input);
+    return envelopeOps ? { operations: envelopeOps } : input;
+  }
+
+  if (!input || typeof input !== "object") return input;
+  const args = input as Record<string, unknown>;
+
+  if (Array.isArray(args.operations)) {
+    return { operations: args.operations };
+  }
+
+  if (typeof args.operations === "string") {
+    try {
+      const parsed = JSON.parse(args.operations) as unknown;
+      if (Array.isArray(parsed)) return { operations: parsed };
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        Array.isArray((parsed as { operations?: unknown }).operations)
+      ) {
+        return { operations: (parsed as { operations: unknown[] }).operations };
+      }
+    } catch {
+      // Fall through to Codex envelope parsing below.
+    }
+
+    const envelopeOps = parseCodexPatchEnvelope(args.operations);
+    if (envelopeOps) return { operations: envelopeOps };
+  }
+
+  const patchText =
+    typeof args.patch === "string"
+      ? args.patch
+      : typeof args.input === "string"
+        ? args.input
+        : typeof args.diff === "string"
+          ? args.diff
+          : typeof args.text === "string"
+            ? args.text
+            : undefined;
+
+  if (patchText) {
+    const envelopeOps = parseCodexPatchEnvelope(patchText);
+    if (envelopeOps) return { operations: envelopeOps };
+  }
+
+  return input;
+}
+
 interface ApplyUpdateResult {
   output: string;
   fuzz: number;
   normalizedMarkers?: string[];
 }
 
-function applyV4AUpdateWithRecovery(
+function applyCodexUpdateWithRecovery(
   input: string,
   diff: string,
   rel: string,
 ): ApplyUpdateResult {
   try {
-    const strict = applyV4AUpdate(input, diff);
+    const strict = applyCodexUpdateBody(input, diff);
     return { output: strict.output, fuzz: strict.fuzz };
   } catch (err) {
     if (!isEnvelopeMarkerParseError(err)) throw err;
@@ -666,7 +859,7 @@ function applyV4AUpdateWithRecovery(
     const normalized = tryNormalizeUpdateDiffEnvelope(diff, rel);
     if (!normalized) throw err;
 
-    const recovered = applyV4AUpdate(input, normalized.diff);
+    const recovered = applyCodexUpdateBody(input, normalized.diff);
     return {
       output: recovered.output,
       fuzz: recovered.fuzz,
@@ -675,13 +868,13 @@ function applyV4AUpdateWithRecovery(
   }
 }
 
-// Apply a V4A update diff to existing file content.
+// Apply a Codex Update File body to existing file content.
 // Returns updated content plus a fuzz score when context matching was inexact.
-function applyV4AUpdate(
+function applyCodexUpdateBody(
   input: string,
   diff: string,
 ): { output: string; fuzz: number } {
-  // IMPORTANT: do NOT trim() here. V4A diff lines may start with a leading space (context lines).
+  // IMPORTANT: do NOT trim() here. Codex context lines start with a leading space.
   const normalizedDiff = normalizeLineEndings(diff);
   const patchLines = normalizedDiff.split("\n");
   // Drop a single trailing newline to avoid creating an extra empty diff line.
@@ -827,8 +1020,10 @@ function applyV4AUpdate(
   return { output: dest.join("\n"), fuzz };
 }
 
-// Apply a V4A create diff (every line starts with '+') and return file content.
-function applyV4ACreate(diff: string): string {
+// Apply a Codex Add File body (every line starts with '+') and return file content.
+function applyCodexCreateBody(diff: string): string {
+  if (diff.length === 0) return "";
+
   const lines = normalizeLineEndings(diff).split("\n");
   // Drop trailing empty line to avoid an extra empty content line.
   if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
@@ -1104,7 +1299,7 @@ async function applyOperations(
         if (await checkPathExists(abs))
           throw new DiffError(`File already exists at path '${rel}'`);
 
-        const content = applyV4ACreate(diff);
+        const content = applyCodexCreateBody(diff);
         await ensureDir(path.dirname(abs));
         await writeFileAtomic(abs, content);
         markPathExists(abs, true);
@@ -1116,9 +1311,9 @@ async function applyOperations(
           throw new DiffError(`update_file missing diff for ${rel}`);
 
         let st: Awaited<ReturnType<typeof fs.stat>>;
-        let current: string;
+        let rawCurrent: string;
         try {
-          [st, current] = await Promise.all([
+          [st, rawCurrent] = await Promise.all([
             fs.stat(abs),
             fs.readFile(abs, "utf8"),
           ]);
@@ -1131,11 +1326,18 @@ async function applyOperations(
         }
         markPathExists(abs, true);
 
-        const { output, fuzz, normalizedMarkers } = applyV4AUpdateWithRecovery(
+        const { bom, text: current } = stripBom(rawCurrent);
+        const originalEnding = detectLineEnding(current);
+
+        const { output, fuzz, normalizedMarkers } = applyCodexUpdateWithRecovery(
           current,
           diff,
           rel,
         );
+        if (!task.moveAbs && normalizeLineEndings(current) === output) {
+          throw new DiffError(`No changes made to ${rel}.`);
+        }
+        const finalOutput = bom + restoreLineEndings(output, originalEnding);
         const warning =
           normalizedMarkers && normalizedMarkers.length > 0
             ? `Warning: forbidden marker lines were auto-removed: ${normalizedMarkers.join(", ")}. Use only @@/space/+/- lines.`
@@ -1148,7 +1350,7 @@ async function applyOperations(
             throw new DiffError(`Target already exists at path '${relTo}'`);
 
           await ensureDir(path.dirname(absTo));
-          await writeFileAtomic(absTo, output, st.mode);
+          await writeFileAtomic(absTo, finalOutput, st.mode);
           await fs.unlink(abs);
           markPathExists(abs, false);
           markPathExists(absTo, true);
@@ -1165,7 +1367,7 @@ async function applyOperations(
         }
 
         await ensureDir(path.dirname(abs));
-        await writeFileAtomic(abs, output, st.mode);
+        await writeFileAtomic(abs, finalOutput, st.mode);
         markPathExists(abs, true);
         return {
           result: { type, path: rel, status: "completed" },
@@ -1347,7 +1549,7 @@ function getCachedDiffPreview(diff: string, filePath?: string): string {
   const cached = diffPreviewCache.get(key);
   if (cached !== undefined) return cached;
 
-  const nativeDiff = v4aToNativeDiffText(diff);
+  const nativeDiff = codexBodyToNativeDiffText(diff);
   const rendered = nativeDiff ? renderDiff(nativeDiff, { filePath }) : "";
   diffPreviewCache.set(key, rendered);
 
@@ -1359,7 +1561,7 @@ function getCachedDiffPreview(diff: string, filePath?: string): string {
   return rendered;
 }
 
-function v4aToNativeDiffText(diff: string): string {
+function codexBodyToNativeDiffText(diff: string): string {
   const lines = normalizeLineEndings(diff).split("\n");
   if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
 
@@ -1371,7 +1573,7 @@ function v4aToNativeDiffText(diff: string): string {
   let maxLine = 1;
 
   for (let line of lines) {
-    // V4A markers are not part of the rendered body.
+    // Codex envelope/hunk markers are not part of the rendered body.
     if (line.startsWith("@@") || line.startsWith("***")) continue;
 
     // Keep parity with parser behavior for blank lines in sections.
@@ -1581,27 +1783,35 @@ export default function (pi: ExtensionAPI) {
     name: "apply_patch",
     label: "apply_patch",
     description:
-      "Apply file edits via JSON operations (create_file/update_file/delete_file) with V4A diffs. For update_file, each non-empty diff line must start with @@, space, +, or -. Never include lines starting with ***.",
-    parameters: Type.Object({
-      operations: Type.Array(
-        Type.Object({
-          type: StringEnum([
-            "create_file",
-            "update_file",
-            "delete_file",
-          ] as const),
-          path: Type.String(),
-          diff: Type.Optional(Type.String()),
-          move_path: Type.Optional(Type.String()),
-        }),
-      ),
-    }),
+      "Apply file edits via JSON operations (create_file/update_file/delete_file) whose diff fields contain Codex apply_patch section bodies, not full envelopes. For update_file, each non-empty diff line must start with @@, space, +, or -. Never include envelope lines starting with *** in diff.",
+    parameters: Type.Object(
+      {
+        operations: Type.Array(
+          Type.Object(
+            {
+              type: StringEnum([
+                "create_file",
+                "update_file",
+                "delete_file",
+              ] as const),
+              path: Type.String(),
+              diff: Type.Optional(Type.String()),
+              move_path: Type.Optional(Type.String()),
+            },
+            { additionalProperties: false },
+          ),
+        ),
+      },
+      { additionalProperties: false },
+    ),
+    prepareArguments: prepareApplyPatchArguments,
 
     renderCall(args, theme) {
       let out = theme.fg("toolTitle", theme.bold("apply_patch"));
       try {
+        const renderArgs = prepareApplyPatchArguments(args);
         const { operationCount, headerPath, headerLine } =
-          summarizeOperationsArgs(args);
+          summarizeOperationsArgs(renderArgs);
         if (headerPath) {
           out += " " + theme.fg("accent", headerPath);
           if (typeof headerLine === "number")
@@ -1666,7 +1876,7 @@ export default function (pi: ExtensionAPI) {
 
             const output = textFromContent(result.content);
             if (!output) {
-              if (!warningsText) return undefined;
+              if (!warningsText) return new Text(withResultSpacing(theme.fg("muted", "(no output)")), 0, 0);
               return new Text(withResultSpacing(warningsText), 0, 0);
             }
             return new Text(
@@ -1802,9 +2012,10 @@ export default function (pi: ExtensionAPI) {
         "\n\n# apply_patch\n" +
         "- Use the apply_patch tool for file edits.\n" +
         "- Use operations with type: create_file | update_file | delete_file.\n" +
-        "- For create_file: diff is full file content in V4A create mode (every line starts with '+').\n" +
-        "- For update_file: diff is a V4A diff with @@ sections; each non-empty line must start with @@, space, +, or -.\n" +
-        "- NEVER include any line starting with *** in diff.\n" +
+        "- The diff field contains a Codex apply_patch section body, not a full *** Begin/End Patch envelope.\n" +
+        "- For create_file: diff is an Add File body; every content line starts with '+'.\n" +
+        "- For update_file: diff is an Update File body with @@ sections; each non-empty diff line must start with @@, space, +, or -.\n" +
+        "- NEVER include Codex envelope marker lines starting with *** inside diff.\n" +
         "- BAD: *** End Patch\n" +
         "- GOOD: end diff after normal @@/context/add/remove lines.\n" +
         "- If you need literal *** text in file content, use +*** ... (or a context line starting with a single space).\n" +
