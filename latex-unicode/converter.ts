@@ -794,26 +794,264 @@ function toSubscript(s: string): string {
 
 // ---------------------------------------------------------------------------
 // Detect LaTeX math in text and convert to Unicode.
-// Handles: $...$, $$...$$, \(...\), \[...\]
-// Also handles bare \frac, \sqrt, \sum, etc. outside of math delimiters
-// when they appear inline in markdown text (common in LLM output).
+// Uses a real segment scanner instead of in-band placeholders so code spans
+// and fenced code blocks are preserved by construction.
 // ---------------------------------------------------------------------------
-const MATH_DELIMITERS = [
-	// Display math: $$...$$
-	{ open: /\$\$(.+?)\$\$/gs, type: "display" as const },
-	// Inline math: $...$  (but not $$)
-	{ open: /(?<!\$)\$(?!\$)((?:[^\$\\]|\\.)+?)\$(?!\$)/g, type: "inline" as const },
-	// \( ... \)
-	{ open: /\\\((.+?)\\\)/gs, type: "inline" as const },
-	// \[ ... \]
-	{ open: /\\\[(.+?)\\\]/gs, type: "display" as const },
-];
+
+type SegmentKind = "text" | "inlineCode" | "fencedCode" | "inlineMath" | "displayMath";
+
+interface Segment {
+	kind: SegmentKind;
+	raw: string;
+	content?: string;
+}
+
+interface FenceInfo {
+	fenceChar: "`" | "~";
+	fenceLength: number;
+}
+
+function nextLineEnd(text: string, start: number): number {
+	const newline = text.indexOf("\n", start);
+	return newline === -1 ? text.length : newline + 1;
+}
+
+function stripLineEnding(line: string): string {
+	return line.replace(/[\r\n]+$/, "");
+}
+
+function parseFenceOpener(line: string): FenceInfo | null {
+	const body = stripLineEnding(line);
+	const match = body.match(/^([ \t]*(?:>[ \t]*)*)(`{3,}|~{3,})([^\r\n]*)$/);
+	if (!match) return null;
+
+	const fence = match[2]!;
+	const rest = match[3] ?? "";
+	const fenceChar = fence[0] as "`" | "~";
+
+	// CommonMark-style restriction: backtick-fenced info strings may not
+	// themselves contain backticks.
+	if (fenceChar === "`" && rest.includes("`")) return null;
+
+	return { fenceChar, fenceLength: fence.length };
+}
+
+function isFenceCloser(line: string, opener: FenceInfo): boolean {
+	const body = stripLineEnding(line);
+	const match = body.match(/^([ \t]*(?:>[ \t]*)*)(`{3,}|~{3,})[ \t]*$/);
+	if (!match) return false;
+
+	const fence = match[2]!;
+	return fence[0] === opener.fenceChar && fence.length >= opener.fenceLength;
+}
+
+function findFencedCodeBlockEnd(text: string, searchStart: number, opener: FenceInfo): number {
+	let search = searchStart;
+
+	while (search < text.length) {
+		const candidateEnd = nextLineEnd(text, search);
+		const candidateLine = text.slice(search, candidateEnd);
+		if (isFenceCloser(candidateLine, opener)) {
+			return candidateEnd;
+		}
+		search = candidateEnd;
+	}
+
+	return text.length;
+}
+
+function findInlineCodeSpanEnd(text: string, start: number): number | null {
+	let openerEnd = start;
+	while (openerEnd < text.length && text[openerEnd] === "`") openerEnd++;
+	const fenceLength = openerEnd - start;
+
+	const lineEnd = text.indexOf("\n", openerEnd);
+	const searchLimit = lineEnd === -1 ? text.length : lineEnd;
+
+	let search = openerEnd;
+	while (search < searchLimit) {
+		if (text[search] !== "`") {
+			search++;
+			continue;
+		}
+
+		let closerEnd = search;
+		while (closerEnd < searchLimit && text[closerEnd] === "`") closerEnd++;
+		const closerLength = closerEnd - search;
+
+		if (closerLength === fenceLength) return closerEnd;
+		search = closerEnd;
+	}
+
+	return null;
+}
+
+function isLineStart(text: string, index: number): boolean {
+	return index === 0 || text[index - 1] === "\n";
+}
+
+function isInlineDollarStart(text: string, index: number): boolean {
+	return text[index] === "$" && text[index - 1] !== "$" && text[index + 1] !== "$";
+}
+
+function findDisplayDollarMathEnd(text: string, start: number): number | null {
+	const close = text.indexOf("$$", start + 2);
+	if (close === -1 || close === start + 2) return null;
+	return close + 2;
+}
+
+function findInlineDollarMathEnd(text: string, start: number): number | null {
+	const lineEnd = text.indexOf("\n", start + 1);
+	const searchLimit = lineEnd === -1 ? text.length : lineEnd;
+
+	let cursor = start + 1;
+	while (cursor < searchLimit) {
+		if (text[cursor] === "\\") {
+			cursor += 2;
+			continue;
+		}
+
+		if (text[cursor] === "$" && text[cursor + 1] !== "$") {
+			if (cursor === start + 1) return null;
+			return cursor + 1;
+		}
+
+		cursor++;
+	}
+
+	return null;
+}
+
+function findEscapedMathEnd(text: string, start: number, close: "\\)" | "\\]", allowMultiline: boolean): number | null {
+	const searchStart = start + 2;
+	const closeIndex = text.indexOf(close, searchStart);
+	if (closeIndex === -1 || closeIndex === searchStart) return null;
+
+	if (!allowMultiline) {
+		const lineEnd = text.indexOf("\n", searchStart);
+		const searchLimit = lineEnd === -1 ? text.length : lineEnd;
+		if (closeIndex >= searchLimit) return null;
+	}
+
+	return closeIndex + close.length;
+}
+
+function scanSegments(text: string): Segment[] {
+	const segments: Segment[] = [];
+	let textStart = 0;
+	let cursor = 0;
+
+	const flushText = (end: number) => {
+		if (end > textStart) {
+			segments.push({ kind: "text", raw: text.slice(textStart, end) });
+		}
+	};
+
+	while (cursor < text.length) {
+		if (isLineStart(text, cursor)) {
+			const lineEnd = nextLineEnd(text, cursor);
+			const opener = parseFenceOpener(text.slice(cursor, lineEnd));
+			if (opener) {
+				flushText(cursor);
+				const blockEnd = findFencedCodeBlockEnd(text, lineEnd, opener);
+				segments.push({ kind: "fencedCode", raw: text.slice(cursor, blockEnd) });
+				cursor = blockEnd;
+				textStart = cursor;
+				continue;
+			}
+		}
+
+		if (text[cursor] === "`") {
+			const inlineCodeEnd = findInlineCodeSpanEnd(text, cursor);
+			if (inlineCodeEnd !== null) {
+				flushText(cursor);
+				segments.push({ kind: "inlineCode", raw: text.slice(cursor, inlineCodeEnd) });
+				cursor = inlineCodeEnd;
+				textStart = cursor;
+				continue;
+			}
+		}
+
+		if (text.startsWith("$$", cursor)) {
+			const displayEnd = findDisplayDollarMathEnd(text, cursor);
+			if (displayEnd !== null) {
+				flushText(cursor);
+				segments.push({
+					kind: "displayMath",
+					raw: text.slice(cursor, displayEnd),
+					content: text.slice(cursor + 2, displayEnd - 2),
+				});
+				cursor = displayEnd;
+				textStart = cursor;
+				continue;
+			}
+		}
+
+		if (text.startsWith("\\[", cursor)) {
+			const displayEnd = findEscapedMathEnd(text, cursor, "\\]", true);
+			if (displayEnd !== null) {
+				flushText(cursor);
+				segments.push({
+					kind: "displayMath",
+					raw: text.slice(cursor, displayEnd),
+					content: text.slice(cursor + 2, displayEnd - 2),
+				});
+				cursor = displayEnd;
+				textStart = cursor;
+				continue;
+			}
+		}
+
+		if (text.startsWith("\\(", cursor)) {
+			const inlineEnd = findEscapedMathEnd(text, cursor, "\\)", false);
+			if (inlineEnd !== null) {
+				flushText(cursor);
+				segments.push({
+					kind: "inlineMath",
+					raw: text.slice(cursor, inlineEnd),
+					content: text.slice(cursor + 2, inlineEnd - 2),
+				});
+				cursor = inlineEnd;
+				textStart = cursor;
+				continue;
+			}
+		}
+
+		if (isInlineDollarStart(text, cursor)) {
+			const inlineEnd = findInlineDollarMathEnd(text, cursor);
+			if (inlineEnd !== null) {
+				flushText(cursor);
+				segments.push({
+					kind: "inlineMath",
+					raw: text.slice(cursor, inlineEnd),
+					content: text.slice(cursor + 1, inlineEnd - 1),
+				});
+				cursor = inlineEnd;
+				textStart = cursor;
+				continue;
+			}
+		}
+
+		cursor++;
+	}
+
+	flushText(text.length);
+	return segments;
+}
+
+function convertBareLatexCommands(text: string): string {
+	return text.replace(/\\([a-zA-Z]+)/g, (match, cmd: string) => {
+		if (commandMap[cmd]) return commandMap[cmd]!;
+		if (namedFuncs[cmd]) return namedFuncs[cmd]!;
+		return match;
+	});
+}
 
 /**
  * Check if a string contains LaTeX math
  */
 export function hasLatex(text: string): boolean {
-	return MATH_DELIMITERS.some(d => d.open.test(text));
+	return scanSegments(text).some(segment => segment.kind === "inlineMath" || segment.kind === "displayMath");
 }
 
 /**
@@ -821,22 +1059,21 @@ export function hasLatex(text: string): boolean {
  * Returns the converted string.
  */
 export function latexToUnicode(text: string): string {
-	let result = text;
-
-	for (const delim of MATH_DELIMITERS) {
-		result = result.replace(delim.open, (_match, expr: string) => {
-			const converted = convertMathExpr(expr).trim();
-			return converted;
-		});
-	}
-
-	// Also handle bare LaTeX commands outside math delimiters
-	// that commonly appear in LLM prose (e.g. "use α = β + γ")
-	result = result.replace(/\\([a-zA-Z]+)/g, (match, cmd: string) => {
-		if (commandMap[cmd]) return commandMap[cmd];
-		if (namedFuncs[cmd]) return namedFuncs[cmd];
-		return match; // keep unknown commands
-	});
-
-	return result;
+	return scanSegments(text)
+		.map((segment) => {
+			switch (segment.kind) {
+				case "inlineMath":
+				case "displayMath":
+					return convertMathExpr(segment.content ?? "").trim();
+				case "text":
+					// Also handle bare LaTeX commands outside math delimiters when the
+					// surrounding message contains some actual math markup.
+					return convertBareLatexCommands(segment.raw);
+				case "inlineCode":
+				case "fencedCode":
+				default:
+					return segment.raw;
+			}
+		})
+		.join("");
 }
