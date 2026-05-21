@@ -1,12 +1,12 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { complete, type Message } from "@mariozechner/pi-ai";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { Text } from "@mariozechner/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
 /**
- * Extension for handling images with non-vision models.
+ * Extension for image vision support.
  *
  * When the current model doesn't support vision:
  * 1. Activates the `read_image` tool (deactivates it when vision is available)
@@ -14,7 +14,7 @@ import * as path from "node:path";
  *
  * Configuration via ~/.pi/agent/vision-config.json:
  * {
- *   "model": "glm-4.6v",        // Vision model ID to use
+ *   "model": "GLM-5V",           // Vision model ID to use
  *   "provider": "zai"           // Provider (optional, inferred from model)
  * }
  */
@@ -72,8 +72,8 @@ async function findVisionModel(ctx: ExtensionContext): Promise<{ provider: strin
     // Fall through to auto-detect if config model not found
   }
 
-  // Find first available vision model (prefer glm-4.6v, then faster/cheaper models)
-  const preferredPatterns = ["glm-4.6v", "claude-3-5-haiku", "gpt-4o-mini", "gemini-2.0-flash", "haiku", "flash"];
+  // Find first available vision model (prefer GLM-5V, then faster/cheaper models)
+  const preferredPatterns = ["GLM-5V", "claude-3-5-haiku", "gpt-4o-mini", "gemini-2.0-flash", "haiku", "flash"];
   for (const pattern of preferredPatterns) {
     const found = available.find((m) => m.id.includes(pattern) && m.input.includes("image"));
     if (found) {
@@ -187,14 +187,16 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      // Get API key
-      const apiKey = await ctx.modelRegistry.getApiKey(model);
-      if (!apiKey) {
+      // Get API key & headers
+      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+      if (!auth.ok || !auth.apiKey) {
         return {
           content: [
             {
               type: "text",
-              text: `No API key available for vision model ${provider}/${visionModelId}. Run /login or set the appropriate environment variable.`,
+              text: auth.ok
+            ? `No API key available for vision model ${provider}/${visionModelId}. Run /login or set the appropriate environment variable.`
+            : `Auth error for vision model ${provider}/${visionModelId}: ${auth.error}`,
             },
           ],
           details: {
@@ -223,7 +225,7 @@ export default function (pi: ExtensionAPI) {
 
       // Call vision model
       try {
-        const response = await complete(model, { messages: [userMessage] }, { apiKey, signal });
+        const response = await complete(model, { messages: [userMessage] }, { apiKey: auth.apiKey, headers: auth.headers, signal });
 
         if (response.stopReason === "aborted") {
           return {
