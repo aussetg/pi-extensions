@@ -251,9 +251,11 @@ interface LineMatchCache {
   raw: string[];
   trimEnd?: string[];
   trim?: string[];
+  unicode?: string[];
   rawIndex?: Map<string, number[]>;
   trimEndIndex?: Map<string, number[]>;
   trimIndex?: Map<string, number[]>;
+  unicodeIndex?: Map<string, number[]>;
   rawScanMisses?: number;
   preferRawIndex?: boolean;
 }
@@ -296,6 +298,28 @@ function getTrimmedLineIndex(cache: LineMatchCache): Map<string, number[]> {
   if (!cache.trimIndex)
     cache.trimIndex = buildLineIndex(getTrimmedLines(cache));
   return cache.trimIndex;
+}
+
+function normalizeLineForUnicodeMatch(line: string): string {
+  return line
+    .normalize("NFKC")
+    .trim()
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
+    .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
+    .replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ");
+}
+
+function getUnicodeLines(cache: LineMatchCache): string[] {
+  if (!cache.unicode)
+    cache.unicode = cache.raw.map((line) => normalizeLineForUnicodeMatch(line));
+  return cache.unicode;
+}
+
+function getUnicodeLineIndex(cache: LineMatchCache): Map<string, number[]> {
+  if (!cache.unicodeIndex)
+    cache.unicodeIndex = buildLineIndex(getUnicodeLines(cache));
+  return cache.unicodeIndex;
 }
 
 function lowerBound(values: number[], target: number): number {
@@ -501,6 +525,14 @@ function findContextCore(
     idx = findLineFrom(linesTrimmed, start, contextRaw[0]!.trim());
     if (idx !== -1) return { index: idx, fuzz: 100 };
 
+    const linesUnicode = getUnicodeLines(cache);
+    idx = findLineFrom(
+      linesUnicode,
+      start,
+      normalizeLineForUnicodeMatch(contextRaw[0]!),
+    );
+    if (idx !== -1) return { index: idx, fuzz: 1000 };
+
     return { index: -1, fuzz: 0 };
   }
 
@@ -575,6 +607,29 @@ function findContextCore(
       : findContextByScan(linesTrimmed, getContextTrimmed(), start);
   if (trimIndex !== -1) return { index: trimIndex, fuzz: 100 };
 
+  let contextUnicode: string[] | undefined;
+  const getContextUnicode = () => {
+    if (!contextUnicode) {
+      contextUnicode = new Array<string>(contextRaw.length);
+      for (let i = 0; i < contextRaw.length; i++) {
+        contextUnicode[i] = normalizeLineForUnicodeMatch(contextRaw[i]!);
+      }
+    }
+    return contextUnicode;
+  };
+
+  const linesUnicode = getUnicodeLines(cache);
+  const unicodeIndex =
+    linesUnicode.length >= INDEXED_CONTEXT_MATCH_MIN_LINES
+      ? findContextByIndex(
+          linesUnicode,
+          getContextUnicode(),
+          start,
+          getUnicodeLineIndex(cache),
+        )
+      : findContextByScan(linesUnicode, getContextUnicode(), start);
+  if (unicodeIndex !== -1) return { index: unicodeIndex, fuzz: 1000 };
+
   return { index: -1, fuzz: 0 };
 }
 
@@ -596,6 +651,43 @@ function findContext(
     return { index: fallback.index, fuzz: fallback.fuzz + 10000 };
   }
   return findContextCore(cache, contextRaw, start);
+}
+
+function matchDeletedLines(
+  cache: LineMatchCache,
+  start: number,
+  expected: string[],
+): { matched: boolean; actual: string[]; fuzz: number } {
+  const actual = expected.map((_, i) => cache.raw[start + i] ?? "");
+  if (start < 0 || start + expected.length > cache.raw.length) {
+    return { matched: false, actual, fuzz: 0 };
+  }
+
+  if (expected.length === 0) return { matched: true, actual: [], fuzz: 0 };
+
+  if (expected.every((line, i) => line === actual[i])) {
+    return { matched: true, actual, fuzz: 0 };
+  }
+
+  if (expected.every((line, i) => line.trimEnd() === actual[i]!.trimEnd())) {
+    return { matched: true, actual, fuzz: 1 };
+  }
+
+  if (expected.every((line, i) => line.trim() === actual[i]!.trim())) {
+    return { matched: true, actual, fuzz: 100 };
+  }
+
+  if (
+    expected.every(
+      (line, i) =>
+        normalizeLineForUnicodeMatch(line) ===
+        normalizeLineForUnicodeMatch(actual[i]!),
+    )
+  ) {
+    return { matched: true, actual, fuzz: 1000 };
+  }
+
+  return { matched: false, actual, fuzz: 0 };
 }
 
 const ENVELOPE_BEGIN_MARKER = "*** Begin Patch";
@@ -920,22 +1012,29 @@ function applyCodexUpdateBody(
   let fuzz = 0;
   let patchIndex = 0;
   let fileIndex = 0;
-  const dest: string[] = [];
   const replacements: LineReplacement[] = [];
-  let origIndex = 0;
   let seenPrefixIndex = 0;
   const seenExact = new Set<string>();
   let seenTrimmed: Set<string> | undefined;
+  let seenUnicode: Set<string> | undefined;
 
   const syncSeenPrefix = (toExclusive: number) => {
     const limit = Math.min(toExclusive, fileLines.length);
     if (seenPrefixIndex >= limit) return;
 
-    if (seenTrimmed) {
-      const trimmedLines = getTrimmedLines(fileLineCache);
+    if (seenTrimmed || seenUnicode) {
+      const trimmedLines = seenTrimmed
+        ? getTrimmedLines(fileLineCache)
+        : undefined;
+      const unicodeLines = seenUnicode
+        ? getUnicodeLines(fileLineCache)
+        : undefined;
       for (; seenPrefixIndex < limit; seenPrefixIndex++) {
         seenExact.add(fileLines[seenPrefixIndex]!);
-        seenTrimmed.add(trimmedLines[seenPrefixIndex]!);
+        if (seenTrimmed && trimmedLines)
+          seenTrimmed.add(trimmedLines[seenPrefixIndex]!);
+        if (seenUnicode && unicodeLines)
+          seenUnicode.add(unicodeLines[seenPrefixIndex]!);
       }
       return;
     }
@@ -954,6 +1053,17 @@ function applyCodexUpdateBody(
       }
     }
     return seenTrimmed;
+  };
+
+  const getSeenUnicode = (): Set<string> => {
+    if (!seenUnicode) {
+      const unicodeLines = getUnicodeLines(fileLineCache);
+      seenUnicode = new Set<string>();
+      for (let i = 0; i < seenPrefixIndex; i++) {
+        seenUnicode.add(unicodeLines[i]!);
+      }
+    }
+    return seenUnicode;
   };
 
   while (patchIndex < patchLines.length) {
@@ -989,6 +1099,20 @@ function applyCodexUpdateBody(
             if (trimPos !== -1) {
               fileIndex = trimPos + 1;
               fuzz += 1;
+            } else {
+              const defStrUnicode = normalizeLineForUnicodeMatch(defStr);
+              const unicodeLines = getUnicodeLines(fileLineCache);
+              if (!getSeenUnicode().has(defStrUnicode)) {
+                const unicodePos = findLineFrom(
+                  unicodeLines,
+                  fileIndex,
+                  defStrUnicode,
+                );
+                if (unicodePos !== -1) {
+                  fileIndex = unicodePos + 1;
+                  fuzz += 1000;
+                }
+              }
             }
           }
         }
@@ -1013,50 +1137,65 @@ function applyCodexUpdateBody(
 
     fuzz += found.fuzz;
     for (const ch of sectionChunks) {
-      const chunkOrigIndex = ch.origIndex + found.index;
-      if (origIndex > chunkOrigIndex) {
-        throw new DiffError(
-          `applyDiff: origIndex ${origIndex} > chunk.origIndex ${chunkOrigIndex}`,
-        );
-      }
-
-      dest.push(...fileLines.slice(origIndex, chunkOrigIndex));
-      origIndex = chunkOrigIndex;
+      const chunkOrigIndex =
+        ch.delLines.length === 0 && context.length === 0
+          ? fileLines.length > 0 && fileLines[fileLines.length - 1] === ""
+            ? fileLines.length - 1
+            : fileLines.length
+          : ch.origIndex + found.index;
 
       const expected = ch.delLines;
-      let mismatchAt = -1;
-      for (let i = 0; i < expected.length; i++) {
-        if (expected[i] !== fileLines[origIndex + i]) {
-          mismatchAt = i;
-          break;
-        }
-      }
-      if (mismatchAt !== -1) {
-        const actual: string[] = [];
-        for (let i = 0; i < expected.length; i++) {
-          actual.push(fileLines[origIndex + i] ?? "");
-        }
+      const matchedDelete = matchDeletedLines(
+        fileLineCache,
+        chunkOrigIndex,
+        expected,
+      );
+      if (!matchedDelete.matched) {
         throw new DiffError(
-          `Patch conflict at line ${origIndex + 1}. Expected:\n${expected.join("\n")}\n\nActual:\n${actual.join("\n")}`,
+          `Patch conflict at line ${chunkOrigIndex + 1}. Expected:\n${expected.join("\n")}\n\nActual:\n${matchedDelete.actual.join("\n")}`,
         );
       }
+      fuzz += matchedDelete.fuzz;
 
       replacements.push({
         oldStart: chunkOrigIndex,
-        oldLines: expected,
+        oldLines: matchedDelete.actual,
         newLines: ch.insLines,
       });
-      dest.push(...ch.insLines);
-      origIndex += expected.length;
     }
 
     fileIndex = found.index + context.length;
     patchIndex = nextIndex;
   }
 
-  // Tail
-  dest.push(...fileLines.slice(origIndex));
-  return { output: dest.join("\n"), fuzz, replacements };
+  const sortedReplacements = replacements
+    .map((replacement, index) => ({ ...replacement, index }))
+    .sort((a, b) => a.oldStart - b.oldStart || a.index - b.index);
+  for (let i = 1; i < sortedReplacements.length; i++) {
+    const previous = sortedReplacements[i - 1]!;
+    const current = sortedReplacements[i]!;
+    if (previous.oldStart + previous.oldLines.length > current.oldStart) {
+      throw new DiffError(
+        `Patch chunks overlap at line ${current.oldStart + 1}.`,
+      );
+    }
+  }
+
+  const outputLines = [...fileLines];
+  for (let i = sortedReplacements.length - 1; i >= 0; i--) {
+    const replacement = sortedReplacements[i]!;
+    outputLines.splice(
+      replacement.oldStart,
+      replacement.oldLines.length,
+      ...replacement.newLines,
+    );
+  }
+
+  return {
+    output: outputLines.join("\n"),
+    fuzz,
+    replacements: sortedReplacements.map(({ index: _index, ...rest }) => rest),
+  };
 }
 
 // Apply a Codex Add File body (every line starts with '+') and return file content.
