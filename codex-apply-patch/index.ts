@@ -215,16 +215,6 @@ function shortenPathForDisplay(p: string): string {
   return p;
 }
 
-// Cheap existence check used for create/update/delete preconditions.
-async function fileExists(p: string): Promise<boolean> {
-  try {
-    await fs.stat(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function isNotFoundError(err: unknown): boolean {
   return (
     typeof err === "object" &&
@@ -1216,7 +1206,10 @@ function applyCodexCreateBody(diff: string): string {
     }
     out[i] = line.slice(1);
   }
-  return out.join("\n");
+
+  // Codex Add File lines are logical text lines; each line in the envelope is
+  // newline-terminated. Keep that useful POSIX default for new files.
+  return `${out.join("\n")}\n`;
 }
 
 interface GeneratedDiff {
@@ -1875,312 +1868,6 @@ async function applyOperations(
   return { fuzz: fuzzTotal, results: finalizeResults(), warnings: [...warnings] };
 }
 
-function chooseBatchParallelism(
-  tasks: PreparedApplyTask[],
-  upperLimit: number,
-): number {
-  if (tasks.length <= 1) return 1;
-  if (upperLimit <= 1) return 1;
-
-  let updateCount = 0;
-  let nonUpdateCount = 0;
-  let totalDiffLen = 0;
-  let maxDiffLen = 0;
-
-  for (const task of tasks) {
-    if (task.type === "update_file") {
-      updateCount++;
-      const len = task.diff?.length ?? 0;
-      totalDiffLen += len;
-      if (len > maxDiffLen) maxDiffLen = len;
-    } else {
-      nonUpdateCount++;
-    }
-  }
-
-  if (updateCount === 0) return Math.min(upperLimit, tasks.length);
-
-  const avgUpdateDiffLen = totalDiffLen / updateCount;
-
-  if (updateCount === tasks.length) {
-    if (maxDiffLen >= 120_000 || avgUpdateDiffLen >= 40_000)
-      return Math.min(upperLimit, 2, tasks.length);
-    if (avgUpdateDiffLen >= 12_000)
-      return Math.min(upperLimit, 3, tasks.length);
-    if (avgUpdateDiffLen >= 4_000) return Math.min(upperLimit, 4, tasks.length);
-    return Math.min(upperLimit, 6, tasks.length);
-  }
-
-  if (maxDiffLen >= 120_000 || avgUpdateDiffLen >= 40_000)
-    return Math.min(upperLimit, 2, tasks.length);
-  if (avgUpdateDiffLen >= 12_000) return Math.min(upperLimit, 3, tasks.length);
-  if (nonUpdateCount > updateCount)
-    return Math.min(upperLimit, 6, tasks.length);
-  return Math.min(upperLimit, 4, tasks.length);
-}
-
-// Apply operations in order, but run independent non-move operations in bounded parallel batches.
-// Each op reports its own success/failure; no rollback.
-async function applyOperationsLegacy(
-  operations: ApplyPatchOperation[],
-  cwd: string,
-  signal?: AbortSignal,
-  onProgress?: (
-    message: string,
-    preview?: { path?: string; diff?: string },
-  ) => void,
-): Promise<{
-  fuzz: number;
-  results: ApplyOperationResult[];
-  warnings: string[];
-}> {
-  const { tasks, presetResults } = prepareApplyTasks(operations, cwd);
-  const results: Array<ApplyOperationResult | undefined> = presetResults;
-  let fuzzTotal = 0;
-  const warnings = new Set<string>();
-  const ensuredDirs = new Map<string, Promise<void>>();
-  const knownPathExistence = new Map<string, boolean>();
-  const maxParallelUpper = Math.max(
-    1,
-    Math.min(
-      8,
-      typeof os.availableParallelism === "function"
-        ? os.availableParallelism()
-        : 4,
-    ),
-  );
-
-  const ensureDir = async (dir: string) => {
-    const inFlight = ensuredDirs.get(dir);
-    if (inFlight) return inFlight;
-
-    const pending = fs.mkdir(dir, { recursive: true }).catch((err) => {
-      ensuredDirs.delete(dir);
-      throw err;
-    });
-    ensuredDirs.set(dir, pending);
-    return pending;
-  };
-
-  const markPathExists = (abs: string, exists: boolean) => {
-    knownPathExistence.set(abs, exists);
-  };
-
-  const checkPathExists = async (abs: string): Promise<boolean> => {
-    const known = knownPathExistence.get(abs);
-    if (typeof known === "boolean") return known;
-    const exists = await fileExists(abs);
-    knownPathExistence.set(abs, exists);
-    return exists;
-  };
-
-  const runTask = async (
-    task: PreparedApplyTask,
-  ): Promise<{
-    result: ApplyOperationResult;
-    fuzz: number;
-    warning?: string;
-  }> => {
-    if (signal?.aborted) throw new Error("Aborted");
-
-    const { type, rel, abs, diff } = task;
-    try {
-      if (type === "create_file") {
-        if (typeof diff !== "string")
-          throw new DiffError(`create_file missing diff for ${rel}`);
-        if (await checkPathExists(abs))
-          throw new DiffError(`File already exists at path '${rel}'`);
-
-        const content = applyCodexCreateBody(diff);
-        await ensureDir(path.dirname(abs));
-        await writeFileAtomic(abs, content);
-        markPathExists(abs, true);
-        return { result: { type, path: rel, status: "completed" }, fuzz: 0 };
-      }
-
-      if (type === "update_file") {
-        if (typeof diff !== "string")
-          throw new DiffError(`update_file missing diff for ${rel}`);
-
-        let st: Awaited<ReturnType<typeof fs.stat>>;
-        let rawCurrent: string;
-        try {
-          [st, rawCurrent] = await Promise.all([
-            fs.stat(abs),
-            fs.readFile(abs, "utf8"),
-          ]);
-        } catch (err) {
-          if (isNotFoundError(err)) {
-            markPathExists(abs, false);
-            throw new DiffError(`File not found at path '${rel}'`);
-          }
-          throw err;
-        }
-        markPathExists(abs, true);
-
-        const { bom, text: current } = stripBom(rawCurrent);
-        const originalEnding = detectLineEnding(current);
-
-        const { output, fuzz, replacements, normalizedMarkers } =
-          applyCodexUpdateWithRecovery(current, diff, rel);
-        if (!task.moveAbs && normalizeLineEndings(current) === output) {
-          throw new DiffError(`No changes made to ${rel}.`);
-        }
-        const generatedDiff = generateDiffFromReplacements(
-          current,
-          output,
-          replacements,
-        );
-        const finalOutput = bom + restoreLineEndings(output, originalEnding);
-        const warning =
-          normalizedMarkers && normalizedMarkers.length > 0
-            ? `Warning: forbidden marker lines were auto-removed: ${normalizedMarkers.join(", ")}. Use only @@/space/+/- lines.`
-            : undefined;
-
-        if (task.moveAbs && task.moveRel) {
-          const relTo = task.moveRel;
-          const absTo = task.moveAbs;
-          if (await checkPathExists(absTo))
-            throw new DiffError(`Target already exists at path '${relTo}'`);
-
-          await ensureDir(path.dirname(absTo));
-          await writeFileAtomic(absTo, finalOutput, st.mode);
-          await fs.unlink(abs);
-          markPathExists(abs, false);
-          markPathExists(absTo, true);
-          return {
-            result: {
-              type,
-              path: relTo,
-              status: "completed",
-              output: `Moved from ${rel}`,
-              diff: generatedDiff.diff,
-              firstChangedLine: generatedDiff.firstChangedLine,
-            },
-            fuzz,
-            warning,
-          };
-        }
-
-        await ensureDir(path.dirname(abs));
-        await writeFileAtomic(abs, finalOutput, st.mode);
-        markPathExists(abs, true);
-        return {
-          result: {
-            type,
-            path: rel,
-            status: "completed",
-            diff: generatedDiff.diff,
-            firstChangedLine: generatedDiff.firstChangedLine,
-          },
-          fuzz,
-          warning,
-        };
-      }
-
-      // delete_file
-      try {
-        await fs.unlink(abs);
-      } catch (err) {
-        if (isNotFoundError(err)) {
-          markPathExists(abs, false);
-          throw new DiffError(`File not found at path '${rel}'`);
-        }
-        throw err;
-      }
-      markPathExists(abs, false);
-      return { result: { type, path: rel, status: "completed" }, fuzz: 0 };
-    } catch (err) {
-      return {
-        result: {
-          type,
-          path: rel,
-          status: "failed",
-          output: err instanceof Error ? err.message : String(err),
-        },
-        fuzz: 0,
-      };
-    }
-  };
-
-  let batch: PreparedApplyTask[] = [];
-  const batchTouchedPaths = new Set<string>();
-
-  const flushBatch = async () => {
-    if (batch.length === 0) return;
-    const toRun = batch;
-    batch = [];
-    batchTouchedPaths.clear();
-    const batchParallel = chooseBatchParallelism(toRun, maxParallelUpper);
-
-    for (let start = 0; start < toRun.length; start += batchParallel) {
-      if (signal?.aborted) throw new Error("Aborted");
-
-      const slice = toRun.slice(start, start + batchParallel);
-      const done = await Promise.all(slice.map((task) => runTask(task)));
-      for (let i = 0; i < slice.length; i++) {
-        const task = slice[i]!;
-        const executed = done[i]!;
-        results[task.index] = executed.result;
-        fuzzTotal += executed.fuzz;
-        if (executed.warning) warnings.add(executed.warning);
-      }
-    }
-  };
-
-  onProgress?.(`Applying ${operations.length} operation(s)...`);
-
-  for (let i = 0; i < tasks.length; i++) {
-    if (signal?.aborted) throw new Error("Aborted");
-
-    const task = tasks[i]!;
-
-    const stepPreview =
-      task.type === "update_file" &&
-      typeof task.diff === "string" &&
-      task.diff.length > 0
-        ? { path: task.displayPath, diff: task.diff }
-        : undefined;
-    onProgress?.(
-      `${task.index + 1}/${operations.length} ${task.type} ${task.rel}`,
-      stepPreview,
-    );
-
-    let conflictsWithBatch = false;
-    for (const touched of task.touchedPaths) {
-      if (batchTouchedPaths.has(touched)) {
-        conflictsWithBatch = true;
-        break;
-      }
-    }
-    if (conflictsWithBatch) {
-      await flushBatch();
-    }
-
-    batch.push(task);
-    for (const touched of task.touchedPaths) {
-      batchTouchedPaths.add(touched);
-    }
-  }
-
-  await flushBatch();
-
-  const finalized: ApplyOperationResult[] = results.map(
-    (res, i): ApplyOperationResult => {
-      if (res) return res;
-      const op = operations[i]!;
-      return {
-        type: op.type,
-        path: typeof op.path === "string" ? op.path : "(invalid)",
-        status: "failed",
-        output: "Internal error: missing result",
-      };
-    },
-  );
-
-  return { fuzz: fuzzTotal, results: finalized, warnings: [...warnings] };
-}
-
 // UI helpers for rendering tool arguments/results without flooding the TUI.
 
 // Pull and normalize operations from tool args for call/result rendering.
@@ -2499,21 +2186,50 @@ function collectProgressPreview(
 // Extension wiring: tool policy, tool registration, and system prompt hook.
 export default function (pi: ExtensionAPI) {
   let baselineTools: string[] | null = null;
+  let policyMode: "codex" | "normal" | null = null;
+
+  const withoutApplyPatch = (tools: string[]) =>
+    tools.filter((tool) => tool !== "apply_patch");
+
+  const setActiveToolsIfChanged = (tools: string[]) => {
+    const current = pi.getActiveTools();
+    if (
+      current.length === tools.length &&
+      current.every((tool, index) => tool === tools[index])
+    ) {
+      return;
+    }
+    pi.setActiveTools(tools);
+  };
 
   // Enforce apply_patch-only policy for selected models; hide edit/write to avoid mixed diffs.
   function applyToolPolicy(ctx: ExtensionContext): void {
-    if (!baselineTools) baselineTools = pi.getActiveTools();
-
     if (isCodexModel(ctx)) {
-      const next = new Set(baselineTools);
+      if (policyMode !== "codex") {
+        baselineTools = withoutApplyPatch(pi.getActiveTools());
+      }
+
+      const next = new Set(
+        baselineTools ?? withoutApplyPatch(pi.getActiveTools()),
+      );
       next.delete("edit");
       next.delete("write");
       next.add("apply_patch");
-      pi.setActiveTools([...next]);
+      policyMode = "codex";
+      setActiveToolsIfChanged([...next]);
       return;
     }
 
-    pi.setActiveTools(baselineTools.filter((t) => t !== "apply_patch"));
+    if (policyMode === "codex" && baselineTools) {
+      policyMode = "normal";
+      setActiveToolsIfChanged(baselineTools);
+      return;
+    }
+
+    const normalTools = withoutApplyPatch(pi.getActiveTools());
+    baselineTools = normalTools;
+    policyMode = "normal";
+    setActiveToolsIfChanged(normalTools);
   }
 
   pi.registerTool({
