@@ -5,6 +5,11 @@ import type { DiffRow, DiffSpan, HighlightedDiffCode } from "./types.ts";
 import type { PierreTerminalPalette } from "./theme.ts";
 import type { PierreRendererConfig } from "./config.ts";
 
+const ROW_CACHE_LIMIT = 512;
+const rowCache = new Map<string, DiffRow[]>();
+const highlightedCodeIds = new WeakMap<object, number>();
+let nextHighlightedCodeId = 1;
+
 export function buildDiffRows(
   metadata: FileDiffMetadata,
   highlighted: HighlightedDiffCode,
@@ -175,6 +180,153 @@ export function buildDiffRows(
   }
 
   return rows;
+}
+
+export function buildCachedDiffRows(
+  metadata: FileDiffMetadata,
+  highlighted: HighlightedDiffCode,
+  palette: PierreTerminalPalette,
+  config: PierreRendererConfig,
+  options: { expandCollapsed?: boolean } = {},
+  cacheKey = "",
+): DiffRow[] {
+  const key = diffRowsCacheKey(
+    metadata,
+    highlighted,
+    palette,
+    config,
+    options,
+    cacheKey,
+  );
+  const cached = rowCache.get(key);
+  if (cached) return cached;
+
+  const rows = buildDiffRows(metadata, highlighted, palette, config, options);
+  rowCache.set(key, rows);
+  if (rowCache.size > ROW_CACHE_LIMIT) {
+    const oldestKey = rowCache.keys().next().value;
+    if (typeof oldestKey === "string") rowCache.delete(oldestKey);
+  }
+  return rows;
+}
+
+function diffRowsCacheKey(
+  metadata: FileDiffMetadata,
+  highlighted: HighlightedDiffCode,
+  palette: PierreTerminalPalette,
+  config: PierreRendererConfig,
+  options: { expandCollapsed?: boolean },
+  cacheKey: string,
+): string {
+  return [
+    cacheKey || metadata.cacheKey || metadataContentKey(metadata),
+    metadataHunksKey(metadata),
+    highlightedCodeKey(highlighted),
+    options.expandCollapsed ? "1" : "0",
+    rowPaletteKey(palette),
+    rowConfigKey(config),
+  ].join("\u0000");
+}
+
+function metadataContentKey(metadata: FileDiffMetadata): string {
+  return [
+    metadata.name,
+    metadata.prevName ?? "",
+    metadata.type,
+    metadata.lang ?? "",
+    metadata.deletionLines.join("\n"),
+    metadata.additionLines.join("\n"),
+  ].join("\u0001");
+}
+
+function metadataHunksKey(metadata: FileDiffMetadata): string {
+  const parts: string[] = [metadata.isPartial ? "1" : "0"];
+  for (const hunk of metadata.hunks) {
+    parts.push(
+      String(hunk.collapsedBefore),
+      String(hunk.additionStart),
+      String(hunk.additionCount),
+      String(hunk.additionLineIndex),
+      String(hunk.deletionStart),
+      String(hunk.deletionCount),
+      String(hunk.deletionLineIndex),
+      hunk.noEOFCRDeletions ? "1" : "0",
+      hunk.noEOFCRAdditions ? "1" : "0",
+      hunk.hunkSpecs ?? "",
+    );
+    for (const content of hunk.hunkContent) {
+      if (content.type === "context") {
+        parts.push(
+          "c",
+          String(content.lines),
+          String(content.deletionLineIndex),
+          String(content.additionLineIndex),
+        );
+      } else {
+        parts.push(
+          "x",
+          String(content.deletions),
+          String(content.deletionLineIndex),
+          String(content.additions),
+          String(content.additionLineIndex),
+        );
+      }
+    }
+  }
+  return parts.join("\u0001");
+}
+
+function highlightedCodeKey(highlighted: HighlightedDiffCode): string {
+  const cached = highlightedCodeIds.get(highlighted);
+  if (cached !== undefined) return String(cached);
+
+  if (
+    !highlighted.deletionLines.some(Boolean) &&
+    !highlighted.additionLines.some(Boolean)
+  ) {
+    return "empty";
+  }
+
+  const id = nextHighlightedCodeId++;
+  highlightedCodeIds.set(highlighted, id);
+  return String(id);
+}
+
+function rowConfigKey(config: PierreRendererConfig): string {
+  return [
+    config.wordDiff.enabled ? "1" : "0",
+    config.wordDiff.style,
+    config.wordDiff.maxLineLength,
+  ].join("\u0001");
+}
+
+function rowPaletteKey(palette: PierreTerminalPalette): string {
+  return [
+    palette.appearance,
+    palette.contextFg,
+    palette.contextRowBg,
+    palette.additionFg,
+    palette.additionRowBg,
+    palette.deletionFg,
+    palette.deletionRowBg,
+    palette.lineNumberFg,
+    palette.additionLineNumberFg,
+    palette.deletionLineNumberFg,
+    palette.additionWordBg,
+    palette.deletionWordBg,
+    palette.syntaxText,
+    palette.syntaxComment,
+    palette.syntaxKeyword,
+    palette.syntaxFunction,
+    palette.syntaxVariable,
+    palette.syntaxString,
+    palette.syntaxNumber,
+    palette.syntaxType,
+    palette.syntaxOperator,
+    palette.syntaxPunctuation,
+    palette.metadataFg,
+    palette.metadataBg,
+  ].join("\u0001");
 }
 
 export function lineNumberWidthFor(

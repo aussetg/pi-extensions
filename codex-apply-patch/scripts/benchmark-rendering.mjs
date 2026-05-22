@@ -3,6 +3,8 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { buildPiHighlightedDiff } from "../src/pierre/highlight.ts";
 import { DEFAULT_PIERRE_RENDERER_CONFIG } from "../src/pierre/config.ts";
+import { buildCachedDiffRows, buildDiffRows } from "../src/pierre/rows.ts";
+import { getPierrePalette } from "../src/pierre/theme.ts";
 import {
   baselineHighlightedDiff,
   changedFileMetadata,
@@ -66,6 +68,33 @@ for (const fixture of fixtures) {
       "cpu ms": (optimized.cpuMs - baseline.cpuMs).toFixed(1),
       "heap MiB": (optimized.heapMiB - baseline.heapMiB).toFixed(2),
       speedup: `${(baseline.wallMs / optimized.wallMs).toFixed(2)}×`,
+    },
+  ]);
+
+  const highlighted = buildPiHighlightedDiff(metadata, config).dark;
+  const palette = getPierrePalette({ name: "dark" }, config);
+  const rowCacheKey = `bench:rows:${fixture.name}`;
+  buildDiffRows(metadata, highlighted, palette, config);
+  buildCachedDiffRows(metadata, highlighted, palette, config, {}, rowCacheKey);
+  const uncachedRows = measure("rows uncached", () =>
+    buildDiffRows(metadata, highlighted, palette, config),
+  );
+  const cachedRows = measure("rows cached", () =>
+    buildCachedDiffRows(metadata, highlighted, palette, config, {}, rowCacheKey),
+  );
+
+  console.log(
+    `fixture: ${fixture.name} rows, ${metadata.additionLines.length} TypeScript lines, ${iterations} iterations`,
+  );
+  console.table([
+    formatResult(uncachedRows),
+    formatResult(cachedRows),
+    {
+      name: "delta",
+      "wall ms": (cachedRows.wallMs - uncachedRows.wallMs).toFixed(1),
+      "cpu ms": (cachedRows.cpuMs - uncachedRows.cpuMs).toFixed(1),
+      "heap MiB": (cachedRows.heapMiB - uncachedRows.heapMiB).toFixed(2),
+      speedup: `${(uncachedRows.wallMs / cachedRows.wallMs).toFixed(2)}×`,
     },
   ]);
 }

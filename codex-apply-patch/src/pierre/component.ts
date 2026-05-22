@@ -5,7 +5,7 @@ import {
   wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
 import { buildPiHighlightedDiff, hasHighlightedLines } from "./highlight.ts";
-import { buildDiffRows, lineNumberWidthFor } from "./rows.ts";
+import { buildCachedDiffRows, lineNumberWidthFor } from "./rows.ts";
 import {
   getPierreRendererConfig,
   type PierreRendererConfig,
@@ -174,15 +174,20 @@ export class PierreInlineDiffComponent implements Component {
       }
 
       const highlighted = this.highlightedFor(payload)[this.palette.appearance];
-      const rows = buildDiffRows(
+      const rows = buildCachedDiffRows(
         payload.metadata,
         highlighted,
         this.palette,
         this.config,
         { expandCollapsed: this.expandCollapsedHunks },
+        payloadKey(payload),
+      );
+      const lineNumberWidth = lineNumberWidthFor(
+        payload.metadata,
+        this.config.gutter.lineNumberMinWidth,
       );
       for (const row of rows) {
-        lines.push(...this.renderRow(payload, row, safeWidth));
+        lines.push(...this.renderRow(row, safeWidth, lineNumberWidth));
       }
     }
 
@@ -196,9 +201,9 @@ export class PierreInlineDiffComponent implements Component {
   invalidate(): void {}
 
   private renderRow(
-    payload: PierreDiffPayload,
     row: DiffRow,
     width: number,
+    lineNumberWidth: number,
   ): string[] {
     if (row.kind === "metadata") {
       return [
@@ -217,10 +222,6 @@ export class PierreInlineDiffComponent implements Component {
       ];
     }
 
-    const lineNumberWidth = lineNumberWidthFor(
-      payload.metadata,
-      this.config.gutter.lineNumberMinWidth,
-    );
     const prefixSegments = linePrefixSegments(
       row,
       lineNumberWidth,

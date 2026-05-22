@@ -6,6 +6,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { buildPiHighlightedDiff } from "../src/pierre/highlight.ts";
 import { DEFAULT_PIERRE_RENDERER_CONFIG } from "../src/pierre/config.ts";
+import { buildCachedDiffRows, buildDiffRows } from "../src/pierre/rows.ts";
+import { getPierrePalette } from "../src/pierre/theme.ts";
 import {
   baselineHighlightedDiff,
   changedFileMetadata,
@@ -295,6 +297,102 @@ test("tree-sitter worker batch output matches single-job output", () => {
   );
 });
 
+test("cached diff rows match uncached rows and reuse exact row arrays", () => {
+  const metadata = cases[0];
+  const highlighted = buildPiHighlightedDiff(metadata, config).dark;
+  const palette = getPierrePalette({ name: "dark" }, config);
+  const options = { expandCollapsed: false };
+  const cacheKey = "row-cache-basic";
+
+  const uncached = buildDiffRows(metadata, highlighted, palette, config, options);
+  const cached = buildCachedDiffRows(
+    metadata,
+    highlighted,
+    palette,
+    config,
+    options,
+    cacheKey,
+  );
+  const cachedAgain = buildCachedDiffRows(
+    metadata,
+    highlighted,
+    palette,
+    config,
+    options,
+    cacheKey,
+  );
+
+  assert.deepEqual(cached, uncached);
+  assert.strictEqual(cachedAgain, cached);
+});
+
+test("cached diff rows keep palette, word-diff config, and expansion separate", () => {
+  const metadata = collapsedMetadata();
+  const highlighted = buildPiHighlightedDiff(metadata, config).dark;
+  const darkPalette = getPierrePalette({ name: "dark" }, config);
+  const lightPalette = getPierrePalette({ name: "light" }, config);
+  const noWordDiffConfig = {
+    ...config,
+    wordDiff: { ...config.wordDiff, enabled: false },
+  };
+  const cacheKey = "row-cache-variants";
+
+  const darkRows = buildCachedDiffRows(
+    metadata,
+    highlighted,
+    darkPalette,
+    config,
+    { expandCollapsed: false },
+    cacheKey,
+  );
+  const lightRows = buildCachedDiffRows(
+    metadata,
+    highlighted,
+    lightPalette,
+    config,
+    { expandCollapsed: false },
+    cacheKey,
+  );
+  const noWordRows = buildCachedDiffRows(
+    metadata,
+    highlighted,
+    darkPalette,
+    noWordDiffConfig,
+    { expandCollapsed: false },
+    cacheKey,
+  );
+  const expandedRows = buildCachedDiffRows(
+    metadata,
+    highlighted,
+    darkPalette,
+    config,
+    { expandCollapsed: true },
+    cacheKey,
+  );
+
+  assert.deepEqual(
+    lightRows,
+    buildDiffRows(metadata, highlighted, lightPalette, config, {
+      expandCollapsed: false,
+    }),
+  );
+  assert.deepEqual(
+    noWordRows,
+    buildDiffRows(metadata, highlighted, darkPalette, noWordDiffConfig, {
+      expandCollapsed: false,
+    }),
+  );
+  assert.deepEqual(
+    expandedRows,
+    buildDiffRows(metadata, highlighted, darkPalette, config, {
+      expandCollapsed: true,
+    }),
+  );
+  assert.notStrictEqual(lightRows, darkRows);
+  assert.notStrictEqual(noWordRows, darkRows);
+  assert.notStrictEqual(expandedRows, darkRows);
+});
+
 function workerCaptures(languageKey, lines, indexes) {
   const result = spawnSync(process.execPath, [workerPath], {
     input: JSON.stringify({ languageKey, lines, indexes }),
@@ -374,4 +472,41 @@ function sortedCaptureKeys(captures) {
       ].join(":"),
     )
     .sort();
+}
+
+function collapsedMetadata() {
+  const metadata = makeMetadata({
+    name: "collapsed.ts",
+    lang: "typescript",
+    deletionLines: [
+      "export const keep0 = 0;",
+      "export const keep1 = 1;",
+      "export const keep2 = 2;",
+      "export const oldValue = 3;",
+    ],
+    additionLines: [
+      "export const keep0 = 0;",
+      "export const keep1 = 1;",
+      "export const keep2 = 2;",
+      "export const newValue = 4;",
+    ],
+    hunkContent: [
+      {
+        type: "change",
+        deletions: 1,
+        deletionLineIndex: 3,
+        additions: 1,
+        additionLineIndex: 3,
+      },
+    ],
+  });
+  metadata.isPartial = false;
+  metadata.hunks[0].collapsedBefore = 3;
+  metadata.hunks[0].additionStart = 4;
+  metadata.hunks[0].deletionStart = 4;
+  metadata.hunks[0].additionLineIndex = 3;
+  metadata.hunks[0].deletionLineIndex = 3;
+  metadata.hunks[0].additionCount = 1;
+  metadata.hunks[0].deletionCount = 1;
+  return metadata;
 }
