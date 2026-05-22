@@ -428,7 +428,7 @@ export function renderApplyPatchCall(
   } catch {
     // Keep renderer resilient; fallback to just tool title.
   }
-  return new Text(`\n${out}`, 1, 0, toolBackground(theme, context));
+  return new Text(out, 1, 1, toolBackground(theme, context));
 }
 
 export function renderApplyPatchResult(

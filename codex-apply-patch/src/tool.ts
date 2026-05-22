@@ -3,53 +3,12 @@ import type { AgentToolUpdateCallback, ExtensionAPI } from "@mariozechner/pi-cod
 import { Type } from "typebox";
 import { applyOperations, prepareApplyTasks, withMutationQueues } from "./apply.ts";
 import { prepareApplyPatchArguments } from "./codex-envelope.ts";
-import { getPierreRendererConfig } from "./pierre/config.ts";
 import { createThrottledProgressEmitter } from "./progress.ts";
 import { collectProgressPreview, collectSuccessPreviews, renderApplyPatchCall, renderApplyPatchResult } from "./render.ts";
 import type { ApplyPatchDetails, ApplyPatchOperation } from "./types.ts";
 import { DiffError, shortenPathForDisplay } from "./util.ts";
 
-function installWorkingFooterSpacing(ctx: {
-  hasUI?: boolean;
-  ui?: { setWorkingMessage?: (message?: string) => void };
-}): void {
-  if (!ctx.hasUI || !ctx.ui?.setWorkingMessage) return;
-
-  const footerLines = getPierreRendererConfig().spacing.afterDiff;
-  if (footerLines <= 0) return;
-
-  ctx.ui.setWorkingMessage(
-    ["Working...", ...Array.from({ length: footerLines }, () => "\u200b")].join("\n"),
-  );
-  workingFooterSpacingInstalled = true;
-}
-
-let workingFooterSpacingInstalled = false;
-
-function restoreWorkingFooterSpacing(ctx: {
-  hasUI?: boolean;
-  ui?: { setWorkingMessage?: (message?: string) => void };
-}): void {
-  if (!workingFooterSpacingInstalled) return;
-  if (!ctx.hasUI || !ctx.ui?.setWorkingMessage) return;
-  ctx.ui.setWorkingMessage();
-  workingFooterSpacingInstalled = false;
-}
-
 export function registerApplyPatchTool(pi: ExtensionAPI): void {
-  pi.on("tool_execution_start", async (event, ctx) => {
-    if (event.toolName !== "apply_patch") return;
-    installWorkingFooterSpacing(ctx);
-  });
-
-  pi.on("agent_end", async (_event, ctx) => {
-    restoreWorkingFooterSpacing(ctx);
-  });
-
-  pi.on("session_shutdown", async (_event, ctx) => {
-    restoreWorkingFooterSpacing(ctx);
-  });
-
   pi.registerTool({
     name: "apply_patch",
     label: "apply_patch",
@@ -96,7 +55,6 @@ export function registerApplyPatchTool(pi: ExtensionAPI): void {
       const queueTasks = prepareApplyTasks(ops, ctx.cwd).tasks;
       const queuePaths = queueTasks.flatMap((task) => task.touchedPaths);
       const preview = collectProgressPreview(ops);
-      installWorkingFooterSpacing(ctx);
       progressEmitter.emit("Applying patch operations...", preview, true);
       const { fuzz, results, warnings } = await (async () => {
         try {
