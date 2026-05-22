@@ -37,10 +37,14 @@ export interface DiffSpan {
 
 export type DiffRow =
   | {
-      kind: "collapsed" | "metadata";
+      kind: "metadata";
       text: string;
       fg: string;
       bg: string;
+    }
+  | {
+      kind: "collapsed";
+      count: number;
     }
   | {
       kind: "line";

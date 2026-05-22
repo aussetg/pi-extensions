@@ -9,6 +9,7 @@ import type { ApplyOperationResult } from "./apply.ts";
 import { prepareApplyPatchArguments } from "./codex-envelope.ts";
 import { firstChangedLineFromDiff } from "./diff-lines.ts";
 import { PierreInlineDiffComponent } from "./pierre/component.ts";
+import { getPierreRendererConfig } from "./pierre/config.ts";
 import { buildPierreNumberedDiffPayload } from "./pierre/metadata.ts";
 import type { PierreDiffPayload } from "./pierre/types.ts";
 import { shortenPathForDisplay, validatePatchPath } from "./util.ts";
@@ -289,9 +290,15 @@ function renderPierrePreviews(
 }
 
 function maxPierreVisibleLines(expanded: boolean): number {
+  const config = getPierreRendererConfig();
   const rows = typeof process.stdout.rows === "number" ? process.stdout.rows : 40;
-  const expandedLimit = Math.max(10, Math.floor(rows * 0.7));
-  return expanded ? expandedLimit : Math.min(expandedLimit, 18);
+  const expandedLimit = Math.max(
+    10,
+    Math.floor(rows * config.layout.expandedMaxVisibleRatio),
+  );
+  return expanded
+    ? expandedLimit
+    : Math.min(expandedLimit, config.layout.maxVisibleLines);
 }
 
 function isPierreDiffPayload(value: unknown): value is PierreDiffPayload {

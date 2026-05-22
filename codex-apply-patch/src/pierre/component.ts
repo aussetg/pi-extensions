@@ -7,6 +7,10 @@ import {
 import { hasHighlightedLines } from "./highlight.ts";
 import { buildDiffRows, lineNumberWidthFor } from "./rows.ts";
 import {
+  getPierreRendererConfig,
+  type PierreRendererConfig,
+} from "./config.ts";
+import {
   getPierrePalette,
   type PiThemeLike,
   type PierreTerminalPalette,
@@ -20,7 +24,6 @@ import type {
 import { emptyHighlightedDiffSet } from "./types.ts";
 
 const ANSI_RESET = "\u001b[22m\u001b[39m\u001b[49m";
-const DEFAULT_MAX_VISIBLE_LINES = 18;
 
 interface RenderSegment {
   text: string;
@@ -36,6 +39,7 @@ export interface PierreInlineDiffOptions {
 }
 
 export class PierreStatusComponent implements Component {
+  private config: PierreRendererConfig;
   private palette: PierreTerminalPalette;
   private text: string;
   private kind: "pending" | "success" | "error";
@@ -45,7 +49,8 @@ export class PierreStatusComponent implements Component {
     text: string,
     kind: "pending" | "success" | "error",
   ) {
-    this.palette = getPierrePalette(theme);
+    this.config = getPierreRendererConfig();
+    this.palette = getPierrePalette(theme, this.config);
     this.text = text;
     this.kind = kind;
   }
@@ -55,7 +60,8 @@ export class PierreStatusComponent implements Component {
     text: string,
     kind: "pending" | "success" | "error",
   ): void {
-    this.palette = getPierrePalette(theme);
+    this.config = getPierreRendererConfig();
+    this.palette = getPierrePalette(theme, this.config);
     this.text = text;
     this.kind = kind;
   }
@@ -78,9 +84,13 @@ export class PierreStatusComponent implements Component {
 
 export class PierreInlineDiffComponent implements Component {
   private payloads: PierreDiffPayload[];
+  private theme: PiThemeLike;
+  private config: PierreRendererConfig;
   private palette: PierreTerminalPalette;
   private maxVisibleLines: number;
   private showFileHeaders: boolean;
+  private explicitMaxVisibleLines: number | undefined;
+  private explicitShowFileHeaders: boolean | undefined;
   private highlightedByKey = new Map<string, HighlightedDiffSet>();
 
   constructor(
@@ -89,9 +99,18 @@ export class PierreInlineDiffComponent implements Component {
     options: PierreInlineDiffOptions = {},
   ) {
     this.payloads = normalizePayloads(payloads);
-    this.palette = getPierrePalette(theme);
-    this.maxVisibleLines = options.maxVisibleLines ?? DEFAULT_MAX_VISIBLE_LINES;
-    this.showFileHeaders = options.showFileHeaders ?? this.payloads.length > 1;
+    this.theme = theme;
+    this.explicitMaxVisibleLines = options.maxVisibleLines;
+    this.explicitShowFileHeaders = options.showFileHeaders;
+    this.config = getPierreRendererConfig();
+    this.palette = getPierrePalette(theme, this.config);
+    this.maxVisibleLines =
+      options.maxVisibleLines ?? this.config.layout.maxVisibleLines;
+    this.showFileHeaders = resolveShowFileHeaders(
+      this.config,
+      options.showFileHeaders,
+      this.payloads.length,
+    );
     this.ingestHighlightedPayloads();
   }
 
@@ -101,24 +120,51 @@ export class PierreInlineDiffComponent implements Component {
     options: PierreInlineDiffOptions = {},
   ): void {
     this.payloads = normalizePayloads(payloads);
-    this.palette = getPierrePalette(theme);
-    this.maxVisibleLines = options.maxVisibleLines ?? DEFAULT_MAX_VISIBLE_LINES;
-    this.showFileHeaders = options.showFileHeaders ?? this.payloads.length > 1;
+    this.theme = theme;
+    this.explicitMaxVisibleLines = options.maxVisibleLines;
+    this.explicitShowFileHeaders = options.showFileHeaders;
+    this.config = getPierreRendererConfig();
+    this.palette = getPierrePalette(theme, this.config);
+    this.maxVisibleLines =
+      options.maxVisibleLines ?? this.config.layout.maxVisibleLines;
+    this.showFileHeaders = resolveShowFileHeaders(
+      this.config,
+      options.showFileHeaders,
+      this.payloads.length,
+    );
     this.ingestHighlightedPayloads();
   }
 
   render(width: number): string[] {
+    this.config = getPierreRendererConfig();
+    this.palette = getPierrePalette(this.theme, this.config);
+    this.maxVisibleLines =
+      this.explicitMaxVisibleLines ?? this.config.layout.maxVisibleLines;
+    this.showFileHeaders = resolveShowFileHeaders(
+      this.config,
+      this.explicitShowFileHeaders,
+      this.payloads.length,
+    );
     const safeWidth = Math.max(20, width);
     const lines: string[] = [];
+
+    for (let i = 0; i < this.config.spacing.beforeDiff; i += 1) {
+      lines.push(renderBlankLine(safeWidth, this.palette.editorBg));
+    }
 
     for (let i = 0; i < this.payloads.length; i++) {
       const payload = this.payloads[i]!;
       if (this.showFileHeaders || this.payloads.length > 1) {
-        lines.push(renderFileHeader(payload, this.palette, safeWidth));
+        lines.push(renderFileHeader(payload, this.palette, this.config, safeWidth));
       }
 
       const highlighted = this.highlightedFor(payload)[this.palette.appearance];
-      const rows = buildDiffRows(payload.metadata, highlighted, this.palette);
+      const rows = buildDiffRows(
+        payload.metadata,
+        highlighted,
+        this.palette,
+        this.config,
+      );
       for (const row of rows) {
         lines.push(...this.renderRow(payload, row, safeWidth));
       }
@@ -129,16 +175,14 @@ export class PierreInlineDiffComponent implements Component {
     const visible = Math.max(1, this.maxVisibleLines - 1);
     return [
       ...lines.slice(0, visible),
-      renderFullWidthLine(
-        [
-          {
-            text: `… ${lines.length - visible} more diff line${lines.length - visible === 1 ? "" : "s"}`,
-            fg: this.palette.metadataFg,
-            bg: this.palette.metadataBg,
-          },
-        ],
+      renderHunkNoticeLine(
+        formatCountLabel(
+          this.config.hunk.moreDiffLabel,
+          lines.length - visible,
+        ),
+        this.palette,
+        this.config,
         safeWidth,
-        { fg: this.palette.metadataFg, bg: this.palette.metadataBg },
       ),
     ];
   }
@@ -150,32 +194,59 @@ export class PierreInlineDiffComponent implements Component {
     row: DiffRow,
     width: number,
   ): string[] {
-    if (row.kind !== "line") {
-      const text = row.kind === "collapsed" ? ` ${row.text}` : row.text;
+    if (row.kind === "metadata") {
       return [
-        renderFullWidthLine(
-          [{ text, fg: row.fg, bg: row.bg }],
+        renderMetadataLine(row.text, this.palette, this.config, width, row),
+      ];
+    }
+
+    if (row.kind === "collapsed") {
+      return [
+        renderHunkNoticeLine(
+          formatCountLabel(this.config.hunk.collapsedLabel, row.count),
+          this.palette,
+          this.config,
           width,
-          { fg: row.fg, bg: row.bg },
+          payload,
         ),
       ];
     }
 
-    const lineNumberWidth = lineNumberWidthFor(payload.metadata);
+    const lineNumberWidth = lineNumberWidthFor(
+      payload.metadata,
+      this.config.gutter.lineNumberMinWidth,
+    );
+    const bar = lineBar(row.lineType, this.config);
+    const barColors = lineBarColors(row.lineType, this.palette);
     const prefixSegments: RenderSegment[] = [
-      { text: lineMarker(row.lineType), fg: row.rowFg, bg: row.rowBg },
       {
-        text: formatLineNumber(row.lineNumber, lineNumberWidth),
-        fg: row.lineNumberFg,
-        bg: row.rowBg,
+        text: " ".repeat(this.config.layout.leftPadding),
+        fg: row.rowFg,
+        bg: this.palette.editorBg,
       },
-      { text: " ", fg: row.lineNumberFg, bg: row.rowBg },
+      {
+        text:
+          formatLineNumber(row.lineNumber, lineNumberWidth) +
+          " ".repeat(this.config.gutter.lineNumberPaddingRight),
+        fg: row.lineNumberFg,
+        bg: this.palette.lineNumberBg,
+      },
+      {
+        text: this.config.gutter.separator,
+        fg: this.palette.gutterFg,
+        bg: this.palette.gutterBg,
+      },
+      { text: bar, ...barColors },
+      { text: this.config.gutter.barGap, fg: row.rowFg, bg: row.rowBg },
     ];
 
-    const prefix = `${lineMarker(row.lineType)}${formatLineNumber(
-      row.lineNumber,
-      lineNumberWidth,
-    )} `;
+    const prefix =
+      " ".repeat(this.config.layout.leftPadding) +
+      formatLineNumber(row.lineNumber, lineNumberWidth) +
+      " ".repeat(this.config.gutter.lineNumberPaddingRight) +
+      this.config.gutter.separator +
+      bar +
+      this.config.gutter.barGap;
     const prefixWidth = visibleWidth(prefix);
     const contentWidth = Math.max(8, width - prefixWidth);
     const prefixAnsi = renderSegments(prefixSegments, {
@@ -183,7 +254,12 @@ export class PierreInlineDiffComponent implements Component {
       bg: row.rowBg,
     });
     const continuationAnsi = renderSegments(
-      [{ text: " ".repeat(prefixWidth), fg: row.rowFg, bg: row.rowBg }],
+      continuationPrefixSegments(
+        prefixWidth,
+        row,
+        this.palette,
+        this.config,
+      ),
       { fg: row.rowFg, bg: row.rowBg },
     );
     const contentAnsi = renderSegments(
@@ -222,17 +298,135 @@ export class PierreInlineDiffComponent implements Component {
 function renderFileHeader(
   payload: PierreDiffPayload,
   palette: PierreTerminalPalette,
+  config: PierreRendererConfig,
   width: number,
 ): string {
   const label = changeLabel(payload.metadata.type);
   return renderFullWidthLine(
     [
+      { text: " ".repeat(config.layout.leftPadding), fg: palette.headerFg, bg: palette.headerBg },
       { text: `${label} `, fg: palette.headerFg, bg: palette.headerBg, bold: true },
       { text: payload.path, fg: palette.headerAccentFg, bg: palette.headerBg },
     ],
     width,
     { fg: palette.headerFg, bg: palette.headerBg },
   );
+}
+
+function renderBlankLine(width: number, bg: string): string {
+  return renderFullWidthLine([], width, { bg });
+}
+
+function renderMetadataLine(
+  text: string,
+  palette: PierreTerminalPalette,
+  config: PierreRendererConfig,
+  width: number,
+  row: { fg: string; bg: string },
+): string {
+  return renderFullWidthLine(
+    [
+      { text: " ".repeat(config.layout.leftPadding), fg: row.fg, bg: row.bg },
+      { text, fg: row.fg, bg: row.bg },
+    ],
+    width,
+    { fg: palette.metadataFg, bg: row.bg },
+  );
+}
+
+function renderHunkNoticeLine(
+  text: string,
+  palette: PierreTerminalPalette,
+  config: PierreRendererConfig,
+  width: number,
+  payload?: PierreDiffPayload,
+): string {
+  const lineNumberWidth = payload
+    ? lineNumberWidthFor(payload.metadata, config.gutter.lineNumberMinWidth)
+    : config.gutter.lineNumberMinWidth;
+  const prefixSegments: RenderSegment[] = [
+    { text: " ".repeat(config.layout.leftPadding), fg: palette.hunkFg, bg: palette.hunkBg },
+    {
+      text: " ".repeat(lineNumberWidth + config.gutter.lineNumberPaddingRight),
+      fg: palette.lineNumberFg,
+      bg: palette.hunkBg,
+    },
+    { text: config.gutter.separator, fg: palette.gutterFg, bg: palette.hunkBg },
+    { text: config.gutter.hunkBar, fg: palette.hunkFg, bg: palette.hunkBg },
+    { text: config.gutter.barGap, fg: palette.hunkFg, bg: palette.hunkBg },
+    { text, fg: palette.hunkFg, bg: palette.hunkBg },
+  ];
+
+  return renderFullWidthLine(prefixSegments, width, {
+    fg: palette.hunkFg,
+    bg: palette.hunkBg,
+  });
+}
+
+function continuationPrefixSegments(
+  prefixWidth: number,
+  row: Extract<DiffRow, { kind: "line" }>,
+  palette: PierreTerminalPalette,
+  config: PierreRendererConfig,
+): RenderSegment[] {
+  const pad = " ".repeat(config.layout.leftPadding);
+  const rest = Math.max(
+    0,
+    prefixWidth -
+      visibleWidth(
+        pad + config.gutter.continuationBar + config.gutter.barGap,
+      ),
+  );
+
+  return [
+    { text: pad, fg: row.rowFg, bg: palette.editorBg },
+    { text: " ".repeat(rest), fg: palette.lineNumberFg, bg: palette.lineNumberBg },
+    { text: config.gutter.continuationBar, fg: palette.contextBarFg, bg: palette.contextBarBg },
+    { text: config.gutter.barGap, fg: row.rowFg, bg: row.rowBg },
+  ];
+}
+
+function lineBar(
+  lineType: "context" | "addition" | "deletion",
+  config: PierreRendererConfig,
+): string {
+  return lineType === "addition"
+    ? config.gutter.additionBar
+    : lineType === "deletion"
+      ? config.gutter.deletionBar
+      : config.gutter.contextBar;
+}
+
+function lineBarColors(
+  lineType: "context" | "addition" | "deletion",
+  palette: PierreTerminalPalette,
+): Pick<RenderSegment, "fg" | "bg"> {
+  if (lineType === "addition") {
+    return { fg: palette.additionBarFg, bg: palette.additionBarBg };
+  }
+  if (lineType === "deletion") {
+    return { fg: palette.deletionBarFg, bg: palette.deletionBarBg };
+  }
+  return { fg: palette.contextBarFg, bg: palette.contextBarBg };
+}
+
+function formatCountLabel(template: string, count: number): string {
+  const noun = count === 1 ? "line" : "lines";
+  return template
+    .replaceAll("{count}", String(count))
+    .replaceAll("{line|lines}", noun)
+    .replaceAll("{s}", count === 1 ? "" : "s");
+}
+
+function resolveShowFileHeaders(
+  config: PierreRendererConfig,
+  explicit: boolean | undefined,
+  payloadCount: number,
+): boolean {
+  if (explicit !== undefined) return explicit;
+  if (config.layout.showFileHeaders === "always") return true;
+  if (config.layout.showFileHeaders === "never") return false;
+  return payloadCount > 1;
 }
 
 function renderFullWidthLine(
@@ -332,10 +526,6 @@ function payloadKey(payload: PierreDiffPayload): string {
 
 function formatLineNumber(lineNumber: number | undefined, width: number): string {
   return lineNumber === undefined ? " ".repeat(width) : String(lineNumber).padStart(width, " ");
-}
-
-function lineMarker(lineType: "context" | "addition" | "deletion"): string {
-  return lineType === "addition" ? "+" : lineType === "deletion" ? "-" : " ";
 }
 
 function changeLabel(type: string): string {
