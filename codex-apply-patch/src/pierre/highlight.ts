@@ -159,6 +159,7 @@ type TreeSitterRuntime = {
   Parser: TreeSitterParserConstructor;
   languages: Map<string, TreeSitterLanguage>;
   queries: Map<string, string>;
+  parsers: Map<string, TreeSitterParser>;
 };
 type HighlightLineResult = {
   lines: Array<HastNode | undefined>;
@@ -270,6 +271,7 @@ function getTreeSitterRuntime(): TreeSitterRuntime | undefined {
         ["typescript", `${jsQuery}\n${tsQuery}`],
         ["tsx", `${jsQuery}\n${tsQuery}`],
       ]),
+      parsers: new Map<string, TreeSitterParser>(),
     };
   } catch {
     treeSitterRuntime = null;
@@ -312,8 +314,7 @@ function highlightTreeSitterLines(
   const { cleanLines, lineStyles } = prepared;
 
   try {
-    const parser = new runtime.Parser();
-    parser.setLanguage(language);
+    const parser = treeSitterParser(runtime, languageKey, language);
     const tree = parser.parse(cleanLines.join("\n"));
     const query = treeSitterQuery(runtime, languageKey, language, querySource);
     paintCaptures(
@@ -327,6 +328,7 @@ function highlightTreeSitterLines(
       ),
     );
   } catch {
+    runtime.parsers.delete(languageKey);
     return { lines: [], styled: false };
   }
 
@@ -573,6 +575,20 @@ function treeSitterQuery(
   const query = new runtime.Parser.Query(language, querySource);
   treeSitterQueryCache.set(languageKey, query);
   return query;
+}
+
+function treeSitterParser(
+  runtime: TreeSitterRuntime,
+  languageKey: string,
+  language: TreeSitterLanguage,
+): TreeSitterParser {
+  const cached = runtime.parsers.get(languageKey);
+  if (cached) return cached;
+
+  const parser = new runtime.Parser();
+  parser.setLanguage(language);
+  runtime.parsers.set(languageKey, parser);
+  return parser;
 }
 
 function syntaxCategoryForCapture(name: string): SyntaxCategory | undefined {
