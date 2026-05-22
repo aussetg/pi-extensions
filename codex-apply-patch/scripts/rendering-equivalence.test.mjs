@@ -6,7 +6,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { openAnsi, renderAnsiSegments } from "../src/pierre/ansi.ts";
 import { continuationPrefixSegments } from "../src/pierre/gutter.ts";
-import { buildPiHighlightedDiff } from "../src/pierre/highlight.ts";
+import {
+  buildPiHighlightedDiff,
+  hasHighlightedLines,
+} from "../src/pierre/highlight.ts";
 import { DEFAULT_PIERRE_RENDERER_CONFIG } from "../src/pierre/config.ts";
 import { buildCachedDiffRows, buildDiffRows } from "../src/pierre/rows.ts";
 import { getPierrePalette } from "../src/pierre/theme.ts";
@@ -248,6 +251,37 @@ test("unsupported languages keep the same empty-highlight behavior", () => {
     buildPiHighlightedDiff(metadata, config),
     baselineHighlightedDiff(metadata, config),
   );
+});
+
+test("tree-sitter highlighting supports common coding languages", () => {
+  const samples = [
+    ["python", "sample.py", ["def f(x):", "    return x + 1"], ["def f(x):", "    return x + 2"]],
+    ["rust", "sample.rs", ["fn main() {", "    let x = 1;", "}"], ["fn main() {", "    let x = 2;", "}"]],
+    ["c", "sample.c", ["int main(void) {", "  return 1;", "}"], ["int main(void) {", "  return 2;", "}"]],
+    ["cpp", "sample.cpp", ["int main() {", "  auto x = 1;", "}"], ["int main() {", "  auto x = 2;", "}"]],
+    ["zig", "sample.zig", ["pub fn main() void {", "    const x = 1;", "}"], ["pub fn main() void {", "    const x = 2;", "}"]],
+    ["json", "sample.json", ["{\"x\": 1}"], ["{\"x\": 2}"]],
+    ["yaml", "sample.yaml", ["x: 1"], ["x: 2"]],
+    ["toml", "sample.toml", ["x = 1"], ["x = 2"]],
+    ["julia", "sample.jl", ["function f(x)", "  x + 1", "end"], ["function f(x)", "  x + 2", "end"]],
+    ["haskell", "sample.hs", ["main = print 1"], ["main = print 2"]],
+    ["bash", "sample.sh", ["echo 1"], ["echo 2"]],
+    ["go", "sample.go", ["package main", "func main() { println(1) }"], ["package main", "func main() { println(2) }"]],
+    ["java", "sample.java", ["class A { int x = 1; }"], ["class A { int x = 2; }"]],
+    ["ruby", "sample.rb", ["def f", "  1", "end"], ["def f", "  2", "end"]],
+    ["php", "sample.php", ["<?php echo 1;"], ["<?php echo 2;"]],
+    ["css", "sample.css", ["body { color: red; }"], ["body { color: blue; }"]],
+    ["html", "sample.html", ["<p>one</p>"], ["<p>two</p>"]],
+    ["regex", "sample.regex", ["a+"], ["b+"]],
+  ];
+
+  for (const [lang, name, before, after] of samples) {
+    const highlighted = buildPiHighlightedDiff(
+      changedFileMetadata({ name, lang, before, after }),
+      config,
+    );
+    assert.equal(hasHighlightedLines(highlighted), true, lang);
+  }
 });
 
 test("best-effort preview builders do not throw for unpreviewable diffs", () => {

@@ -22,21 +22,46 @@ function keepLinuxX64Prebuild(packageName) {
   }
 }
 
-for (const packageName of [
+const nativePackages = [
   "tree-sitter",
+  "@tree-sitter-grammars/tree-sitter-toml",
+  "@tree-sitter-grammars/tree-sitter-yaml",
+  "@tree-sitter-grammars/tree-sitter-zig",
+  "tree-sitter-bash",
+  "tree-sitter-c",
+  "tree-sitter-cpp",
+  "tree-sitter-css",
+  "tree-sitter-go",
+  "tree-sitter-haskell",
+  "tree-sitter-html",
+  "tree-sitter-java",
   "tree-sitter-javascript",
+  "tree-sitter-json",
+  "tree-sitter-julia",
+  "tree-sitter-php",
+  "tree-sitter-python",
+  "tree-sitter-regex",
+  "tree-sitter-ruby",
+  "tree-sitter-rust",
   "tree-sitter-typescript",
-]) {
+];
+
+for (const packageName of nativePackages) {
   keepLinuxX64Prebuild(packageName);
 }
 
 rm(join(nodeModules, "tree-sitter", "src"));
 rm(join(nodeModules, "tree-sitter", "vendor"));
 
-rm(join(nodeModules, "tree-sitter-javascript", "src"));
-rm(join(nodeModules, "tree-sitter-javascript", "tree-sitter-javascript.wasm"));
+for (const packageName of nativePackages.filter((name) => name !== "tree-sitter")) {
+  rm(join(nodeModules, packageName, "src"));
+  rm(join(nodeModules, packageName, "grammar"));
+}
 
 rm(join(nodeModules, "tree-sitter-typescript", "typescript", "src"));
 rm(join(nodeModules, "tree-sitter-typescript", "tsx", "src"));
 rm(join(nodeModules, "tree-sitter-typescript", "tree-sitter-typescript.wasm"));
 rm(join(nodeModules, "tree-sitter-typescript", "tree-sitter-tsx.wasm"));
+
+rm(join(nodeModules, "tree-sitter-php", "php", "src"));
+rm(join(nodeModules, "tree-sitter-php", "php_only", "src"));

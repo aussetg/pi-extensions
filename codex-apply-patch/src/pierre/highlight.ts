@@ -161,6 +161,12 @@ type TreeSitterRuntime = {
   queries: Map<string, string>;
   parsers: Map<string, TreeSitterParser>;
 };
+type TreeSitterLanguageSpec = {
+  key: string;
+  packageName: string;
+  exportName?: string;
+  queryPaths: string[];
+};
 type HighlightLineResult = {
   lines: Array<HastNode | undefined>;
   styled: boolean;
@@ -196,6 +202,63 @@ const syntaxStyleByCaptureName = Object.create(null) as Record<
   string,
   CaptureStyle | null | undefined
 >;
+
+const TREE_SITTER_LANGUAGE_SPECS: TreeSitterLanguageSpec[] = [
+  {
+    key: "javascript",
+    packageName: "tree-sitter-javascript",
+    queryPaths: ["tree-sitter-javascript/queries/highlights.scm"],
+  },
+  {
+    key: "typescript",
+    packageName: "tree-sitter-typescript",
+    exportName: "typescript",
+    queryPaths: [
+      "tree-sitter-javascript/queries/highlights.scm",
+      "tree-sitter-typescript/queries/highlights.scm",
+    ],
+  },
+  {
+    key: "tsx",
+    packageName: "tree-sitter-typescript",
+    exportName: "tsx",
+    queryPaths: [
+      "tree-sitter-javascript/queries/highlights.scm",
+      "tree-sitter-typescript/queries/highlights.scm",
+    ],
+  },
+  languageSpec("python", "tree-sitter-python"),
+  languageSpec("rust", "tree-sitter-rust"),
+  languageSpec("c", "tree-sitter-c"),
+  languageSpec("cpp", "tree-sitter-cpp"),
+  languageSpec("zig", "@tree-sitter-grammars/tree-sitter-zig"),
+  languageSpec("json", "tree-sitter-json"),
+  languageSpec("yaml", "@tree-sitter-grammars/tree-sitter-yaml"),
+  languageSpec("toml", "@tree-sitter-grammars/tree-sitter-toml"),
+  languageSpec("julia", "tree-sitter-julia"),
+  languageSpec("haskell", "tree-sitter-haskell"),
+  languageSpec("bash", "tree-sitter-bash"),
+  languageSpec("go", "tree-sitter-go"),
+  languageSpec("java", "tree-sitter-java"),
+  languageSpec("ruby", "tree-sitter-ruby"),
+  languageSpec("php", "tree-sitter-php", "php"),
+  languageSpec("css", "tree-sitter-css"),
+  languageSpec("html", "tree-sitter-html"),
+  languageSpec("regex", "tree-sitter-regex"),
+];
+
+function languageSpec(
+  key: string,
+  packageName: string,
+  exportName?: string,
+): TreeSitterLanguageSpec {
+  return {
+    key,
+    packageName,
+    exportName,
+    queryPaths: [`${packageName}/queries/highlights.scm`],
+  };
+}
 
 function buildTreeSitterHighlightedDiff(
   metadata: FileDiffMetadata,
@@ -291,33 +354,18 @@ function getTreeSitterRuntime(): TreeSitterRuntime | undefined {
 
   try {
     const Parser = nodeRequire("tree-sitter") as TreeSitterParserConstructor;
-    const TypeScript = nodeRequire("tree-sitter-typescript") as {
-      typescript?: TreeSitterLanguage;
-      tsx?: TreeSitterLanguage;
-    };
-    const JavaScript = nodeRequire("tree-sitter-javascript") as TreeSitterLanguage;
-    const jsQuery = readFileSync(
-      nodeRequire.resolve("tree-sitter-javascript/queries/highlights.scm"),
-      "utf8",
-    );
-    const tsQuery = readFileSync(
-      nodeRequire.resolve("tree-sitter-typescript/queries/highlights.scm"),
-      "utf8",
-    );
-    if (!TypeScript.typescript || !TypeScript.tsx) throw new Error("missing TS grammar");
+    const languages = new Map<string, TreeSitterLanguage>();
+    const queries = new Map<string, string>();
+
+    for (const spec of TREE_SITTER_LANGUAGE_SPECS) {
+      languages.set(spec.key, loadTreeSitterLanguage(spec));
+      queries.set(spec.key, loadTreeSitterQuerySource(spec));
+    }
 
     treeSitterRuntime = {
       Parser,
-      languages: new Map<string, TreeSitterLanguage>([
-        ["javascript", JavaScript],
-        ["typescript", TypeScript.typescript],
-        ["tsx", TypeScript.tsx],
-      ]),
-      queries: new Map<string, string>([
-        ["javascript", jsQuery],
-        ["typescript", `${jsQuery}\n${tsQuery}`],
-        ["tsx", `${jsQuery}\n${tsQuery}`],
-      ]),
+      languages,
+      queries,
       parsers: new Map<string, TreeSitterParser>(),
     };
   } catch {
@@ -325,6 +373,44 @@ function getTreeSitterRuntime(): TreeSitterRuntime | undefined {
   }
 
   return treeSitterRuntime ?? undefined;
+}
+
+function loadTreeSitterLanguage(spec: TreeSitterLanguageSpec): TreeSitterLanguage {
+  const module = nodeRequire(spec.packageName) as Record<string, unknown>;
+  const language = spec.exportName ? module[spec.exportName] : module;
+  if (!language) throw new Error(`missing tree-sitter grammar: ${spec.key}`);
+  return language as TreeSitterLanguage;
+}
+
+function loadTreeSitterQuerySource(spec: TreeSitterLanguageSpec): string {
+  return spec.queryPaths.map(readTreeSitterQuerySource).join("\n");
+}
+
+function readTreeSitterQuerySource(queryPath: string): string {
+  return sanitizeTreeSitterQuerySource(
+    readFileSync(nodeRequire.resolve(queryPath), "utf8"),
+  );
+}
+
+function sanitizeTreeSitterQuerySource(source: string): string {
+  return source
+    .replaceAll("#lua-match?", "#match?")
+    .split("\n")
+    .map((line) => {
+      if (!line.includes("#has-ancestor?")) return line;
+      const balance = parenBalance(line);
+      return balance < 0 ? ")".repeat(-balance) : "";
+    })
+    .join("\n");
+}
+
+function parenBalance(line: string): number {
+  let balance = 0;
+  for (const char of line) {
+    if (char === "(") balance += 1;
+    else if (char === ")") balance -= 1;
+  }
+  return balance;
 }
 
 function treeSitterLanguageKey(lang: string): string | undefined {
@@ -340,6 +426,40 @@ function treeSitterLanguageKey(lang: string): string | undefined {
   ) {
     return "javascript";
   }
+  if (normalized === "python" || normalized === "py") return "python";
+  if (normalized === "rust" || normalized === "rs") return "rust";
+  if (normalized === "c" || normalized === "objective-c") return "c";
+  if (
+    normalized === "cpp" ||
+    normalized === "c++" ||
+    normalized === "cc" ||
+    normalized === "cxx" ||
+    normalized === "hpp" ||
+    normalized === "objective-cpp"
+  ) {
+    return "cpp";
+  }
+  if (normalized === "zig") return "zig";
+  if (normalized === "json" || normalized === "jsonc") return "json";
+  if (normalized === "yaml" || normalized === "yml") return "yaml";
+  if (normalized === "toml") return "toml";
+  if (normalized === "julia" || normalized === "jl") return "julia";
+  if (normalized === "haskell" || normalized === "hs") return "haskell";
+  if (
+    normalized === "bash" ||
+    normalized === "sh" ||
+    normalized === "shell" ||
+    normalized === "zsh"
+  ) {
+    return "bash";
+  }
+  if (normalized === "go" || normalized === "golang") return "go";
+  if (normalized === "java") return "java";
+  if (normalized === "ruby" || normalized === "rb") return "ruby";
+  if (normalized === "php") return "php";
+  if (normalized === "css") return "css";
+  if (normalized === "html") return "html";
+  if (normalized === "regex" || normalized === "regexp") return "regex";
   return undefined;
 }
 

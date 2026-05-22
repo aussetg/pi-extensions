@@ -4,45 +4,99 @@ const TREE_SITTER_QUERY_RANGE_END_COLUMN = 0x7fffffff;
 const TREE_SITTER_QUERY_FULL_COVERAGE_NUMERATOR = 3;
 const TREE_SITTER_QUERY_FULL_COVERAGE_DENOMINATOR = 4;
 
+const LANGUAGE_SPECS = [
+  spec("javascript", "tree-sitter-javascript"),
+  {
+    key: "typescript",
+    packageName: "tree-sitter-typescript",
+    exportName: "typescript",
+    queryPaths: [
+      "tree-sitter-javascript/queries/highlights.scm",
+      "tree-sitter-typescript/queries/highlights.scm",
+    ],
+  },
+  {
+    key: "tsx",
+    packageName: "tree-sitter-typescript",
+    exportName: "tsx",
+    queryPaths: [
+      "tree-sitter-javascript/queries/highlights.scm",
+      "tree-sitter-typescript/queries/highlights.scm",
+    ],
+  },
+  spec("python", "tree-sitter-python"),
+  spec("rust", "tree-sitter-rust"),
+  spec("c", "tree-sitter-c"),
+  spec("cpp", "tree-sitter-cpp"),
+  spec("zig", "@tree-sitter-grammars/tree-sitter-zig"),
+  spec("json", "tree-sitter-json"),
+  spec("yaml", "@tree-sitter-grammars/tree-sitter-yaml"),
+  spec("toml", "@tree-sitter-grammars/tree-sitter-toml"),
+  spec("julia", "tree-sitter-julia"),
+  spec("haskell", "tree-sitter-haskell"),
+  spec("bash", "tree-sitter-bash"),
+  spec("go", "tree-sitter-go"),
+  spec("java", "tree-sitter-java"),
+  spec("ruby", "tree-sitter-ruby"),
+  spec("php", "tree-sitter-php", "php"),
+  spec("css", "tree-sitter-css"),
+  spec("html", "tree-sitter-html"),
+  spec("regex", "tree-sitter-regex"),
+];
+
+function spec(key, packageName, exportName) {
+  return {
+    key,
+    packageName,
+    exportName,
+    queryPaths: [`${packageName}/queries/highlights.scm`],
+  };
+}
+
 function readInput() {
   return JSON.parse(fs.readFileSync(0, "utf8"));
 }
 
 function loadLanguage(languageKey) {
   const Parser = require("tree-sitter");
-  const JavaScript = require("tree-sitter-javascript");
-  const TypeScript = require("tree-sitter-typescript");
-  const jsQuery = fs.readFileSync(
-    require.resolve("tree-sitter-javascript/queries/highlights.scm"),
-    "utf8",
-  );
-
-  if (languageKey === "javascript") {
-    return { Parser, language: JavaScript, querySource: jsQuery };
-  }
-
-  const tsQuery = fs.readFileSync(
-    require.resolve("tree-sitter-typescript/queries/highlights.scm"),
-    "utf8",
-  );
-
-  if (languageKey === "typescript") {
-    return {
-      Parser,
-      language: TypeScript.typescript,
-      querySource: `${jsQuery}\n${tsQuery}`,
-    };
-  }
-
-  if (languageKey === "tsx") {
-    return {
-      Parser,
-      language: TypeScript.tsx,
-      querySource: `${jsQuery}\n${tsQuery}`,
-    };
+  const languageSpec = LANGUAGE_SPECS.find((spec) => spec.key === languageKey);
+  if (languageSpec) {
+    const module = require(languageSpec.packageName);
+    const language = languageSpec.exportName
+      ? module[languageSpec.exportName]
+      : module;
+    const querySource = languageSpec.queryPaths
+      .map(readQuerySource)
+      .join("\n");
+    return { Parser, language, querySource };
   }
 
   throw new Error(`Unsupported language: ${languageKey}`);
+}
+
+function readQuerySource(queryPath) {
+  return sanitizeQuerySource(fs.readFileSync(require.resolve(queryPath), "utf8"));
+}
+
+function sanitizeQuerySource(source) {
+  return source
+    .replaceAll("#lua-match?", "#match?")
+    .split("\n")
+    .map((line) => {
+      if (!line.includes("#has-ancestor?")) return line;
+      const balance = parenBalance(line);
+      return balance < 0 ? ")".repeat(-balance) : "";
+    })
+    .join("\n");
+}
+
+function parenBalance(line) {
+  let balance = 0;
+  for (const char of line) {
+    if (char === "(") balance += 1;
+    else if (char === ")") balance -= 1;
+  }
+  return balance;
 }
 
 function overlapsIndexes(node, visible) {
