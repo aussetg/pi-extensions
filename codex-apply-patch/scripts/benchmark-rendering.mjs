@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
+import { renderAnsiSegments } from "../src/pierre/ansi.ts";
 import { buildPiHighlightedDiff } from "../src/pierre/highlight.ts";
 import { DEFAULT_PIERRE_RENDERER_CONFIG } from "../src/pierre/config.ts";
 import { buildCachedDiffRows, buildDiffRows } from "../src/pierre/rows.ts";
@@ -46,6 +47,7 @@ const iterations = Number(process.env.PI_RENDER_BENCH_ITERATIONS ?? 40);
 const workerIterations = Number(
   process.env.PI_RENDER_WORKER_BENCH_ITERATIONS ?? Math.min(8, iterations),
 );
+const ansiIterations = Number(process.env.PI_RENDER_ANSI_BENCH_ITERATIONS ?? 5000);
 
 for (const fixture of fixtures) {
   const { metadata } = fixture;
@@ -134,6 +136,34 @@ console.table([
   },
 ]);
 
+const ansiBase = { fg: "#102030", bg: "#405060" };
+const ansiSegments = makeAnsiSegments(240);
+baselineRenderAnsiSegments(ansiSegments, ansiBase);
+renderAnsiSegments(ansiSegments, ansiBase);
+const uncachedAnsi = measure(
+  "ansi uncached",
+  () => baselineRenderAnsiSegments(ansiSegments, ansiBase),
+  ansiIterations,
+);
+const cachedAnsi = measure(
+  "ansi cached",
+  () => renderAnsiSegments(ansiSegments, ansiBase),
+  ansiIterations,
+);
+
+console.log(`fixture: ANSI segment rendering, ${ansiIterations} iterations`);
+console.table([
+  formatResult(uncachedAnsi),
+  formatResult(cachedAnsi),
+  {
+    name: "delta",
+    "wall ms": (cachedAnsi.wallMs - uncachedAnsi.wallMs).toFixed(1),
+    "cpu ms": (cachedAnsi.cpuMs - uncachedAnsi.cpuMs).toFixed(1),
+    "heap MiB": (cachedAnsi.heapMiB - uncachedAnsi.heapMiB).toFixed(2),
+    speedup: `${(uncachedAnsi.wallMs / cachedAnsi.wallMs).toFixed(2)}×`,
+  },
+]);
+
 function measure(name, fn, count = iterations) {
   if (global.gc) global.gc();
   const heapBefore = process.memoryUsage().heapUsed;
@@ -200,6 +230,69 @@ function makeFile(count, changed) {
   lines.push("}");
   lines.push("export const registry = new Registry();");
   return lines;
+}
+
+function makeAnsiSegments(count) {
+  const styles = [
+    {},
+    { fg: "#112233" },
+    { bg: "#445566" },
+    { fg: "#778899", bg: "#010203" },
+    { fg: "\u001b[31m", bg: "\u001b[42m" },
+    { bold: true },
+    { bold: false, fg: "#abcdef" },
+  ];
+  return Array.from({ length: count }, (_, index) => ({
+    text: `segment-${index} `,
+    ...styles[index % styles.length],
+  }));
+}
+
+function baselineRenderAnsiSegments(segments, base) {
+  let output = baselineOpenAnsi(base);
+  for (const segment of segments) {
+    output += baselineOpenAnsi({
+      fg: segment.fg ?? base.fg,
+      bg: segment.bg ?? base.bg,
+      bold: "bold" in segment ? segment.bold ?? base.bold : base.bold,
+    });
+    output += segment.text;
+  }
+  output += baselineOpenAnsi(base);
+  return output;
+}
+
+function baselineOpenAnsi(style) {
+  return [
+    `\u001b[${style.bold ? "1" : "22"}m`,
+    baselineColorToAnsi(style.fg, "fg"),
+    baselineColorToAnsi(style.bg, "bg"),
+  ].join("");
+}
+
+function baselineColorToAnsi(color, slot) {
+  const reset = slot === "fg" ? "\u001b[39m" : "\u001b[49m";
+  const normalized = color?.trim();
+  if (!normalized) return reset;
+
+  if (normalized.includes("\u001b[")) return normalized;
+
+  const rgb = baselineToRgb(normalized);
+  if (!rgb) return reset;
+
+  const prefix = slot === "fg" ? "38" : "48";
+  return `\u001b[${prefix};2;${rgb.r};${rgb.g};${rgb.b}m`;
+}
+
+function baselineToRgb(hex) {
+  const normalized = hex.trim();
+  if (!/^#[0-9a-fA-F]{6}$/.test(normalized)) return undefined;
+
+  return {
+    r: Number.parseInt(normalized.slice(1, 3), 16),
+    g: Number.parseInt(normalized.slice(3, 5), 16),
+    b: Number.parseInt(normalized.slice(5, 7), 16),
+  };
 }
 
 function sparseMetadata() {

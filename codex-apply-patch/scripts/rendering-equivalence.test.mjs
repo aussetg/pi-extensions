@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { openAnsi, renderAnsiSegments } from "../src/pierre/ansi.ts";
 import { buildPiHighlightedDiff } from "../src/pierre/highlight.ts";
 import { DEFAULT_PIERRE_RENDERER_CONFIG } from "../src/pierre/config.ts";
 import { buildCachedDiffRows, buildDiffRows } from "../src/pierre/rows.ts";
@@ -393,6 +394,44 @@ test("cached diff rows keep palette, word-diff config, and expansion separate", 
   assert.notStrictEqual(expandedRows, darkRows);
 });
 
+test("cached ANSI style rendering matches the previous uncached behavior", () => {
+  const styles = [
+    {},
+    { fg: "#123456" },
+    { bg: "#abcdef" },
+    { fg: " #ABCDEF ", bg: " #010203 ", bold: true },
+    { fg: "not-a-color", bg: "also-not-a-color", bold: false },
+    { fg: "\u001b[31m", bg: "\u001b[42m" },
+    { fg: " \u001b[38;2;1;2;3m ", bg: " \u001b[48;2;4;5;6m " },
+  ];
+
+  for (const style of styles) {
+    assert.equal(openAnsi(style), baselineOpenAnsi(style));
+    assert.equal(openAnsi(style), baselineOpenAnsi(style));
+  }
+});
+
+test("cached ANSI segment rendering preserves base and override behavior", () => {
+  const base = { fg: "#102030", bg: "#405060" };
+  const segments = [
+    { text: "plain" },
+    { text: "fg", fg: "#112233" },
+    { text: "bg", bg: "#445566" },
+    { text: "bold", bold: true },
+    { text: "reset-bold", bold: false },
+    { text: "ansi", fg: "\u001b[35m", bg: "\u001b[46m" },
+  ];
+
+  assert.equal(
+    renderAnsiSegments(segments, base),
+    baselineRenderAnsiSegments(segments, base),
+  );
+  assert.equal(
+    renderAnsiSegments(segments, { ...base, bold: true }),
+    baselineRenderAnsiSegments(segments, { ...base, bold: true }),
+  );
+});
+
 function workerCaptures(languageKey, lines, indexes) {
   const result = spawnSync(process.execPath, [workerPath], {
     input: JSON.stringify({ languageKey, lines, indexes }),
@@ -509,4 +548,51 @@ function collapsedMetadata() {
   metadata.hunks[0].additionCount = 1;
   metadata.hunks[0].deletionCount = 1;
   return metadata;
+}
+
+function baselineRenderAnsiSegments(segments, base) {
+  let output = baselineOpenAnsi(base);
+  for (const segment of segments) {
+    output += baselineOpenAnsi({
+      fg: segment.fg ?? base.fg,
+      bg: segment.bg ?? base.bg,
+      bold: "bold" in segment ? segment.bold ?? base.bold : base.bold,
+    });
+    output += segment.text;
+  }
+  output += baselineOpenAnsi(base);
+  return output;
+}
+
+function baselineOpenAnsi(style) {
+  return [
+    `\u001b[${style.bold ? "1" : "22"}m`,
+    baselineColorToAnsi(style.fg, "fg"),
+    baselineColorToAnsi(style.bg, "bg"),
+  ].join("");
+}
+
+function baselineColorToAnsi(color, slot) {
+  const reset = slot === "fg" ? "\u001b[39m" : "\u001b[49m";
+  const normalized = color?.trim();
+  if (!normalized) return reset;
+
+  if (normalized.includes("\u001b[")) return normalized;
+
+  const rgb = baselineToRgb(normalized);
+  if (!rgb) return reset;
+
+  const prefix = slot === "fg" ? "38" : "48";
+  return `\u001b[${prefix};2;${rgb.r};${rgb.g};${rgb.b}m`;
+}
+
+function baselineToRgb(hex) {
+  const normalized = hex.trim();
+  if (!/^#[0-9a-fA-F]{6}$/.test(normalized)) return undefined;
+
+  return {
+    r: Number.parseInt(normalized.slice(1, 3), 16),
+    g: Number.parseInt(normalized.slice(3, 5), 16),
+    b: Number.parseInt(normalized.slice(5, 7), 16),
+  };
 }

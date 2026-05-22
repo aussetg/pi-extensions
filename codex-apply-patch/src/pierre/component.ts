@@ -4,6 +4,11 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
+import {
+  ANSI_RESET,
+  openAnsi,
+  renderAnsiSegments as renderSegments,
+} from "./ansi.ts";
 import { buildPiHighlightedDiff, hasHighlightedLines } from "./highlight.ts";
 import { buildCachedDiffRows, lineNumberWidthFor } from "./rows.ts";
 import {
@@ -17,13 +22,11 @@ import {
 } from "./theme.ts";
 import type {
   DiffRow,
-  DiffSpan,
   HighlightedDiffSet,
   PierreDiffPayload,
 } from "./types.ts";
 import { emptyHighlightedDiffSet } from "./types.ts";
 
-const ANSI_RESET = "\u001b[22m\u001b[39m\u001b[49m";
 const GLOBAL_PI_HIGHLIGHT_CACHE_KEY = "__codexApplyPatchPiHighlightCache";
 const PI_HIGHLIGHT_CACHE_LIMIT = 512;
 const payloadCacheKeys = new WeakMap<object, { path: string; key: string }>();
@@ -546,59 +549,6 @@ function padRenderedLine(
     visibleWidth(line) > safeWidth ? truncateToWidth(line, safeWidth, "") : line;
   const padding = Math.max(0, safeWidth - visibleWidth(clipped));
   return `${clipped}${openAnsi(base)}${" ".repeat(padding)}${ANSI_RESET}`;
-}
-
-function renderSegments(
-  segments: Array<RenderSegment | DiffSpan>,
-  base: { fg?: string; bg?: string; bold?: boolean },
-): string {
-  let output = openAnsi(base);
-  for (const segment of segments) {
-    output += openAnsi({
-      fg: segment.fg ?? base.fg,
-      bg: segment.bg ?? base.bg,
-      bold: "bold" in segment ? segment.bold ?? base.bold : base.bold,
-    });
-    output += segment.text;
-  }
-  output += openAnsi(base);
-  return output;
-}
-
-function openAnsi(style: { fg?: string; bg?: string; bold?: boolean }): string {
-  return [
-    `\u001b[${style.bold ? "1" : "22"}m`,
-    colorToAnsi(style.fg, "fg"),
-    colorToAnsi(style.bg, "bg"),
-  ].join("");
-}
-
-function colorToAnsi(
-  color: string | undefined,
-  slot: "fg" | "bg",
-): string {
-  const reset = slot === "fg" ? "\u001b[39m" : "\u001b[49m";
-  const normalized = color?.trim();
-  if (!normalized) return reset;
-
-  if (normalized.includes("\u001b[")) return normalized;
-
-  const rgb = toRgb(normalized);
-  if (!rgb) return reset;
-
-  const prefix = slot === "fg" ? "38" : "48";
-  return `\u001b[${prefix};2;${rgb.r};${rgb.g};${rgb.b}m`;
-}
-
-function toRgb(hex: string) {
-  const normalized = hex.trim();
-  if (!/^#[0-9a-fA-F]{6}$/.test(normalized)) return undefined;
-
-  return {
-    r: Number.parseInt(normalized.slice(1, 3), 16),
-    g: Number.parseInt(normalized.slice(3, 5), 16),
-    b: Number.parseInt(normalized.slice(5, 7), 16),
-  };
 }
 
 function normalizePayloads(
