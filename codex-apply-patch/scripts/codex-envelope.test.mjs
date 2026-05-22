@@ -31,6 +31,17 @@ test("prepared full-envelope repair warnings are available to execute", () => {
   );
 });
 
+test("patch argument accepts a complete Codex envelope without repair warnings", () => {
+  const prepared = prepareApplyPatchArguments({
+    patch: "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n",
+  });
+
+  assert.deepEqual((prepared).operations, [
+    { type: "create_file", path: "hello.txt", diff: "+hello" },
+  ]);
+  assert.deepEqual(takePreparedApplyPatchWarnings(prepared), []);
+});
+
 test("full envelope parser rejects non-repairable trailing garbage", () => {
   assert.equal(
     parseCodexPatchEnvelopeDetailed(
@@ -64,11 +75,14 @@ test("full envelope parser repairs missing end before trailing markdown fence", 
   assert.match(parsed?.warnings.join("\n") ?? "", /added missing/);
 });
 
-test("direct file sections remain accepted without an envelope", () => {
+test("direct file sections are accepted with an envelope repair warning", () => {
   const parsed = parseCodexPatchEnvelopeDetailed("*** Delete File: stale.txt\n");
 
   assert.deepEqual(parsed?.operations, [
     { type: "delete_file", path: "stale.txt" },
   ]);
-  assert.deepEqual(parsed?.warnings, []);
+  assert.match(
+    parsed?.warnings.join("\n") ?? "",
+    /without '\*\*\* Begin Patch'\/\'\*\*\* End Patch'/,
+  );
 });

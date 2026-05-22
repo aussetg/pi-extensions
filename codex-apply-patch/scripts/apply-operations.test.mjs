@@ -112,3 +112,23 @@ test("applyOperations surfaces fuzzy matching warnings", async (t) => {
   assert.equal(await readFile(join(cwd, "fuzzy.txt"), "utf8"), "a  \nB\n");
   assert.match(result.warnings.join("\n"), /trailing whitespace/);
 });
+
+test("applyOperations surfaces a trailing Codex end marker in update diffs", async (t) => {
+  const cwd = await tempDir(t);
+  await writeFile(join(cwd, "marker.txt"), "old\n", "utf8");
+
+  const result = await applyOperations(
+    [
+      {
+        type: "update_file",
+        path: "marker.txt",
+        diff: "@@\n-old\n+new\n*** End Patch\n",
+      },
+    ],
+    cwd,
+  );
+
+  assert.equal(result.results[0].status, "completed");
+  assert.equal(await readFile(join(cwd, "marker.txt"), "utf8"), "new\n");
+  assert.match(result.warnings.join("\n"), /\*\*\* End Patch/);
+});

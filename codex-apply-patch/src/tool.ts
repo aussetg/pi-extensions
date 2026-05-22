@@ -12,28 +12,39 @@ import type { ApplyPatchDetails, ApplyPatchOperation } from "./types.ts";
 import { DiffError, shortenPathForDisplay } from "./util.ts";
 
 export function registerApplyPatchTool(pi: ExtensionAPI): void {
+  const operationSchema = Type.Object(
+    {
+      type: StringEnum([
+        "create_file",
+        "update_file",
+        "delete_file",
+      ] as const),
+      path: Type.String(),
+      diff: Type.Optional(Type.String()),
+      move_path: Type.Optional(Type.String()),
+    },
+    { additionalProperties: false },
+  );
+
   pi.registerTool({
     name: "apply_patch",
     label: "apply_patch",
     description:
-      "Apply file edits via JSON operations (create_file/update_file/delete_file) whose diff fields contain Codex apply_patch section bodies, not full envelopes. For update_file, each non-empty diff line must start with @@, space, +, or -. Never include envelope lines starting with *** in diff.",
+      "Apply file edits. Accept either operations[] with Codex apply_patch section bodies, or patch with a full Codex apply_patch envelope (*** Begin Patch ... *** End Patch). Use exactly one form.",
     parameters: Type.Object(
       {
-        operations: Type.Array(
-          Type.Object(
-            {
-              type: StringEnum([
-                "create_file",
-                "update_file",
-                "delete_file",
-              ] as const),
-              path: Type.String(),
-              diff: Type.Optional(Type.String()),
-              move_path: Type.Optional(Type.String()),
-            },
-            { additionalProperties: false },
-          ),
-          { minItems: 1 },
+        operations: Type.Optional(
+          Type.Array(operationSchema, {
+            minItems: 1,
+            description:
+              "Pi JSON form: one operation per file. diff is the Codex section body only, without *** Begin/End Patch or file headers.",
+          }),
+        ),
+        patch: Type.Optional(
+          Type.String({
+            description:
+              "Codex envelope form: a complete patch beginning with *** Begin Patch and ending with *** End Patch.",
+          }),
         ),
       },
       { additionalProperties: false },
@@ -55,11 +66,37 @@ export function registerApplyPatchTool(pi: ExtensionAPI): void {
         | undefined;
       const progressEmitter = createThrottledProgressEmitter(update, 40);
 
-      const ops = params.operations as ApplyPatchOperation[];
+      const rawParams = params as { operations?: unknown; patch?: unknown };
+      const preparedParams = (
+        Array.isArray(rawParams.operations)
+          ? rawParams
+          : prepareApplyPatchArguments(params)
+      ) as {
+        operations?: unknown;
+        patch?: unknown;
+      };
+      if (
+        Array.isArray(preparedParams.operations) &&
+        typeof preparedParams.patch === "string" &&
+        preparedParams.patch.trim() !== ""
+      ) {
+        throw new DiffError(
+          "apply_patch received both operations[] and patch. Use exactly one form.",
+        );
+      }
+
+      const ops = preparedParams.operations as ApplyPatchOperation[] | undefined;
+      if (!Array.isArray(ops)) {
+        throw new DiffError(
+          typeof preparedParams.patch === "string"
+            ? "Invalid apply_patch patch envelope. Use a full Codex envelope beginning with '*** Begin Patch' and ending with '*** End Patch', or use operations[]."
+            : "apply_patch requires either operations[] or patch.",
+        );
+      }
       if (ops.length === 0) {
         throw new DiffError("apply_patch requires at least one operation.");
       }
-      const preparedWarnings = takePreparedApplyPatchWarnings(params);
+      const preparedWarnings = takePreparedApplyPatchWarnings(preparedParams);
 
       const queueTasks = prepareApplyTasks(ops, ctx.cwd).tasks;
       const queuePaths = queueTasks.flatMap((task) => task.touchedPaths);

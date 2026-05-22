@@ -8,7 +8,9 @@ export interface ApplyPatchOperation {
   type: ApplyPatchOpType;
   path: string;
   /**
-   * Codex apply_patch section body, not a full *** Begin/End Patch envelope.
+   * Structured JSON form only: Codex apply_patch section body, not a full
+   * *** Begin/End Patch envelope. Full envelopes belong in the tool-level
+   * `patch` argument.
    * - create_file: Add File body; every content line starts with '+'
    * - update_file: Update File hunks; @@ sections with +/-/space lines
    */

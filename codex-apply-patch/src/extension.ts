@@ -28,16 +28,14 @@ export function registerApplyPatchExtension(pi: ExtensionAPI): void {
       systemPrompt:
         event.systemPrompt +
         "\n\n# apply_patch\n" +
-        "- Use the apply_patch tool for file edits.\n" +
-        "- Use operations with type: create_file | update_file | delete_file.\n" +
-        "- The diff field contains a Codex apply_patch section body, not a full *** Begin/End Patch envelope.\n" +
-        "- For create_file: diff is an Add File body; every content line starts with '+'.\n" +
-        "- For update_file: diff is an Update File body with @@ sections; each non-empty diff line must start with @@, space, +, or -.\n" +
-        "- NEVER include Codex envelope marker lines starting with *** inside diff.\n" +
-        "- BAD: *** End Patch\n" +
-        "- GOOD: end diff after normal @@/context/add/remove lines.\n" +
-        "- If you need literal *** text in file content, use +*** ... (or a context line starting with a single space).\n" +
-        "- For delete_file: no diff.\n" +
+        "- Use exactly one of these two forms for file edits.\n" +
+        "- Codex envelope form: set patch to a complete patch string with *** Begin Patch, one or more *** Add/Update/Delete File sections, and *** End Patch.\n" +
+        "- Structured JSON form: set operations to an array of create_file | update_file | delete_file objects.\n" +
+        "- In structured JSON form, diff contains only the Codex section body, not the full envelope.\n" +
+        "- Structured create_file diff: Add File body; every content line starts with '+'.\n" +
+        "- Structured update_file diff: Update File hunks; each non-empty diff line starts with @@, space, +, or -.\n" +
+        "- Do not include *** Begin Patch, *** End Patch, or *** Add/Update/Delete File lines inside operations[].diff; if you want those markers, use patch instead.\n" +
+        "- Structured delete_file: no diff.\n" +
         "- Use create_file for new files and update_file for existing files.\n",
     };
   });

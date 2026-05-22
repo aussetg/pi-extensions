@@ -349,6 +349,11 @@ export function parseCodexPatchEnvelopeDetailed(
     first.startsWith(ENVELOPE_UPDATE_PREFIX) ||
     first.startsWith(ENVELOPE_DELETE_PREFIX);
   if (!looksLikeEnvelope) return undefined;
+  if (!hadBegin) {
+    warnings.push(
+      `Warning: repaired apply_patch envelope: accepted file sections without '${ENVELOPE_BEGIN_MARKER}'/'${ENVELOPE_END_MARKER}'.`,
+    );
+  }
 
   const ops: ApplyPatchOperation[] = [];
   let i = lo;
@@ -456,7 +461,10 @@ export function prepareApplyPatchArguments(
   const args = input as Record<string, unknown>;
 
   if (Array.isArray(args.operations)) {
-    return { operations: args.operations };
+    return {
+      operations: args.operations,
+      ...(typeof args.patch === "string" ? { patch: args.patch } : {}),
+    };
   }
 
   if (typeof args.operations === "string") {
