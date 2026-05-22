@@ -262,6 +262,39 @@ test("tree-sitter worker range queries match full-query captures", () => {
   );
 });
 
+test("tree-sitter worker batch output matches single-job output", () => {
+  const deletionLines = [
+    "const before = 1;",
+    "/*",
+    " * old value",
+    " */",
+    "const after = 2;",
+  ];
+  const additionLines = [
+    "const before = 1;",
+    "/*",
+    " * new value",
+    " */",
+    "const after = 2;",
+  ];
+  const deletionIndexes = [2];
+  const additionIndexes = [2];
+
+  const batch = batchWorkerCaptures("typescript", [
+    { lines: deletionLines, indexes: deletionIndexes },
+    { lines: additionLines, indexes: additionIndexes },
+  ]);
+
+  assert.deepEqual(
+    sortedCaptureKeys(batch[0]),
+    sortedCaptureKeys(workerCaptures("typescript", deletionLines, deletionIndexes)),
+  );
+  assert.deepEqual(
+    sortedCaptureKeys(batch[1]),
+    sortedCaptureKeys(workerCaptures("typescript", additionLines, additionIndexes)),
+  );
+});
+
 function workerCaptures(languageKey, lines, indexes) {
   const result = spawnSync(process.execPath, [workerPath], {
     input: JSON.stringify({ languageKey, lines, indexes }),
@@ -269,6 +302,17 @@ function workerCaptures(languageKey, lines, indexes) {
   });
   assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout).captures;
+}
+
+function batchWorkerCaptures(languageKey, jobs) {
+  const result = spawnSync(process.execPath, [workerPath], {
+    input: JSON.stringify({ languageKey, jobs }),
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.jobs.length, jobs.length);
+  return parsed.jobs.map((job) => job.captures);
 }
 
 function fullQueryCaptures(languageKey, lines, indexes) {

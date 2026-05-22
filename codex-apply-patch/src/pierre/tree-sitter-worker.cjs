@@ -132,23 +132,23 @@ function queryCapturesForIndexes(query, rootNode, indexes, lineCount) {
   }
 }
 
-function main() {
-  const input = readInput();
-  const languageKey = input.languageKey;
-  const lines = Array.isArray(input.lines) ? input.lines : [];
-  const indexes = Array.isArray(input.indexes) ? input.indexes : [];
-  const visible = new Set(indexes.filter((index) => Number.isInteger(index)));
+function normalizeJob(input) {
+  return {
+    lines: Array.isArray(input?.lines) ? input.lines : [],
+    indexes: Array.isArray(input?.indexes) ? input.indexes : [],
+  };
+}
 
-  const { Parser, language, querySource } = loadLanguage(languageKey);
+function capturesForJob(Parser, language, query, job) {
+  const visible = new Set(job.indexes.filter((index) => Number.isInteger(index)));
   const parser = new Parser();
   parser.setLanguage(language);
-  const tree = parser.parse(lines.join("\n"));
-  const query = new Parser.Query(language, querySource);
-  const captures = queryCapturesForIndexes(
+  const tree = parser.parse(job.lines.join("\n"));
+  return queryCapturesForIndexes(
     query,
     tree.rootNode,
     [...visible],
-    lines.length,
+    job.lines.length,
   )
     .filter((capture) => overlapsIndexes(capture.node, visible))
     .map((capture) => ({
@@ -158,8 +158,28 @@ function main() {
       endRow: capture.node.endPosition.row,
       endColumn: capture.node.endPosition.column,
     }));
+}
 
-  process.stdout.write(JSON.stringify({ captures }));
+function main() {
+  const input = readInput();
+  const languageKey = input.languageKey;
+  const isBatch = Array.isArray(input.jobs);
+  const jobs = isBatch ? input.jobs.map(normalizeJob) : [normalizeJob(input)];
+
+  const { Parser, language, querySource } = loadLanguage(languageKey);
+  const query = new Parser.Query(language, querySource);
+  const results = jobs.map((job) => {
+    if (!isBatch) return { captures: capturesForJob(Parser, language, query, job) };
+    try {
+      return { captures: capturesForJob(Parser, language, query, job) };
+    } catch {
+      return { captures: [] };
+    }
+  });
+
+  process.stdout.write(
+    JSON.stringify(isBatch ? { jobs: results } : { captures: results[0].captures }),
+  );
 }
 
 try {

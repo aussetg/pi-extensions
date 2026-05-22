@@ -1,4 +1,6 @@
+import { spawnSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
 import { buildPiHighlightedDiff } from "../src/pierre/highlight.ts";
 import { DEFAULT_PIERRE_RENDERER_CONFIG } from "../src/pierre/config.ts";
 import {
@@ -6,6 +8,10 @@ import {
   changedFileMetadata,
   makeMetadata,
 } from "./rendering-baseline.mjs";
+
+const workerPath = fileURLToPath(
+  new URL("../src/pierre/tree-sitter-worker.cjs", import.meta.url),
+);
 
 const config = {
   ...DEFAULT_PIERRE_RENDERER_CONFIG,
@@ -35,6 +41,9 @@ const fixtures = [
 ];
 
 const iterations = Number(process.env.PI_RENDER_BENCH_ITERATIONS ?? 40);
+const workerIterations = Number(
+  process.env.PI_RENDER_WORKER_BENCH_ITERATIONS ?? Math.min(8, iterations),
+);
 
 for (const fixture of fixtures) {
   const { metadata } = fixture;
@@ -61,13 +70,48 @@ for (const fixture of fixtures) {
   ]);
 }
 
-function measure(name, fn) {
+const workerMetadata = sparseMetadata();
+const workerIndexes = renderedLineIndexes(workerMetadata);
+const workerJobs = [
+  { lines: workerMetadata.deletionLines, indexes: workerIndexes.deletion },
+  { lines: workerMetadata.additionLines, indexes: workerIndexes.addition },
+];
+const singleWorker = measure(
+  "two single spawns",
+  () => {
+    workerCaptures("typescript", workerJobs[0].lines, workerJobs[0].indexes);
+    workerCaptures("typescript", workerJobs[1].lines, workerJobs[1].indexes);
+  },
+  workerIterations,
+);
+const batchWorker = measure(
+  "one batch spawn",
+  () => workerBatchCaptures("typescript", workerJobs),
+  workerIterations,
+);
+
+console.log(
+  `fixture: worker fallback, ${workerMetadata.additionLines.length} TypeScript lines, ${workerIterations} iterations`,
+);
+console.table([
+  formatResult(singleWorker),
+  formatResult(batchWorker),
+  {
+    name: "delta",
+    "wall ms": (batchWorker.wallMs - singleWorker.wallMs).toFixed(1),
+    "cpu ms": (batchWorker.cpuMs - singleWorker.cpuMs).toFixed(1),
+    "heap MiB": (batchWorker.heapMiB - singleWorker.heapMiB).toFixed(2),
+    speedup: `${(singleWorker.wallMs / batchWorker.wallMs).toFixed(2)}×`,
+  },
+]);
+
+function measure(name, fn, count = iterations) {
   if (global.gc) global.gc();
   const heapBefore = process.memoryUsage().heapUsed;
   const cpuBefore = process.cpuUsage();
   const wallBefore = performance.now();
 
-  for (let i = 0; i < iterations; i++) fn();
+  for (let i = 0; i < count; i++) fn();
 
   const wallMs = performance.now() - wallBefore;
   const cpu = process.cpuUsage(cpuBefore);
@@ -78,6 +122,24 @@ function measure(name, fn) {
     cpuMs: (cpu.user + cpu.system) / 1000,
     heapMiB: (heapAfter - heapBefore) / 1024 / 1024,
   };
+}
+
+function workerCaptures(languageKey, lines, indexes) {
+  const result = spawnSync(process.execPath, [workerPath], {
+    input: JSON.stringify({ languageKey, lines, indexes }),
+    encoding: "utf8",
+  });
+  if (result.status !== 0) throw new Error(result.stderr);
+  return JSON.parse(result.stdout).captures;
+}
+
+function workerBatchCaptures(languageKey, jobs) {
+  const result = spawnSync(process.execPath, [workerPath], {
+    input: JSON.stringify({ languageKey, jobs }),
+    encoding: "utf8",
+  });
+  if (result.status !== 0) throw new Error(result.stderr);
+  return JSON.parse(result.stdout).jobs;
 }
 
 function formatResult(result) {
@@ -133,4 +195,30 @@ function sparseMetadata() {
     })),
     cacheKey: "benchmark-large-ts-sparse",
   });
+}
+
+function renderedLineIndexes(metadata) {
+  const deletion = new Set();
+  const addition = new Set();
+
+  for (const hunk of metadata.hunks) {
+    for (const content of hunk.hunkContent) {
+      if (content.type === "context") {
+        addRange(addition, content.additionLineIndex, content.lines);
+        continue;
+      }
+
+      addRange(deletion, content.deletionLineIndex, content.deletions);
+      addRange(addition, content.additionLineIndex, content.additions);
+    }
+  }
+
+  return {
+    deletion: [...deletion].sort((a, b) => a - b),
+    addition: [...addition].sort((a, b) => a - b),
+  };
+}
+
+function addRange(target, start, count) {
+  for (let i = 0; i < count; i++) target.add(start + i);
 }

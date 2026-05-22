@@ -165,9 +165,18 @@ type HighlightLineResult = {
   lines: Array<HastNode | undefined>;
   styled: boolean;
 };
+type TreeSitterDiffSide = "deletion" | "addition";
+type TreeSitterWorkerHighlightJob = {
+  side: TreeSitterDiffSide;
+  lines: string[];
+  indexes: number[];
+};
 type PreparedTreeSitterLines = {
   cleanLines: string[];
   lineStyles: Map<number, Array<SyntaxCategory | undefined>>;
+};
+type PreparedTreeSitterWorkerJob = PreparedTreeSitterLines & {
+  side: TreeSitterDiffSide;
 };
 type LineRange = { start: number; end: number };
 type CaptureStyle = { category: SyntaxCategory; priority: number };
@@ -206,30 +215,68 @@ function buildTreeSitterHighlightedDiff(
   const runtime = getTreeSitterRuntime();
   const language = runtime?.languages.get(languageKey);
   const querySource = runtime?.queries.get(languageKey);
-  const highlightLines = (lines: string[], lineIndexes: number[]) => {
-    if (runtime && language && querySource) {
-      const inProcess = highlightTreeSitterLines(
-        runtime,
-        languageKey,
-        language,
-        querySource,
-        lines,
-        lineIndexes,
-        config,
-      );
-      if (inProcess.styled) return inProcess;
-    }
+  const workerJobs: TreeSitterWorkerHighlightJob[] = [];
+  let deletion = emptyHighlightLineResult();
+  let addition = emptyHighlightLineResult();
 
-    return highlightTreeSitterLinesWithWorker(
+  if (runtime && language && querySource) {
+    deletion = highlightTreeSitterLines(
+      runtime,
       languageKey,
-      lines,
-      lineIndexes,
+      language,
+      querySource,
+      metadata.deletionLines,
+      indexes.deletion,
       config,
     );
-  };
+    addition = highlightTreeSitterLines(
+      runtime,
+      languageKey,
+      language,
+      querySource,
+      metadata.additionLines,
+      indexes.addition,
+      config,
+    );
 
-  const deletion = highlightLines(metadata.deletionLines, indexes.deletion);
-  const addition = highlightLines(metadata.additionLines, indexes.addition);
+    if (!deletion.styled) {
+      workerJobs.push({
+        side: "deletion",
+        lines: metadata.deletionLines,
+        indexes: indexes.deletion,
+      });
+    }
+    if (!addition.styled) {
+      workerJobs.push({
+        side: "addition",
+        lines: metadata.additionLines,
+        indexes: indexes.addition,
+      });
+    }
+  } else {
+    workerJobs.push(
+      {
+        side: "deletion",
+        lines: metadata.deletionLines,
+        indexes: indexes.deletion,
+      },
+      {
+        side: "addition",
+        lines: metadata.additionLines,
+        indexes: indexes.addition,
+      },
+    );
+  }
+
+  if (workerJobs.length > 0) {
+    const workerResults = highlightTreeSitterLinesWithWorkerBatch(
+      languageKey,
+      workerJobs,
+      config,
+    );
+    deletion = workerResults.get("deletion") ?? deletion;
+    addition = workerResults.get("addition") ?? addition;
+  }
 
   if (!deletion.styled && !addition.styled) return undefined;
   return {
@@ -332,6 +379,61 @@ function highlightTreeSitterLines(
     return { lines: [], styled: false };
   }
 
+  return highlightedLinesFromStyles(cleanLines, lineStyles);
+}
+
+function highlightTreeSitterLinesWithWorkerBatch(
+  languageKey: string,
+  jobs: TreeSitterWorkerHighlightJob[],
+  config: PierreRendererConfig,
+): Map<TreeSitterDiffSide, HighlightLineResult> {
+  const results = new Map<TreeSitterDiffSide, HighlightLineResult>();
+  const preparedJobs: PreparedTreeSitterWorkerJob[] = [];
+
+  for (const job of jobs) {
+    if (job.lines.length === 0 || job.indexes.length === 0) {
+      results.set(job.side, emptyHighlightLineResult());
+      continue;
+    }
+
+    const prepared = prepareTreeSitterLines(job.lines, job.indexes, config);
+    if (!prepared) {
+      results.set(job.side, emptyHighlightLineResult());
+      continue;
+    }
+
+    preparedJobs.push({ side: job.side, ...prepared });
+  }
+
+  if (preparedJobs.length === 0) return results;
+
+  const captureSets = treeSitterWorkerCapturesBatch(
+    languageKey,
+    preparedJobs.map((job) => ({
+      lines: job.cleanLines,
+      indexes: [...job.lineStyles.keys()],
+    })),
+  );
+
+  for (let index = 0; index < preparedJobs.length; index++) {
+    const job = preparedJobs[index]!;
+    const captures = captureSets?.[index];
+    if (!captures) {
+      results.set(job.side, emptyHighlightLineResult());
+      continue;
+    }
+
+    paintCaptures(job.cleanLines, job.lineStyles, captures);
+    results.set(job.side, highlightedLinesFromStyles(job.cleanLines, job.lineStyles));
+  }
+
+  return results;
+}
+
+function highlightedLinesFromStyles(
+  cleanLines: string[],
+  lineStyles: Map<number, Array<SyntaxCategory | undefined>>,
+): HighlightLineResult {
   const out: Array<HastNode | undefined> = [];
   let styled = false;
   for (const [index, styles] of lineStyles) {
@@ -344,39 +446,8 @@ function highlightTreeSitterLines(
   return { lines: out, styled };
 }
 
-function highlightTreeSitterLinesWithWorker(
-  languageKey: string,
-  lines: string[],
-  indexes: number[],
-  config: PierreRendererConfig,
-): HighlightLineResult {
-  if (lines.length === 0 || indexes.length === 0) {
-    return { lines: [], styled: false };
-  }
-
-  const prepared = prepareTreeSitterLines(lines, indexes, config);
-  if (!prepared) return { lines: [], styled: false };
-  const { cleanLines, lineStyles } = prepared;
-
-  const captures = treeSitterWorkerCaptures(
-    languageKey,
-    cleanLines,
-    [...lineStyles.keys()],
-  );
-  if (!captures) return { lines: [], styled: false };
-
-  paintCaptures(cleanLines, lineStyles, captures);
-
-  const out: Array<HastNode | undefined> = [];
-  let styled = false;
-  for (const [index, styles] of lineStyles) {
-    if (!styles.some(Boolean)) continue;
-    const line = cleanLines[index] ?? "";
-    out[index] = syntaxSpansNode(spansFromLineStyles(line, styles));
-    styled = true;
-  }
-
-  return { lines: out, styled };
+function emptyHighlightLineResult(): HighlightLineResult {
+  return { lines: [], styled: false };
 }
 
 function prepareTreeSitterLines(
@@ -504,17 +575,18 @@ function captureOverlapsStyledLine(
   return false;
 }
 
-function treeSitterWorkerCaptures(
+function treeSitterWorkerCapturesBatch(
   languageKey: string,
-  lines: string[],
-  indexes: number[],
-): TreeSitterCapture[] | undefined {
+  jobs: Array<{ lines: string[]; indexes: number[] }>,
+): Array<TreeSitterCapture[] | undefined> | undefined {
+  if (jobs.length === 0) return [];
+
   try {
     const result = spawnSync(
       process.env.PI_TREE_SITTER_NODE ?? "node",
       [treeSitterWorkerPath],
       {
-        input: JSON.stringify({ languageKey, lines, indexes }),
+        input: JSON.stringify({ languageKey, jobs }),
         encoding: "utf8",
         maxBuffer: 16 * 1024 * 1024,
       },
@@ -523,12 +595,17 @@ function treeSitterWorkerCaptures(
 
     const parsed = JSON.parse(result.stdout) as unknown;
     if (!parsed || typeof parsed !== "object") return undefined;
-    const captures = (parsed as { captures?: unknown }).captures;
-    if (!Array.isArray(captures)) return undefined;
+    const parsedJobs = (parsed as { jobs?: unknown }).jobs;
+    if (!Array.isArray(parsedJobs)) return undefined;
 
-    return captures
-      .map(normalizeWorkerCapture)
-      .filter((capture): capture is TreeSitterCapture => Boolean(capture));
+    return parsedJobs.map((job) => {
+      if (!job || typeof job !== "object") return undefined;
+      const captures = (job as { captures?: unknown }).captures;
+      if (!Array.isArray(captures)) return undefined;
+      return captures
+        .map(normalizeWorkerCapture)
+        .filter((capture): capture is TreeSitterCapture => Boolean(capture));
+    });
   } catch {
     return undefined;
   }
