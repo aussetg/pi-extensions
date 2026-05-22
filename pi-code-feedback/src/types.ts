@@ -88,6 +88,14 @@ export interface DiagnosticRefreshResult {
 
 export type LspClientState = "starting" | "ready" | "stopped" | "failed";
 
+export type LspServerLogLevel = "info" | "warning" | "error";
+
+export interface LspServerLog {
+  level: LspServerLogLevel;
+  message: string;
+  at: number;
+}
+
 export interface LspClientStatus {
   id: string;
   root: string;
@@ -99,6 +107,7 @@ export interface LspClientStatus {
   diagnosticFiles: number;
   lastDiagnosticsAt?: number;
   lastError?: string;
+  lastServerLog?: LspServerLog;
 }
 
 export interface LspUnavailableServer {

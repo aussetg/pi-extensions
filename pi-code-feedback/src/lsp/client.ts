@@ -1,8 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import * as path from "node:path";
 import { createDiagnosticSnapshot } from "../diagnostics/snapshots.ts";
-import type { DiagnosticRefreshResult, DiagnosticSnapshot, LspClientState, LspClientStatus, LspDiagnostic, RelatedLocation } from "../types.ts";
-import { filePathToUri, lspRangeToExternal, type LspPosition, type LspRange } from "./positions.ts";
+import type { DiagnosticRefreshResult, DiagnosticSnapshot, LspClientState, LspClientStatus, LspDiagnostic, LspServerLog, LspServerLogLevel, RelatedLocation } from "../types.ts";
+import { filePathToUri, lspRangeToExternal, type LspRange } from "./positions.ts";
 import type { LanguageServerDefinition } from "./servers.ts";
 
 interface JsonRpcRequest {
@@ -93,6 +93,7 @@ export class LspClient {
   private capabilities: unknown;
   private lastDiagnosticsAt?: number;
   private lastError?: string;
+  private lastServerLog?: LspServerLog;
 
   constructor(definition: LanguageServerDefinition, root: string) {
     this.definition = definition;
@@ -205,6 +206,7 @@ export class LspClient {
       diagnosticFiles: this.diagnostics.size,
       lastDiagnosticsAt: this.lastDiagnosticsAt,
       lastError: this.lastError,
+      lastServerLog: this.lastServerLog,
     };
   }
 
@@ -252,7 +254,7 @@ export class LspClient {
       child.stdout.on("data", (chunk: Buffer) => this.handleData(chunk));
       child.stderr.on("data", (chunk: Buffer) => {
         const text = chunk.toString("utf8").trim();
-        if (text.length > 0) this.lastError = text.slice(-1000);
+        if (text.length > 0) this.lastServerLog = classifyServerLog(text.slice(-1000));
       });
       child.on("error", (error) => {
         this.lastError = error.message;
@@ -519,6 +521,20 @@ function normalizeSeverity(value: number | undefined): LspDiagnostic["severity"]
     default:
       return "warning";
   }
+}
+
+function classifyServerLog(message: string): LspServerLog {
+  return {
+    level: inferServerLogLevel(message),
+    message,
+    at: Date.now(),
+  };
+}
+
+function inferServerLogLevel(message: string): LspServerLogLevel {
+  if (/\b(warn|warning)\b/i.test(message)) return "warning";
+  if (/\b(error|fatal|panic)\b/i.test(message)) return "error";
+  return "info";
 }
 
 function readServerCapabilities(initializeResult: unknown): unknown {

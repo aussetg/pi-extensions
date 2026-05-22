@@ -39,6 +39,7 @@ export function renderStatus(runtime: CodeFeedbackRuntime, lspStatus?: LspServic
       const last = client.lastDiagnosticsAt ? ` last_diag=${formatTimestamp(client.lastDiagnosticsAt)}` : "";
       lines.push(`    ${client.id}: ${client.state}${pid} docs=${client.openDocuments} diag_files=${client.diagnosticFiles}${last}`);
       if (client.lastError) lines.push(`      error: ${client.lastError}`);
+      if (client.lastServerLog) lines.push(`      server ${client.lastServerLog.level}: ${client.lastServerLog.message}`);
     }
   }
 
