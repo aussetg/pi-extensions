@@ -1,13 +1,13 @@
 import type { FileDiffMetadata } from "../../node_modules/@pierre/diffs/dist/types.js";
 import { diffWordsWithSpace } from "diff";
-import { cleanDiffLine } from "./highlight.ts";
-import type { DiffRow, HighlightedDiffCode } from "./types.ts";
+import { cleanDiffLine, flattenHighlightedLine } from "./highlight.ts";
+import type { DiffRow, DiffSpan, HighlightedDiffCode } from "./types.ts";
 import type { PierreTerminalPalette } from "./theme.ts";
 import type { PierreRendererConfig } from "./config.ts";
 
 export function buildDiffRows(
   metadata: FileDiffMetadata,
-  _highlighted: HighlightedDiffCode,
+  highlighted: HighlightedDiffCode,
   palette: PierreTerminalPalette,
   config: PierreRendererConfig,
 ): DiffRow[] {
@@ -36,7 +36,12 @@ export function buildDiffRows(
             kind: "line",
             lineType: "context",
             lineNumber: additionLineNumber + offset,
-            spans: plainSpans(line),
+            spans: highlightedSpans(
+              highlighted.additionLines[additionLineIndex + offset],
+              line,
+              palette,
+              palette.contextRowBg,
+            ),
             rowFg: palette.contextFg,
             rowBg: palette.contextRowBg,
             lineNumberFg: palette.lineNumberFg,
@@ -68,6 +73,12 @@ export function buildDiffRows(
             "deletion",
             palette,
             config,
+            highlightedSpans(
+              highlighted.deletionLines[deletionLineIndex + offset],
+              deletionLine,
+              palette,
+              palette.deletionWordBg,
+            ),
           ),
           rowFg: palette.deletionFg,
           rowBg: palette.deletionRowBg,
@@ -93,6 +104,12 @@ export function buildDiffRows(
             "addition",
             palette,
             config,
+            highlightedSpans(
+              highlighted.additionLines[additionLineIndex + offset],
+              additionLine,
+              palette,
+              palette.additionWordBg,
+            ),
           ),
           rowFg: palette.additionFg,
           rowBg: palette.additionRowBg,
@@ -155,12 +172,28 @@ function plainSpans(text: string) {
   return text.length > 0 ? [{ text }] : [];
 }
 
+function highlightedSpans(
+  node: HighlightedDiffCode["additionLines"][number],
+  fallbackLine: string,
+  palette: PierreTerminalPalette,
+  emphasisBg: string,
+) {
+  return flattenHighlightedLine(
+    node,
+    palette.appearance,
+    palette,
+    emphasisBg,
+    fallbackLine,
+  );
+}
+
 function wordDiffSpans(
   line: string,
   pairedLine: string | undefined,
   type: "addition" | "deletion",
   palette: PierreTerminalPalette,
   config: PierreRendererConfig,
+  baseSpans: DiffSpan[],
 ) {
   if (
     !config.wordDiff.enabled ||
@@ -170,35 +203,79 @@ function wordDiffSpans(
     line.length > config.wordDiff.maxLineLength ||
     pairedLine.length > config.wordDiff.maxLineLength
   ) {
-    return plainSpans(line);
+    return baseSpans;
   }
 
   const oldLine = type === "deletion" ? line : pairedLine;
   const newLine = type === "addition" ? line : pairedLine;
   const parts = diffWordsWithSpace(oldLine, newLine);
-  const spans = [];
+  const ranges: Array<[number, number]> = [];
+  let oldIndex = 0;
+  let newIndex = 0;
   let changed = false;
 
   for (const part of parts) {
-    if (type === "deletion") {
-      if (part.added) continue;
-      changed ||= Boolean(part.removed);
-      spans.push({
-        text: part.value,
-        bg: part.removed ? palette.deletionWordBg : undefined,
-      });
+    const length = part.value.length;
+    if (part.removed) {
+      if (type === "deletion") ranges.push([oldIndex, oldIndex + length]);
+      oldIndex += length;
+      changed = true;
+      continue;
+    }
+    if (part.added) {
+      if (type === "addition") ranges.push([newIndex, newIndex + length]);
+      newIndex += length;
+      changed = true;
       continue;
     }
 
-    if (part.removed) continue;
-    changed ||= Boolean(part.added);
-    spans.push({
-      text: part.value,
-      bg: part.added ? palette.additionWordBg : undefined,
-    });
+    oldIndex += length;
+    newIndex += length;
   }
 
-  return changed && spans.length > 0 ? spans : plainSpans(line);
+  return changed && ranges.length > 0
+    ? applyWordDiffBackground(
+        baseSpans,
+        ranges,
+        type === "addition" ? palette.additionWordBg : palette.deletionWordBg,
+      )
+    : baseSpans;
+}
+
+function applyWordDiffBackground(
+  spans: DiffSpan[],
+  ranges: Array<[number, number]>,
+  bg: string,
+) {
+  const out: DiffSpan[] = [];
+  let offset = 0;
+
+  for (const span of spans) {
+    let localStart = 0;
+    const spanStart = offset;
+    const spanEnd = offset + span.text.length;
+
+    for (const [rangeStart, rangeEnd] of ranges) {
+      const start = Math.max(spanStart, rangeStart);
+      const end = Math.min(spanEnd, rangeEnd);
+      if (start >= end) continue;
+
+      const before = start - spanStart;
+      const after = end - spanStart;
+      if (before > localStart) {
+        out.push({ ...span, text: span.text.slice(localStart, before) });
+      }
+      out.push({ ...span, text: span.text.slice(before, after), bg });
+      localStart = after;
+    }
+
+    if (localStart < span.text.length) {
+      out.push({ ...span, text: span.text.slice(localStart) });
+    }
+    offset = spanEnd;
+  }
+
+  return out;
 }
 
 function trailingCollapsedLines(metadata: FileDiffMetadata): number {

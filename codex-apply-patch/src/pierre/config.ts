@@ -40,6 +40,11 @@ export interface PierreRendererConfig {
     style: "word-alt" | "none";
     maxLineLength: number;
   };
+  syntaxHighlight: {
+    enabled: boolean;
+    maxLines: number;
+    maxLineLength: number;
+  };
   colors: {
     editorBg: PierreColorValue;
     headerBg: PierreColorValue;
@@ -69,6 +74,16 @@ export interface PierreRendererConfig {
     hunkBg: PierreColorValue;
     additionWordBg: PierreColorValue;
     deletionWordBg: PierreColorValue;
+    syntaxText: PierreColorValue;
+    syntaxComment: PierreColorValue;
+    syntaxKeyword: PierreColorValue;
+    syntaxFunction: PierreColorValue;
+    syntaxVariable: PierreColorValue;
+    syntaxString: PierreColorValue;
+    syntaxNumber: PierreColorValue;
+    syntaxType: PierreColorValue;
+    syntaxOperator: PierreColorValue;
+    syntaxPunctuation: PierreColorValue;
     metadataFg: PierreColorValue;
     metadataBg: PierreColorValue;
     pendingFg: PierreColorValue;
@@ -118,6 +133,11 @@ export const DEFAULT_PIERRE_RENDERER_CONFIG: PierreRendererConfig = {
     style: "word-alt",
     maxLineLength: 2000,
   },
+  syntaxHighlight: {
+    enabled: true,
+    maxLines: 1200,
+    maxLineLength: 1000,
+  },
   colors: {
     editorBg: "toolSuccessBg",
     headerBg: "toolSuccessBg",
@@ -147,6 +167,16 @@ export const DEFAULT_PIERRE_RENDERER_CONFIG: PierreRendererConfig = {
     hunkBg: "toolSuccessBg",
     additionWordBg: { dark: "#214a34", light: "#c8efd8" },
     deletionWordBg: { dark: "#5a2a2a", light: "#ffd0d0" },
+    syntaxText: "toolOutput",
+    syntaxComment: "syntaxComment",
+    syntaxKeyword: "syntaxKeyword",
+    syntaxFunction: "syntaxFunction",
+    syntaxVariable: "syntaxVariable",
+    syntaxString: "syntaxString",
+    syntaxNumber: "syntaxNumber",
+    syntaxType: "syntaxType",
+    syntaxOperator: "syntaxOperator",
+    syntaxPunctuation: "syntaxPunctuation",
     metadataFg: "dim",
     metadataBg: "toolSuccessBg",
     pendingFg: "warning",
@@ -263,6 +293,12 @@ function sanitizeConfig(config: PierreRendererConfig): PierreRendererConfig {
       enabled: Boolean(config.wordDiff.enabled),
       style: config.wordDiff.style === "none" ? "none" : "word-alt",
       maxLineLength: clampInt(config.wordDiff.maxLineLength, 80, 20000),
+    },
+    syntaxHighlight: {
+      ...config.syntaxHighlight,
+      enabled: Boolean(config.syntaxHighlight.enabled),
+      maxLines: clampInt(config.syntaxHighlight.maxLines, 0, 20000),
+      maxLineLength: clampInt(config.syntaxHighlight.maxLineLength, 80, 20000),
     },
   };
 }

@@ -43,6 +43,16 @@ export interface PierreTerminalPalette {
   hunkBg: string;
   additionWordBg: string;
   deletionWordBg: string;
+  syntaxText: string;
+  syntaxComment: string;
+  syntaxKeyword: string;
+  syntaxFunction: string;
+  syntaxVariable: string;
+  syntaxString: string;
+  syntaxNumber: string;
+  syntaxType: string;
+  syntaxOperator: string;
+  syntaxPunctuation: string;
   metadataFg: string;
   metadataBg: string;
   pendingFg: string;
@@ -176,6 +186,16 @@ function buildPalette(
       pickColor(colors.deletionWordBg, appearance),
       fallback(appearance, "#5a2a2a", "#ffd0d0"),
     ),
+    syntaxText: fg(theme, pickColor(colors.syntaxText, appearance), fallback(appearance, "#ebdbb2", "#3c3836")),
+    syntaxComment: fg(theme, pickColor(colors.syntaxComment, appearance), fallback(appearance, "#928374", "#7c6f64")),
+    syntaxKeyword: fg(theme, pickColor(colors.syntaxKeyword, appearance), fallback(appearance, "#fb4934", "#9d0006")),
+    syntaxFunction: fg(theme, pickColor(colors.syntaxFunction, appearance), fallback(appearance, "#fabd2f", "#b57614")),
+    syntaxVariable: fg(theme, pickColor(colors.syntaxVariable, appearance), fallback(appearance, "#ebdbb2", "#3c3836")),
+    syntaxString: fg(theme, pickColor(colors.syntaxString, appearance), fallback(appearance, "#b8bb26", "#79740e")),
+    syntaxNumber: fg(theme, pickColor(colors.syntaxNumber, appearance), fallback(appearance, "#d3869b", "#8f3f71")),
+    syntaxType: fg(theme, pickColor(colors.syntaxType, appearance), fallback(appearance, "#8ec07c", "#427b58")),
+    syntaxOperator: fg(theme, pickColor(colors.syntaxOperator, appearance), fallback(appearance, "#fe8019", "#af3a03")),
+    syntaxPunctuation: fg(theme, pickColor(colors.syntaxPunctuation, appearance), fallback(appearance, "#a89984", "#7c6f64")),
     metadataFg: fg(theme, pickColor(colors.metadataFg, appearance), fallback(appearance, "#6f6f6f", "#8a8a8a")),
     metadataBg: bg(
       theme,

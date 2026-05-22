@@ -4,7 +4,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
-import { hasHighlightedLines } from "./highlight.ts";
+import { hasHighlightedLines, loadHighlightedDiff } from "./highlight.ts";
 import { buildDiffRows, lineNumberWidthFor } from "./rows.ts";
 import {
   getPierreRendererConfig,
@@ -91,7 +91,10 @@ export class PierreInlineDiffComponent implements Component {
   private showFileHeaders: boolean;
   private explicitMaxVisibleLines: number | undefined;
   private explicitShowFileHeaders: boolean | undefined;
+  private invalidateView: (() => void) | undefined;
   private highlightedByKey = new Map<string, HighlightedDiffSet>();
+  private loadingByKey = new Map<string, Promise<void>>();
+  private attemptedKeys = new Set<string>();
 
   constructor(
     payloads: PierreDiffPayload | PierreDiffPayload[],
@@ -102,6 +105,7 @@ export class PierreInlineDiffComponent implements Component {
     this.theme = theme;
     this.explicitMaxVisibleLines = options.maxVisibleLines;
     this.explicitShowFileHeaders = options.showFileHeaders;
+    this.invalidateView = options.onInvalidate;
     this.config = getPierreRendererConfig();
     this.palette = getPierrePalette(theme, this.config);
     this.maxVisibleLines =
@@ -112,6 +116,7 @@ export class PierreInlineDiffComponent implements Component {
       this.payloads.length,
     );
     this.ingestHighlightedPayloads();
+    this.maybeRefreshHighlightedDiffs();
   }
 
   update(
@@ -123,6 +128,7 @@ export class PierreInlineDiffComponent implements Component {
     this.theme = theme;
     this.explicitMaxVisibleLines = options.maxVisibleLines;
     this.explicitShowFileHeaders = options.showFileHeaders;
+    this.invalidateView = options.onInvalidate;
     this.config = getPierreRendererConfig();
     this.palette = getPierrePalette(theme, this.config);
     this.maxVisibleLines =
@@ -133,6 +139,7 @@ export class PierreInlineDiffComponent implements Component {
       this.payloads.length,
     );
     this.ingestHighlightedPayloads();
+    this.maybeRefreshHighlightedDiffs();
   }
 
   render(width: number): string[] {
@@ -145,6 +152,7 @@ export class PierreInlineDiffComponent implements Component {
       this.explicitShowFileHeaders,
       this.payloads.length,
     );
+    this.maybeRefreshHighlightedDiffs();
     const safeWidth = Math.max(20, width);
     const lines: string[] = [];
 
@@ -254,6 +262,8 @@ export class PierreInlineDiffComponent implements Component {
   }
 
   private highlightedFor(payload: PierreDiffPayload): HighlightedDiffSet {
+    if (!this.config.syntaxHighlight.enabled) return emptyHighlightedDiffSet();
+
     const key = payloadKey(payload);
     return (
       this.highlightedByKey.get(key) ??
@@ -267,8 +277,45 @@ export class PierreInlineDiffComponent implements Component {
       if (!payload.highlighted || !hasHighlightedLines(payload.highlighted)) continue;
       const key = payloadKey(payload);
       this.highlightedByKey.set(key, payload.highlighted);
+      this.attemptedKeys.add(key);
     }
   }
+
+  private maybeRefreshHighlightedDiffs(): void {
+    if (!this.config.syntaxHighlight.enabled) return;
+
+    for (const payload of this.payloads) {
+      const key = payloadKey(payload);
+      if (this.highlightedByKey.has(key)) continue;
+      if (this.loadingByKey.has(key)) continue;
+      if (this.attemptedKeys.has(key)) continue;
+      if (!shouldHighlight(payload, this.config)) continue;
+
+      const pending = loadHighlightedDiff(payload.metadata, this.config)
+        .then((highlighted) => {
+          this.highlightedByKey.set(key, highlighted);
+          this.attemptedKeys.add(key);
+          this.invalidateView?.();
+        })
+        .catch(() => {
+          this.attemptedKeys.add(key);
+        })
+        .finally(() => {
+          this.loadingByKey.delete(key);
+        });
+
+      this.loadingByKey.set(key, pending);
+    }
+  }
+}
+
+function shouldHighlight(
+  payload: PierreDiffPayload,
+  config: PierreRendererConfig,
+): boolean {
+  const lineCount =
+    payload.metadata.deletionLines.length + payload.metadata.additionLines.length;
+  return lineCount > 0 && lineCount <= config.syntaxHighlight.maxLines;
 }
 
 function renderFileHeader(

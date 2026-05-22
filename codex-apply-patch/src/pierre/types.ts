@@ -2,6 +2,18 @@ import type { FileDiffMetadata } from "../../node_modules/@pierre/diffs/dist/typ
 
 export type PierreAppearance = "dark" | "light";
 
+export type SyntaxCategory =
+  | "text"
+  | "comment"
+  | "keyword"
+  | "function"
+  | "variable"
+  | "string"
+  | "number"
+  | "type"
+  | "operator"
+  | "punctuation";
+
 export interface HastTextNode {
   type: "text";
   value: string;
