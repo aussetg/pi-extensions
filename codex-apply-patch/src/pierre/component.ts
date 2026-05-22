@@ -4,7 +4,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
-import { hasHighlightedLines, loadHighlightedDiff } from "./highlight.ts";
+import { hasHighlightedLines } from "./highlight.ts";
 import { buildDiffRows, lineNumberWidthFor } from "./rows.ts";
 import {
   getPierrePalette,
@@ -21,7 +21,6 @@ import { emptyHighlightedDiffSet } from "./types.ts";
 
 const ANSI_RESET = "\u001b[22m\u001b[39m\u001b[49m";
 const DEFAULT_MAX_VISIBLE_LINES = 18;
-const HIGHLIGHT_LINE_LIMIT = 1200;
 
 interface RenderSegment {
   text: string;
@@ -82,10 +81,7 @@ export class PierreInlineDiffComponent implements Component {
   private palette: PierreTerminalPalette;
   private maxVisibleLines: number;
   private showFileHeaders: boolean;
-  private invalidateView: (() => void) | undefined;
   private highlightedByKey = new Map<string, HighlightedDiffSet>();
-  private loadingByKey = new Map<string, Promise<void>>();
-  private attemptedKeys = new Set<string>();
 
   constructor(
     payloads: PierreDiffPayload | PierreDiffPayload[],
@@ -96,9 +92,7 @@ export class PierreInlineDiffComponent implements Component {
     this.palette = getPierrePalette(theme);
     this.maxVisibleLines = options.maxVisibleLines ?? DEFAULT_MAX_VISIBLE_LINES;
     this.showFileHeaders = options.showFileHeaders ?? this.payloads.length > 1;
-    this.invalidateView = options.onInvalidate;
     this.ingestHighlightedPayloads();
-    this.maybeRefreshHighlightedDiffs();
   }
 
   update(
@@ -110,9 +104,7 @@ export class PierreInlineDiffComponent implements Component {
     this.palette = getPierrePalette(theme);
     this.maxVisibleLines = options.maxVisibleLines ?? DEFAULT_MAX_VISIBLE_LINES;
     this.showFileHeaders = options.showFileHeaders ?? this.payloads.length > 1;
-    this.invalidateView = options.onInvalidate;
     this.ingestHighlightedPayloads();
-    this.maybeRefreshHighlightedDiffs();
   }
 
   render(width: number): string[] {
@@ -223,32 +215,6 @@ export class PierreInlineDiffComponent implements Component {
       if (!payload.highlighted || !hasHighlightedLines(payload.highlighted)) continue;
       const key = payloadKey(payload);
       this.highlightedByKey.set(key, payload.highlighted);
-      this.attemptedKeys.add(key);
-    }
-  }
-
-  private maybeRefreshHighlightedDiffs(): void {
-    for (const payload of this.payloads) {
-      const key = payloadKey(payload);
-      if (this.highlightedByKey.has(key)) continue;
-      if (this.loadingByKey.has(key)) continue;
-      if (this.attemptedKeys.has(key)) continue;
-      if (!shouldHighlight(payload)) continue;
-
-      const pending = loadHighlightedDiff(payload.metadata)
-        .then((highlighted) => {
-          this.highlightedByKey.set(key, highlighted);
-          this.attemptedKeys.add(key);
-          this.invalidateView?.();
-        })
-        .catch(() => {
-          this.attemptedKeys.add(key);
-        })
-        .finally(() => {
-          this.loadingByKey.delete(key);
-        });
-
-      this.loadingByKey.set(key, pending);
     }
   }
 }
@@ -362,12 +328,6 @@ function payloadKey(payload: PierreDiffPayload): string {
     payload.metadata.additionLines.join("\n"),
     payload.metadata.hunks.map((hunk) => hunk.hunkSpecs ?? "").join("\n"),
   ].join("\u0000");
-}
-
-function shouldHighlight(payload: PierreDiffPayload): boolean {
-  const lineCount =
-    payload.metadata.deletionLines.length + payload.metadata.additionLines.length;
-  return lineCount > 0 && lineCount <= HIGHLIGHT_LINE_LIMIT;
 }
 
 function formatLineNumber(lineNumber: number | undefined, width: number): string {

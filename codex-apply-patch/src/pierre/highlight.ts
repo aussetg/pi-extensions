@@ -1,10 +1,3 @@
-import {
-  cleanLastNewline,
-  getHighlighterOptions,
-  getSharedHighlighter,
-  renderDiffWithHighlighter,
-  type FileDiffMetadata,
-} from "@pierre/diffs";
 import type {
   DiffSpan,
   HastNode,
@@ -14,41 +7,10 @@ import type {
 } from "./types.ts";
 import { emptyHighlightedDiffSet } from "./types.ts";
 
-const PIERRE_THEME_NAMES = {
-  dark: "pierre-dark",
-  light: "pierre-light",
-} as const;
-
-const PIERRE_RENDER_OPTIONS = {
-  dark: {
-    theme: PIERRE_THEME_NAMES.dark,
-    useTokenTransformer: false,
-    tokenizeMaxLineLength: 1000,
-    lineDiffType: "word-alt" as const,
-    maxLineDiffLength: 2000,
-  },
-  light: {
-    theme: PIERRE_THEME_NAMES.light,
-    useTokenTransformer: false,
-    tokenizeMaxLineLength: 1000,
-    lineDiffType: "word-alt" as const,
-    maxLineDiffLength: 2000,
-  },
-} as const;
-
-type HighlightOptions = ReturnType<typeof getHighlighterOptions>;
-
-const highlighterOptionsByKey = new Map<string, HighlightOptions>();
-
 export async function loadHighlightedDiff(
-  metadata: FileDiffMetadata,
+  _metadata: unknown,
 ): Promise<HighlightedDiffSet> {
-  const [dark, light] = await Promise.all([
-    highlightForAppearance(metadata, "dark"),
-    highlightForAppearance(metadata, "light"),
-  ]);
-
-  return { dark, light };
+  return emptyHighlightedDiffSet();
 }
 
 export function normalizeHighlightedDiffSet(
@@ -125,41 +87,6 @@ export function cleanDiffLine(line: string | undefined): string {
   return tabify(cleanLastNewline(line ?? "").replace(/\r$/, ""));
 }
 
-async function highlightForAppearance(
-  metadata: FileDiffMetadata,
-  appearance: PierreAppearance,
-): Promise<HighlightedDiffCode> {
-  try {
-    const language = metadata.lang ?? "text";
-    const cacheKey = `${appearance}:${language}`;
-    const highlighterOptions =
-      highlighterOptionsByKey.get(cacheKey) ??
-      getHighlighterOptions(language, { theme: PIERRE_THEME_NAMES[appearance] });
-
-    if (!highlighterOptionsByKey.has(cacheKey)) {
-      highlighterOptionsByKey.set(cacheKey, highlighterOptions);
-    }
-
-    const highlighter = await getSharedHighlighter({
-      ...highlighterOptions,
-      preferredHighlighter: "shiki-js",
-    });
-
-    const highlighted = renderDiffWithHighlighter(
-      metadata,
-      highlighter,
-      PIERRE_RENDER_OPTIONS[appearance],
-    );
-
-    return {
-      deletionLines: highlighted.code.deletionLines as Array<HastNode | undefined>,
-      additionLines: highlighted.code.additionLines as Array<HastNode | undefined>,
-    };
-  } catch {
-    return { deletionLines: [], additionLines: [] };
-  }
-}
-
 function normalizeHighlightedDiffCode(code: unknown): HighlightedDiffCode {
   if (!code || typeof code !== "object") {
     return { deletionLines: [], additionLines: [] };
@@ -178,6 +105,10 @@ function normalizeHighlightedDiffCode(code: unknown): HighlightedDiffCode {
 
 function tabify(text: string): string {
   return text.replace(/\t/g, "    ");
+}
+
+function cleanLastNewline(text: string): string {
+  return text.endsWith("\n") ? text.slice(0, -1) : text;
 }
 
 function mergeSpan(target: DiffSpan[], next: DiffSpan): void {

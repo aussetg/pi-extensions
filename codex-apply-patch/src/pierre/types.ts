@@ -1,4 +1,4 @@
-import type { FileDiffMetadata } from "@pierre/diffs";
+import type { FileDiffMetadata } from "../../node_modules/@pierre/diffs/dist/types.js";
 
 export type PierreAppearance = "dark" | "light";
 

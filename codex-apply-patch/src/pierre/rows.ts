@@ -1,4 +1,4 @@
-import type { FileDiffMetadata } from "@pierre/diffs";
+import type { FileDiffMetadata } from "../../node_modules/@pierre/diffs/dist/types.js";
 import { cleanDiffLine, flattenHighlightedLine } from "./highlight.ts";
 import type { DiffRow, HighlightedDiffCode } from "./types.ts";
 import type { PierreTerminalPalette } from "./theme.ts";

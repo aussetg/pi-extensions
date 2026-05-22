@@ -1,11 +1,9 @@
-import {
-  getFiletypeFromFileName,
-  parsePatchFiles,
-  setLanguageOverride,
-  type FileDiffMetadata,
-} from "@pierre/diffs";
 import { createHash } from "node:crypto";
 import { createTwoFilesPatch } from "diff";
+import { getFiletypeFromFileName } from "../../node_modules/@pierre/diffs/dist/utils/getFiletypeFromFileName.js";
+import { parsePatchFiles } from "../../node_modules/@pierre/diffs/dist/utils/parsePatchFiles.js";
+import { setLanguageOverride } from "../../node_modules/@pierre/diffs/dist/utils/setLanguageOverride.js";
+import type { FileDiffMetadata } from "../../node_modules/@pierre/diffs/dist/types.js";
 import { normalizeLineEndings } from "../util.ts";
 import type { PierreDiffPayload } from "./types.ts";
 
