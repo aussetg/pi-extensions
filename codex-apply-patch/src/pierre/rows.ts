@@ -10,15 +10,28 @@ export function buildDiffRows(
   highlighted: HighlightedDiffCode,
   palette: PierreTerminalPalette,
   config: PierreRendererConfig,
+  options: { expandCollapsed?: boolean } = {},
 ): DiffRow[] {
   const rows: DiffRow[] = [];
 
   for (const hunk of metadata.hunks) {
     if (hunk.collapsedBefore > 0) {
-      rows.push({
-        kind: "collapsed",
-        count: hunk.collapsedBefore,
-      });
+      if (options.expandCollapsed) {
+        pushContextRows(
+          rows,
+          metadata,
+          highlighted,
+          palette,
+          hunk.additionLineIndex - hunk.collapsedBefore,
+          hunk.additionStart - hunk.collapsedBefore,
+          hunk.collapsedBefore,
+        );
+      } else {
+        rows.push({
+          kind: "collapsed",
+          count: hunk.collapsedBefore,
+        });
+      }
     }
 
     let deletionLineIndex = hunk.deletionLineIndex;
@@ -134,7 +147,18 @@ export function buildDiffRows(
   }
 
   const trailing = trailingCollapsedLines(metadata);
-  if (trailing > 0) {
+  if (trailing > 0 && options.expandCollapsed) {
+    const lastHunk = metadata.hunks[metadata.hunks.length - 1]!;
+    pushContextRows(
+      rows,
+      metadata,
+      highlighted,
+      palette,
+      lastHunk.additionLineIndex + lastHunk.additionCount,
+      lastHunk.additionStart + lastHunk.additionCount,
+      trailing,
+    );
+  } else if (trailing > 0) {
     rows.push({
       kind: "collapsed",
       count: trailing,
@@ -170,6 +194,40 @@ export function lineNumberWidthFor(
 
 function plainSpans(text: string) {
   return text.length > 0 ? [{ text }] : [];
+}
+
+function pushContextRows(
+  rows: DiffRow[],
+  metadata: FileDiffMetadata,
+  highlighted: HighlightedDiffCode,
+  palette: PierreTerminalPalette,
+  startIndex: number,
+  startLineNumber: number,
+  count: number,
+): void {
+  const safeStartIndex = Math.max(0, startIndex);
+  const safeStartLineNumber = Math.max(1, startLineNumber);
+
+  for (let offset = 0; offset < count; offset += 1) {
+    const index = safeStartIndex + offset;
+    const line = cleanDiffLine(
+      metadata.additionLines[index] ?? metadata.deletionLines[index],
+    );
+    rows.push({
+      kind: "line",
+      lineType: "context",
+      lineNumber: safeStartLineNumber + offset,
+      spans: highlightedSpans(
+        highlighted.additionLines[index] ?? highlighted.deletionLines[index],
+        line,
+        palette,
+        palette.contextRowBg,
+      ),
+      rowFg: palette.contextFg,
+      rowBg: palette.contextRowBg,
+      lineNumberFg: palette.lineNumberFg,
+    });
+  }
 }
 
 function highlightedSpans(

@@ -40,6 +40,7 @@ export interface PierreTerminalPalette {
   deletionBarFg: string;
   deletionBarBg: string;
   hunkFg: string;
+  hunkKeyFg: string;
   hunkBg: string;
   additionWordBg: string;
   deletionWordBg: string;
@@ -171,6 +172,7 @@ function buildPalette(
       fallback(appearance, "#2e1e1e", "#f8e8e8"),
     ),
     hunkFg: fg(theme, pickColor(colors.hunkFg, appearance), fallback(appearance, "#8a8a8a", "#707070")),
+    hunkKeyFg: fg(theme, pickColor(colors.hunkKeyFg, appearance), fallback(appearance, "#6f6f6f", "#8a8a8a")),
     hunkBg: bg(
       theme,
       pickColor(colors.hunkBg, appearance),

@@ -35,6 +35,7 @@ interface RenderSegment {
 export interface PierreInlineDiffOptions {
   maxVisibleLines?: number;
   showFileHeaders?: boolean;
+  expandCollapsedHunks?: boolean;
   onInvalidate?: () => void;
 }
 
@@ -91,6 +92,7 @@ export class PierreInlineDiffComponent implements Component {
   private showFileHeaders: boolean;
   private explicitMaxVisibleLines: number | undefined;
   private explicitShowFileHeaders: boolean | undefined;
+  private expandCollapsedHunks: boolean;
   private invalidateView: (() => void) | undefined;
   private highlightedByKey = new Map<string, HighlightedDiffSet>();
   private piHighlightedByKey = new Map<string, HighlightedDiffSet>();
@@ -104,6 +106,7 @@ export class PierreInlineDiffComponent implements Component {
     this.theme = theme;
     this.explicitMaxVisibleLines = options.maxVisibleLines;
     this.explicitShowFileHeaders = options.showFileHeaders;
+    this.expandCollapsedHunks = Boolean(options.expandCollapsedHunks);
     this.invalidateView = options.onInvalidate;
     this.config = getPierreRendererConfig();
     this.palette = getPierrePalette(theme, this.config);
@@ -126,6 +129,7 @@ export class PierreInlineDiffComponent implements Component {
     this.theme = theme;
     this.explicitMaxVisibleLines = options.maxVisibleLines;
     this.explicitShowFileHeaders = options.showFileHeaders;
+    this.expandCollapsedHunks = Boolean(options.expandCollapsedHunks);
     this.invalidateView = options.onInvalidate;
     this.config = getPierreRendererConfig();
     this.palette = getPierrePalette(theme, this.config);
@@ -168,6 +172,7 @@ export class PierreInlineDiffComponent implements Component {
         highlighted,
         this.palette,
         this.config,
+        { expandCollapsed: this.expandCollapsedHunks },
       );
       for (const row of rows) {
         lines.push(...this.renderRow(payload, row, safeWidth));
@@ -201,7 +206,6 @@ export class PierreInlineDiffComponent implements Component {
           this.palette,
           this.config,
           width,
-          payload,
         ),
       ];
     }
@@ -323,18 +327,30 @@ function renderHunkNoticeLine(
   palette: PierreTerminalPalette,
   config: PierreRendererConfig,
   width: number,
-  payload?: PierreDiffPayload,
 ): string {
-  const lineNumberWidth = payload
-    ? lineNumberWidthFor(payload.metadata, config.gutter.lineNumberMinWidth)
-    : config.gutter.lineNumberMinWidth;
-  const prefixSegments = hunkPrefixSegments(lineNumberWidth, palette, config);
-  prefixSegments.push({ text, fg: palette.hunkFg, bg: palette.hunkBg });
+  return renderFullWidthLine(
+    [
+      { text: " ".repeat(config.layout.leftPadding), fg: palette.hunkFg, bg: palette.hunkBg },
+      ...hunkLabelSegments(text, palette),
+    ],
+    width,
+    { fg: palette.hunkFg, bg: palette.hunkBg },
+  );
+}
 
-  return renderFullWidthLine(prefixSegments, width, {
-    fg: palette.hunkFg,
-    bg: palette.hunkBg,
-  });
+function hunkLabelSegments(
+  text: string,
+  palette: PierreTerminalPalette,
+): RenderSegment[] {
+  const key = "ctrl+o";
+  const index = text.toLowerCase().indexOf(key);
+  if (index < 0) return [{ text, fg: palette.hunkFg, bg: palette.hunkBg }];
+
+  return [
+    { text: text.slice(0, index), fg: palette.hunkFg, bg: palette.hunkBg },
+    { text: text.slice(index, index + key.length), fg: palette.hunkKeyFg, bg: palette.hunkBg },
+    { text: text.slice(index + key.length), fg: palette.hunkFg, bg: palette.hunkBg },
+  ];
 }
 
 function linePrefixSegments(
@@ -397,34 +413,6 @@ function linePrefixText(
   return config.gutter.barPosition === "after-number"
     ? pad + number + config.gutter.separator + bar + config.gutter.barGap
     : pad + bar + config.gutter.barGap + number + config.gutter.separator;
-}
-
-function hunkPrefixSegments(
-  lineNumberWidth: number,
-  palette: PierreTerminalPalette,
-  config: PierreRendererConfig,
-): RenderSegment[] {
-  const pad = {
-    text: " ".repeat(config.layout.leftPadding),
-    fg: palette.hunkFg,
-    bg: palette.hunkBg,
-  };
-  const numberSpace = {
-    text: " ".repeat(lineNumberWidth + config.gutter.lineNumberPaddingRight),
-    fg: palette.lineNumberFg,
-    bg: palette.hunkBg,
-  };
-  const separator = {
-    text: config.gutter.separator,
-    fg: palette.gutterFg,
-    bg: palette.hunkBg,
-  };
-  const bar = { text: config.gutter.hunkBar, fg: palette.hunkFg, bg: palette.hunkBg };
-  const barGap = { text: config.gutter.barGap, fg: palette.hunkFg, bg: palette.hunkBg };
-
-  return config.gutter.barPosition === "after-number"
-    ? [pad, numberSpace, separator, bar, barGap]
-    : [pad, bar, barGap, numberSpace, separator];
 }
 
 function continuationPrefixSegments(

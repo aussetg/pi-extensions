@@ -73,6 +73,7 @@ export interface PierreRendererConfig {
     deletionBarFg: PierreColorValue;
     deletionBarBg: PierreColorValue;
     hunkFg: PierreColorValue;
+    hunkKeyFg: PierreColorValue;
     hunkBg: PierreColorValue;
     additionWordBg: PierreColorValue;
     deletionWordBg: PierreColorValue;
@@ -167,7 +168,8 @@ export const DEFAULT_PIERRE_RENDERER_CONFIG: PierreRendererConfig = {
     additionBarBg: { dark: "#223b2a", light: "#dff4e7" },
     deletionBarFg: "toolDiffRemoved",
     deletionBarBg: "toolErrorBg",
-    hunkFg: "dim",
+    hunkFg: "muted",
+    hunkKeyFg: "dim",
     hunkBg: "toolSuccessBg",
     additionWordBg: { dark: "#214a34", light: "#c8efd8" },
     deletionWordBg: { dark: "#5a2a2a", light: "#ffd0d0" },

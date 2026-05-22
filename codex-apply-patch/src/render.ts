@@ -229,11 +229,17 @@ class ApplyPatchPierreResultComponent implements Component {
   constructor(
     payloads: PierreDiffPayload[],
     theme: ThemeLike,
-    options: { maxVisibleLines: number; footerText: string; invalidate?: () => void },
+    options: {
+      maxVisibleLines: number;
+      footerText: string;
+      expanded: boolean;
+      invalidate?: () => void;
+    },
   ) {
     this.diff = new PierreInlineDiffComponent(payloads, theme, {
       maxVisibleLines: options.maxVisibleLines,
       showFileHeaders: payloads.length > 1,
+      expandCollapsedHunks: options.expanded,
       onInvalidate: options.invalidate,
     });
     this.update(payloads, theme, options);
@@ -242,11 +248,17 @@ class ApplyPatchPierreResultComponent implements Component {
   update(
     payloads: PierreDiffPayload[],
     theme: ThemeLike,
-    options: { maxVisibleLines: number; footerText: string; invalidate?: () => void },
+    options: {
+      maxVisibleLines: number;
+      footerText: string;
+      expanded: boolean;
+      invalidate?: () => void;
+    },
   ): void {
     this.diff.update(payloads, theme, {
       maxVisibleLines: options.maxVisibleLines,
       showFileHeaders: payloads.length > 1,
+      expandCollapsedHunks: options.expanded,
       onInvalidate: options.invalidate,
     });
     this.footerText = options.footerText;
@@ -279,6 +291,7 @@ function renderPierrePreviews(
   const options = {
     maxVisibleLines: maxPierreVisibleLines(expanded),
     footerText,
+    expanded,
     invalidate: context?.invalidate,
   };
   const component =
