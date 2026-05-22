@@ -10,8 +10,6 @@ import {
   buildPierreDeletePayload,
   buildPierreUpdatePayload,
 } from "./pierre/metadata.ts";
-import { getPierreRendererConfig } from "./pierre/config.ts";
-import { hasHighlightedLines, loadHighlightedDiff } from "./pierre/highlight.ts";
 import type { PierreDiffPayload } from "./pierre/types.ts";
 import {
   detectLineEnding,
@@ -562,32 +560,6 @@ export async function applyOperations(
     if (plannedTask.warning) warnings.add(plannedTask.warning);
   }
 
-  const finalResults = finalizeResults();
-  await hydratePierreHighlights(finalResults, signal);
-  return { fuzz: fuzzTotal, results: finalResults, warnings: [...warnings] };
-}
-
-async function hydratePierreHighlights(
-  results: ApplyOperationResult[],
-  signal?: AbortSignal,
-): Promise<void> {
-  const payloads = results
-    .filter((result) => result.status === "completed" && result.pierre)
-    .map((result) => result.pierre!);
-  if (payloads.length === 0 || signal?.aborted) return;
-
-  const config = getPierreRendererConfig();
-  if (!config.syntaxHighlight.enabled) return;
-
-  await Promise.all(
-    payloads.map(async (payload) => {
-      if (signal?.aborted || payload.highlighted) return;
-
-      const highlighted = await loadHighlightedDiff(payload.metadata, config);
-      if (hasHighlightedLines(highlighted)) payload.highlighted = highlighted;
-    }),
-  ).catch(() => {
-    // Highlighting is a visual upgrade. Never let it affect patch application.
-  });
+  return { fuzz: fuzzTotal, results: finalizeResults(), warnings: [...warnings] };
 }
 

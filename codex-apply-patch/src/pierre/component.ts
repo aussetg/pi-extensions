@@ -4,7 +4,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
-import { hasHighlightedLines, loadHighlightedDiff } from "./highlight.ts";
+import { buildPiHighlightedDiff, hasHighlightedLines } from "./highlight.ts";
 import { buildDiffRows, lineNumberWidthFor } from "./rows.ts";
 import {
   getPierreRendererConfig,
@@ -93,8 +93,7 @@ export class PierreInlineDiffComponent implements Component {
   private explicitShowFileHeaders: boolean | undefined;
   private invalidateView: (() => void) | undefined;
   private highlightedByKey = new Map<string, HighlightedDiffSet>();
-  private loadingByKey = new Map<string, Promise<void>>();
-  private attemptedKeys = new Set<string>();
+  private piHighlightedByKey = new Map<string, HighlightedDiffSet>();
 
   constructor(
     payloads: PierreDiffPayload | PierreDiffPayload[],
@@ -116,7 +115,6 @@ export class PierreInlineDiffComponent implements Component {
       this.payloads.length,
     );
     this.ingestHighlightedPayloads();
-    this.maybeRefreshHighlightedDiffs();
   }
 
   update(
@@ -139,7 +137,6 @@ export class PierreInlineDiffComponent implements Component {
       this.payloads.length,
     );
     this.ingestHighlightedPayloads();
-    this.maybeRefreshHighlightedDiffs();
   }
 
   render(width: number): string[] {
@@ -152,7 +149,6 @@ export class PierreInlineDiffComponent implements Component {
       this.explicitShowFileHeaders,
       this.payloads.length,
     );
-    this.maybeRefreshHighlightedDiffs();
     const safeWidth = Math.max(20, width);
     const lines: string[] = [];
 
@@ -265,6 +261,18 @@ export class PierreInlineDiffComponent implements Component {
     if (!this.config.syntaxHighlight.enabled) return emptyHighlightedDiffSet();
 
     const key = payloadKey(payload);
+    const piKey = `${key}:${this.theme.name ?? ""}:${this.config.syntaxHighlight.maxLines}:${this.config.syntaxHighlight.maxLineLength}`;
+    let piHighlighted = this.piHighlightedByKey.get(piKey);
+    if (!piHighlighted) {
+      piHighlighted = buildPiHighlightedDiff(payload.metadata, this.config);
+      this.piHighlightedByKey.set(piKey, piHighlighted);
+      if (this.piHighlightedByKey.size > 128) {
+        const oldestKey = this.piHighlightedByKey.keys().next().value;
+        if (typeof oldestKey === "string") this.piHighlightedByKey.delete(oldestKey);
+      }
+    }
+    if (hasHighlightedLines(piHighlighted)) return piHighlighted;
+
     return (
       this.highlightedByKey.get(key) ??
       payload.highlighted ??
@@ -277,45 +285,8 @@ export class PierreInlineDiffComponent implements Component {
       if (!payload.highlighted || !hasHighlightedLines(payload.highlighted)) continue;
       const key = payloadKey(payload);
       this.highlightedByKey.set(key, payload.highlighted);
-      this.attemptedKeys.add(key);
     }
   }
-
-  private maybeRefreshHighlightedDiffs(): void {
-    if (!this.config.syntaxHighlight.enabled) return;
-
-    for (const payload of this.payloads) {
-      const key = payloadKey(payload);
-      if (this.highlightedByKey.has(key)) continue;
-      if (this.loadingByKey.has(key)) continue;
-      if (this.attemptedKeys.has(key)) continue;
-      if (!shouldHighlight(payload, this.config)) continue;
-
-      const pending = loadHighlightedDiff(payload.metadata, this.config)
-        .then((highlighted) => {
-          this.highlightedByKey.set(key, highlighted);
-          this.attemptedKeys.add(key);
-          this.invalidateView?.();
-        })
-        .catch(() => {
-          this.attemptedKeys.add(key);
-        })
-        .finally(() => {
-          this.loadingByKey.delete(key);
-        });
-
-      this.loadingByKey.set(key, pending);
-    }
-  }
-}
-
-function shouldHighlight(
-  payload: PierreDiffPayload,
-  config: PierreRendererConfig,
-): boolean {
-  const lineCount =
-    payload.metadata.deletionLines.length + payload.metadata.additionLines.length;
-  return lineCount > 0 && lineCount <= config.syntaxHighlight.maxLines;
 }
 
 function renderFileHeader(
