@@ -12,6 +12,7 @@ export type PierreColorValue =
 export interface PierreRendererConfig {
   spacing: {
     beforeDiff: number;
+    afterDiff: number;
   };
   layout: {
     leftPadding: number;
@@ -106,6 +107,7 @@ export const PIERRE_CONFIG_PATH = join(
 export const DEFAULT_PIERRE_RENDERER_CONFIG: PierreRendererConfig = {
   spacing: {
     beforeDiff: 1,
+    afterDiff: 1,
   },
   layout: {
     leftPadding: 1,
@@ -127,8 +129,8 @@ export const DEFAULT_PIERRE_RENDERER_CONFIG: PierreRendererConfig = {
     hunkBar: " ",
   },
   hunk: {
-    collapsedLabel: "{count} unmodified {line|lines}",
-    moreDiffLabel: "{count} more diff {line|lines}",
+    collapsedLabel: "... ({count} more {line|lines}, ctrl+o to expand)",
+    moreDiffLabel: "... ({count} more {line|lines}, ctrl+o to expand)",
   },
   wordDiff: {
     enabled: true,
@@ -258,6 +260,7 @@ function sanitizeConfig(config: PierreRendererConfig): PierreRendererConfig {
     spacing: {
       ...config.spacing,
       beforeDiff: clampInt(config.spacing.beforeDiff, 0, 4),
+      afterDiff: clampInt(config.spacing.afterDiff, 0, 4),
     },
     layout: {
       ...config.layout,
