@@ -21,6 +21,7 @@ export interface PierreRendererConfig {
   };
   gutter: {
     barPosition: "before-number" | "after-number";
+    lineNumberAlign: "left" | "right";
     lineNumberMinWidth: number;
     lineNumberPaddingRight: number;
     separator: string;
@@ -114,6 +115,7 @@ export const DEFAULT_PIERRE_RENDERER_CONFIG: PierreRendererConfig = {
   },
   gutter: {
     barPosition: "before-number",
+    lineNumberAlign: "left",
     lineNumberMinWidth: 3,
     lineNumberPaddingRight: 1,
     separator: " ",
@@ -278,6 +280,8 @@ function sanitizeConfig(config: PierreRendererConfig): PierreRendererConfig {
         config.gutter.barPosition === "after-number"
           ? "after-number"
           : "before-number",
+      lineNumberAlign:
+        config.gutter.lineNumberAlign === "right" ? "right" : "left",
       lineNumberMinWidth: clampInt(config.gutter.lineNumberMinWidth, 1, 8),
       lineNumberPaddingRight: clampInt(config.gutter.lineNumberPaddingRight, 0, 4),
       separator: safeGlyph(config.gutter.separator, ""),

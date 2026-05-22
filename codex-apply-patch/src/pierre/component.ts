@@ -32,6 +32,16 @@ interface RenderSegment {
   bold?: boolean;
 }
 
+interface RenderedRow {
+  row: DiffRow;
+  lines: string[];
+}
+
+interface RenderedBlock {
+  lines: string[];
+  rows?: RenderedRow[];
+}
+
 export interface PierreInlineDiffOptions {
   maxVisibleLines?: number;
   showFileHeaders?: boolean;
@@ -150,16 +160,18 @@ export class PierreInlineDiffComponent implements Component {
       this.payloads.length,
     );
     const safeWidth = Math.max(20, width);
-    const lines: string[] = [];
+    const blocks: RenderedBlock[] = [];
 
     for (let i = 0; i < this.config.spacing.beforeDiff; i += 1) {
-      lines.push(renderBlankLine(safeWidth, this.palette.editorBg));
+      blocks.push({ lines: [renderBlankLine(safeWidth, this.palette.editorBg)] });
     }
 
     for (let i = 0; i < this.payloads.length; i++) {
       const payload = this.payloads[i]!;
       if (this.showFileHeaders || this.payloads.length > 1) {
-        lines.push(renderFileHeader(payload, this.palette, this.config, safeWidth));
+        blocks.push({
+          lines: [renderFileHeader(payload, this.palette, this.config, safeWidth)],
+        });
       }
 
       const highlighted = this.highlightedFor(payload)[this.palette.appearance];
@@ -169,26 +181,22 @@ export class PierreInlineDiffComponent implements Component {
         this.palette,
         this.config,
       );
-      for (const row of rows) {
-        lines.push(...this.renderRow(payload, row, safeWidth));
+      for (const section of groupDiffRows(rows)) {
+        const renderedRows = section.map((row) => ({
+          row,
+          lines: this.renderRow(payload, row, safeWidth),
+        }));
+        blocks.push({
+          rows: renderedRows,
+          lines: renderedRows.flatMap((row) => row.lines),
+        });
       }
     }
 
+    const lines = blocks.flatMap((block) => block.lines);
     if (lines.length <= this.maxVisibleLines) return lines;
 
-    const visible = Math.max(1, this.maxVisibleLines - 1);
-    return [
-      ...lines.slice(0, visible),
-      renderHunkNoticeLine(
-        formatCountLabel(
-          this.config.hunk.moreDiffLabel,
-          lines.length - visible,
-        ),
-        this.palette,
-        this.config,
-        safeWidth,
-      ),
-    ];
+    return this.truncateBlocks(blocks, lines.length, safeWidth);
   }
 
   invalidate(): void {}
@@ -287,6 +295,76 @@ export class PierreInlineDiffComponent implements Component {
       this.highlightedByKey.set(key, payload.highlighted);
     }
   }
+
+  private truncateBlocks(
+    blocks: RenderedBlock[],
+    totalLines: number,
+    width: number,
+  ): string[] {
+    const visibleLimit = Math.max(1, this.maxVisibleLines - 1);
+    const out: string[] = [];
+
+    for (const block of blocks) {
+      const remaining = visibleLimit - out.length;
+      if (remaining <= 0) break;
+
+      if (block.lines.length <= remaining) {
+        out.push(...block.lines);
+        continue;
+      }
+
+      if (!block.rows) break;
+
+      const sectionHasChanges = block.rows.some((row) => isChangedRow(row.row));
+      const partial: string[] = [];
+      let partialHasChanges = false;
+      for (const row of block.rows) {
+        if (partial.length + row.lines.length > remaining) break;
+        partial.push(...row.lines);
+        partialHasChanges ||= isChangedRow(row.row);
+      }
+
+      // Avoid showing the context-only prefix of a later hunk when the actual
+      // modified lines would be hidden behind the truncation notice.
+      if (partial.length > 0 && (partialHasChanges || !sectionHasChanges)) {
+        out.push(...partial);
+      }
+      break;
+    }
+
+    return [
+      ...out,
+      renderHunkNoticeLine(
+        formatCountLabel(
+          this.config.hunk.moreDiffLabel,
+          totalLines - out.length,
+        ),
+        this.palette,
+        this.config,
+        width,
+      ),
+    ];
+  }
+}
+
+function groupDiffRows(rows: DiffRow[]): DiffRow[][] {
+  const sections: DiffRow[][] = [];
+  let current: DiffRow[] = [];
+
+  for (const row of rows) {
+    if (row.kind === "collapsed" && current.length > 0) {
+      sections.push(current);
+      current = [];
+    }
+    current.push(row);
+  }
+
+  if (current.length > 0) sections.push(current);
+  return sections;
+}
+
+function isChangedRow(row: DiffRow): boolean {
+  return row.kind === "line" && row.lineType !== "context";
 }
 
 function renderFileHeader(
@@ -360,7 +438,11 @@ function linePrefixSegments(
   };
   const number = {
     text:
-      formatLineNumber(row.lineNumber, lineNumberWidth) +
+      formatLineNumber(
+        row.lineNumber,
+        lineNumberWidth,
+        config.gutter.lineNumberAlign,
+      ) +
       " ".repeat(config.gutter.lineNumberPaddingRight),
     fg: row.lineNumberFg,
     bg: lineNumberBg(row.lineType, palette),
@@ -391,7 +473,11 @@ function linePrefixText(
   config: PierreRendererConfig,
 ): string {
   const number =
-    formatLineNumber(row.lineNumber, lineNumberWidth) +
+    formatLineNumber(
+      row.lineNumber,
+      lineNumberWidth,
+      config.gutter.lineNumberAlign,
+    ) +
     " ".repeat(config.gutter.lineNumberPaddingRight);
   const bar = lineBar(row.lineType, config);
   const pad = " ".repeat(config.layout.leftPadding);
@@ -620,8 +706,14 @@ function payloadKey(payload: PierreDiffPayload): string {
   ].join("\u0000");
 }
 
-function formatLineNumber(lineNumber: number | undefined, width: number): string {
-  return lineNumber === undefined ? " ".repeat(width) : String(lineNumber).padStart(width, " ");
+function formatLineNumber(
+  lineNumber: number | undefined,
+  width: number,
+  align: "left" | "right" = "right",
+): string {
+  if (lineNumber === undefined) return " ".repeat(width);
+  const text = String(lineNumber);
+  return align === "left" ? text.padEnd(width, " ") : text.padStart(width, " ");
 }
 
 function changeLabel(type: string): string {
