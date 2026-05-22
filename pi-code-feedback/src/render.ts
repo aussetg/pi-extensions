@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { formatTouchedRange } from "./diagnostics/ranges.ts";
 import type { CodeFeedbackRuntime } from "./runtime.ts";
-import type { CompletedEdit, DelayedDiagnosticFeedback, DiagnosticFilterResult, DiagnosticSeverity, DiagnosticSnapshot, FormatServiceStatus, FormatterSummary, LinkedDiagnostic, LspDiagnostic, LspServiceStatus } from "./types.ts";
+import type { CodeFeedbackTiming, CompletedEdit, DelayedDiagnosticFeedback, DiagnosticFilterResult, DiagnosticSeverity, DiagnosticSnapshot, FormatServiceStatus, FormatterSummary, LinkedDiagnostic, LspDiagnostic, LspServiceStatus } from "./types.ts";
 
 export interface FooterTheme {
   fg?: (color: string, text: string) => string;
@@ -30,6 +30,15 @@ export function renderStatus(runtime: CodeFeedbackRuntime, lspStatus?: LspServic
   }
   if (runtime.lastError) {
     lines.push(`  last error: ${runtime.lastError}`);
+  }
+
+  const recentTimedEdits = runtime.completedEdits.filter((edit) => edit.timing).slice(-5).reverse();
+  if (recentTimedEdits.length > 0) {
+    lines.push("", "  recent edit timings:");
+    for (const edit of recentTimedEdits) {
+      const relative = path.relative(runtime.projectRoot, edit.filePath) || edit.filePath;
+      lines.push(`    ${relative}: ${formatTimingSummary(edit.timing!)}`);
+    }
   }
 
   if (lspStatus && lspStatus.clients.length > 0) {
@@ -136,6 +145,9 @@ export function renderDiagnosticsStatus(runtime: CodeFeedbackRuntime, target?: s
     if (edit.diagnosticFilter) {
       const summary = edit.diagnosticFilter.summary;
       lines.push(`      diagnostics: ${summary.shownDiagnostics}/${summary.linkedDiagnostics} linked shown, ${summary.hiddenUnrelated} unrelated hidden`);
+    }
+    if (edit.timing) {
+      lines.push(`      timing: ${formatTimingSummary(edit.timing)}`);
     }
   }
 
@@ -279,6 +291,25 @@ function formatFormatterSummary(formatter: FormatterSummary, projectRoot?: strin
     parts.push(`format failed: ${name}: ${first}`);
   }
   return parts.join("; ");
+}
+
+function formatTimingSummary(timing: CodeFeedbackTiming): string {
+  const slowPhases = timing.phases
+    .filter((phase) => phase.durationMs >= 0.05)
+    .sort((left, right) => right.durationMs - left.durationMs)
+    .slice(0, 4)
+    .map((phase) => `${formatTimingPhaseName(phase.name)} ${formatDurationMs(phase.durationMs)}`);
+  return `total ${formatDurationMs(timing.totalMs)}${slowPhases.length > 0 ? ` (${slowPhases.join(", ")})` : ""}`;
+}
+
+function formatTimingPhaseName(name: string): string {
+  return name.replace(/^tool_(call|result)\./, "").replace(/^delayed\./, "delayed ").replace(/_/g, " ");
+}
+
+function formatDurationMs(ms: number): string {
+  if (ms < 10) return `${ms.toFixed(2)}ms`;
+  if (ms < 100) return `${ms.toFixed(1)}ms`;
+  return `${Math.round(ms)}ms`;
 }
 
 function countSeverities(diagnostics: LinkedDiagnostic[]): Record<DiagnosticSeverity, number> {

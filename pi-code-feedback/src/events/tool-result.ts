@@ -7,6 +7,7 @@ import type { FormatService } from "../format/service.ts";
 import { readUtf8IfExists } from "../fs.ts";
 import type { LspService } from "../lsp/service.ts";
 import { resolveInputPath, shouldTrackFile } from "../paths.ts";
+import { addTimingPhase, createTimingRecorder, type TimingRecorder } from "../perf.ts";
 import type { PiToolResult } from "../pi.ts";
 import { renderDelayedDiagnosticFeedback, renderInlineDiagnosticFeedback } from "../render.ts";
 import { enqueueDelayedFeedback, hasPendingEditForFile, recordCompletedEdit, takePendingEdit, type CodeFeedbackRuntime } from "../runtime.ts";
@@ -51,34 +52,36 @@ export async function handleToolResult(
   }
 
   if (event.toolName !== "write" && event.toolName !== "edit") return;
+  const toolName = event.toolName;
 
   const filePath = resolveInputPath(event.input, ctx.cwd, runtime.projectRoot);
   if (!filePath || !shouldTrackFile(filePath, runtime.projectRoot)) return;
 
-  const pending = takePendingEdit(runtime, event.toolCallId, filePath, event.toolName);
+  const pending = takePendingEdit(runtime, event.toolCallId, filePath, toolName);
+  const timing = createTimingRecorder(pending?.timing);
   if (event.isError) return;
 
-  const afterAgentContent = readUtf8IfExists(filePath);
+  const afterAgentContent = timing.measure("tool_result.read_after", () => readUtf8IfExists(filePath));
   if (afterAgentContent === undefined) return;
 
   const detailsDiff = readDetailsDiff(event.details);
-  let touchedRanges = computeTouchedRanges({
+  let touchedRanges = timing.measure("tool_result.touched_ranges", () => computeTouchedRanges({
     filePath,
     beforeContent: pending?.beforeContent,
     afterContent: afterAgentContent,
-    toolName: event.toolName,
+    toolName,
     detailsDiff,
-  });
+  }));
 
-  const formatter = await maybeFormatFile(formatService, runtime, filePath, afterAgentContent, touchedRanges.length > 0);
+  const formatter = await timing.measureAsync("tool_result.format", () => maybeFormatFile(formatService, runtime, filePath, afterAgentContent, touchedRanges.length > 0));
   const finalContent = formatter?.finalContent ?? afterAgentContent;
   if (formatter?.changed) {
-    touchedRanges = mapTouchedRangesThroughFormatting(filePath, afterAgentContent, finalContent, touchedRanges);
+    touchedRanges = timing.measure("tool_result.format_map", () => mapTouchedRangesThroughFormatting(filePath, afterAgentContent, finalContent, touchedRanges));
   }
 
   const completed: CompletedEdit = {
-    id: pending?.id ?? event.toolCallId ?? `${runtime.turnIndex}:${runtime.writeIndex}:${event.toolName}:${filePath}:result`,
-    toolName: event.toolName,
+    id: pending?.id ?? event.toolCallId ?? `${runtime.turnIndex}:${runtime.writeIndex}:${toolName}:${filePath}:result`,
+    toolName,
     filePath,
     beforeContent: pending?.beforeContent,
     afterAgentContent,
@@ -92,14 +95,16 @@ export async function handleToolResult(
     formatter: summarizeFormatter(formatter),
   };
 
-  const afterRefresh = await captureAfterDiagnosticRefresh(lspService, filePath, finalContent, runtime);
+  const afterRefresh = await timing.measureAsync("tool_result.after_diagnostics", () => captureAfterDiagnosticRefresh(lspService, filePath, finalContent, runtime));
   const afterDiagnostics = afterRefresh?.fresh
     ? afterRefresh.snapshot
     : readDiagnosticSnapshotFromDetails(event.details, ["afterDiagnostics", "postDiagnostics", "diagnostics"]);
-  attachDiagnosticFilter(event, pending, completed, runtime, afterDiagnostics);
-  recordCompletedEdit(runtime, completed);
+  timing.measure("tool_result.filter_diagnostics", () => attachDiagnosticFilter(event, pending, completed, runtime, afterDiagnostics));
+  completed.timing = timing.snapshot();
+  timing.measure("tool_result.record_completed", () => recordCompletedEdit(runtime, completed));
+  completed.timing = timing.snapshot();
   scheduleDelayedDiagnosticsIfNeeded(afterRefresh, lspService, runtime, completed, pending?.beforeDiagnostics, finalContent);
-  return appendInlineFeedback(event, completed, runtime);
+  return appendInlineFeedback(event, completed, runtime, timing);
 }
 
 async function handleApplyPatchToolResult(
@@ -114,6 +119,7 @@ async function handleApplyPatchToolResult(
   if (results.length === 0) return;
 
   const completedEdits: CompletedEdit[] = [];
+  const timingsByEditId = new Map<string, TimingRecorder>();
 
   for (const [index, result] of results.entries()) {
     if (result.status !== "completed") continue;
@@ -123,29 +129,30 @@ async function handleApplyPatchToolResult(
 
     const pendingId = applyPatchOperationId(event.toolCallId, runtime.turnIndex, runtime.writeIndex, index);
     const pending = takePendingEdit(runtime, pendingId, resultPath, "apply_patch");
+    const timing = createTimingRecorder(pending?.timing);
     const filePath = pending?.filePath ?? resultPath;
     if (!shouldTrackFile(filePath, runtime.projectRoot)) {
       forgetOriginalPathIfMoved(lspService, pending, filePath);
       continue;
     }
-    const afterAgentContent = result.type === "delete_file" ? undefined : readUtf8IfExists(filePath);
+    const afterAgentContent = result.type === "delete_file" ? undefined : timing.measure("tool_result.read_after", () => readUtf8IfExists(filePath));
     if (result.type !== "delete_file" && afterAgentContent === undefined) continue;
 
     const detailsDiff = typeof result.diff === "string" && result.diff.length > 0 ? result.diff : undefined;
     let touchedRanges = afterAgentContent === undefined
       ? []
-      : computeTouchedRanges({
+      : timing.measure("tool_result.touched_ranges", () => computeTouchedRanges({
           filePath,
           beforeContent: pending?.beforeContent,
           afterContent: afterAgentContent,
           toolName: "apply_patch",
           detailsDiff,
-        });
+        }));
 
-    const formatter = afterAgentContent === undefined ? undefined : await maybeFormatFile(formatService, runtime, filePath, afterAgentContent, touchedRanges.length > 0);
+    const formatter = afterAgentContent === undefined ? undefined : await timing.measureAsync("tool_result.format", () => maybeFormatFile(formatService, runtime, filePath, afterAgentContent, touchedRanges.length > 0));
     const finalContent = formatter?.finalContent ?? afterAgentContent;
     if (formatter?.changed && afterAgentContent !== undefined && finalContent !== undefined) {
-      touchedRanges = mapTouchedRangesThroughFormatting(filePath, afterAgentContent, finalContent, touchedRanges);
+      touchedRanges = timing.measure("tool_result.format_map", () => mapTouchedRangesThroughFormatting(filePath, afterAgentContent, finalContent, touchedRanges));
     }
 
     const completed: CompletedEdit = {
@@ -169,21 +176,24 @@ async function handleApplyPatchToolResult(
 
     const afterRefresh = finalContent === undefined
       ? undefined
-      : await captureAfterDiagnosticRefresh(lspService, filePath, finalContent, runtime);
+      : await timing.measureAsync("tool_result.after_diagnostics", () => captureAfterDiagnosticRefresh(lspService, filePath, finalContent, runtime));
     const afterDiagnostics = afterRefresh?.fresh
       ? afterRefresh.snapshot
       : readDiagnosticSnapshotFromDetails(event.details, ["afterDiagnostics", "postDiagnostics", "diagnostics"]);
-    attachDiagnosticFilter(event, pending, completed, runtime, afterDiagnostics);
-    recordCompletedEdit(runtime, completed);
+    timing.measure("tool_result.filter_diagnostics", () => attachDiagnosticFilter(event, pending, completed, runtime, afterDiagnostics));
+    completed.timing = timing.snapshot();
+    timing.measure("tool_result.record_completed", () => recordCompletedEdit(runtime, completed));
+    completed.timing = timing.snapshot();
     forgetOriginalPathIfMoved(lspService, pending, filePath);
     if (result.type === "delete_file") lspService?.forgetFile(filePath);
     if (finalContent !== undefined) {
       scheduleDelayedDiagnosticsIfNeeded(afterRefresh, lspService, runtime, completed, pending?.beforeDiagnostics, finalContent);
     }
     completedEdits.push(completed);
+    timingsByEditId.set(completed.id, timing);
   }
 
-  return appendInlineFeedbackForEdits(event, completedEdits, runtime);
+  return appendInlineFeedbackForEdits(event, completedEdits, runtime, timingsByEditId);
 }
 
 function forgetOriginalPathIfMoved(lspService: LspService | undefined, pending: PendingEdit | undefined, finalPath: string): void {
@@ -308,10 +318,12 @@ function scheduleDelayedDiagnosticsIfNeeded(
   if (completed.touchedRanges.length === 0) return;
   if (completed.diagnosticFilter?.linked.length) return;
 
+  const delayedStartedAt = Date.now();
   void lspService.diagnosticsForFileDetailed(completed.filePath, finalContent, {
     timeoutMs: Math.max(runtime.config.diagnostics.delayedTimeoutMs, runtime.config.diagnostics.timeoutMs),
     settleMs: runtime.config.diagnostics.settleMs,
   }).then((refresh) => {
+    completed.timing = addTimingPhase(completed.timing, "delayed.diagnostics", Date.now() - delayedStartedAt);
     if (!runtime.config.enabled || !runtime.config.lsp.enabled) return;
     if (!refresh?.fresh) return;
 
@@ -329,6 +341,7 @@ function scheduleDelayedDiagnosticsIfNeeded(
       text,
     });
   }).catch((error) => {
+    completed.timing = addTimingPhase(completed.timing, "delayed.diagnostics", Date.now() - delayedStartedAt);
     runtime.lastError = error instanceof Error ? error.message : String(error);
   });
 }
@@ -385,8 +398,11 @@ function severityRank(severity: LspDiagnostic["severity"]): number {
   }
 }
 
-function appendInlineFeedback(event: ToolResultEvent, completed: CompletedEdit, runtime: CodeFeedbackRuntime): PiToolResult | void {
-  const feedback = renderInlineDiagnosticFeedback(runtime, completed);
+function appendInlineFeedback(event: ToolResultEvent, completed: CompletedEdit, runtime: CodeFeedbackRuntime, timing?: TimingRecorder): PiToolResult | void {
+  const feedback = timing
+    ? timing.measure("tool_result.render", () => renderInlineDiagnosticFeedback(runtime, completed))
+    : renderInlineDiagnosticFeedback(runtime, completed);
+  if (timing) completed.timing = timing.snapshot();
   if (!feedback) return;
   const isStrictError = runtime.config.strict && completed.diagnosticFilter?.linked.some((linked) => linked.diagnostic.severity === "error");
   const result: PiToolResult = {
@@ -398,9 +414,21 @@ function appendInlineFeedback(event: ToolResultEvent, completed: CompletedEdit, 
   return result;
 }
 
-function appendInlineFeedbackForEdits(event: ToolResultEvent, completedEdits: CompletedEdit[], runtime: CodeFeedbackRuntime): PiToolResult | void {
+function appendInlineFeedbackForEdits(
+  event: ToolResultEvent,
+  completedEdits: CompletedEdit[],
+  runtime: CodeFeedbackRuntime,
+  timingsByEditId?: Map<string, TimingRecorder>,
+): PiToolResult | void {
   const renderedFeedback = completedEdits
-    .map((edit) => ({ edit, text: renderInlineDiagnosticFeedback(runtime, edit) }))
+    .map((edit) => {
+      const timing = timingsByEditId?.get(edit.id);
+      const text = timing
+        ? timing.measure("tool_result.render", () => renderInlineDiagnosticFeedback(runtime, edit))
+        : renderInlineDiagnosticFeedback(runtime, edit);
+      if (timing) edit.timing = timing.snapshot();
+      return { edit, text };
+    })
     .filter((entry): entry is { edit: CompletedEdit; text: string } => entry.text !== undefined);
   if (renderedFeedback.length === 0) return;
 
@@ -453,6 +481,7 @@ function toCodeFeedbackEditDetails(runtime: CodeFeedbackRuntime, edit: Completed
     filePath: edit.filePath,
     displayPath,
     touchedRanges: edit.touchedRanges,
+    timing: edit.timing,
     formatter: edit.formatter,
     diagnostics: filter
       ? {

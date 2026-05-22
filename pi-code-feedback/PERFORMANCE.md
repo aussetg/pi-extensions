@@ -13,6 +13,8 @@ Metrics per scenario:
 - main-process RSS start/end/peak
 - LSP child-process CPU and RSS when `/proc` exposes the child process tree
 
+Real sessions also record per-edit extension phase timings. Inspect them with `/lsp status` or `/lsp diagnostics [path]`; structured tool-result metadata includes the same `piCodeFeedback.edits[].timing` object for renderers.
+
 The useful comparison is not one number. We compare layers:
 
 1. `edit/disabled` — extension installed but `enabled=false`

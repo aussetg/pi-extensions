@@ -160,8 +160,19 @@ export interface CodeFeedbackEditDetails {
   filePath: string;
   displayPath: string;
   touchedRanges: TouchedRange[];
+  timing?: CodeFeedbackTiming;
   formatter?: FormatterSummary;
   diagnostics?: CodeFeedbackDiagnosticDetails;
+}
+
+export interface CodeFeedbackTimingPhase {
+  name: string;
+  durationMs: number;
+}
+
+export interface CodeFeedbackTiming {
+  totalMs: number;
+  phases: CodeFeedbackTimingPhase[];
 }
 
 export interface CodeFeedbackDiagnosticDetails {
@@ -179,6 +190,7 @@ export interface PendingEdit {
   turnIndex: number;
   writeIndex: number;
   startedAt: number;
+  timing?: CodeFeedbackTiming;
   applyPatchOperationIndex?: number;
   originalPath?: string;
 }
@@ -195,6 +207,7 @@ export interface CompletedEdit {
   writeIndex: number;
   startedAt: number;
   completedAt: number;
+  timing?: CodeFeedbackTiming;
   skippedReason?: string;
   detailsDiffPresent: boolean;
   formatter?: FormatterSummary;
