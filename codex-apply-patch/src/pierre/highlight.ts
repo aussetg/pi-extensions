@@ -76,13 +76,11 @@ export function hasHighlightedLines(highlighted: HighlightedDiffSet): boolean {
 
 export function flattenHighlightedLine(
   node: HastNode | undefined,
-  appearance: PierreAppearance,
+  _appearance: PierreAppearance,
   emphasisBg: string,
   fallbackText: string,
 ): DiffSpan[] {
   const spans: DiffSpan[] = [];
-  const colorVariable =
-    appearance === "light" ? "--diffs-token-light" : "--diffs-token-dark";
 
   const visit = (
     current: HastNode | undefined,
@@ -100,9 +98,12 @@ export function flattenHighlightedLine(
     }
 
     const properties = current.properties ?? {};
-    const styles = parseStyleValue(properties.style);
     const nextStyle: Pick<DiffSpan, "fg" | "bg"> = {
-      fg: styles.get(colorVariable) ?? styles.get("color") ?? inherited.fg,
+      // Pierre/Shiki token colors are intentionally ignored here. The terminal
+      // renderer should inherit Pi's active theme, so syntax-level colors must
+      // not smuggle Pierre's palette into the TUI. We still keep Pierre's
+      // token tree so changed-word spans can carry the row-local emphasis bg.
+      fg: inherited.fg,
       bg: Object.prototype.hasOwnProperty.call(properties, "data-diff-span")
         ? emphasisBg
         : inherited.bg,
@@ -177,22 +178,6 @@ function normalizeHighlightedDiffCode(code: unknown): HighlightedDiffCode {
 
 function tabify(text: string): string {
   return text.replace(/\t/g, "    ");
-}
-
-function parseStyleValue(styleValue: unknown): Map<string, string> {
-  const styles = new Map<string, string>();
-  if (typeof styleValue !== "string") return styles;
-
-  for (const segment of styleValue.split(";")) {
-    const separator = segment.indexOf(":");
-    if (separator <= 0) continue;
-
-    const key = segment.slice(0, separator).trim();
-    const value = segment.slice(separator + 1).trim();
-    if (key && value) styles.set(key, value);
-  }
-
-  return styles;
 }
 
 function mergeSpan(target: DiffSpan[], next: DiffSpan): void {

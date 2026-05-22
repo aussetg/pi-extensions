@@ -309,21 +309,33 @@ function renderSegments(
 }
 
 function openAnsi(style: { fg?: string; bg?: string; bold?: boolean }): string {
-  const codes: string[] = [];
-  codes.push(style.bold ? "1" : "22");
-
-  const fg = toRgb(style.fg);
-  codes.push(fg ? `38;2;${fg.r};${fg.g};${fg.b}` : "39");
-
-  const bg = toRgb(style.bg);
-  codes.push(bg ? `48;2;${bg.r};${bg.g};${bg.b}` : "49");
-
-  return `\u001b[${codes.join(";")}m`;
+  return [
+    `\u001b[${style.bold ? "1" : "22"}m`,
+    colorToAnsi(style.fg, "fg"),
+    colorToAnsi(style.bg, "bg"),
+  ].join("");
 }
 
-function toRgb(hex: string | undefined) {
-  const normalized = hex?.trim();
-  if (!normalized || !/^#[0-9a-fA-F]{6}$/.test(normalized)) return undefined;
+function colorToAnsi(
+  color: string | undefined,
+  slot: "fg" | "bg",
+): string {
+  const reset = slot === "fg" ? "\u001b[39m" : "\u001b[49m";
+  const normalized = color?.trim();
+  if (!normalized) return reset;
+
+  if (normalized.includes("\u001b[")) return normalized;
+
+  const rgb = toRgb(normalized);
+  if (!rgb) return reset;
+
+  const prefix = slot === "fg" ? "38" : "48";
+  return `\u001b[${prefix};2;${rgb.r};${rgb.g};${rgb.b}m`;
+}
+
+function toRgb(hex: string) {
+  const normalized = hex.trim();
+  if (!/^#[0-9a-fA-F]{6}$/.test(normalized)) return undefined;
 
   return {
     r: Number.parseInt(normalized.slice(1, 3), 16),
