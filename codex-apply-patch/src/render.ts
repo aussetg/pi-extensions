@@ -191,6 +191,33 @@ function toolBackground(
   return (text: string) => theme.bg!(color, text);
 }
 
+class ApplyPatchTextResultComponent implements Component {
+  private text: string;
+  private background: ((text: string) => string) | undefined;
+  private footerLines: number;
+
+  constructor(
+    text: string,
+    theme: ThemeLike,
+    context?: ShellContextLike,
+  ) {
+    this.text = text;
+    this.background = toolBackground(theme, context);
+    this.footerLines = getPierreRendererConfig().spacing.afterDiff;
+  }
+
+  render(width: number): string[] {
+    const lines = new Text(this.text, 1, 0, this.background).render(width);
+    for (let i = 0; i < this.footerLines; i += 1) {
+      const blank = " ".repeat(Math.max(0, width));
+      lines.push(this.background ? this.background(blank) : blank);
+    }
+    return lines;
+  }
+
+  invalidate(): void {}
+}
+
 const DEGRADED_PIERRE_CACHE_LIMIT = 128;
 const degradedPierreCache = new Map<string, PierreDiffPayload | null>();
 
@@ -407,7 +434,10 @@ export function renderApplyPatchResult(
   context?: ShellContextLike,
 ) {
   const renderText = (text: string) =>
-    new Text(`${text}\n`, 1, 0, toolBackground(theme, { ...context, isPartial }));
+    new ApplyPatchTextResultComponent(`${text}\n`, theme, {
+      ...context,
+      isPartial,
+    });
 
   const details = result.details as ApplyPatchDetails | undefined;
   if (isPartial) {
