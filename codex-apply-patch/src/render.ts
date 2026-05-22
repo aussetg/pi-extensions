@@ -261,14 +261,12 @@ class ApplyPatchPierreResultComponent implements Component {
     payloads: PierreDiffPayload[],
     theme: ThemeLike,
     options: {
-      maxVisibleLines: number;
       footerText: string;
       expanded: boolean;
       invalidate?: () => void;
     },
   ) {
     this.diff = new PierreInlineDiffComponent(payloads, theme, {
-      maxVisibleLines: options.maxVisibleLines,
       showFileHeaders: payloads.length > 1,
       expandCollapsedHunks: options.expanded,
       onInvalidate: options.invalidate,
@@ -280,14 +278,12 @@ class ApplyPatchPierreResultComponent implements Component {
     payloads: PierreDiffPayload[],
     theme: ThemeLike,
     options: {
-      maxVisibleLines: number;
       footerText: string;
       expanded: boolean;
       invalidate?: () => void;
     },
   ): void {
     this.diff.update(payloads, theme, {
-      maxVisibleLines: options.maxVisibleLines,
       showFileHeaders: payloads.length > 1,
       expandCollapsedHunks: options.expanded,
       onInvalidate: options.invalidate,
@@ -320,7 +316,6 @@ function renderPierrePreviews(
   if (payloads.length === 0 || payloads.length !== previews.length) return undefined;
 
   const options = {
-    maxVisibleLines: maxPierreVisibleLines(expanded),
     footerText,
     expanded,
     invalidate: context?.invalidate,
@@ -331,18 +326,6 @@ function renderPierrePreviews(
       : new ApplyPatchPierreResultComponent(payloads, theme, options);
   component.update(payloads, theme, options);
   return component;
-}
-
-function maxPierreVisibleLines(expanded: boolean): number {
-  const config = getPierreRendererConfig();
-  const rows = typeof process.stdout.rows === "number" ? process.stdout.rows : 40;
-  const expandedLimit = Math.max(
-    10,
-    Math.floor(rows * config.layout.expandedMaxVisibleRatio),
-  );
-  return expanded
-    ? expandedLimit
-    : Math.min(expandedLimit, config.layout.maxVisibleLines);
 }
 
 function isPierreDiffPayload(value: unknown): value is PierreDiffPayload {

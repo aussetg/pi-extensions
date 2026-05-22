@@ -33,7 +33,6 @@ interface RenderSegment {
 }
 
 export interface PierreInlineDiffOptions {
-  maxVisibleLines?: number;
   showFileHeaders?: boolean;
   expandCollapsedHunks?: boolean;
   onInvalidate?: () => void;
@@ -88,9 +87,7 @@ export class PierreInlineDiffComponent implements Component {
   private theme: PiThemeLike;
   private config: PierreRendererConfig;
   private palette: PierreTerminalPalette;
-  private maxVisibleLines: number;
   private showFileHeaders: boolean;
-  private explicitMaxVisibleLines: number | undefined;
   private explicitShowFileHeaders: boolean | undefined;
   private expandCollapsedHunks: boolean;
   private invalidateView: (() => void) | undefined;
@@ -104,14 +101,11 @@ export class PierreInlineDiffComponent implements Component {
   ) {
     this.payloads = normalizePayloads(payloads);
     this.theme = theme;
-    this.explicitMaxVisibleLines = options.maxVisibleLines;
     this.explicitShowFileHeaders = options.showFileHeaders;
     this.expandCollapsedHunks = Boolean(options.expandCollapsedHunks);
     this.invalidateView = options.onInvalidate;
     this.config = getPierreRendererConfig();
     this.palette = getPierrePalette(theme, this.config);
-    this.maxVisibleLines =
-      options.maxVisibleLines ?? this.config.layout.maxVisibleLines;
     this.showFileHeaders = resolveShowFileHeaders(
       this.config,
       options.showFileHeaders,
@@ -127,14 +121,11 @@ export class PierreInlineDiffComponent implements Component {
   ): void {
     this.payloads = normalizePayloads(payloads);
     this.theme = theme;
-    this.explicitMaxVisibleLines = options.maxVisibleLines;
     this.explicitShowFileHeaders = options.showFileHeaders;
     this.expandCollapsedHunks = Boolean(options.expandCollapsedHunks);
     this.invalidateView = options.onInvalidate;
     this.config = getPierreRendererConfig();
     this.palette = getPierrePalette(theme, this.config);
-    this.maxVisibleLines =
-      options.maxVisibleLines ?? this.config.layout.maxVisibleLines;
     this.showFileHeaders = resolveShowFileHeaders(
       this.config,
       options.showFileHeaders,
@@ -146,8 +137,6 @@ export class PierreInlineDiffComponent implements Component {
   render(width: number): string[] {
     this.config = getPierreRendererConfig();
     this.palette = getPierrePalette(this.theme, this.config);
-    this.maxVisibleLines =
-      this.explicitMaxVisibleLines ?? this.config.layout.maxVisibleLines;
     this.showFileHeaders = resolveShowFileHeaders(
       this.config,
       this.explicitShowFileHeaders,
@@ -258,7 +247,11 @@ export class PierreInlineDiffComponent implements Component {
     const piKey = `${key}:${this.theme.name ?? ""}:${this.config.syntaxHighlight.maxLines}:${this.config.syntaxHighlight.maxLineLength}`;
     let piHighlighted = this.piHighlightedByKey.get(piKey);
     if (!piHighlighted) {
-      piHighlighted = buildPiHighlightedDiff(payload.metadata, this.config);
+      piHighlighted = buildPiHighlightedDiff(
+        payload.metadata,
+        this.config,
+        this.theme,
+      );
       this.piHighlightedByKey.set(piKey, piHighlighted);
       if (this.piHighlightedByKey.size > 128) {
         const oldestKey = this.piHighlightedByKey.keys().next().value;

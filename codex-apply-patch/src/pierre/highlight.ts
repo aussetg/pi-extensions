@@ -1,7 +1,7 @@
 import type { FileDiffMetadata } from "../../node_modules/@pierre/diffs/dist/types.js";
 import { highlightCode } from "@mariozechner/pi-coding-agent";
 import type { PierreRendererConfig } from "./config.ts";
-import type { PierreTerminalPalette } from "./theme.ts";
+import type { PiThemeLike, PierreTerminalPalette } from "./theme.ts";
 import type {
   DiffSpan,
   HastNode,
@@ -15,13 +15,15 @@ import { emptyHighlightedDiffSet } from "./types.ts";
 export async function loadHighlightedDiff(
   metadata: FileDiffMetadata,
   config: PierreRendererConfig,
+  theme?: PiThemeLike,
 ): Promise<HighlightedDiffSet> {
-  return buildPiHighlightedDiff(metadata, config);
+  return buildPiHighlightedDiff(metadata, config, theme);
 }
 
 export function buildPiHighlightedDiff(
   metadata: FileDiffMetadata,
   config: PierreRendererConfig,
+  theme?: PiThemeLike,
 ): HighlightedDiffSet {
   if (!config.syntaxHighlight.enabled) return emptyHighlightedDiffSet();
 
@@ -31,8 +33,8 @@ export function buildPiHighlightedDiff(
   }
 
   const lang = metadata.lang ?? "text";
-  const deletion = highlightAnsiLines(metadata.deletionLines, lang, config);
-  const addition = highlightAnsiLines(metadata.additionLines, lang, config);
+  const deletion = highlightAnsiLines(metadata.deletionLines, lang, config, theme);
+  const addition = highlightAnsiLines(metadata.additionLines, lang, config, theme);
   if (!deletion.styled && !addition.styled) return emptyHighlightedDiffSet();
 
   const highlighted = {
@@ -120,19 +122,29 @@ function highlightAnsiLines(
   lines: string[],
   lang: string,
   config: PierreRendererConfig,
+  theme?: PiThemeLike,
 ): { lines: Array<HastNode | undefined>; styled: boolean } {
   if (lines.length === 0) return { lines: [], styled: false };
 
   const cleanLines = lines.map(cleanDiffLine);
+  if (cleanLines.some((line) => line.length > config.syntaxHighlight.maxLineLength)) {
+    return { lines: cleanLines.map(textNode), styled: false };
+  }
+
   try {
-    const highlightedLines = highlightCode(
+    const highlighter = highlightCode as (
+      code: string,
+      lang?: string,
+      theme?: PiThemeLike,
+    ) => string | string[];
+    const rawHighlighted = highlighter(
       cleanLines.join("\n"),
       isPlainTextLanguage(lang) ? undefined : lang,
+      theme,
     );
+    const highlightedLines = normalizeHighlightedLines(rawHighlighted);
     let styled = false;
     const nodes = cleanLines.map((line, index) => {
-      if (line.length > config.syntaxHighlight.maxLineLength) return textNode(line);
-
       const renderedLine = highlightedLines[index] ?? line;
       const parsed = ansiToSpans(renderedLine);
       styled ||= parsed.some((span) => Boolean(span.fg));
@@ -142,6 +154,10 @@ function highlightAnsiLines(
   } catch {
     return { lines: [], styled: false };
   }
+}
+
+function normalizeHighlightedLines(value: string | string[]): string[] {
+  return Array.isArray(value) ? value : value.split("\n");
 }
 
 function ansiSpansNode(spans: DiffSpan[]): HastNode | undefined {

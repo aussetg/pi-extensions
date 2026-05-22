@@ -74,10 +74,7 @@ export function registerApplyPatchTool(pi: ExtensionAPI): void {
       })();
 
       const failed = results.filter((r) => r.status === "failed");
-      const normalizationNotice =
-        warnings.length > 0
-          ? "WARNING: forbidden marker lines (for example '*** End Patch') were detected in update_file.diff and auto-removed. Only @@/space/+/- lines are valid."
-          : undefined;
+      const warningText = warnings.length > 0 ? warnings.join("\n") : undefined;
       const summaryLines = results
         .map((r) => {
           const opName =
@@ -97,15 +94,15 @@ export function registerApplyPatchTool(pi: ExtensionAPI): void {
           ? `${completedCount > 0 ? "Patch partially applied:" : "Patch was not applied:"}\n${summaryLines}`
           : `${failed.length} operation(s) failed`;
         throw new DiffError(
-          normalizationNotice
-            ? `${normalizationNotice}\n${baseError}`
+          warningText
+            ? `${warningText}\n${baseError}`
             : baseError,
         );
       }
 
       const previews = collectSuccessPreviews(results);
-      const contentText = normalizationNotice
-        ? `${summaryLines || "✓"}\n${normalizationNotice}`
+      const contentText = warningText
+        ? `${summaryLines || "✓"}\n${warningText}`
         : summaryLines || "✓";
 
       return {

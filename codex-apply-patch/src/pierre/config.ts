@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { homedir } from "node:os";
 
 export type PierreColorValue =
@@ -16,8 +16,6 @@ export interface PierreRendererConfig {
   };
   layout: {
     leftPadding: number;
-    maxVisibleLines: number;
-    expandedMaxVisibleRatio: number;
     showFileHeaders: "auto" | "always" | "never";
   };
   gutter: {
@@ -35,7 +33,6 @@ export interface PierreRendererConfig {
   };
   hunk: {
     collapsedLabel: string;
-    moreDiffLabel: string;
   };
   wordDiff: {
     enabled: boolean;
@@ -112,8 +109,6 @@ export const DEFAULT_PIERRE_RENDERER_CONFIG: PierreRendererConfig = {
   },
   layout: {
     leftPadding: 1,
-    maxVisibleLines: 18,
-    expandedMaxVisibleRatio: 0.7,
     showFileHeaders: "auto",
   },
   gutter: {
@@ -131,7 +126,6 @@ export const DEFAULT_PIERRE_RENDERER_CONFIG: PierreRendererConfig = {
   },
   hunk: {
     collapsedLabel: "... ({count} more {line|lines}, ctrl+o to expand)",
-    moreDiffLabel: "... ({count} more {line|lines}, ctrl+o to expand)",
   },
   wordDiff: {
     enabled: true,
@@ -194,41 +188,14 @@ export const DEFAULT_PIERRE_RENDERER_CONFIG: PierreRendererConfig = {
   },
 };
 
-let cachedConfig: PierreRendererConfig | undefined;
-let cachedMtime = -1;
+let cachedConfig: PierreRendererConfig = DEFAULT_PIERRE_RENDERER_CONFIG;
 
 export function getPierreRendererConfig(): PierreRendererConfig {
-  ensureDefaultConfigFile();
-
-  const mtime = configMtime();
-  if (cachedConfig && cachedMtime === mtime) return cachedConfig;
-
-  cachedMtime = mtime;
-  cachedConfig = loadConfigFile();
   return cachedConfig;
 }
 
-function ensureDefaultConfigFile(): void {
-  if (existsSync(PIERRE_CONFIG_PATH)) return;
-
-  try {
-    mkdirSync(dirname(PIERRE_CONFIG_PATH), { recursive: true });
-    writeFileSync(
-      PIERRE_CONFIG_PATH,
-      `${JSON.stringify(DEFAULT_PIERRE_RENDERER_CONFIG, null, 2)}\n`,
-      "utf8",
-    );
-  } catch {
-    // Rendering must not fail because config creation failed.
-  }
-}
-
-function configMtime(): number {
-  try {
-    return statSync(PIERRE_CONFIG_PATH).mtimeMs;
-  } catch {
-    return -1;
-  }
+export function reloadPierreRendererConfig(): void {
+  cachedConfig = loadConfigFile();
 }
 
 function loadConfigFile(): PierreRendererConfig {
@@ -267,12 +234,6 @@ function sanitizeConfig(config: PierreRendererConfig): PierreRendererConfig {
     layout: {
       ...config.layout,
       leftPadding: clampInt(config.layout.leftPadding, 0, 8),
-      maxVisibleLines: clampInt(config.layout.maxVisibleLines, 4, 200),
-      expandedMaxVisibleRatio: clampNumber(
-        config.layout.expandedMaxVisibleRatio,
-        0.2,
-        1,
-      ),
       showFileHeaders: ["auto", "always", "never"].includes(
         config.layout.showFileHeaders,
       )
@@ -326,12 +287,6 @@ function clampInt(value: unknown, min: number, max: number): number {
   const number = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(number)) return min;
   return Math.min(max, Math.max(min, Math.round(number)));
-}
-
-function clampNumber(value: unknown, min: number, max: number): number {
-  const number = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(number)) return min;
-  return Math.min(max, Math.max(min, number));
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

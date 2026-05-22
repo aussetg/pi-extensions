@@ -1,13 +1,17 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { createApplyPatchToolPolicy, isCodexModel } from "./policy.ts";
+import { reloadPierreRendererConfig } from "./pierre/config.ts";
 import { registerApplyPatchTool } from "./tool.ts";
 
 export function registerApplyPatchExtension(pi: ExtensionAPI): void {
+  reloadPierreRendererConfig();
+
   const policy = createApplyPatchToolPolicy(pi);
 
   registerApplyPatchTool(pi);
 
   pi.on("session_start", async (_event, ctx) => {
+    reloadPierreRendererConfig();
     policy.captureBaseline();
     policy.apply(ctx);
   });
