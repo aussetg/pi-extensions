@@ -169,6 +169,7 @@ type PreparedTreeSitterLines = {
   lineStyles: Map<number, Array<SyntaxCategory | undefined>>;
 };
 type LineRange = { start: number; end: number };
+type CaptureStyle = { category: SyntaxCategory; priority: number };
 
 const nodeRequire = createRequire(import.meta.url);
 const treeSitterWorkerPath = join(
@@ -181,6 +182,10 @@ const TREE_SITTER_QUERY_FULL_COVERAGE_NUMERATOR = 3;
 const TREE_SITTER_QUERY_FULL_COVERAGE_DENOMINATOR = 4;
 let treeSitterRuntime: TreeSitterRuntime | null | undefined;
 const treeSitterQueryCache = new Map<string, TreeSitterQuery>();
+const syntaxStyleByCaptureName = Object.create(null) as Record<
+  string,
+  CaptureStyle | null | undefined
+>;
 
 function buildTreeSitterHighlightedDiff(
   metadata: FileDiffMetadata,
@@ -470,11 +475,10 @@ function paintCaptures(
   const categories: Array<SyntaxCategory | undefined> = [];
   for (const capture of captures) {
     if (!captureOverlapsStyledLine(capture.node, lineStyles)) continue;
-    const category = syntaxCategoryForCapture(capture.name);
-    if (!category) continue;
-    const priority = syntaxCategoryPriority(category);
-    categories[priority] = category;
-    (buckets[priority] ??= []).push(capture);
+    const style = syntaxStyleForCapture(capture.name);
+    if (!style) continue;
+    categories[style.priority] = style.category;
+    (buckets[style.priority] ??= []).push(capture);
   }
 
   for (let priority = 0; priority < buckets.length; priority++) {
@@ -594,6 +598,18 @@ function syntaxCategoryForCapture(name: string): SyntaxCategory | undefined {
     default:
       return undefined;
   }
+}
+
+function syntaxStyleForCapture(name: string): CaptureStyle | undefined {
+  const cached = syntaxStyleByCaptureName[name];
+  if (cached !== undefined) return cached ?? undefined;
+
+  const category = syntaxCategoryForCapture(name);
+  const style = category
+    ? { category, priority: syntaxCategoryPriority(category) }
+    : null;
+  syntaxStyleByCaptureName[name] = style;
+  return style ?? undefined;
 }
 
 function syntaxCategoryPriority(category: SyntaxCategory): number {
