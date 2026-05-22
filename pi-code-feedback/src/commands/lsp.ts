@@ -41,7 +41,7 @@ export function registerLspCommand(pi: PiApi, runtime: CodeFeedbackRuntime, lspS
             return;
           }
           setLspEnabled(runtime, true);
-          setFooterStatus(ctx, runtime);
+          setFooterStatus(ctx, runtime, lspService);
           notify(ctx, "pi-code-feedback LSP feedback enabled for this session. Use /lsp status to inspect it.", "info");
           return;
 
@@ -49,7 +49,7 @@ export function registerLspCommand(pi: PiApi, runtime: CodeFeedbackRuntime, lspS
         case "off":
           setLspEnabled(runtime, false);
           await lspService.shutdownAll();
-          setFooterStatus(ctx, runtime);
+          setFooterStatus(ctx, runtime, lspService);
           notify(ctx, "pi-code-feedback LSP feedback disabled for this session. Use /lsp enable to turn it back on.", "warning");
           return;
 
@@ -61,7 +61,7 @@ export function registerLspCommand(pi: PiApi, runtime: CodeFeedbackRuntime, lspS
           }
           restartLsp(runtime, "human command");
           await lspService.restart();
-          setFooterStatus(ctx, runtime);
+          setFooterStatus(ctx, runtime, lspService);
           notify(ctx, "pi-code-feedback LSP clients restarted and config will be reused on demand.", "info");
           return;
 
@@ -106,8 +106,8 @@ function notify(ctx: PiCommandContext, message: string, level: "info" | "warning
   ctx.ui.notify(message, level);
 }
 
-function setFooterStatus(ctx: PiCommandContext, runtime: CodeFeedbackRuntime): void {
-  ctx.ui.setStatus?.("pi-code-feedback-lsp", renderFooterStatus(runtime, ctx.ui.theme));
+function setFooterStatus(ctx: PiCommandContext, runtime: CodeFeedbackRuntime, lspService: LspService): void {
+  ctx.ui.setStatus?.("pi-code-feedback-lsp", renderFooterStatus(runtime, ctx.ui.theme, lspService.getStatus()));
 }
 
 function renderHelp(command: string): string {

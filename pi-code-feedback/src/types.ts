@@ -106,6 +106,8 @@ export interface LspClientStatus {
   openDocuments: number;
   diagnosticFiles: number;
   lastDiagnosticsAt?: number;
+  lastDiagnosticDurationMs?: number;
+  lastDiagnosticTimedOut?: boolean;
   lastError?: string;
   lastServerLog?: LspServerLog;
 }

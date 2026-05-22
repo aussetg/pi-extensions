@@ -99,6 +99,8 @@ export class LspClient {
   private diagnosticWaiters = new Map<string, Set<DiagnosticWaiter>>();
   private capabilities: unknown;
   private lastDiagnosticsAt?: number;
+  private lastDiagnosticDurationMs?: number;
+  private lastDiagnosticTimedOut?: boolean;
   private lastError?: string;
   private lastServerLog?: LspServerLog;
 
@@ -147,12 +149,15 @@ export class LspClient {
     });
 
     const fresh = await this.waitForDiagnostics(uri, version, touchedAt, options.timeoutMs, options.settleMs);
+    const completedAt = Date.now();
+    this.lastDiagnosticDurationMs = completedAt - touchedAt;
+    this.lastDiagnosticTimedOut = !fresh;
     return {
       snapshot: this.snapshot(),
       fresh,
       timedOut: !fresh,
       requestedAt: touchedAt,
-      completedAt: Date.now(),
+      completedAt,
     };
   }
 
@@ -216,6 +221,8 @@ export class LspClient {
       openDocuments: this.documents.size,
       diagnosticFiles: this.diagnostics.size,
       lastDiagnosticsAt: this.lastDiagnosticsAt,
+      lastDiagnosticDurationMs: this.lastDiagnosticDurationMs,
+      lastDiagnosticTimedOut: this.lastDiagnosticTimedOut,
       lastError: this.lastError,
       lastServerLog: this.lastServerLog,
     };

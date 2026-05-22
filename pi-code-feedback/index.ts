@@ -40,7 +40,7 @@ export default function (piValue: unknown) {
       projectRoot: runtime.projectRoot,
       formatterOverrides: runtime.config.formatters,
     });
-    ctx.ui.setStatus?.("pi-code-feedback-lsp", renderFooterStatus(runtime, ctx.ui.theme));
+    ctx.ui?.setStatus?.("pi-code-feedback-lsp", renderFooterStatus(runtime, ctx.ui?.theme, lspService.getStatus()));
   });
 
   pi.on?.("turn_start", () => {
@@ -52,7 +52,9 @@ export default function (piValue: unknown) {
   });
 
   pi.on?.("tool_result", async (event, ctx) => {
-    return handleToolResult(event as Parameters<typeof handleToolResult>[0], ctx, runtime, lspService, formatService);
+    const result = await handleToolResult(event as Parameters<typeof handleToolResult>[0], ctx, runtime, lspService, formatService);
+    ctx.ui?.setStatus?.("pi-code-feedback-lsp", renderFooterStatus(runtime, ctx.ui?.theme, lspService.getStatus()));
+    return result;
   });
 
   pi.on?.("context", (event) => {

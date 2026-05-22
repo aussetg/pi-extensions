@@ -46,7 +46,8 @@ export function renderStatus(runtime: CodeFeedbackRuntime, lspStatus?: LspServic
     for (const client of lspStatus.clients) {
       const pid = client.pid ? ` pid=${client.pid}` : "";
       const last = client.lastDiagnosticsAt ? ` last_diag=${formatTimestamp(client.lastDiagnosticsAt)}` : "";
-      lines.push(`    ${client.id}: ${client.state}${pid} docs=${client.openDocuments} diag_files=${client.diagnosticFiles}${last}`);
+      const latency = formatClientDiagnosticLatency(client);
+      lines.push(`    ${client.id}: ${client.state}${pid} docs=${client.openDocuments} diag_files=${client.diagnosticFiles}${last}${latency ? ` diag_latency=${latency}` : ""}`);
       if (client.lastError) lines.push(`      error: ${client.lastError}`);
       if (client.lastServerLog) lines.push(`      server ${client.lastServerLog.level}: ${client.lastServerLog.message}`);
     }
@@ -212,9 +213,47 @@ export function renderDelayedContextMessage(feedback: DelayedDiagnosticFeedback[
   return [prefix, ...blocks].join("\n\n");
 }
 
-export function renderFooterStatus(runtime: CodeFeedbackRuntime, theme?: FooterTheme): string {
-  const text = runtime.config.enabled && runtime.config.lsp.enabled ? "lsp:on" : "lsp:off";
+export function renderFooterStatus(runtime: CodeFeedbackRuntime, theme?: FooterTheme, lspStatus?: LspServiceStatus): string {
+  const text = footerStatusText(runtime, lspStatus);
   return theme?.fg?.("dim", text) ?? text;
+}
+
+function footerStatusText(runtime: CodeFeedbackRuntime, lspStatus?: LspServiceStatus): string {
+  if (!runtime.config.enabled || !runtime.config.lsp.enabled) return "lsp: off";
+
+  const clients = (lspStatus?.clients ?? [])
+    .filter((client) => client.state === "ready" || client.state === "starting")
+    .sort(compareFooterClients);
+  if (clients.length === 0) return "lsp: idle";
+
+  const shown = clients.slice(0, 4).map(formatFooterClient);
+  const hidden = clients.length - shown.length;
+  return `lsp: ${shown.join(" ")}${hidden > 0 ? ` +${hidden}` : ""}`;
+}
+
+function formatFooterClient(client: LspServiceStatus["clients"][number]): string {
+  const label = footerClientLabel(client);
+  const latency = formatClientDiagnosticLatency(client);
+  const state = client.state === "starting" ? " starting" : "";
+  return `${label}${latency ? ` (${latency})` : state}`;
+}
+
+function footerClientLabel(client: LspServiceStatus["clients"][number]): string {
+  const commandName = path.basename(client.command);
+  if (commandName === "ty" || commandName === "ruff") return commandName;
+  if (client.id === "python-ruff") return "ruff";
+  if (client.id === "python" && commandName === "ty") return "ty";
+  return client.id;
+}
+
+function compareFooterClients(left: LspServiceStatus["clients"][number], right: LspServiceStatus["clients"][number]): number {
+  return footerClientLabel(left).localeCompare(footerClientLabel(right));
+}
+
+function formatClientDiagnosticLatency(client: LspServiceStatus["clients"][number]): string | undefined {
+  if (client.lastDiagnosticDurationMs === undefined) return undefined;
+  const duration = `${Math.max(0, Math.round(client.lastDiagnosticDurationMs))} ms`;
+  return client.lastDiagnosticTimedOut ? `timeout ${duration}` : duration;
 }
 
 function formatTimestamp(ms: number): string {
