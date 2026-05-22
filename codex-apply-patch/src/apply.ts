@@ -11,6 +11,11 @@ import {
   buildPierreDeletePayload,
   buildPierreUpdatePayload,
 } from "./pierre/metadata.ts";
+import { getPierreRendererConfig } from "./pierre/config.ts";
+import {
+  buildPiHighlightedDiff,
+  hasHighlightedLines,
+} from "./pierre/highlight.ts";
 import type { PierreDiffPayload } from "./pierre/types.ts";
 import {
   detectLineEnding,
@@ -196,6 +201,14 @@ export interface PreparedApplyTask {
   diff?: string;
   moveRel?: string;
   moveAbs?: string;
+}
+
+function withHighlightedPierre(pierre: PierreDiffPayload): PierreDiffPayload {
+  const highlighted = buildPiHighlightedDiff(
+    pierre.metadata,
+    getPierreRendererConfig(),
+  );
+  return hasHighlightedLines(highlighted) ? { ...pierre, highlighted } : pierre;
 }
 
 interface VirtualFileState {
@@ -459,7 +472,9 @@ export async function applyOperations(
             type,
             path: rel,
             status: "completed",
-            pierre: buildPierreCreatePayload({ path: rel, newContent: content }),
+            pierre: withHighlightedPierre(
+              buildPierreCreatePayload({ path: rel, newContent: content }),
+            ),
           },
           mutation: { kind: "write", abs, content, replace: false },
           fuzz: 0,
@@ -502,12 +517,14 @@ export async function applyOperations(
         );
         const finalOutput = bom + restoreLineEndings(output, originalEnding);
         const buildPierre = (newPath: string) =>
-          buildPierreUpdatePayload({
-            oldPath: rel,
-            newPath,
-            oldContent: current,
-            newContent: output,
-          });
+          withHighlightedPierre(
+            buildPierreUpdatePayload({
+              oldPath: rel,
+              newPath,
+              oldContent: current,
+              newContent: output,
+            }),
+          );
         const warning =
           normalizedMarkers && normalizedMarkers.length > 0
             ? `Warning: forbidden marker lines were auto-removed: ${normalizedMarkers.join(", ")}. Use only @@/space/+/- lines.`
@@ -601,10 +618,12 @@ export async function applyOperations(
         try {
           const contentState = await getVirtualState(abs, true);
           if (contentState.content !== undefined) {
-            pierre = buildPierreDeletePayload({
-              path: rel,
-              oldContent: contentState.content,
-            });
+            pierre = withHighlightedPierre(
+              buildPierreDeletePayload({
+                path: rel,
+                oldContent: contentState.content,
+              }),
+            );
           }
         } catch {
           // Delete previews are best-effort. Unlink permission depends on the

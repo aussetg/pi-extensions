@@ -24,6 +24,16 @@ import type {
 import { emptyHighlightedDiffSet } from "./types.ts";
 
 const ANSI_RESET = "\u001b[22m\u001b[39m\u001b[49m";
+const GLOBAL_PI_HIGHLIGHT_CACHE_KEY = "__codexApplyPatchPiHighlightCache";
+const PI_HIGHLIGHT_CACHE_LIMIT = 512;
+
+function globalPiHighlightCache(): Map<string, HighlightedDiffSet> {
+  const scope = globalThis as typeof globalThis & {
+    [GLOBAL_PI_HIGHLIGHT_CACHE_KEY]?: Map<string, HighlightedDiffSet>;
+  };
+  scope[GLOBAL_PI_HIGHLIGHT_CACHE_KEY] ??= new Map<string, HighlightedDiffSet>();
+  return scope[GLOBAL_PI_HIGHLIGHT_CACHE_KEY];
+}
 
 interface RenderSegment {
   text: string;
@@ -92,7 +102,7 @@ export class PierreInlineDiffComponent implements Component {
   private expandCollapsedHunks: boolean;
   private invalidateView: (() => void) | undefined;
   private highlightedByKey = new Map<string, HighlightedDiffSet>();
-  private piHighlightedByKey = new Map<string, HighlightedDiffSet>();
+  private piHighlightedByKey = globalPiHighlightCache();
 
   constructor(
     payloads: PierreDiffPayload | PierreDiffPayload[],
@@ -244,7 +254,16 @@ export class PierreInlineDiffComponent implements Component {
     if (!this.config.syntaxHighlight.enabled) return emptyHighlightedDiffSet();
 
     const key = payloadKey(payload);
-    const piKey = `${key}:${this.theme.name ?? ""}:${this.config.syntaxHighlight.maxLines}:${this.config.syntaxHighlight.maxLineLength}`;
+    const stored = this.highlightedByKey.get(key) ?? payload.highlighted;
+    if (stored && hasHighlightedLines(stored)) return stored;
+
+    const piKey = [
+      key,
+      this.theme.name ?? "",
+      this.config.syntaxHighlight.maxLines,
+      this.config.syntaxHighlight.maxLineLength,
+      syntaxPaletteKey(this.palette),
+    ].join("\u0000");
     let piHighlighted = this.piHighlightedByKey.get(piKey);
     if (!piHighlighted) {
       piHighlighted = buildPiHighlightedDiff(
@@ -253,18 +272,14 @@ export class PierreInlineDiffComponent implements Component {
         this.theme,
       );
       this.piHighlightedByKey.set(piKey, piHighlighted);
-      if (this.piHighlightedByKey.size > 128) {
+      if (this.piHighlightedByKey.size > PI_HIGHLIGHT_CACHE_LIMIT) {
         const oldestKey = this.piHighlightedByKey.keys().next().value;
         if (typeof oldestKey === "string") this.piHighlightedByKey.delete(oldestKey);
       }
     }
     if (hasHighlightedLines(piHighlighted)) return piHighlighted;
 
-    return (
-      this.highlightedByKey.get(key) ??
-      payload.highlighted ??
-      emptyHighlightedDiffSet()
-    );
+    return emptyHighlightedDiffSet();
   }
 
   private ingestHighlightedPayloads(): void {
@@ -274,6 +289,21 @@ export class PierreInlineDiffComponent implements Component {
       this.highlightedByKey.set(key, payload.highlighted);
     }
   }
+}
+
+function syntaxPaletteKey(palette: PierreTerminalPalette): string {
+  return [
+    palette.syntaxText,
+    palette.syntaxComment,
+    palette.syntaxKeyword,
+    palette.syntaxFunction,
+    palette.syntaxVariable,
+    palette.syntaxString,
+    palette.syntaxNumber,
+    palette.syntaxType,
+    palette.syntaxOperator,
+    palette.syntaxPunctuation,
+  ].join("\u001f");
 }
 
 function renderFileHeader(

@@ -1,5 +1,9 @@
 import type { FileDiffMetadata } from "../../node_modules/@pierre/diffs/dist/types.js";
-import { highlightCode } from "@mariozechner/pi-coding-agent";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import type { PierreRendererConfig } from "./config.ts";
 import type { PiThemeLike, PierreTerminalPalette } from "./theme.ts";
 import type {
@@ -23,7 +27,7 @@ export async function loadHighlightedDiff(
 export function buildPiHighlightedDiff(
   metadata: FileDiffMetadata,
   config: PierreRendererConfig,
-  theme?: PiThemeLike,
+  _theme?: PiThemeLike,
 ): HighlightedDiffSet {
   if (!config.syntaxHighlight.enabled) return emptyHighlightedDiffSet();
 
@@ -34,27 +38,21 @@ export function buildPiHighlightedDiff(
   }
 
   const lang = metadata.lang ?? "text";
-  const deletion = highlightAnsiLines(
-    metadata.deletionLines,
-    indexes.deletion,
+  const treeSitter = buildTreeSitterHighlightedDiff(
+    metadata,
+    indexes,
     lang,
     config,
-    theme,
   );
-  const addition = highlightAnsiLines(
-    metadata.additionLines,
-    indexes.addition,
-    lang,
-    config,
-    theme,
-  );
-  if (!deletion.styled && !addition.styled) return emptyHighlightedDiffSet();
+  if (treeSitter?.styled) {
+    const highlighted = {
+      deletionLines: treeSitter.deletionLines,
+      additionLines: treeSitter.additionLines,
+    };
+    return { dark: highlighted, light: highlighted };
+  }
 
-  const highlighted = {
-    deletionLines: deletion.lines,
-    additionLines: addition.lines,
-  };
-  return { dark: highlighted, light: highlighted };
+  return emptyHighlightedDiffSet();
 }
 
 export function normalizeHighlightedDiffSet(
@@ -131,97 +129,435 @@ export function flattenHighlightedLine(
       : [];
 }
 
-function highlightAnsiLines(
-  lines: string[],
-  indexes: number[],
+type TreeSitterLanguage = unknown;
+type TreeSitterNode = {
+  text: string;
+  startPosition: { row: number; column: number };
+  endPosition: { row: number; column: number };
+};
+type TreeSitterCapture = { name: string; node: TreeSitterNode };
+type TreeSitterQuery = {
+  captures: (node: unknown) => TreeSitterCapture[];
+};
+type TreeSitterParser = {
+  setLanguage: (language: TreeSitterLanguage) => void;
+  parse: (code: string) => { rootNode: unknown };
+};
+type TreeSitterParserConstructor = {
+  new (): TreeSitterParser;
+  Query: new (language: TreeSitterLanguage, source: string) => TreeSitterQuery;
+};
+type TreeSitterRuntime = {
+  Parser: TreeSitterParserConstructor;
+  languages: Map<string, TreeSitterLanguage>;
+  queries: Map<string, string>;
+};
+type HighlightLineResult = {
+  lines: Array<HastNode | undefined>;
+  styled: boolean;
+};
+
+const nodeRequire = createRequire(import.meta.url);
+const treeSitterWorkerPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "tree-sitter-worker.cjs",
+);
+let treeSitterRuntime: TreeSitterRuntime | null | undefined;
+const treeSitterQueryCache = new Map<string, TreeSitterQuery>();
+
+function buildTreeSitterHighlightedDiff(
+  metadata: FileDiffMetadata,
+  indexes: { deletion: number[]; addition: number[] },
   lang: string,
   config: PierreRendererConfig,
-  theme?: PiThemeLike,
-): { lines: Array<HastNode | undefined>; styled: boolean } {
+):
+  | {
+      deletionLines: Array<HastNode | undefined>;
+      additionLines: Array<HastNode | undefined>;
+      styled: boolean;
+    }
+  | undefined {
+  const languageKey = treeSitterLanguageKey(lang);
+  if (!languageKey) return undefined;
+
+  const runtime = getTreeSitterRuntime();
+  const language = runtime?.languages.get(languageKey);
+  const querySource = runtime?.queries.get(languageKey);
+  const highlightLines = (lines: string[], lineIndexes: number[]) => {
+    if (runtime && language && querySource) {
+      const inProcess = highlightTreeSitterLines(
+        runtime,
+        languageKey,
+        language,
+        querySource,
+        lines,
+        lineIndexes,
+        config,
+      );
+      if (inProcess.styled) return inProcess;
+    }
+
+    return highlightTreeSitterLinesWithWorker(
+      languageKey,
+      lines,
+      lineIndexes,
+      config,
+    );
+  };
+
+  const deletion = highlightLines(metadata.deletionLines, indexes.deletion);
+  const addition = highlightLines(metadata.additionLines, indexes.addition);
+
+  if (!deletion.styled && !addition.styled) return undefined;
+  return {
+    deletionLines: deletion.lines,
+    additionLines: addition.lines,
+    styled: true,
+  };
+}
+
+function getTreeSitterRuntime(): TreeSitterRuntime | undefined {
+  if (treeSitterRuntime !== undefined) return treeSitterRuntime ?? undefined;
+
+  try {
+    const Parser = nodeRequire("tree-sitter") as TreeSitterParserConstructor;
+    const TypeScript = nodeRequire("tree-sitter-typescript") as {
+      typescript?: TreeSitterLanguage;
+      tsx?: TreeSitterLanguage;
+    };
+    const JavaScript = nodeRequire("tree-sitter-javascript") as TreeSitterLanguage;
+    const jsQuery = readFileSync(
+      nodeRequire.resolve("tree-sitter-javascript/queries/highlights.scm"),
+      "utf8",
+    );
+    const tsQuery = readFileSync(
+      nodeRequire.resolve("tree-sitter-typescript/queries/highlights.scm"),
+      "utf8",
+    );
+    if (!TypeScript.typescript || !TypeScript.tsx) throw new Error("missing TS grammar");
+
+    treeSitterRuntime = {
+      Parser,
+      languages: new Map<string, TreeSitterLanguage>([
+        ["javascript", JavaScript],
+        ["typescript", TypeScript.typescript],
+        ["tsx", TypeScript.tsx],
+      ]),
+      queries: new Map<string, string>([
+        ["javascript", jsQuery],
+        ["typescript", `${jsQuery}\n${tsQuery}`],
+        ["tsx", `${jsQuery}\n${tsQuery}`],
+      ]),
+    };
+  } catch {
+    treeSitterRuntime = null;
+  }
+
+  return treeSitterRuntime ?? undefined;
+}
+
+function treeSitterLanguageKey(lang: string): string | undefined {
+  const normalized = lang.toLowerCase();
+  if (normalized === "typescript" || normalized === "ts") return "typescript";
+  if (normalized === "tsx") return "tsx";
+  if (
+    normalized === "javascript" ||
+    normalized === "js" ||
+    normalized === "jsx" ||
+    normalized === "mjs" ||
+    normalized === "cjs"
+  ) {
+    return "javascript";
+  }
+  return undefined;
+}
+
+function highlightTreeSitterLines(
+  runtime: TreeSitterRuntime,
+  languageKey: string,
+  language: TreeSitterLanguage,
+  querySource: string,
+  lines: string[],
+  indexes: number[],
+  config: PierreRendererConfig,
+): HighlightLineResult {
   if (lines.length === 0 || indexes.length === 0) {
+    return { lines: [], styled: false };
+  }
+
+  const cleanLines = lines.map(cleanDiffLine);
+  const visible = new Set(indexes);
+  const lineStyles = new Map<number, Array<SyntaxCategory | undefined>>();
+  for (const index of indexes) {
+    const line = cleanLines[index] ?? "";
+    if (line.length > config.syntaxHighlight.maxLineLength) continue;
+    lineStyles.set(index, new Array<SyntaxCategory | undefined>(line.length));
+  }
+  if (lineStyles.size === 0) return { lines: [], styled: false };
+
+  try {
+    const parser = new runtime.Parser();
+    parser.setLanguage(language);
+    const tree = parser.parse(cleanLines.join("\n"));
+    const query = treeSitterQuery(runtime, languageKey, language, querySource);
+    const captures = query
+      .captures(tree.rootNode)
+      .map((capture) => ({
+        ...capture,
+        category: syntaxCategoryForCapture(capture.name),
+      }))
+      .filter(
+        (capture): capture is TreeSitterCapture & { category: SyntaxCategory } =>
+          Boolean(capture.category),
+      )
+      .sort(
+        (a, b) =>
+          syntaxCategoryPriority(a.category) - syntaxCategoryPriority(b.category),
+      );
+
+    for (const capture of captures) {
+      paintCapture(cleanLines, lineStyles, visible, capture.node, capture.category);
+    }
+  } catch {
     return { lines: [], styled: false };
   }
 
   const out: Array<HastNode | undefined> = [];
   let styled = false;
-
-  for (const run of contiguousRuns(indexes)) {
-    let start = 0;
-    while (start < run.length) {
-      while (
-        start < run.length &&
-        cleanDiffLine(lines[run[start]!]).length >
-          config.syntaxHighlight.maxLineLength
-      ) {
-        start++;
-      }
-      if (start >= run.length) break;
-
-      let end = start + 1;
-      while (
-        end < run.length &&
-        cleanDiffLine(lines[run[end]!]).length <=
-          config.syntaxHighlight.maxLineLength
-      ) {
-        end++;
-      }
-
-      const subrun = run.slice(start, end);
-      const cleanLines = subrun.map((index) => cleanDiffLine(lines[index]));
-      const highlighted = highlightCleanLines(cleanLines, lang, theme);
-      if (highlighted) {
-        for (let i = 0; i < subrun.length; i++) {
-          const line = cleanLines[i] ?? "";
-          const renderedLine = highlighted[i] ?? line;
-          const parsed = ansiToSpans(renderedLine);
-          styled ||= parsed.some((span) => Boolean(span.fg));
-          out[subrun[i]!] = ansiSpansNode(parsed);
-        }
-      }
-
-      start = end;
-    }
+  for (const [index, styles] of lineStyles) {
+    if (!styles.some(Boolean)) continue;
+    const line = cleanLines[index] ?? "";
+    out[index] = syntaxSpansNode(spansFromLineStyles(line, styles));
+    styled = true;
   }
 
   return { lines: out, styled };
 }
 
-function highlightCleanLines(
-  cleanLines: string[],
-  lang: string,
-  theme?: PiThemeLike,
-): string[] | undefined {
-  const highlighted = callHighlightCode(cleanLines, lang, theme);
-  if (!theme || highlightedLinesHaveAnsi(highlighted)) return highlighted;
+function highlightTreeSitterLinesWithWorker(
+  languageKey: string,
+  lines: string[],
+  indexes: number[],
+  config: PierreRendererConfig,
+): HighlightLineResult {
+  if (lines.length === 0 || indexes.length === 0) {
+    return { lines: [], styled: false };
+  }
 
-  const fallback = callHighlightCode(cleanLines, lang);
-  return highlightedLinesHaveAnsi(fallback) ? fallback : highlighted;
+  const cleanLines = lines.map(cleanDiffLine);
+  const visible = new Set(indexes);
+  const lineStyles = new Map<number, Array<SyntaxCategory | undefined>>();
+  for (const index of indexes) {
+    const line = cleanLines[index] ?? "";
+    if (line.length > config.syntaxHighlight.maxLineLength) continue;
+    lineStyles.set(index, new Array<SyntaxCategory | undefined>(line.length));
+  }
+  if (lineStyles.size === 0) return { lines: [], styled: false };
+
+  const captures = treeSitterWorkerCaptures(
+    languageKey,
+    cleanLines,
+    [...lineStyles.keys()],
+  );
+  if (!captures) return { lines: [], styled: false };
+
+  for (const capture of captures) {
+    const category = syntaxCategoryForCapture(capture.name);
+    if (!category) continue;
+    paintCapture(cleanLines, lineStyles, visible, capture.node, category);
+  }
+
+  const out: Array<HastNode | undefined> = [];
+  let styled = false;
+  for (const [index, styles] of lineStyles) {
+    if (!styles.some(Boolean)) continue;
+    const line = cleanLines[index] ?? "";
+    out[index] = syntaxSpansNode(spansFromLineStyles(line, styles));
+    styled = true;
+  }
+
+  return { lines: out, styled };
 }
 
-function callHighlightCode(
-  cleanLines: string[],
-  lang: string,
-  theme?: PiThemeLike,
-): string[] | undefined {
+function treeSitterWorkerCaptures(
+  languageKey: string,
+  lines: string[],
+  indexes: number[],
+): TreeSitterCapture[] | undefined {
   try {
-    const highlighter = highlightCode as (
-      code: string,
-      lang?: string,
-      theme?: PiThemeLike,
-    ) => string | string[];
-    const rawHighlighted = highlighter(
-      cleanLines.join("\n"),
-      isPlainTextLanguage(lang) ? undefined : lang,
-      theme,
+    const result = spawnSync(
+      process.env.PI_TREE_SITTER_NODE ?? "node",
+      [treeSitterWorkerPath],
+      {
+        input: JSON.stringify({ languageKey, lines, indexes }),
+        encoding: "utf8",
+        maxBuffer: 16 * 1024 * 1024,
+      },
     );
-    return normalizeHighlightedLines(rawHighlighted);
+    if (result.status !== 0 || !result.stdout) return undefined;
+
+    const parsed = JSON.parse(result.stdout) as unknown;
+    if (!parsed || typeof parsed !== "object") return undefined;
+    const captures = (parsed as { captures?: unknown }).captures;
+    if (!Array.isArray(captures)) return undefined;
+
+    return captures
+      .map(normalizeWorkerCapture)
+      .filter((capture): capture is TreeSitterCapture => Boolean(capture))
+      .sort(
+        (a, b) =>
+          syntaxCategoryPriority(syntaxCategoryForCapture(a.name) ?? "text") -
+          syntaxCategoryPriority(syntaxCategoryForCapture(b.name) ?? "text"),
+      );
   } catch {
     return undefined;
   }
 }
 
-function highlightedLinesHaveAnsi(lines: string[] | undefined): boolean {
-  return Boolean(lines?.some((line) => /\u001b\[[0-9;]*m/.test(line)));
+function normalizeWorkerCapture(value: unknown): TreeSitterCapture | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const capture = value as {
+    name?: unknown;
+    startRow?: unknown;
+    startColumn?: unknown;
+    endRow?: unknown;
+    endColumn?: unknown;
+  };
+  if (typeof capture.name !== "string") return undefined;
+  if (
+    typeof capture.startRow !== "number" ||
+    typeof capture.startColumn !== "number" ||
+    typeof capture.endRow !== "number" ||
+    typeof capture.endColumn !== "number"
+  ) {
+    return undefined;
+  }
+
+  return {
+    name: capture.name,
+    node: {
+      text: "",
+      startPosition: { row: capture.startRow, column: capture.startColumn },
+      endPosition: { row: capture.endRow, column: capture.endColumn },
+    },
+  };
+}
+
+function treeSitterQuery(
+  runtime: TreeSitterRuntime,
+  languageKey: string,
+  language: TreeSitterLanguage,
+  querySource: string,
+): TreeSitterQuery {
+  const cached = treeSitterQueryCache.get(languageKey);
+  if (cached) return cached;
+
+  const query = new runtime.Parser.Query(language, querySource);
+  treeSitterQueryCache.set(languageKey, query);
+  return query;
+}
+
+function syntaxCategoryForCapture(name: string): SyntaxCategory | undefined {
+  const head = name.split(".")[0];
+  switch (head) {
+    case "comment":
+    case "keyword":
+    case "function":
+    case "string":
+    case "number":
+    case "type":
+    case "operator":
+    case "punctuation":
+      return head;
+    case "constructor":
+      return "type";
+    case "constant":
+      return "number";
+    case "property":
+    case "variable":
+      return "variable";
+    default:
+      return undefined;
+  }
+}
+
+function syntaxCategoryPriority(category: SyntaxCategory): number {
+  switch (category) {
+    case "punctuation":
+      return 10;
+    case "operator":
+      return 20;
+    case "variable":
+      return 30;
+    case "type":
+      return 40;
+    case "function":
+      return 50;
+    case "number":
+      return 60;
+    case "keyword":
+      return 70;
+    case "string":
+      return 80;
+    case "comment":
+      return 90;
+    case "text":
+      return 0;
+  }
+}
+
+function paintCapture(
+  lines: string[],
+  lineStyles: Map<number, Array<SyntaxCategory | undefined>>,
+  visible: Set<number>,
+  node: TreeSitterNode,
+  category: SyntaxCategory,
+): void {
+  const startRow = node.startPosition.row;
+  const endRow = node.endPosition.row;
+  for (let row = startRow; row <= endRow; row++) {
+    if (!visible.has(row)) continue;
+    const styles = lineStyles.get(row);
+    if (!styles) continue;
+
+    const line = lines[row] ?? "";
+    const start = row === startRow ? byteColumnToStringIndex(line, node.startPosition.column) : 0;
+    const end = row === endRow ? byteColumnToStringIndex(line, node.endPosition.column) : line.length;
+    for (let i = start; i < end; i++) styles[i] = category;
+  }
+}
+
+function byteColumnToStringIndex(line: string, column: number): number {
+  if (column <= 0) return 0;
+
+  let bytes = 0;
+  for (let i = 0; i < line.length;) {
+    const codePoint = line.codePointAt(i);
+    if (codePoint === undefined) break;
+    const char = String.fromCodePoint(codePoint);
+    const nextBytes = Buffer.byteLength(char, "utf8");
+    if (bytes + nextBytes > column) return i;
+    bytes += nextBytes;
+    i += char.length;
+  }
+
+  return line.length;
+}
+
+function spansFromLineStyles(
+  line: string,
+  styles: Array<SyntaxCategory | undefined>,
+): SyntaxSpan[] {
+  const spans: SyntaxSpan[] = [];
+  let offset = 0;
+  while (offset < line.length) {
+    const category = styles[offset];
+    let end = offset + 1;
+    while (end < line.length && styles[end] === category) end++;
+    spans.push({ text: line.slice(offset, end), category });
+    offset = end;
+  }
+  return spans;
 }
 
 function renderedLineIndexes(metadata: FileDiffMetadata): {
@@ -253,35 +589,26 @@ function addRange(target: Set<number>, start: number, count: number): void {
   for (let i = 0; i < count; i++) target.add(start + i);
 }
 
-function contiguousRuns(indexes: number[]): number[][] {
-  const runs: number[][] = [];
-  let current: number[] = [];
+type SyntaxSpan = { text: string; category?: SyntaxCategory };
 
-  for (const index of indexes) {
-    if (current.length === 0 || index === current[current.length - 1]! + 1) {
-      current.push(index);
-      continue;
-    }
-
-    runs.push(current);
-    current = [index];
-  }
-
-  if (current.length > 0) runs.push(current);
-  return runs;
-}
-
-function normalizeHighlightedLines(value: string | string[]): string[] {
-  return Array.isArray(value) ? value : value.split("\n");
-}
-
-function ansiSpansNode(spans: DiffSpan[]): HastNode | undefined {
+function syntaxSpansNode(spans: SyntaxSpan[]): HastNode | undefined {
   if (spans.length === 0) return undefined;
   return {
     type: "element",
     tagName: "span",
-    properties: { "data-pi-ansi-spans": spans },
-    children: [],
+    properties: {},
+    children: spans.map(syntaxSpanNode),
+  };
+}
+
+function syntaxSpanNode(span: SyntaxSpan): HastNode {
+  const text: HastNode = { type: "text", value: span.text };
+  if (!span.category) return text;
+  return {
+    type: "element",
+    tagName: "span",
+    properties: { "data-pi-syntax": span.category },
+    children: [text],
   };
 }
 
@@ -332,10 +659,6 @@ function syntaxColor(
   }
 }
 
-function isPlainTextLanguage(lang: string): boolean {
-  return lang === "text" || lang === "txt" || lang === "plain" || lang === "plaintext";
-}
-
 function normalizeAnsiSpans(value: unknown): DiffSpan[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const spans: DiffSpan[] = [];
@@ -352,77 +675,6 @@ function normalizeAnsiSpans(value: unknown): DiffSpan[] | undefined {
     });
   }
   return spans.length > 0 ? spans : undefined;
-}
-
-function ansiToSpans(text: string): DiffSpan[] {
-  const spans: DiffSpan[] = [];
-  const sgr = /\u001b\[([0-9;]*)m/g;
-  let offset = 0;
-  let fg: string | undefined;
-
-  for (const match of text.matchAll(sgr)) {
-    const index = match.index ?? 0;
-    if (index > offset) {
-      mergeSpan(spans, { text: text.slice(offset, index), fg });
-    }
-
-    fg = nextAnsiFg(fg, match[1] ?? "");
-    offset = index + match[0].length;
-  }
-
-  if (offset < text.length) mergeSpan(spans, { text: text.slice(offset), fg });
-  return spans;
-}
-
-function nextAnsiFg(current: string | undefined, params: string): string | undefined {
-  const codes = params
-    .split(";")
-    .filter((part) => part.length > 0)
-    .map((part) => Number(part));
-  if (codes.length === 0) return current;
-
-  for (let i = 0; i < codes.length; i += 1) {
-    const code = codes[i];
-    if (code === 0 || code === 39) {
-      current = undefined;
-      continue;
-    }
-
-    if (code === 38 && codes[i + 1] === 2) {
-      const r = codes[i + 2];
-      const g = codes[i + 3];
-      const b = codes[i + 4];
-      if (isByte(r) && isByte(g) && isByte(b)) {
-        current = `\u001b[38;2;${r};${g};${b}m`;
-        i += 4;
-      }
-      continue;
-    }
-
-    if (code === 38 && codes[i + 1] === 5) {
-      const color = codes[i + 2];
-      if (typeof color === "number" && Number.isInteger(color)) {
-        current = `\u001b[38;5;${color}m`;
-        i += 2;
-      }
-      continue;
-    }
-
-    if (typeof code === "number" && code >= 30 && code <= 37) {
-      current = `\u001b[${code}m`;
-      continue;
-    }
-
-    if (typeof code === "number" && code >= 90 && code <= 97) {
-      current = `\u001b[${code}m`;
-    }
-  }
-
-  return current;
-}
-
-function isByte(value: unknown): value is number {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 255;
 }
 
 export function cleanDiffLine(line: string | undefined): string {
