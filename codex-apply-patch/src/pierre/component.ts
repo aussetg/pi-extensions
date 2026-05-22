@@ -350,7 +350,7 @@ function linePrefixSegments(
   const separator = {
     text: config.gutter.separator,
     fg: palette.gutterFg,
-    bg: palette.editorBg,
+    bg: row.rowBg,
   };
   const bar = {
     text: lineBar(row.lineType, config),
@@ -435,7 +435,7 @@ function continuationPrefixSegments(
       { text: config.gutter.continuationBar, fg: palette.contextBarFg, bg: numberBg },
       { text: config.gutter.barGap, fg: palette.gutterFg, bg: numberBg },
       { text: " ".repeat(rest), fg: palette.lineNumberFg, bg: numberBg },
-      { text: config.gutter.separator, fg: palette.gutterFg, bg: palette.editorBg },
+      { text: config.gutter.separator, fg: palette.gutterFg, bg: row.rowBg },
     ];
   }
 
