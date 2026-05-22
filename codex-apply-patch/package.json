@@ -3,7 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "postinstall": "node scripts/prune-tree-sitter.mjs"
+    "postinstall": "node scripts/prune-tree-sitter.mjs",
+    "test:rendering": "node --test scripts/rendering-equivalence.test.mjs",
+    "bench:rendering": "node --expose-gc scripts/benchmark-rendering.mjs"
   },
   "dependencies": {
     "@pierre/diffs": "^1.2.1",

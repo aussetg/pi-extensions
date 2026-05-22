@@ -156,6 +156,10 @@ type HighlightLineResult = {
   lines: Array<HastNode | undefined>;
   styled: boolean;
 };
+type PreparedTreeSitterLines = {
+  cleanLines: string[];
+  lineStyles: Map<number, Array<SyntaxCategory | undefined>>;
+};
 
 const nodeRequire = createRequire(import.meta.url);
 const treeSitterWorkerPath = join(
@@ -285,39 +289,16 @@ function highlightTreeSitterLines(
     return { lines: [], styled: false };
   }
 
-  const cleanLines = lines.map(cleanDiffLine);
-  const visible = new Set(indexes);
-  const lineStyles = new Map<number, Array<SyntaxCategory | undefined>>();
-  for (const index of indexes) {
-    const line = cleanLines[index] ?? "";
-    if (line.length > config.syntaxHighlight.maxLineLength) continue;
-    lineStyles.set(index, new Array<SyntaxCategory | undefined>(line.length));
-  }
-  if (lineStyles.size === 0) return { lines: [], styled: false };
+  const prepared = prepareTreeSitterLines(lines, indexes, config);
+  if (!prepared) return { lines: [], styled: false };
+  const { cleanLines, lineStyles } = prepared;
 
   try {
     const parser = new runtime.Parser();
     parser.setLanguage(language);
     const tree = parser.parse(cleanLines.join("\n"));
     const query = treeSitterQuery(runtime, languageKey, language, querySource);
-    const captures = query
-      .captures(tree.rootNode)
-      .map((capture) => ({
-        ...capture,
-        category: syntaxCategoryForCapture(capture.name),
-      }))
-      .filter(
-        (capture): capture is TreeSitterCapture & { category: SyntaxCategory } =>
-          Boolean(capture.category),
-      )
-      .sort(
-        (a, b) =>
-          syntaxCategoryPriority(a.category) - syntaxCategoryPriority(b.category),
-      );
-
-    for (const capture of captures) {
-      paintCapture(cleanLines, lineStyles, visible, capture.node, capture.category);
-    }
+    paintCaptures(cleanLines, lineStyles, query.captures(tree.rootNode));
   } catch {
     return { lines: [], styled: false };
   }
@@ -344,15 +325,9 @@ function highlightTreeSitterLinesWithWorker(
     return { lines: [], styled: false };
   }
 
-  const cleanLines = lines.map(cleanDiffLine);
-  const visible = new Set(indexes);
-  const lineStyles = new Map<number, Array<SyntaxCategory | undefined>>();
-  for (const index of indexes) {
-    const line = cleanLines[index] ?? "";
-    if (line.length > config.syntaxHighlight.maxLineLength) continue;
-    lineStyles.set(index, new Array<SyntaxCategory | undefined>(line.length));
-  }
-  if (lineStyles.size === 0) return { lines: [], styled: false };
+  const prepared = prepareTreeSitterLines(lines, indexes, config);
+  if (!prepared) return { lines: [], styled: false };
+  const { cleanLines, lineStyles } = prepared;
 
   const captures = treeSitterWorkerCaptures(
     languageKey,
@@ -361,11 +336,7 @@ function highlightTreeSitterLinesWithWorker(
   );
   if (!captures) return { lines: [], styled: false };
 
-  for (const capture of captures) {
-    const category = syntaxCategoryForCapture(capture.name);
-    if (!category) continue;
-    paintCapture(cleanLines, lineStyles, visible, capture.node, category);
-  }
+  paintCaptures(cleanLines, lineStyles, captures);
 
   const out: Array<HastNode | undefined> = [];
   let styled = false;
@@ -377,6 +348,58 @@ function highlightTreeSitterLinesWithWorker(
   }
 
   return { lines: out, styled };
+}
+
+function prepareTreeSitterLines(
+  lines: string[],
+  indexes: number[],
+  config: PierreRendererConfig,
+): PreparedTreeSitterLines | undefined {
+  const cleanLines = lines.map(cleanDiffLine);
+  const lineStyles = new Map<number, Array<SyntaxCategory | undefined>>();
+  for (const index of indexes) {
+    const line = cleanLines[index] ?? "";
+    if (line.length > config.syntaxHighlight.maxLineLength) continue;
+    lineStyles.set(index, new Array<SyntaxCategory | undefined>(line.length));
+  }
+  return lineStyles.size === 0 ? undefined : { cleanLines, lineStyles };
+}
+
+function paintCaptures(
+  lines: string[],
+  lineStyles: Map<number, Array<SyntaxCategory | undefined>>,
+  captures: TreeSitterCapture[],
+): void {
+  const buckets: Array<TreeSitterCapture[] | undefined> = [];
+  const categories: Array<SyntaxCategory | undefined> = [];
+  for (const capture of captures) {
+    if (!captureOverlapsStyledLine(capture.node, lineStyles)) continue;
+    const category = syntaxCategoryForCapture(capture.name);
+    if (!category) continue;
+    const priority = syntaxCategoryPriority(category);
+    categories[priority] = category;
+    (buckets[priority] ??= []).push(capture);
+  }
+
+  for (let priority = 0; priority < buckets.length; priority++) {
+    const bucket = buckets[priority];
+    if (!bucket) continue;
+    const category = categories[priority];
+    if (!category) continue;
+    for (const capture of bucket) {
+      paintCapture(lines, lineStyles, capture.node, category);
+    }
+  }
+}
+
+function captureOverlapsStyledLine(
+  node: TreeSitterNode,
+  lineStyles: Map<number, Array<SyntaxCategory | undefined>>,
+): boolean {
+  for (let row = node.startPosition.row; row <= node.endPosition.row; row++) {
+    if (lineStyles.has(row)) return true;
+  }
+  return false;
 }
 
 function treeSitterWorkerCaptures(
@@ -403,12 +426,7 @@ function treeSitterWorkerCaptures(
 
     return captures
       .map(normalizeWorkerCapture)
-      .filter((capture): capture is TreeSitterCapture => Boolean(capture))
-      .sort(
-        (a, b) =>
-          syntaxCategoryPriority(syntaxCategoryForCapture(a.name) ?? "text") -
-          syntaxCategoryPriority(syntaxCategoryForCapture(b.name) ?? "text"),
-      );
+      .filter((capture): capture is TreeSitterCapture => Boolean(capture));
   } catch {
     return undefined;
   }
@@ -458,7 +476,8 @@ function treeSitterQuery(
 }
 
 function syntaxCategoryForCapture(name: string): SyntaxCategory | undefined {
-  const head = name.split(".")[0];
+  const dot = name.indexOf(".");
+  const head = dot < 0 ? name : name.slice(0, dot);
   switch (head) {
     case "comment":
     case "keyword":
@@ -509,14 +528,12 @@ function syntaxCategoryPriority(category: SyntaxCategory): number {
 function paintCapture(
   lines: string[],
   lineStyles: Map<number, Array<SyntaxCategory | undefined>>,
-  visible: Set<number>,
   node: TreeSitterNode,
   category: SyntaxCategory,
 ): void {
   const startRow = node.startPosition.row;
   const endRow = node.endPosition.row;
   for (let row = startRow; row <= endRow; row++) {
-    if (!visible.has(row)) continue;
     const styles = lineStyles.get(row);
     if (!styles) continue;
 
@@ -534,11 +551,17 @@ function byteColumnToStringIndex(line: string, column: number): number {
   for (let i = 0; i < line.length;) {
     const codePoint = line.codePointAt(i);
     if (codePoint === undefined) break;
-    const char = String.fromCodePoint(codePoint);
-    const nextBytes = Buffer.byteLength(char, "utf8");
+    if (codePoint < 0x80) {
+      if (bytes + 1 > column) return i;
+      bytes += 1;
+      i += 1;
+      continue;
+    }
+    const nextBytes =
+      codePoint < 0x800 ? 2 : codePoint < 0x10000 ? 3 : 4;
     if (bytes + nextBytes > column) return i;
     bytes += nextBytes;
-    i += char.length;
+    i += codePoint > 0xffff ? 2 : 1;
   }
 
   return line.length;

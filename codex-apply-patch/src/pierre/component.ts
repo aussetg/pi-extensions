@@ -26,6 +26,7 @@ import { emptyHighlightedDiffSet } from "./types.ts";
 const ANSI_RESET = "\u001b[22m\u001b[39m\u001b[49m";
 const GLOBAL_PI_HIGHLIGHT_CACHE_KEY = "__codexApplyPatchPiHighlightCache";
 const PI_HIGHLIGHT_CACHE_LIMIT = 512;
+const payloadCacheKeys = new WeakMap<object, { path: string; key: string }>();
 
 function globalPiHighlightCache(): Map<string, HighlightedDiffSet> {
   const scope = globalThis as typeof globalThis & {
@@ -266,10 +267,8 @@ export class PierreInlineDiffComponent implements Component {
 
     const piKey = [
       key,
-      this.theme.name ?? "",
       this.config.syntaxHighlight.maxLines,
       this.config.syntaxHighlight.maxLineLength,
-      syntaxPaletteKey(this.palette),
     ].join("\u0000");
     let piHighlighted = this.piHighlightedByKey.get(piKey);
     if (!piHighlighted) {
@@ -296,21 +295,6 @@ export class PierreInlineDiffComponent implements Component {
       this.highlightedByKey.set(key, payload.highlighted);
     }
   }
-}
-
-function syntaxPaletteKey(palette: PierreTerminalPalette): string {
-  return [
-    palette.syntaxText,
-    palette.syntaxComment,
-    palette.syntaxKeyword,
-    palette.syntaxFunction,
-    palette.syntaxVariable,
-    palette.syntaxString,
-    palette.syntaxNumber,
-    palette.syntaxType,
-    palette.syntaxOperator,
-    palette.syntaxPunctuation,
-  ].join("\u001f");
 }
 
 function renderFileHeader(
@@ -623,8 +607,17 @@ function normalizePayloads(
 }
 
 function payloadKey(payload: PierreDiffPayload): string {
-  if (payload.metadata.cacheKey) return payload.metadata.cacheKey;
-  return [
+  const cached = payloadCacheKeys.get(payload.metadata);
+  if (cached && cached.path === payload.path) return cached.key;
+
+  if (payload.metadata.cacheKey) {
+    payloadCacheKeys.set(payload.metadata, {
+      path: payload.path,
+      key: payload.metadata.cacheKey,
+    });
+    return payload.metadata.cacheKey;
+  }
+  const key = [
     payload.path,
     payload.metadata.name,
     payload.metadata.prevName ?? "",
@@ -634,6 +627,8 @@ function payloadKey(payload: PierreDiffPayload): string {
     payload.metadata.additionLines.join("\n"),
     payload.metadata.hunks.map((hunk) => hunk.hunkSpecs ?? "").join("\n"),
   ].join("\u0000");
+  payloadCacheKeys.set(payload.metadata, { path: payload.path, key });
+  return key;
 }
 
 function formatLineNumber(
