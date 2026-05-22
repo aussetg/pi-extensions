@@ -49,6 +49,12 @@ interface DiagnosticEntry {
   receivedAt: number;
 }
 
+interface DiagnosticWaiter {
+  minVersion: number;
+  touchedAt: number;
+  finish(fresh: boolean): void;
+}
+
 interface RawLspDiagnostic {
   range: LspRange;
   severity?: number;
@@ -90,6 +96,7 @@ export class LspClient {
   private initializePromise?: Promise<void>;
   private documents = new Map<string, OpenDocument>();
   private diagnostics = new Map<string, DiagnosticEntry>();
+  private diagnosticWaiters = new Map<string, Set<DiagnosticWaiter>>();
   private capabilities: unknown;
   private lastDiagnosticsAt?: number;
   private lastError?: string;
@@ -211,6 +218,7 @@ export class LspClient {
   }
 
   async shutdown(): Promise<void> {
+    this.finishDiagnosticWaiters(false);
     if (!this.process || this.state === "stopped") return;
 
     try {
@@ -260,6 +268,7 @@ export class LspClient {
         this.lastError = error.message;
         this.state = "failed";
         this.rejectPending(error);
+        this.finishDiagnosticWaiters(false);
       });
       child.on("exit", (code, signal) => {
         this.initializePromise = undefined;
@@ -267,6 +276,7 @@ export class LspClient {
           this.state = code === 0 ? "stopped" : "failed";
           if (code !== 0 || signal) this.lastError = `process exited code=${code ?? "null"} signal=${signal ?? "null"}`;
           this.rejectPending(new Error(this.lastError ?? "LSP process exited"));
+          this.finishDiagnosticWaiters(false);
         }
       });
 
@@ -447,21 +457,72 @@ export class LspClient {
     };
     this.diagnostics.set(diagnostics.uri, entry);
     this.lastDiagnosticsAt = entry.receivedAt;
+    this.notifyDiagnosticWaiters(entry);
   }
 
-  private async waitForDiagnostics(uri: string, minVersion: number, touchedAt: number, timeoutMs: number, settleMs: number): Promise<boolean> {
-    const deadline = Date.now() + Math.max(0, timeoutMs);
-
-    while (Date.now() <= deadline) {
-      const entry = this.diagnostics.get(uri);
-      if (entry && diagnosticsAreFresh(entry, minVersion, touchedAt)) {
-        if (settleMs > 0) await sleep(settleMs);
-        return true;
-      }
-      await sleep(50);
+  private waitForDiagnostics(uri: string, minVersion: number, touchedAt: number, timeoutMs: number, settleMs: number): Promise<boolean> {
+    const existing = this.diagnostics.get(uri);
+    if (existing && diagnosticsAreFresh(existing, minVersion, touchedAt)) {
+      return settleDiagnostics(settleMs);
     }
 
-    return false;
+    return new Promise((resolve) => {
+      let settled = false;
+      let timeout: NodeJS.Timeout | undefined;
+
+      const waiter: DiagnosticWaiter = {
+        minVersion,
+        touchedAt,
+        finish: (fresh) => {
+          if (settled) return;
+          settled = true;
+          if (timeout) clearTimeout(timeout);
+          this.removeDiagnosticWaiter(uri, waiter);
+          if (fresh) {
+            void settleDiagnostics(settleMs).then(resolve);
+          } else {
+            resolve(false);
+          }
+        },
+      };
+
+      timeout = setTimeout(() => waiter.finish(false), Math.max(0, timeoutMs));
+      timeout.unref?.();
+      this.addDiagnosticWaiter(uri, waiter);
+
+      const current = this.diagnostics.get(uri);
+      if (current && diagnosticsAreFresh(current, minVersion, touchedAt)) {
+        waiter.finish(true);
+      }
+    });
+  }
+
+  private addDiagnosticWaiter(uri: string, waiter: DiagnosticWaiter): void {
+    const waiters = this.diagnosticWaiters.get(uri) ?? new Set<DiagnosticWaiter>();
+    waiters.add(waiter);
+    this.diagnosticWaiters.set(uri, waiters);
+  }
+
+  private removeDiagnosticWaiter(uri: string, waiter: DiagnosticWaiter): void {
+    const waiters = this.diagnosticWaiters.get(uri);
+    if (!waiters) return;
+    waiters.delete(waiter);
+    if (waiters.size === 0) this.diagnosticWaiters.delete(uri);
+  }
+
+  private notifyDiagnosticWaiters(entry: DiagnosticEntry): void {
+    const waiters = this.diagnosticWaiters.get(entry.uri);
+    if (!waiters) return;
+    for (const waiter of [...waiters]) {
+      if (diagnosticsAreFresh(entry, waiter.minVersion, waiter.touchedAt)) {
+        waiter.finish(true);
+      }
+    }
+  }
+
+  private finishDiagnosticWaiters(fresh: boolean): void {
+    const waiters = [...this.diagnosticWaiters.values()].flatMap((entries) => [...entries]);
+    for (const waiter of waiters) waiter.finish(fresh);
   }
 
   private normalizeDiagnostics(entry: DiagnosticEntry): LspDiagnostic[] {
@@ -489,6 +550,11 @@ export class LspClient {
 function diagnosticsAreFresh(entry: DiagnosticEntry, minVersion: number, touchedAt: number): boolean {
   if (typeof entry.version === "number") return entry.version >= minVersion;
   return entry.receivedAt >= touchedAt;
+}
+
+async function settleDiagnostics(settleMs: number): Promise<boolean> {
+  if (settleMs > 0) await sleep(settleMs);
+  return true;
 }
 
 function normalizeRelatedInformation(value: RawRelatedInformation[] | undefined): RelatedLocation[] | undefined {

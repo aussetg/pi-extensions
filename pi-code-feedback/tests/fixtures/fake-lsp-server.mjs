@@ -4,6 +4,10 @@ const severity = Number.parseInt(process.argv[4] ?? "1", 10);
 const stderrMode = process.argv[5] ?? "";
 const mode = process.argv[6] ?? "diagnostics";
 
+// Keep deterministic benchmark servers alive until the client sends `exit`.
+// Some Node versions do not keep a child process alive on a quiet stdin pipe.
+setInterval(() => undefined, 60_000);
+
 if (stderrMode === "warn") {
   process.stderr.write("WARN fake server warning for status tests\n");
 }
@@ -134,7 +138,9 @@ function editForUri(uri) {
 
 function publishDiagnostics(uri, version) {
   if (typeof uri !== "string") return;
-  send({
+  if (mode === "no-diagnostics") return;
+
+  const message = {
     jsonrpc: "2.0",
     method: "textDocument/publishDiagnostics",
     params: {
@@ -153,7 +159,19 @@ function publishDiagnostics(uri, version) {
         },
       ],
     },
-  });
+  };
+
+  const delayMs = diagnosticDelayMs(mode);
+  if (delayMs > 0) {
+    setTimeout(() => send(message), delayMs);
+  } else {
+    send(message);
+  }
+}
+
+function diagnosticDelayMs(value) {
+  const match = /^diagnostics-delay-(\d+)$/.exec(value);
+  return match ? Number.parseInt(match[1], 10) : 0;
 }
 
 function send(message) {
