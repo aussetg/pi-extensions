@@ -93,6 +93,15 @@ export function getRecentCompletedEdits(runtime: CodeFeedbackRuntime, limit = 5)
   return runtime.completedEdits.slice(-limit).reverse();
 }
 
+export function hasPendingEditForFile(runtime: CodeFeedbackRuntime, filePath: string): boolean {
+  const resolved = path.resolve(filePath);
+  for (const edit of runtime.pendingEdits.values()) {
+    if (path.resolve(edit.filePath) === resolved) return true;
+    if (edit.originalPath && path.resolve(edit.originalPath) === resolved) return true;
+  }
+  return false;
+}
+
 export function enqueueDelayedFeedback(runtime: CodeFeedbackRuntime, feedback: DelayedDiagnosticFeedback): void {
   const existingIndex = runtime.delayedFeedback.findIndex((candidate) => candidate.id === feedback.id);
   if (existingIndex >= 0) {

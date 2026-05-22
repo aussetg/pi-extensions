@@ -28,10 +28,17 @@ const DEFAULT_SERVERS: LanguageServerDefinition[] = [
   },
   {
     id: "python",
-    command: "pyright-langserver",
-    args: ["--stdio"],
+    command: "ty",
+    args: ["server"],
     extensions: [".py", ".pyi"],
-    languageId: (filePath) => (filePath.endsWith(".pyi") ? "python" : "python"),
+    languageId: () => "python",
+  },
+  {
+    id: "python-ruff",
+    command: "ruff",
+    args: ["server"],
+    extensions: [".py", ".pyi"],
+    languageId: () => "python",
   },
   {
     id: "rust",
@@ -83,12 +90,24 @@ const DEFAULT_SERVERS: LanguageServerDefinition[] = [
     languageId: () => "lua",
   },
 ];
+const commandAvailabilityCache = new Map<string, boolean>();
 
-export function resolveLanguageServer(filePath: string, overrides: Record<string, unknown> | undefined): ResolvedLanguageServer | undefined {
+export function resolveLanguageServer(filePath: string, overrides: Record<string, unknown> | undefined, projectRoot = path.dirname(filePath)): ResolvedLanguageServer | undefined {
+  return resolveLanguageServers(filePath, overrides, projectRoot)[0];
+}
+
+export function resolveLanguageServers(filePath: string, overrides: Record<string, unknown> | undefined, projectRoot = path.dirname(filePath)): ResolvedLanguageServer[] {
   const extension = path.extname(filePath).toLowerCase();
-  const base = DEFAULT_SERVERS.find((server) => server.extensions.includes(extension));
-  if (!base) return undefined;
+  const bases = DEFAULT_SERVERS.filter((server) => server.extensions.includes(extension));
+  return bases.map((base) => resolveOneLanguageServer(base, filePath, overrides, projectRoot));
+}
 
+function resolveOneLanguageServer(
+  base: LanguageServerDefinition,
+  filePath: string,
+  overrides: Record<string, unknown> | undefined,
+  projectRoot: string,
+): ResolvedLanguageServer {
   const definition = applyOverride(base, overrides?.[base.id]);
   if (!definition) {
     return {
@@ -98,11 +117,12 @@ export function resolveLanguageServer(filePath: string, overrides: Record<string
     };
   }
 
-  const available = commandExists(definition.command);
+  const resolvedCommand = resolveCommand(definition.command, path.dirname(filePath), projectRoot);
+  const available = resolvedCommand !== undefined;
   return {
-    definition,
+    definition: resolvedCommand ? { ...definition, command: resolvedCommand } : definition,
     available,
-    unavailableReason: available ? undefined : `command not found on PATH: ${definition.command}`,
+    unavailableReason: available ? undefined : `command not found on PATH or node_modules/.bin: ${definition.command}`,
   };
 }
 
@@ -127,15 +147,48 @@ function applyOverride(base: LanguageServerDefinition, value: unknown): Language
   };
 }
 
-function commandExists(command: string): boolean {
+function resolveCommand(command: string, startDir: string, projectRoot: string): string | undefined {
   if (path.isAbsolute(command) || command.includes(path.sep)) {
-    return fs.existsSync(command);
+    return fs.existsSync(command) ? command : undefined;
   }
+
+  const local = findLocalBin(command, startDir, projectRoot);
+  if (local) return local;
+
+  return commandExists(command) ? command : undefined;
+}
+
+function findLocalBin(command: string, startDir: string, projectRoot: string): string | undefined {
+  const root = path.resolve(projectRoot);
+  let current = path.resolve(startDir);
+
+  while (true) {
+    if (isInsideOrEqual(current, root)) {
+      const candidate = path.join(current, "node_modules", ".bin", command);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+    if (current === root || current === path.dirname(current)) break;
+    current = path.dirname(current);
+  }
+
+  return undefined;
+}
+
+function commandExists(command: string): boolean {
+  const cached = commandAvailabilityCache.get(command);
+  if (cached !== undefined) return cached;
 
   const result = spawnSync("sh", ["-lc", `command -v ${shellQuote(command)}`], {
     stdio: "ignore",
   });
-  return result.status === 0;
+  const available = result.status === 0;
+  commandAvailabilityCache.set(command, available);
+  return available;
+}
+
+function isInsideOrEqual(child: string, parent: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function shellQuote(value: string): string {

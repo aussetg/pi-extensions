@@ -8,10 +8,11 @@
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
-  "dependencies": {},
   "devDependencies": {
-    "@types/node": "^22.15.21",
-    "typescript": "^5.8.3"
+    "@types/node": "^22.15.21"
+  },
+  "dependencies": {
+    "typescript": "^5.9.3",
+    "typescript-language-server": "^5.3.0"
   }
 }
-

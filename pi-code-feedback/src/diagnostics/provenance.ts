@@ -102,9 +102,8 @@ function findDiagnosticLink(
 function relatedInformationOverlapsTouchedRange(diagnostic: LspDiagnostic, touchedRange: TouchedRange): boolean {
   for (const related of diagnostic.relatedInformation ?? []) {
     if (!sameLocation(related.uri, touchedRange.uri, touchedRange.filePath)) continue;
-    const relatedStart = normalizeLine(related.range.start.line);
-    const relatedEnd = normalizeLine(related.range.end.line);
-    if (Math.min(relatedStart, relatedEnd) <= touchedRange.endLine && Math.max(relatedStart, relatedEnd) >= touchedRange.startLine) {
+    const relatedRange = externalRangeLineSpan(related.range);
+    if (relatedRange.startLine <= touchedRange.endLine && relatedRange.endLine >= touchedRange.startLine) {
       return true;
     }
   }
@@ -169,16 +168,20 @@ function linkReasonRank(reason: DiagnosticLinkReason): number {
       return 3;
     case "expanded-symbol":
       return 4;
+    case "all-diagnostics":
+      return 5;
   }
 }
 
 function diagnosticLineRange(diagnostic: LspDiagnostic): { startLine: number; endLine: number } {
-  const startLine = normalizeLine(diagnostic.range.start.line);
-  const endLine = normalizeLine(diagnostic.range.end.line);
-  return {
-    startLine: Math.min(startLine, endLine),
-    endLine: Math.max(startLine, endLine),
-  };
+  return externalRangeLineSpan(diagnostic.range);
+}
+
+function externalRangeLineSpan(range: LspDiagnostic["range"]): { startLine: number; endLine: number } {
+  const startLine = normalizeLine(range.start.line);
+  const rawEndLine = normalizeLine(range.end.line);
+  const endLine = rawEndLine > startLine && normalizeLine(range.end.character) <= 1 ? rawEndLine - 1 : rawEndLine;
+  return { startLine: Math.min(startLine, endLine), endLine: Math.max(startLine, endLine) };
 }
 
 function flattenSnapshot(snapshot: DiagnosticSnapshot): LspDiagnostic[] {

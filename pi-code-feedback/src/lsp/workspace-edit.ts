@@ -32,6 +32,10 @@ interface ResolvedEdit {
   newText: string;
 }
 
+interface PlannedFileEdit extends AppliedTextEdit {
+  after: string;
+}
+
 export function isWorkspaceEdit(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return isRecord(value.changes) || Array.isArray(value.documentChanges);
@@ -59,24 +63,39 @@ export async function applyWorkspaceEdit(value: unknown, projectRoot: string): P
     };
   }
 
-  const files: AppliedTextEdit[] = [];
-  let totalEdits = 0;
+  let planned: PlannedFileEdit[];
+  try {
+    planned = planWorkspaceEdit(collected.editsByPath);
+  } catch (error) {
+    return {
+      applied: false,
+      files: [],
+      editCount: 0,
+      changedFiles: [],
+      rejected: error instanceof Error ? error.message : String(error),
+    };
+  }
 
-  for (const [filePath, edits] of collected.editsByPath) {
-    totalEdits += edits.length;
-    const before = fs.readFileSync(filePath, "utf8");
-    const after = applyTextEditsToContent(before, edits, filePath);
-    const changed = after !== before;
-    if (changed) fs.writeFileSync(filePath, after, "utf8");
-    files.push({ filePath, editCount: edits.length, changed });
+  for (const file of planned) {
+    if (file.changed) fs.writeFileSync(file.filePath, file.after, "utf8");
   }
 
   return {
     applied: true,
-    files,
-    editCount: totalEdits,
-    changedFiles: files.filter((file) => file.changed).map((file) => file.filePath),
+    files: planned.map(({ filePath, editCount, changed }) => ({ filePath, editCount, changed })),
+    editCount: planned.reduce((count, file) => count + file.editCount, 0),
+    changedFiles: planned.filter((file) => file.changed).map((file) => file.filePath),
   };
+}
+
+function planWorkspaceEdit(editsByPath: Map<string, CollectedEdit[]>): PlannedFileEdit[] {
+  const planned: PlannedFileEdit[] = [];
+  for (const [filePath, edits] of editsByPath) {
+    const before = fs.readFileSync(filePath, "utf8");
+    const after = applyTextEditsToContent(before, edits, filePath);
+    planned.push({ filePath, editCount: edits.length, changed: after !== before, after });
+  }
+  return planned;
 }
 
 export function selectCodeActionForApply(actions: unknown, query: unknown): { action?: Record<string, unknown>; error?: string; candidates: Record<string, unknown>[] } {

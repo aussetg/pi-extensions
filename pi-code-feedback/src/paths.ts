@@ -18,6 +18,10 @@ export function resolveInputPath(input: unknown, cwd: string | undefined, projec
   return path.resolve(path.isAbsolute(raw) ? raw : path.join(cwd || projectRoot, raw));
 }
 
+export function normalizeToolPath(raw: string): string {
+  return raw.startsWith("@") ? raw.slice(1) : raw;
+}
+
 export function shouldTrackFile(filePath: string, projectRoot: string): boolean {
   const resolved = path.resolve(filePath);
   const root = path.resolve(projectRoot);
@@ -32,8 +36,14 @@ export function shouldTrackFile(filePath: string, projectRoot: string): boolean 
 function readPath(input: unknown): string | undefined {
   if (!input || typeof input !== "object") return undefined;
   const candidate = input as { path?: unknown; filePath?: unknown };
-  if (typeof candidate.path === "string" && candidate.path.length > 0) return candidate.path;
-  if (typeof candidate.filePath === "string" && candidate.filePath.length > 0) return candidate.filePath;
+  if (typeof candidate.path === "string" && candidate.path.length > 0) {
+    const normalized = normalizeToolPath(candidate.path);
+    return normalized.length > 0 ? normalized : undefined;
+  }
+  if (typeof candidate.filePath === "string" && candidate.filePath.length > 0) {
+    const normalized = normalizeToolPath(candidate.filePath);
+    return normalized.length > 0 ? normalized : undefined;
+  }
   return undefined;
 }
 

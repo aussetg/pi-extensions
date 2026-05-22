@@ -155,7 +155,8 @@ export function renderInlineDiagnosticFeedback(runtime: CodeFeedbackRuntime, edi
 
   if (filter && filter.linked.length > 0) {
     const severityCounts = countSeverities(filter.linked);
-    lines.push(`  touched diagnostics: ${formatSeverityCounts(severityCounts)}`);
+    const label = runtime.config.diagnostics.inline === "all" ? "diagnostics" : "touched diagnostics";
+    lines.push(`  ${label}: ${formatSeverityCounts(severityCounts)}`);
 
     for (const linked of filter.linked) {
       lines.push("", ...formatLinkedDiagnostic(runtime.projectRoot, linked));
@@ -174,9 +175,10 @@ export function renderDelayedDiagnosticFeedback(runtime: CodeFeedbackRuntime, ed
 
   const relative = path.relative(runtime.projectRoot, edit.filePath) || edit.filePath;
   const severityCounts = countSeverities(filter.linked);
+  const scope = runtime.config.diagnostics.inline === "all" ? "all files" : relative;
   const lines = [
     "pi-code-feedback delayed LSP diagnostics:",
-    `  ${relative}: ${formatSeverityCounts(severityCounts)}`,
+    `  ${scope}: ${formatSeverityCounts(severityCounts)}`,
   ];
 
   for (const linked of filter.linked) {

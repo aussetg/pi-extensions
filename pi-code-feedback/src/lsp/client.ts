@@ -7,7 +7,7 @@ import type { LanguageServerDefinition } from "./servers.ts";
 
 interface JsonRpcRequest {
   jsonrpc: "2.0";
-  id: number;
+  id: number | string;
   method: string;
   params?: unknown;
 }
@@ -20,7 +20,7 @@ interface JsonRpcNotification {
 
 interface JsonRpcResponse {
   jsonrpc: "2.0";
-  id: number;
+  id: number | string | null;
   result?: unknown;
   error?: { code: number; message: string; data?: unknown };
 }
@@ -85,7 +85,7 @@ export class LspClient {
   private process?: ChildProcessWithoutNullStreams;
   private state: LspClientState = "stopped";
   private nextRequestId = 1;
-  private pending = new Map<number, PendingRequest>();
+  private pending = new Map<number | string, PendingRequest>();
   private inputBuffer = Buffer.alloc(0);
   private initializePromise?: Promise<void>;
   private documents = new Map<string, OpenDocument>();
@@ -166,6 +166,19 @@ export class LspClient {
     return entry ? this.normalizeDiagnostics(entry) : [];
   }
 
+  forgetDocument(filePath: string): void {
+    const uri = filePathToUri(filePath);
+    if (this.documents.has(uri) && this.state === "ready") {
+      try {
+        this.notify("textDocument/didClose", { textDocument: { uri } });
+      } catch (error) {
+        this.lastError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    this.documents.delete(uri);
+    this.diagnostics.delete(uri);
+  }
+
   async request(method: string, params?: unknown, timeoutMs = 10_000): Promise<unknown> {
     await this.ensureStarted();
     return this.sendRequest(method, params, timeoutMs);
@@ -244,17 +257,14 @@ export class LspClient {
       child.on("error", (error) => {
         this.lastError = error.message;
         this.state = "failed";
-        for (const pending of this.pending.values()) {
-          clearTimeout(pending.timeout);
-          pending.reject(error);
-        }
-        this.pending.clear();
+        this.rejectPending(error);
       });
       child.on("exit", (code, signal) => {
         this.initializePromise = undefined;
         if (this.state !== "stopped") {
           this.state = code === 0 ? "stopped" : "failed";
           if (code !== 0 || signal) this.lastError = `process exited code=${code ?? "null"} signal=${signal ?? "null"}`;
+          this.rejectPending(new Error(this.lastError ?? "LSP process exited"));
         }
       });
 
@@ -370,6 +380,7 @@ export class LspClient {
 
   private handleMessage(message: JsonRpcMessage): void {
     if ("id" in message && ("result" in message || "error" in message)) {
+      if (message.id === null) return;
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
@@ -382,10 +393,42 @@ export class LspClient {
       return;
     }
 
+    if ("id" in message && "method" in message) {
+      this.handleServerRequest(message);
+      return;
+    }
+
     if ("method" in message) {
       if (message.method === "textDocument/publishDiagnostics") {
         this.handlePublishDiagnostics(message.params);
       }
+    }
+  }
+
+  private handleServerRequest(message: JsonRpcRequest): void {
+    let result: unknown = null;
+    switch (message.method) {
+      case "workspace/configuration":
+        result = [];
+        break;
+      case "workspace/workspaceFolders":
+        result = [{ uri: filePathToUri(this.root), name: path.basename(this.root) || this.root }];
+        break;
+      case "workspace/applyEdit":
+        result = { applied: false, failureReason: "pi-code-feedback does not let language servers apply edits directly" };
+        break;
+      case "client/registerCapability":
+      case "client/unregisterCapability":
+      case "window/showMessageRequest":
+      case "window/workDoneProgress/create":
+        result = null;
+        break;
+    }
+
+    try {
+      this.send({ jsonrpc: "2.0", id: message.id, result });
+    } catch (error) {
+      this.lastError = error instanceof Error ? error.message : String(error);
     }
   }
 
@@ -430,6 +473,14 @@ export class LspClient {
       relatedInformation: normalizeRelatedInformation(diagnostic.relatedInformation),
       version: entry.version,
     }));
+  }
+
+  private rejectPending(error: Error): void {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+    }
+    this.pending.clear();
   }
 }
 

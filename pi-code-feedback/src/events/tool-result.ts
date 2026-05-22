@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { linkDiagnosticsToTouchedRanges } from "../diagnostics/provenance.ts";
 import { computeTouchedRanges } from "../diagnostics/ranges.ts";
 import { readDiagnosticSnapshotFromDetails } from "../diagnostics/snapshots.ts";
@@ -8,8 +9,8 @@ import type { LspService } from "../lsp/service.ts";
 import { resolveInputPath, shouldTrackFile } from "../paths.ts";
 import type { PiToolResult } from "../pi.ts";
 import { renderDelayedDiagnosticFeedback, renderInlineDiagnosticFeedback } from "../render.ts";
-import { enqueueDelayedFeedback, recordCompletedEdit, takePendingEdit, type CodeFeedbackRuntime } from "../runtime.ts";
-import type { CompletedEdit, DiagnosticRefreshResult, DiagnosticSnapshot, FormatterResult, FormatterSummary, PendingEdit } from "../types.ts";
+import { enqueueDelayedFeedback, hasPendingEditForFile, recordCompletedEdit, takePendingEdit, type CodeFeedbackRuntime } from "../runtime.ts";
+import type { CompletedEdit, DiagnosticFilterResult, DiagnosticRefreshResult, DiagnosticSnapshot, FormatterResult, FormatterSummary, LspDiagnostic, PendingEdit } from "../types.ts";
 import { applyPatchOperationId } from "./tool-call.ts";
 
 export interface ToolResultEvent {
@@ -105,11 +106,16 @@ async function handleApplyPatchToolResult(
   for (const [index, result] of results.entries()) {
     if (result.status !== "completed") continue;
 
-    const filePath = resolveInputPath({ path: result.path }, ctx.cwd, runtime.projectRoot);
-    if (!filePath || !shouldTrackFile(filePath, runtime.projectRoot)) continue;
+    const resultPath = resolveInputPath({ path: result.path }, ctx.cwd, runtime.projectRoot);
+    if (!resultPath) continue;
 
     const pendingId = applyPatchOperationId(event.toolCallId, runtime.turnIndex, runtime.writeIndex, index);
-    const pending = takePendingEdit(runtime, pendingId, filePath, "apply_patch");
+    const pending = takePendingEdit(runtime, pendingId, resultPath, "apply_patch");
+    const filePath = pending?.filePath ?? resultPath;
+    if (!shouldTrackFile(filePath, runtime.projectRoot)) {
+      forgetOriginalPathIfMoved(lspService, pending, filePath);
+      continue;
+    }
     const afterAgentContent = result.type === "delete_file" ? undefined : readUtf8IfExists(filePath);
     if (result.type !== "delete_file" && afterAgentContent === undefined) continue;
 
@@ -157,6 +163,8 @@ async function handleApplyPatchToolResult(
       : readDiagnosticSnapshotFromDetails(event.details, ["afterDiagnostics", "postDiagnostics", "diagnostics"]);
     attachDiagnosticFilter(event, pending, completed, runtime, afterDiagnostics);
     recordCompletedEdit(runtime, completed);
+    forgetOriginalPathIfMoved(lspService, pending, filePath);
+    if (result.type === "delete_file") lspService?.forgetFile(filePath);
     if (finalContent !== undefined) {
       scheduleDelayedDiagnosticsIfNeeded(afterRefresh, lspService, runtime, completed, pending?.beforeDiagnostics, finalContent);
     }
@@ -164,6 +172,16 @@ async function handleApplyPatchToolResult(
   }
 
   return appendInlineFeedbackForEdits(event, completedEdits, runtime);
+}
+
+function forgetOriginalPathIfMoved(lspService: LspService | undefined, pending: PendingEdit | undefined, finalPath: string): void {
+  if (!lspService || !pending?.originalPath) return;
+  if (pathEquals(pending.originalPath, finalPath)) return;
+  lspService.forgetFile(pending.originalPath);
+}
+
+function pathEquals(left: string, right: string): boolean {
+  return path.resolve(left) === path.resolve(right);
 }
 
 async function captureAfterDiagnosticRefresh(
@@ -188,6 +206,14 @@ async function maybeFormatFile(
 ): Promise<FormatterResult | undefined> {
   if (!formatService) return undefined;
   if (!runtime.config.autoFormat || runtime.config.formatMode !== "immediate") return undefined;
+  if (hasPendingEditForFile(runtime, filePath)) {
+    return {
+      changed: false,
+      finalContent: content,
+      errors: [],
+      skippedReason: "pending sibling edit for same file",
+    };
+  }
   return formatService.formatFile(filePath, content);
 }
 
@@ -211,6 +237,7 @@ function attachDiagnosticFilter(
   afterDiagnostics: DiagnosticSnapshot | undefined,
 ): void {
   if (!afterDiagnostics) return;
+  if (runtime.config.diagnostics.inline === "off") return;
 
   const beforeDiagnostics = readDiagnosticSnapshotFromDetails(event.details, ["beforeDiagnostics", "preDiagnostics"]);
   attachDiagnosticFilterFromSnapshots(beforeDiagnostics ?? pending?.beforeDiagnostics, completed, runtime, afterDiagnostics);
@@ -222,6 +249,11 @@ function attachDiagnosticFilterFromSnapshots(
   runtime: CodeFeedbackRuntime,
   afterDiagnostics: DiagnosticSnapshot,
 ): void {
+  if (runtime.config.diagnostics.inline === "all") {
+    completed.diagnosticFilter = allDiagnosticsFilter(afterDiagnostics, runtime.config.diagnostics.maxInline);
+    return;
+  }
+
   completed.diagnosticFilter = linkDiagnosticsToTouchedRanges({
     beforeSnapshot: beforeDiagnostics,
     afterSnapshot: afterDiagnostics,
@@ -240,6 +272,7 @@ function scheduleDelayedDiagnosticsIfNeeded(
   finalContent: string,
 ): void {
   if (!lspService || !runtime.config.lsp.enabled) return;
+  if (runtime.config.diagnostics.inline === "off") return;
   if (!firstRefresh || firstRefresh.fresh) return;
   if (completed.touchedRanges.length === 0) return;
   if (completed.diagnosticFilter?.linked.length) return;
@@ -267,6 +300,58 @@ function scheduleDelayedDiagnosticsIfNeeded(
   }).catch((error) => {
     runtime.lastError = error instanceof Error ? error.message : String(error);
   });
+}
+
+function allDiagnosticsFilter(snapshot: DiagnosticSnapshot, maxInline: number): DiagnosticFilterResult {
+  const allDiagnostics = flattenSnapshot(snapshot).sort(compareDiagnostics);
+  const shownDiagnostics = allDiagnostics.slice(0, Math.max(0, maxInline));
+  return {
+    linked: shownDiagnostics.map((diagnostic) => ({
+      diagnostic,
+      linkReason: "all-diagnostics",
+      isNewOrWorsened: false,
+    })),
+    allLinked: allDiagnostics.map((diagnostic) => ({
+      diagnostic,
+      linkReason: "all-diagnostics",
+      isNewOrWorsened: false,
+    })),
+    summary: {
+      totalDiagnostics: allDiagnostics.length,
+      linkedDiagnostics: allDiagnostics.length,
+      shownDiagnostics: shownDiagnostics.length,
+      hiddenUnrelated: 0,
+      hiddenByLimit: Math.max(0, allDiagnostics.length - shownDiagnostics.length),
+    },
+  };
+}
+
+function flattenSnapshot(snapshot: DiagnosticSnapshot): LspDiagnostic[] {
+  return [...snapshot.byUri.values()].flat();
+}
+
+function compareDiagnostics(left: LspDiagnostic, right: LspDiagnostic): number {
+  return (
+    severityRank(right.severity) - severityRank(left.severity) ||
+    left.uri.localeCompare(right.uri) ||
+    left.range.start.line - right.range.start.line ||
+    left.range.start.character - right.range.start.character ||
+    String(left.code ?? "").localeCompare(String(right.code ?? "")) ||
+    left.message.localeCompare(right.message)
+  );
+}
+
+function severityRank(severity: LspDiagnostic["severity"]): number {
+  switch (severity) {
+    case "error":
+      return 4;
+    case "warning":
+      return 3;
+    case "information":
+      return 2;
+    case "hint":
+      return 1;
+  }
 }
 
 function appendInlineFeedback(event: ToolResultEvent, completed: CompletedEdit, runtime: CodeFeedbackRuntime): PiToolResult | void {

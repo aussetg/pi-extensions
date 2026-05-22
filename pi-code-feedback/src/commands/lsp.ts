@@ -1,6 +1,7 @@
 import { renderCapabilities, renderDiagnosticsStatus, renderFooterStatus, renderStatus } from "../render.ts";
 import type { FormatService } from "../format/service.ts";
 import type { LspService } from "../lsp/service.ts";
+import { normalizeToolPath } from "../paths.ts";
 import { restartLsp, setLspEnabled, setProjectRoot, type CodeFeedbackRuntime } from "../runtime.ts";
 import type { PiApi, PiCommandContext } from "../pi.ts";
 
@@ -35,6 +36,10 @@ export function registerLspCommand(pi: PiApi, runtime: CodeFeedbackRuntime, lspS
 
         case "enable":
         case "on":
+          if (!runtime.config.enabled) {
+            notify(ctx, "pi-code-feedback is disabled for this session; LSP feedback cannot be enabled.", "warning");
+            return;
+          }
           setLspEnabled(runtime, true);
           setFooterStatus(ctx, runtime);
           notify(ctx, "pi-code-feedback LSP feedback enabled for this session. Use /lsp status to inspect it.", "info");
@@ -43,12 +48,17 @@ export function registerLspCommand(pi: PiApi, runtime: CodeFeedbackRuntime, lspS
         case "disable":
         case "off":
           setLspEnabled(runtime, false);
+          await lspService.shutdownAll();
           setFooterStatus(ctx, runtime);
           notify(ctx, "pi-code-feedback LSP feedback disabled for this session. Use /lsp enable to turn it back on.", "warning");
           return;
 
         case "restart":
         case "reload":
+          if (!runtime.config.enabled) {
+            notify(ctx, "pi-code-feedback is disabled for this session; LSP clients will not be restarted.", "warning");
+            return;
+          }
           restartLsp(runtime, "human command");
           await lspService.restart();
           setFooterStatus(ctx, runtime);
@@ -56,11 +66,15 @@ export function registerLspCommand(pi: PiApi, runtime: CodeFeedbackRuntime, lspS
           return;
 
         case "capabilities":
-          notify(ctx, renderCapabilities(runtime, lspService.getStatus(), await lspService.capabilities(rest[0])), "info");
+          if (!runtime.config.enabled || !runtime.config.lsp.enabled) {
+            notify(ctx, renderCapabilities(runtime, lspService.getStatus()), "warning");
+            return;
+          }
+          notify(ctx, renderCapabilities(runtime, lspService.getStatus(), await lspService.capabilities(normalizeOptionalPath(rest[0]))), "info");
           return;
 
         case "diagnostics":
-          notify(ctx, renderDiagnosticsStatus(runtime, rest[0], lspService.cachedDiagnostics(rest[0])), "info");
+          notify(ctx, renderDiagnosticsStatus(runtime, normalizeOptionalPath(rest[0]), lspService.cachedDiagnostics(normalizeOptionalPath(rest[0]))), "info");
           return;
 
         case "help":
@@ -80,6 +94,12 @@ function normalizeArgs(args: unknown): string[] {
     return args.trim().split(/\s+/).filter(Boolean);
   }
   return [];
+}
+
+function normalizeOptionalPath(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = normalizeToolPath(value);
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 function notify(ctx: PiCommandContext, message: string, level: "info" | "warning" | "error"): void {

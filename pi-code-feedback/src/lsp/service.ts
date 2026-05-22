@@ -4,7 +4,7 @@ import { readUtf8IfExists } from "../fs.ts";
 import type { DiagnosticRefreshResult, DiagnosticSnapshot, LspServiceStatus, LspUnavailableServer } from "../types.ts";
 import { LspClient } from "./client.ts";
 import { externalPositionToLsp, filePathToUri, oneLineLspRange, type LspPosition } from "./positions.ts";
-import { resolveLanguageServer, type LanguageServerDefinition } from "./servers.ts";
+import { resolveLanguageServer, resolveLanguageServers, type LanguageServerDefinition } from "./servers.ts";
 
 export interface LspServiceOptions {
   projectRoot: string;
@@ -44,14 +44,14 @@ export class LspService {
 
   async diagnosticsForFileDetailed(filePath: string, content: string | undefined, options: DiagnosticsForFileOptions): Promise<DiagnosticRefreshResult | undefined> {
     const resolved = path.resolve(this.projectRoot, filePath);
-    const client = this.getOrCreateClient(resolved);
-    if (!client) return undefined;
+    const clients = this.getOrCreateClients(resolved);
+    if (clients.length === 0) return undefined;
 
     const finalContent = content ?? readUtf8IfExists(resolved);
     if (finalContent === undefined) {
       const now = Date.now();
       return {
-        snapshot: client.snapshot(),
+        snapshot: mergeSnapshots(clients.map((client) => client.snapshot())),
         fresh: true,
         timedOut: false,
         requestedAt: now,
@@ -59,14 +59,26 @@ export class LspService {
       };
     }
 
-    try {
-      const result = await client.touchDocumentDetailed(resolved, finalContent, options);
-      this.armIdleTimer();
-      return result;
-    } catch (error) {
-      this.markClientError(resolved, error);
-      return undefined;
-    }
+    const results = await Promise.all(clients.map(async (client) => {
+      try {
+        return await client.touchDocumentDetailed(resolved, finalContent, options);
+      } catch (error) {
+        this.markClientInstanceError(resolved, client, error);
+        return undefined;
+      }
+    }));
+
+    const successful = results.filter((result): result is DiagnosticRefreshResult => result !== undefined);
+    if (successful.length === 0) return undefined;
+
+    this.armIdleTimer();
+    return {
+      snapshot: mergeSnapshots(successful.map((result) => result.snapshot)),
+      fresh: successful.every((result) => result.fresh),
+      timedOut: successful.some((result) => result.timedOut),
+      requestedAt: Math.min(...successful.map((result) => result.requestedAt)),
+      completedAt: Math.max(...successful.map((result) => result.completedAt)),
+    };
   }
 
   cachedDiagnostics(pathOrAll?: string): DiagnosticSnapshot {
@@ -76,6 +88,11 @@ export class LspService {
     const resolved = path.resolve(this.projectRoot, pathOrAll);
     const uri = filePathToUri(resolved);
     return createDiagnosticSnapshot(snapshot.byUri.get(uri) ?? []);
+  }
+
+  forgetFile(filePath: string): void {
+    const resolved = path.resolve(this.projectRoot, filePath);
+    for (const client of this.clients.values()) client.forgetDocument(resolved);
   }
 
   snapshotAll(): DiagnosticSnapshot {
@@ -211,7 +228,7 @@ export class LspService {
 
   private getOrCreateClient(filePath: string): LspClient | undefined {
     const resolved = path.resolve(filePath);
-    const resolvedServer = resolveLanguageServer(resolved, this.serverOverrides);
+    const resolvedServer = resolveLanguageServer(resolved, this.serverOverrides, this.projectRoot);
     if (!resolvedServer) return undefined;
 
     if (!resolvedServer.available) {
@@ -234,16 +251,54 @@ export class LspService {
     return client;
   }
 
+  private getOrCreateClients(filePath: string): LspClient[] {
+    const resolved = path.resolve(filePath);
+    const clients: LspClient[] = [];
+
+    for (const resolvedServer of resolveLanguageServers(resolved, this.serverOverrides, this.projectRoot)) {
+      if (!resolvedServer.available) {
+        this.unavailableServers.set(resolvedServer.definition.id, {
+          id: resolvedServer.definition.id,
+          command: resolvedServer.definition.command,
+          filePath: resolved,
+          reason: resolvedServer.unavailableReason ?? "unavailable",
+        });
+        continue;
+      }
+
+      const root = this.projectRoot;
+      const key = clientKey(root, resolvedServer.definition);
+      let client = this.clients.get(key);
+      if (!client) {
+        client = new LspClient(resolvedServer.definition, root);
+        this.clients.set(key, client);
+      }
+      clients.push(client);
+    }
+
+    return clients;
+  }
+
   private firstReadyOrAnyClient(): LspClient | undefined {
     return [...this.clients.values()].find((client) => client.getStatus().state === "ready") ?? this.clients.values().next().value;
   }
 
   private markClientError(filePath: string, error: unknown): void {
-    const resolvedServer = resolveLanguageServer(filePath, this.serverOverrides);
+    const resolvedServer = resolveLanguageServer(filePath, this.serverOverrides, this.projectRoot);
     if (!resolvedServer) return;
     this.unavailableServers.set(resolvedServer.definition.id, {
       id: resolvedServer.definition.id,
       command: resolvedServer.definition.command,
+      filePath,
+      reason: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  private markClientInstanceError(filePath: string, client: LspClient, error: unknown): void {
+    const status = client.getStatus();
+    this.unavailableServers.set(status.id, {
+      id: status.id,
+      command: status.command,
       filePath,
       reason: error instanceof Error ? error.message : String(error),
     });
@@ -257,6 +312,11 @@ export class LspService {
     }, this.idleTimeoutMs);
     this.idleTimer.unref?.();
   }
+}
+
+function mergeSnapshots(snapshots: DiagnosticSnapshot[]): DiagnosticSnapshot {
+  const diagnostics = snapshots.flatMap((snapshot) => [...snapshot.byUri.values()].flat());
+  return createDiagnosticSnapshot(diagnostics);
 }
 
 function clientKey(root: string, definition: LanguageServerDefinition): string {

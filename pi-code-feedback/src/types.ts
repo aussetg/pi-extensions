@@ -32,7 +32,8 @@ export type DiagnosticLinkReason =
   | "expanded-symbol"
   | "related-information"
   | "new-on-touched-file"
-  | "cascade-related";
+  | "cascade-related"
+  | "all-diagnostics";
 
 export type TrackedToolName = "write" | "edit" | "apply_patch";
 

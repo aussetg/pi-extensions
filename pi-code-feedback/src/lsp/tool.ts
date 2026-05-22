@@ -1,6 +1,7 @@
 import { renderCapabilities, renderDiagnosticsStatus, renderStatus } from "../render.ts";
 import type { FormatService } from "../format/service.ts";
 import type { LspService } from "./service.ts";
+import { normalizeToolPath } from "../paths.ts";
 import { restartLsp, setProjectRoot, type CodeFeedbackRuntime } from "../runtime.ts";
 import { LSP_ACTIONS, type LspAction } from "../types.ts";
 import type { PiApi, PiToolResult } from "../pi.ts";
@@ -38,6 +39,14 @@ export function registerLspTool(pi: PiApi, runtime: CodeFeedbackRuntime, lspServ
         });
       }
 
+      if (!runtime.config.enabled && action !== "status") {
+        return textResult("pi-code-feedback is disabled for this session.", true, statusDetails(runtime, lspService, formatService));
+      }
+
+      if (!runtime.config.lsp.enabled && actionRequiresEnabledLsp(action, params)) {
+        return textResult("pi-code-feedback LSP clients are disabled for this session. Use /lsp enable to turn them back on.", true, statusDetails(runtime, lspService, formatService));
+      }
+
       try {
         switch (action) {
         case "status":
@@ -50,7 +59,7 @@ export function registerLspTool(pi: PiApi, runtime: CodeFeedbackRuntime, lspServ
           });
 
         case "diagnostics":
-          return textResult(renderDiagnosticsStatus(runtime, params.all === true ? "all" : readPath(params), await diagnosticsSnapshot(params, lspService)), false, {
+          return textResult(renderDiagnosticsStatus(runtime, params.all === true ? "all" : readPath(params), await diagnosticsSnapshot(params, runtime, lspService)), false, {
             implemented: true,
             diagnosticSnapshots: true,
             recentTouchedRanges: runtime.completedEdits.slice(-5).map((edit) => ({
@@ -146,9 +155,10 @@ function textResult(text: string, isError = false, details?: unknown): PiToolRes
   };
 }
 
-async function diagnosticsSnapshot(params: Record<string, unknown>, lspService: LspService) {
+async function diagnosticsSnapshot(params: Record<string, unknown>, runtime: CodeFeedbackRuntime, lspService: LspService) {
   if (params.all === true) return lspService.cachedDiagnostics("all");
   const filePath = readPath(params);
+  if (!runtime.config.enabled || !runtime.config.lsp.enabled) return lspService.cachedDiagnostics(filePath);
   if (!filePath) return lspService.cachedDiagnostics();
   return (await lspService.diagnosticsForFile(filePath, undefined, { timeoutMs: 1200, settleMs: 100 })) ?? lspService.cachedDiagnostics(filePath);
 }
@@ -174,7 +184,22 @@ function statusDetails(runtime: CodeFeedbackRuntime, lspService: LspService, for
 }
 
 function readPath(params: Record<string, unknown>): string | undefined {
-  return typeof params.path === "string" && params.path.length > 0 ? params.path : undefined;
+  if (typeof params.path !== "string" || params.path.length === 0) return undefined;
+  const normalized = normalizeToolPath(params.path);
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function actionRequiresEnabledLsp(action: LspAction, params: Record<string, unknown>): boolean {
+  switch (action) {
+    case "status":
+    case "reload":
+    case "diagnostics":
+      return false;
+    case "capabilities":
+      return readPath(params) !== undefined;
+    default:
+      return true;
+  }
 }
 
 function requirePath(params: Record<string, unknown>): string {
@@ -200,6 +225,11 @@ function renderLspResult(action: LspAction | undefined, result: unknown, project
 }
 
 async function handleCodeActions(params: Record<string, unknown>, runtime: CodeFeedbackRuntime, lspService: LspService): Promise<PiToolResult> {
+  if (params.apply === true) {
+    const pendingGuard = rejectApplyDuringPendingEdits(runtime, "code action");
+    if (pendingGuard) return pendingGuard;
+  }
+
   const result = await lspService.codeActions(requirePath(params), params.line, params.character);
   if (params.apply !== true) return rawOrPretty(params, result, runtime.projectRoot);
 
@@ -221,6 +251,11 @@ async function handleCodeActions(params: Record<string, unknown>, runtime: CodeF
 }
 
 async function handleRename(params: Record<string, unknown>, runtime: CodeFeedbackRuntime, lspService: LspService): Promise<PiToolResult> {
+  if (params.apply === true) {
+    const pendingGuard = rejectApplyDuringPendingEdits(runtime, "rename");
+    if (pendingGuard) return pendingGuard;
+  }
+
   const result = await lspService.rename(requirePath(params), params.line, params.character, params.newName);
   if (params.apply !== true) return rawOrPretty(params, result, runtime.projectRoot);
 
@@ -230,6 +265,15 @@ async function handleRename(params: Record<string, unknown>, runtime: CodeFeedba
     workspaceEdit: result,
     applyResult,
   });
+}
+
+function rejectApplyDuringPendingEdits(runtime: CodeFeedbackRuntime, label: string): PiToolResult | undefined {
+  if (runtime.pendingEdits.size === 0) return undefined;
+  return textResult(
+    `Refusing to apply ${label} while ${runtime.pendingEdits.size} other file edit${runtime.pendingEdits.size === 1 ? " is" : "s are"} still pending in this tool batch. Retry after the edit tools finish.`,
+    true,
+    { pendingEdits: runtime.pendingEdits.size },
+  );
 }
 
 async function resyncChangedFiles(lspService: LspService, changedFiles: string[], runtime: CodeFeedbackRuntime): Promise<void> {
