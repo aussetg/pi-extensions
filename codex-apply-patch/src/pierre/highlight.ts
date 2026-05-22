@@ -27,14 +27,27 @@ export function buildPiHighlightedDiff(
 ): HighlightedDiffSet {
   if (!config.syntaxHighlight.enabled) return emptyHighlightedDiffSet();
 
-  const lineCount = metadata.deletionLines.length + metadata.additionLines.length;
+  const indexes = renderedLineIndexes(metadata);
+  const lineCount = indexes.deletion.length + indexes.addition.length;
   if (lineCount === 0 || lineCount > config.syntaxHighlight.maxLines) {
     return emptyHighlightedDiffSet();
   }
 
   const lang = metadata.lang ?? "text";
-  const deletion = highlightAnsiLines(metadata.deletionLines, lang, config, theme);
-  const addition = highlightAnsiLines(metadata.additionLines, lang, config, theme);
+  const deletion = highlightAnsiLines(
+    metadata.deletionLines,
+    indexes.deletion,
+    lang,
+    config,
+    theme,
+  );
+  const addition = highlightAnsiLines(
+    metadata.additionLines,
+    indexes.addition,
+    lang,
+    config,
+    theme,
+  );
   if (!deletion.styled && !addition.styled) return emptyHighlightedDiffSet();
 
   const highlighted = {
@@ -120,17 +133,76 @@ export function flattenHighlightedLine(
 
 function highlightAnsiLines(
   lines: string[],
+  indexes: number[],
   lang: string,
   config: PierreRendererConfig,
   theme?: PiThemeLike,
 ): { lines: Array<HastNode | undefined>; styled: boolean } {
-  if (lines.length === 0) return { lines: [], styled: false };
-
-  const cleanLines = lines.map(cleanDiffLine);
-  if (cleanLines.some((line) => line.length > config.syntaxHighlight.maxLineLength)) {
-    return { lines: cleanLines.map(textNode), styled: false };
+  if (lines.length === 0 || indexes.length === 0) {
+    return { lines: [], styled: false };
   }
 
+  const out: Array<HastNode | undefined> = [];
+  let styled = false;
+
+  for (const run of contiguousRuns(indexes)) {
+    let start = 0;
+    while (start < run.length) {
+      while (
+        start < run.length &&
+        cleanDiffLine(lines[run[start]!]).length >
+          config.syntaxHighlight.maxLineLength
+      ) {
+        start++;
+      }
+      if (start >= run.length) break;
+
+      let end = start + 1;
+      while (
+        end < run.length &&
+        cleanDiffLine(lines[run[end]!]).length <=
+          config.syntaxHighlight.maxLineLength
+      ) {
+        end++;
+      }
+
+      const subrun = run.slice(start, end);
+      const cleanLines = subrun.map((index) => cleanDiffLine(lines[index]));
+      const highlighted = highlightCleanLines(cleanLines, lang, theme);
+      if (highlighted) {
+        for (let i = 0; i < subrun.length; i++) {
+          const line = cleanLines[i] ?? "";
+          const renderedLine = highlighted[i] ?? line;
+          const parsed = ansiToSpans(renderedLine);
+          styled ||= parsed.some((span) => Boolean(span.fg));
+          out[subrun[i]!] = ansiSpansNode(parsed);
+        }
+      }
+
+      start = end;
+    }
+  }
+
+  return { lines: out, styled };
+}
+
+function highlightCleanLines(
+  cleanLines: string[],
+  lang: string,
+  theme?: PiThemeLike,
+): string[] | undefined {
+  const highlighted = callHighlightCode(cleanLines, lang, theme);
+  if (!theme || highlightedLinesHaveAnsi(highlighted)) return highlighted;
+
+  const fallback = callHighlightCode(cleanLines, lang);
+  return highlightedLinesHaveAnsi(fallback) ? fallback : highlighted;
+}
+
+function callHighlightCode(
+  cleanLines: string[],
+  lang: string,
+  theme?: PiThemeLike,
+): string[] | undefined {
   try {
     const highlighter = highlightCode as (
       code: string,
@@ -142,18 +214,61 @@ function highlightAnsiLines(
       isPlainTextLanguage(lang) ? undefined : lang,
       theme,
     );
-    const highlightedLines = normalizeHighlightedLines(rawHighlighted);
-    let styled = false;
-    const nodes = cleanLines.map((line, index) => {
-      const renderedLine = highlightedLines[index] ?? line;
-      const parsed = ansiToSpans(renderedLine);
-      styled ||= parsed.some((span) => Boolean(span.fg));
-      return ansiSpansNode(parsed);
-    });
-    return { lines: nodes, styled };
+    return normalizeHighlightedLines(rawHighlighted);
   } catch {
-    return { lines: [], styled: false };
+    return undefined;
   }
+}
+
+function highlightedLinesHaveAnsi(lines: string[] | undefined): boolean {
+  return Boolean(lines?.some((line) => /\u001b\[[0-9;]*m/.test(line)));
+}
+
+function renderedLineIndexes(metadata: FileDiffMetadata): {
+  deletion: number[];
+  addition: number[];
+} {
+  const deletion = new Set<number>();
+  const addition = new Set<number>();
+
+  for (const hunk of metadata.hunks) {
+    for (const content of hunk.hunkContent) {
+      if (content.type === "context") {
+        addRange(addition, content.additionLineIndex, content.lines);
+        continue;
+      }
+
+      addRange(deletion, content.deletionLineIndex, content.deletions);
+      addRange(addition, content.additionLineIndex, content.additions);
+    }
+  }
+
+  return {
+    deletion: [...deletion].sort((a, b) => a - b),
+    addition: [...addition].sort((a, b) => a - b),
+  };
+}
+
+function addRange(target: Set<number>, start: number, count: number): void {
+  for (let i = 0; i < count; i++) target.add(start + i);
+}
+
+function contiguousRuns(indexes: number[]): number[][] {
+  const runs: number[][] = [];
+  let current: number[] = [];
+
+  for (const index of indexes) {
+    if (current.length === 0 || index === current[current.length - 1]! + 1) {
+      current.push(index);
+      continue;
+    }
+
+    runs.push(current);
+    current = [index];
+  }
+
+  if (current.length > 0) runs.push(current);
+  return runs;
 }
 
 function normalizeHighlightedLines(value: string | string[]): string[] {
@@ -168,10 +283,6 @@ function ansiSpansNode(spans: DiffSpan[]): HastNode | undefined {
     properties: { "data-pi-ansi-spans": spans },
     children: [],
   };
-}
-
-function textNode(value: string): HastNode {
-  return { type: "text", value };
 }
 
 function normalizeSyntaxCategory(value: unknown): SyntaxCategory | undefined {

@@ -48,6 +48,14 @@ async function unlinkIfExists(abs: string): Promise<void> {
   }
 }
 
+async function rmdirIfExists(abs: string): Promise<void> {
+  try {
+    await fs.rmdir(abs);
+  } catch (err) {
+    if (!isNotFoundError(err)) throw err;
+  }
+}
+
 function isAlreadyExistsError(err: unknown): boolean {
   return (
     typeof err === "object" &&
@@ -223,6 +231,10 @@ type PlannedMutation =
 type JournalEntry =
   | {
       kind: "created";
+      abs: string;
+    }
+  | {
+      kind: "created-dir";
       abs: string;
     }
   | {
@@ -619,18 +631,6 @@ export async function applyOperations(
     }
   }
 
-  const ensuredDirs = new Map<string, Promise<void>>();
-  const ensureDir = async (dir: string) => {
-    const inFlight = ensuredDirs.get(dir);
-    if (inFlight) return inFlight;
-
-    const pending = fs.mkdir(dir, { recursive: true }).catch((err) => {
-      ensuredDirs.delete(dir);
-      throw err;
-    });
-    ensuredDirs.set(dir, pending);
-    return pending;
-  };
   let fuzzTotal = 0;
   const warnings = new Set<string>();
 
@@ -638,7 +638,48 @@ export async function applyOperations(
   // when the filesystem supports it; deletes/moves rename the old path aside so
   // unreadable files and symlinks can still be restored on failure.
   const journal: JournalEntry[] = [];
+  const journaledCreatedDirs = new Set<string>();
   const completedTasks: PlannedApplyTask[] = [];
+
+  const journalCreatedDirs = (firstCreated: string, finalDir: string) => {
+    const first = path.resolve(firstCreated);
+    const final = path.resolve(finalDir);
+    const relative = path.relative(first, final);
+    const dirs = [first];
+
+    if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) {
+      let current = first;
+      for (const part of relative.split(path.sep)) {
+        if (!part) continue;
+        current = path.join(current, part);
+        dirs.push(current);
+      }
+    }
+
+    for (const dir of dirs) {
+      if (journaledCreatedDirs.has(dir)) continue;
+      journaledCreatedDirs.add(dir);
+      journal.push({ kind: "created-dir", abs: dir });
+    }
+  };
+
+  const ensuredDirs = new Map<string, Promise<void>>();
+  const ensureDir = async (dir: string) => {
+    const inFlight = ensuredDirs.get(dir);
+    if (inFlight) return inFlight;
+
+    const pending = fs
+      .mkdir(dir, { recursive: true })
+      .then((firstCreated) => {
+        if (typeof firstCreated === "string") journalCreatedDirs(firstCreated, dir);
+      })
+      .catch((err) => {
+        ensuredDirs.delete(dir);
+        throw err;
+      });
+    ensuredDirs.set(dir, pending);
+    return pending;
+  };
 
   const assertAbsent = async (abs: string) => {
     const st = await lstatIfExists(abs);
@@ -720,7 +761,7 @@ export async function applyOperations(
   const cleanupJournal = async (): Promise<string[]> => {
     const cleanupWarnings: string[] = [];
     for (const entry of journal) {
-      if (entry.kind === "created") continue;
+      if (entry.kind === "created" || entry.kind === "created-dir") continue;
       try {
         await unlinkIfExists(entry.backup);
       } catch (err) {
@@ -740,6 +781,11 @@ export async function applyOperations(
       try {
         if (entry.kind === "created") {
           await unlinkIfExists(entry.abs);
+          continue;
+        }
+
+        if (entry.kind === "created-dir") {
+          await rmdirIfExists(entry.abs);
           continue;
         }
 
