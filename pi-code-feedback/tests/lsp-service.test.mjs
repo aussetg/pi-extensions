@@ -5,6 +5,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { createLspService } from "../src/lsp/service.ts";
+import { selectCodeActionForApply } from "../src/lsp/workspace-edit.ts";
+import { LSP_RESULT_SERVER_ID_KEY } from "../src/types.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fakeServer = path.join(here, "fixtures", "fake-lsp-server.mjs");
@@ -51,6 +53,42 @@ test("diagnostics for a Python file are merged from ty and Ruff clients", async 
     assert.equal(tyClient?.lastError, undefined);
     assert.equal(tyClient?.lastServerLog?.level, "warning");
     assert.match(tyClient?.lastServerLog?.message ?? "", /WARN fake server warning/);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("code actions for a Python file are merged from ty and Ruff clients", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-actions-"));
+  const filePath = path.join(root, "probe.py");
+  await writeFile(filePath, "import os\n", "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "ty", "T100", "1", "", "actions-require-diagnostics"],
+      },
+      "python-ruff": {
+        command: process.execPath,
+        args: [fakeServer, "Ruff", "F401", "2", "", "actions-resolve-require-diagnostics"],
+      },
+    },
+  });
+
+  try {
+    const actions = await service.codeActions(filePath, 1, 1);
+    assert.ok(Array.isArray(actions));
+    assert.equal(actions.length, 2);
+    assert.deepEqual(actions.map((action) => action[LSP_RESULT_SERVER_ID_KEY]).sort(), ["python", "python-ruff"]);
+    assert.deepEqual(actions.map((action) => action.title).sort(), ["Ruff fix F401", "ty fix T100"]);
+    assert.equal(actions.every((action) => action.edit), true);
+
+    const selection = selectCodeActionForApply(actions, "python-ruff");
+    assert.equal(selection.action?.title, "Ruff fix F401");
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });

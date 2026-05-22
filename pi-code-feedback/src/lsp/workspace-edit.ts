@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { LSP_RESULT_SERVER_ID_KEY } from "../types.ts";
 import { uriToFilePath, type LspPosition, type LspRange } from "./positions.ts";
 
 export interface AppliedTextEdit {
@@ -126,6 +127,7 @@ export function selectCodeActionForApply(actions: unknown, query: unknown): { ac
 
 function codeActionMatches(action: Record<string, unknown>, query: string): boolean {
   const haystack = [action.title, action.kind, action.command]
+    .concat(action[LSP_RESULT_SERVER_ID_KEY])
     .map((value) => (typeof value === "string" ? value.toLowerCase() : ""))
     .join("\n");
   return haystack.includes(query);

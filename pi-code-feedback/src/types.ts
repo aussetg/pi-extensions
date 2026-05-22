@@ -146,6 +146,8 @@ export interface DiagnosticFilterResult {
 
 export const CODE_FEEDBACK_DETAILS_KEY = "piCodeFeedback";
 
+export const LSP_RESULT_SERVER_ID_KEY = "__piCodeFeedbackServerId";
+
 export interface CodeFeedbackToolDetails {
   version: 1;
   inlineText: string;

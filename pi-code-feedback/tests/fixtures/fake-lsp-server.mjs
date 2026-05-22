@@ -2,6 +2,7 @@ const source = process.argv[2] ?? "fake";
 const code = process.argv[3] ?? "FAKE";
 const severity = Number.parseInt(process.argv[4] ?? "1", 10);
 const stderrMode = process.argv[5] ?? "";
+const mode = process.argv[6] ?? "diagnostics";
 
 if (stderrMode === "warn") {
   process.stderr.write("WARN fake server warning for status tests\n");
@@ -46,6 +47,8 @@ function handleMessage(message) {
         capabilities: {
           textDocumentSync: 1,
           diagnosticProvider: { interFileDependencies: false, workspaceDiagnostics: false },
+          codeActionProvider: true,
+          hoverProvider: true,
         },
       },
     });
@@ -54,6 +57,31 @@ function handleMessage(message) {
 
   if (message.id !== undefined && message.method === "shutdown") {
     send({ jsonrpc: "2.0", id: message.id, result: null });
+    return;
+  }
+
+  if (message.id !== undefined && message.method === "textDocument/codeAction") {
+    const diagnostics = message.params?.context?.diagnostics;
+    const hasDiagnostics = Array.isArray(diagnostics) && diagnostics.length > 0;
+    const result = mode === "empty" || (mode === "actions-require-diagnostics" && !hasDiagnostics)
+      ? []
+      : [codeAction(message.params?.textDocument?.uri, { deferEdit: mode === "actions-resolve-require-diagnostics" })];
+    send({ jsonrpc: "2.0", id: message.id, result });
+    return;
+  }
+
+  if (message.id !== undefined && message.method === "codeAction/resolve") {
+    const action = typeof message.params === "object" && message.params ? message.params : {};
+    send({ jsonrpc: "2.0", id: message.id, result: { ...action, edit: editForUri(action.data?.uri) } });
+    return;
+  }
+
+  if (message.id !== undefined && message.method === "textDocument/hover") {
+    send({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: mode === "empty" ? null : { contents: { kind: "plaintext", value: `${source} hover` } },
+    });
     return;
   }
 
@@ -76,6 +104,32 @@ function handleMessage(message) {
     const document = message.params?.textDocument;
     publishDiagnostics(document?.uri, document?.version);
   }
+}
+
+function codeAction(uri, options = {}) {
+  return {
+    title: `${source} fix ${code}`,
+    kind: "quickfix",
+    data: typeof uri === "string" ? { uri } : undefined,
+    edit: options.deferEdit ? undefined : editForUri(uri),
+  };
+}
+
+function editForUri(uri) {
+  if (typeof uri !== "string") return undefined;
+  return {
+    changes: {
+      [uri]: [
+        {
+          range: {
+            start: { line: 0, character: 0 },
+            end: { line: 0, character: 0 },
+          },
+          newText: `# fixed by ${source}\n`,
+        },
+      ],
+    },
+  };
 }
 
 function publishDiagnostics(uri, version) {

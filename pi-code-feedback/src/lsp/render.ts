@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { lspRangeToExternal, uriToFilePath, type LspRange } from "./positions.ts";
 import { workspaceEditSummary, type WorkspaceEditApplyResult } from "./workspace-edit.ts";
-import type { LspAction } from "../types.ts";
+import { LSP_RESULT_SERVER_ID_KEY, type LspAction } from "../types.ts";
 
 export function renderLspActionResult(action: LspAction, result: unknown, projectRoot: string): string {
   switch (action) {
@@ -44,9 +44,10 @@ export function renderCodeActionApplySelectionError(error: string, candidates: R
     lines.push("", "Applicable code actions:");
     for (const action of candidates.slice(0, 20)) {
       const title = typeof action.title === "string" ? action.title : "untitled action";
+      const server = typeof action[LSP_RESULT_SERVER_ID_KEY] === "string" ? ` (${action[LSP_RESULT_SERVER_ID_KEY]})` : "";
       const kind = typeof action.kind === "string" ? ` [${action.kind}]` : "";
       const preferred = action.isPreferred === true ? " preferred" : "";
-      lines.push(`  - ${title}${kind}${preferred}`);
+      lines.push(`  - ${title}${server}${kind}${preferred}`);
     }
     if (candidates.length > 20) lines.push(`  ... ${candidates.length - 20} more`);
   }
@@ -128,11 +129,12 @@ function renderCodeActions(result: unknown): string {
   const lines = [`${actions.length} code action${actions.length === 1 ? "" : "s"}:`];
   for (const action of actions.slice(0, 40)) {
     const title = typeof action.title === "string" ? action.title : typeof action.command === "string" ? action.command : "untitled action";
+    const server = typeof action[LSP_RESULT_SERVER_ID_KEY] === "string" ? ` (${action[LSP_RESULT_SERVER_ID_KEY]})` : "";
     const kind = typeof action.kind === "string" ? ` [${action.kind}]` : "";
     const preferred = action.isPreferred === true ? " preferred" : "";
     const edit = workspaceEditSummary(action.edit);
     const editText = edit.edits > 0 ? ` edits=${edit.edits} files=${edit.files}` : "";
-    lines.push(`  - ${title}${kind}${preferred}${editText}`);
+    lines.push(`  - ${title}${server}${kind}${preferred}${editText}`);
   }
   if (actions.length > 40) lines.push(`  ... ${actions.length - 40} more`);
   return lines.join("\n");

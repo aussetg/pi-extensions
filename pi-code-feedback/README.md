@@ -16,3 +16,5 @@ If a language server answers after the inline tool-result timeout, linked diagno
 
 Inline feedback is appended to `result.content` for the model and mirrored as structured metadata under `result.details.piCodeFeedback` for renderers.
 
+For languages with multiple configured servers, diagnostics and read-only `/lsp` requests fan out across the matching servers; code actions are tagged with their source server so `apply:true` can select e.g. Ruff actions by query.
+
