@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { openAnsi, renderAnsiSegments } from "../src/pierre/ansi.ts";
+import { continuationPrefixSegments } from "../src/pierre/gutter.ts";
 import { buildPiHighlightedDiff } from "../src/pierre/highlight.ts";
 import { DEFAULT_PIERRE_RENDERER_CONFIG } from "../src/pierre/config.ts";
 import { buildCachedDiffRows, buildDiffRows } from "../src/pierre/rows.ts";
@@ -430,6 +431,55 @@ test("cached ANSI segment rendering preserves base and override behavior", () =>
     renderAnsiSegments(segments, { ...base, bold: true }),
     baselineRenderAnsiSegments(segments, { ...base, bold: true }),
   );
+});
+
+test("wrapped line continuation prefixes keep the row gutter bar", () => {
+  const palette = getPierrePalette({ name: "dark" }, config);
+  const additionRow = {
+    kind: "line",
+    lineType: "addition",
+    lineNumber: 5,
+    spans: [],
+    rowFg: palette.additionFg,
+    rowBg: palette.additionRowBg,
+    lineNumberFg: palette.additionLineNumberFg,
+  };
+  const deletionRow = {
+    ...additionRow,
+    lineType: "deletion",
+    rowFg: palette.deletionFg,
+    rowBg: palette.deletionRowBg,
+    lineNumberFg: palette.deletionLineNumberFg,
+  };
+  const visibleWidth = (text) => [...text].length;
+
+  const additionBeforeNumber = continuationPrefixSegments(
+    8,
+    additionRow,
+    palette,
+    config,
+    visibleWidth,
+  );
+  const deletionBeforeNumber = continuationPrefixSegments(
+    8,
+    deletionRow,
+    palette,
+    config,
+    visibleWidth,
+  );
+  const additionAfterNumber = continuationPrefixSegments(
+    8,
+    additionRow,
+    palette,
+    { ...config, gutter: { ...config.gutter, barPosition: "after-number" } },
+    visibleWidth,
+  );
+
+  assert.equal(additionBeforeNumber[1].text, config.gutter.additionBar);
+  assert.equal(additionBeforeNumber[1].fg, palette.additionBarFg);
+  assert.equal(additionBeforeNumber[1].bg, palette.additionBarBg);
+  assert.equal(deletionBeforeNumber[1].text, config.gutter.deletionBar);
+  assert.equal(additionAfterNumber[2].text, config.gutter.additionBar);
 });
 
 function workerCaptures(languageKey, lines, indexes) {
