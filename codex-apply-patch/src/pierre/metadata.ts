@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { createTwoFilesPatch } from "diff";
 import { getFiletypeFromFileName } from "../../node_modules/@pierre/diffs/dist/utils/getFiletypeFromFileName.js";
+import { parseDiffFromFile } from "../../node_modules/@pierre/diffs/dist/utils/parseDiffFromFile.js";
 import { parsePatchFiles } from "../../node_modules/@pierre/diffs/dist/utils/parsePatchFiles.js";
 import { setLanguageOverride } from "../../node_modules/@pierre/diffs/dist/utils/setLanguageOverride.js";
 import type { FileDiffMetadata } from "../../node_modules/@pierre/diffs/dist/types.js";
@@ -140,17 +140,12 @@ function buildPierrePayload({
 
   try {
     const cacheKey = diffCacheKey(oldPath, newPath, oldNormalized, newNormalized);
-    const patch = createTwoFilesPatch(
-      oldPath,
-      newPath,
-      oldNormalized,
-      newNormalized,
-      "",
-      "",
+    const metadata = parseDiffFromFile(
+      { name: oldPath, contents: oldNormalized, cacheKey: `${cacheKey}:old` },
+      { name: newPath, contents: newNormalized, cacheKey: `${cacheKey}:new` },
       { context: contextLines },
+      true,
     );
-    const parsed = parsePatchFiles(patch, cacheKey, true);
-    const metadata = parsed[0]?.files[0];
     if (!metadata) return undefined;
 
     const typedMetadata = forcedType

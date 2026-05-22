@@ -16,7 +16,7 @@ export function buildDiffRows(
 
   for (const hunk of metadata.hunks) {
     if (hunk.collapsedBefore > 0) {
-      if (options.expandCollapsed) {
+      if (options.expandCollapsed && !metadata.isPartial) {
         pushContextRows(
           rows,
           metadata,
@@ -147,7 +147,7 @@ export function buildDiffRows(
   }
 
   const trailing = trailingCollapsedLines(metadata);
-  if (trailing > 0 && options.expandCollapsed) {
+  if (trailing > 0 && options.expandCollapsed && !metadata.isPartial) {
     const lastHunk = metadata.hunks[metadata.hunks.length - 1]!;
     pushContextRows(
       rows,
