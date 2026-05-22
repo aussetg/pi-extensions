@@ -136,8 +136,16 @@ type TreeSitterNode = {
   endPosition: { row: number; column: number };
 };
 type TreeSitterCapture = { name: string; node: TreeSitterNode };
+type TreeSitterPoint = { row: number; column: number };
+type TreeSitterQueryOptions = {
+  startPosition?: TreeSitterPoint;
+  endPosition?: TreeSitterPoint;
+};
 type TreeSitterQuery = {
-  captures: (node: unknown) => TreeSitterCapture[];
+  captures: (
+    node: unknown,
+    options?: TreeSitterQueryOptions,
+  ) => TreeSitterCapture[];
 };
 type TreeSitterParser = {
   setLanguage: (language: TreeSitterLanguage) => void;
@@ -160,12 +168,17 @@ type PreparedTreeSitterLines = {
   cleanLines: string[];
   lineStyles: Map<number, Array<SyntaxCategory | undefined>>;
 };
+type LineRange = { start: number; end: number };
 
 const nodeRequire = createRequire(import.meta.url);
 const treeSitterWorkerPath = join(
   dirname(fileURLToPath(import.meta.url)),
   "tree-sitter-worker.cjs",
 );
+const TREE_SITTER_QUERY_RANGE_GAP = 2;
+const TREE_SITTER_QUERY_RANGE_END_COLUMN = 0x7fffffff;
+const TREE_SITTER_QUERY_FULL_COVERAGE_NUMERATOR = 3;
+const TREE_SITTER_QUERY_FULL_COVERAGE_DENOMINATOR = 4;
 let treeSitterRuntime: TreeSitterRuntime | null | undefined;
 const treeSitterQueryCache = new Map<string, TreeSitterQuery>();
 
@@ -298,7 +311,16 @@ function highlightTreeSitterLines(
     parser.setLanguage(language);
     const tree = parser.parse(cleanLines.join("\n"));
     const query = treeSitterQuery(runtime, languageKey, language, querySource);
-    paintCaptures(cleanLines, lineStyles, query.captures(tree.rootNode));
+    paintCaptures(
+      cleanLines,
+      lineStyles,
+      treeSitterCapturesForStyledRanges(
+        query,
+        tree.rootNode,
+        lineStyles,
+        cleanLines.length,
+      ),
+    );
   } catch {
     return { lines: [], styled: false };
   }
@@ -363,6 +385,80 @@ function prepareTreeSitterLines(
     lineStyles.set(index, new Array<SyntaxCategory | undefined>(line.length));
   }
   return lineStyles.size === 0 ? undefined : { cleanLines, lineStyles };
+}
+
+function treeSitterCapturesForStyledRanges(
+  query: TreeSitterQuery,
+  rootNode: unknown,
+  lineStyles: Map<number, Array<SyntaxCategory | undefined>>,
+  lineCount: number,
+): TreeSitterCapture[] {
+  const ranges = styledLineRanges(lineStyles, lineCount);
+  if (ranges.length === 0) return [];
+  if (shouldQueryFullTree(ranges, lineCount)) {
+    return query.captures(rootNode);
+  }
+
+  try {
+    const captures: TreeSitterCapture[] = [];
+    for (const range of ranges) {
+      captures.push(
+        ...query.captures(rootNode, {
+          startPosition: { row: range.start, column: 0 },
+          endPosition: {
+            row: range.end,
+            column: TREE_SITTER_QUERY_RANGE_END_COLUMN,
+          },
+        }),
+      );
+    }
+    return captures;
+  } catch {
+    return query.captures(rootNode);
+  }
+}
+
+function styledLineRanges(
+  lineStyles: Map<number, Array<SyntaxCategory | undefined>>,
+  lineCount: number,
+): LineRange[] {
+  const ranges: LineRange[] = [];
+  let current: LineRange | undefined;
+
+  for (const row of lineStyles.keys()) {
+    if (row < 0 || row >= lineCount) continue;
+    if (!current) {
+      current = { start: row, end: row };
+      continue;
+    }
+    if (row <= current.end + TREE_SITTER_QUERY_RANGE_GAP + 1) {
+      current.end = row;
+      continue;
+    }
+
+    ranges.push(current);
+    current = { start: row, end: row };
+  }
+
+  if (current) ranges.push(current);
+  return ranges;
+}
+
+function shouldQueryFullTree(ranges: LineRange[], lineCount: number): boolean {
+  if (
+    ranges.length === 1 &&
+    ranges[0]!.start === 0 &&
+    ranges[0]!.end >= lineCount - 1
+  ) {
+    return true;
+  }
+
+  let coveredLines = 0;
+  for (const range of ranges) coveredLines += range.end - range.start + 1;
+  return (
+    coveredLines * TREE_SITTER_QUERY_FULL_COVERAGE_DENOMINATOR >=
+    lineCount * TREE_SITTER_QUERY_FULL_COVERAGE_NUMERATOR
+  );
 }
 
 function paintCaptures(

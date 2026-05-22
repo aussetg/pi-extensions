@@ -4,6 +4,7 @@ import { DEFAULT_PIERRE_RENDERER_CONFIG } from "../src/pierre/config.ts";
 import {
   baselineHighlightedDiff,
   changedFileMetadata,
+  makeMetadata,
 } from "./rendering-baseline.mjs";
 
 const config = {
@@ -16,35 +17,49 @@ const config = {
   },
 };
 
-const metadata = changedFileMetadata({
-  name: "large.ts",
-  lang: "typescript",
-  before: makeFile(220, false),
-  after: makeFile(220, true),
-  cacheKey: "benchmark-large-ts",
-});
+const fixtures = [
+  {
+    name: "dense",
+    metadata: changedFileMetadata({
+      name: "large.ts",
+      lang: "typescript",
+      before: makeFile(220, false),
+      after: makeFile(220, true),
+      cacheKey: "benchmark-large-ts-dense",
+    }),
+  },
+  {
+    name: "sparse",
+    metadata: sparseMetadata(),
+  },
+];
 
 const iterations = Number(process.env.PI_RENDER_BENCH_ITERATIONS ?? 40);
 
-if (global.gc) global.gc();
-baselineHighlightedDiff(metadata, config);
-buildPiHighlightedDiff(metadata, config);
+for (const fixture of fixtures) {
+  const { metadata } = fixture;
+  if (global.gc) global.gc();
+  baselineHighlightedDiff(metadata, config);
+  buildPiHighlightedDiff(metadata, config);
 
-const baseline = measure("baseline", () => baselineHighlightedDiff(metadata, config));
-const optimized = measure("optimized", () => buildPiHighlightedDiff(metadata, config));
+  const baseline = measure("baseline", () => baselineHighlightedDiff(metadata, config));
+  const optimized = measure("optimized", () => buildPiHighlightedDiff(metadata, config));
 
-console.log(`fixture: ${metadata.additionLines.length} TypeScript lines, ${iterations} iterations`);
-console.table([
-  formatResult(baseline),
-  formatResult(optimized),
-  {
-    name: "delta",
-    "wall ms": (optimized.wallMs - baseline.wallMs).toFixed(1),
-    "cpu ms": (optimized.cpuMs - baseline.cpuMs).toFixed(1),
-    "heap MiB": (optimized.heapMiB - baseline.heapMiB).toFixed(2),
-    "speedup": `${(baseline.wallMs / optimized.wallMs).toFixed(2)}×`,
-  },
-]);
+  console.log(
+    `fixture: ${fixture.name}, ${metadata.additionLines.length} TypeScript lines, ${iterations} iterations`,
+  );
+  console.table([
+    formatResult(baseline),
+    formatResult(optimized),
+    {
+      name: "delta",
+      "wall ms": (optimized.wallMs - baseline.wallMs).toFixed(1),
+      "cpu ms": (optimized.cpuMs - baseline.cpuMs).toFixed(1),
+      "heap MiB": (optimized.heapMiB - baseline.heapMiB).toFixed(2),
+      speedup: `${(baseline.wallMs / optimized.wallMs).toFixed(2)}×`,
+    },
+  ]);
+}
 
 function measure(name, fn) {
   if (global.gc) global.gc();
@@ -94,4 +109,28 @@ function makeFile(count, changed) {
   lines.push("}");
   lines.push("export const registry = new Registry();");
   return lines;
+}
+
+function sparseMetadata() {
+  const before = makeFile(220, false);
+  const after = [...before];
+  const changedRows = [8, 103, 257, 509, 801, 1002];
+  for (const row of changedRows) {
+    after[row] = before[row].replace(/\d+/, (value) => String(Number(value) + 1000));
+  }
+
+  return makeMetadata({
+    name: "large-sparse.ts",
+    lang: "typescript",
+    deletionLines: before,
+    additionLines: after,
+    hunkContent: changedRows.map((row) => ({
+      type: "change",
+      deletions: 1,
+      deletionLineIndex: row,
+      additions: 1,
+      additionLineIndex: row,
+    })),
+    cacheKey: "benchmark-large-ts-sparse",
+  });
 }
