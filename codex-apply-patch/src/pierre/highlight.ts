@@ -1,4 +1,5 @@
 import type { FileDiffMetadata } from "../../node_modules/@pierre/diffs/dist/types.js";
+import { createHighlighter, createJavaScriptRegexEngine } from "shiki";
 import type { PierreRendererConfig } from "./config.ts";
 import type { PierreTerminalPalette } from "./theme.ts";
 import type {
@@ -175,11 +176,10 @@ async function loadLanguage(lang: string): Promise<string> {
 
 async function getHighlighter(): Promise<ShikiHighlighter> {
   highlighterPromise ??= (async () => {
-    const shiki = await import("shiki");
-    return (await shiki.createHighlighter({
+    return (await createHighlighter({
       themes: [PI_SHIKI_THEME],
       langs: ["text"],
-      engine: shiki.createJavaScriptRegexEngine(),
+      engine: createJavaScriptRegexEngine(),
     })) as ShikiHighlighter;
   })();
   return highlighterPromise;
