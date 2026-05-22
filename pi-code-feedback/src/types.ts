@@ -135,6 +135,30 @@ export interface DiagnosticFilterResult {
   summary: DiagnosticFilterSummary;
 }
 
+export const CODE_FEEDBACK_DETAILS_KEY = "piCodeFeedback";
+
+export interface CodeFeedbackToolDetails {
+  version: 1;
+  inlineText: string;
+  edits: CodeFeedbackEditDetails[];
+}
+
+export interface CodeFeedbackEditDetails {
+  id: string;
+  toolName: TrackedToolName;
+  filePath: string;
+  displayPath: string;
+  touchedRanges: TouchedRange[];
+  formatter?: FormatterSummary;
+  diagnostics?: CodeFeedbackDiagnosticDetails;
+}
+
+export interface CodeFeedbackDiagnosticDetails {
+  label: "diagnostics" | "touched diagnostics";
+  linked: LinkedDiagnostic[];
+  summary: DiagnosticFilterSummary;
+}
+
 export interface PendingEdit {
   id: string;
   toolName: TrackedToolName;

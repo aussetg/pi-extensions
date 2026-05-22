@@ -10,7 +10,19 @@ import { resolveInputPath, shouldTrackFile } from "../paths.ts";
 import type { PiToolResult } from "../pi.ts";
 import { renderDelayedDiagnosticFeedback, renderInlineDiagnosticFeedback } from "../render.ts";
 import { enqueueDelayedFeedback, hasPendingEditForFile, recordCompletedEdit, takePendingEdit, type CodeFeedbackRuntime } from "../runtime.ts";
-import type { CompletedEdit, DiagnosticFilterResult, DiagnosticRefreshResult, DiagnosticSnapshot, FormatterResult, FormatterSummary, LspDiagnostic, PendingEdit } from "../types.ts";
+import {
+  CODE_FEEDBACK_DETAILS_KEY,
+  type CodeFeedbackEditDetails,
+  type CodeFeedbackToolDetails,
+  type CompletedEdit,
+  type DiagnosticFilterResult,
+  type DiagnosticRefreshResult,
+  type DiagnosticSnapshot,
+  type FormatterResult,
+  type FormatterSummary,
+  type LspDiagnostic,
+  type PendingEdit,
+} from "../types.ts";
 import { applyPatchOperationId } from "./tool-call.ts";
 
 export interface ToolResultEvent {
@@ -358,22 +370,78 @@ function appendInlineFeedback(event: ToolResultEvent, completed: CompletedEdit, 
   const feedback = renderInlineDiagnosticFeedback(runtime, completed);
   if (!feedback) return;
   const isStrictError = runtime.config.strict && completed.diagnosticFilter?.linked.some((linked) => linked.diagnostic.severity === "error");
-  return {
+  const result: PiToolResult = {
     content: [...(event.content ?? []), { type: "text", text: feedback }],
     isError: isStrictError || undefined,
   };
+  const details = appendCodeFeedbackDetails(event.details, runtime, feedback, [completed]);
+  if (details !== undefined) result.details = details;
+  return result;
 }
 
 function appendInlineFeedbackForEdits(event: ToolResultEvent, completedEdits: CompletedEdit[], runtime: CodeFeedbackRuntime): PiToolResult | void {
-  const feedbackBlocks = completedEdits
-    .map((edit) => renderInlineDiagnosticFeedback(runtime, edit))
-    .filter((feedback): feedback is string => feedback !== undefined);
-  if (feedbackBlocks.length === 0) return;
+  const renderedFeedback = completedEdits
+    .map((edit) => ({ edit, text: renderInlineDiagnosticFeedback(runtime, edit) }))
+    .filter((entry): entry is { edit: CompletedEdit; text: string } => entry.text !== undefined);
+  if (renderedFeedback.length === 0) return;
+
+  const feedback = renderedFeedback.map((entry) => entry.text).join("\n\n");
+  const feedbackEdits = renderedFeedback.map((entry) => entry.edit);
 
   const isStrictError = runtime.config.strict && completedEdits.some((edit) => edit.diagnosticFilter?.linked.some((linked) => linked.diagnostic.severity === "error"));
-  return {
-    content: [...(event.content ?? []), { type: "text", text: feedbackBlocks.join("\n\n") }],
+  const result: PiToolResult = {
+    content: [...(event.content ?? []), { type: "text", text: feedback }],
     isError: isStrictError || undefined,
+  };
+  const details = appendCodeFeedbackDetails(event.details, runtime, feedback, feedbackEdits);
+  if (details !== undefined) result.details = details;
+  return result;
+}
+
+function appendCodeFeedbackDetails(
+  details: unknown,
+  runtime: CodeFeedbackRuntime,
+  inlineText: string,
+  edits: CompletedEdit[],
+): unknown | undefined {
+  const feedback: CodeFeedbackToolDetails = {
+    version: 1,
+    inlineText,
+    edits: edits.map((edit) => toCodeFeedbackEditDetails(runtime, edit)),
+  };
+
+  if (details === undefined) {
+    return { [CODE_FEEDBACK_DETAILS_KEY]: feedback };
+  }
+  if (!isObjectDetails(details)) return undefined;
+
+  return {
+    ...details,
+    [CODE_FEEDBACK_DETAILS_KEY]: feedback,
+  };
+}
+
+function isObjectDetails(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function toCodeFeedbackEditDetails(runtime: CodeFeedbackRuntime, edit: CompletedEdit): CodeFeedbackEditDetails {
+  const displayPath = path.relative(runtime.projectRoot, edit.filePath) || edit.filePath;
+  const filter = edit.diagnosticFilter;
+  return {
+    id: edit.id,
+    toolName: edit.toolName,
+    filePath: edit.filePath,
+    displayPath,
+    touchedRanges: edit.touchedRanges,
+    formatter: edit.formatter,
+    diagnostics: filter
+      ? {
+          label: runtime.config.diagnostics.inline === "all" ? "diagnostics" : "touched diagnostics",
+          linked: filter.linked,
+          summary: filter.summary,
+        }
+      : undefined,
   };
 }
 

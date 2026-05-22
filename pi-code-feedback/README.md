@@ -14,3 +14,5 @@ Automatic formatting is deterministic: one configured/canonical formatter per fi
 
 If a language server answers after the inline tool-result timeout, linked diagnostics are queued once and injected before the next model request.
 
+Inline feedback is appended to `result.content` for the model and mirrored as structured metadata under `result.details.piCodeFeedback` for renderers.
+
