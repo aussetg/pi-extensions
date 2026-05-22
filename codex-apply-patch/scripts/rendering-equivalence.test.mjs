@@ -11,6 +11,10 @@ import { DEFAULT_PIERRE_RENDERER_CONFIG } from "../src/pierre/config.ts";
 import { buildCachedDiffRows, buildDiffRows } from "../src/pierre/rows.ts";
 import { getPierrePalette } from "../src/pierre/theme.ts";
 import {
+  buildCreateFilePreview,
+  buildUpdateFilePreview,
+} from "../src/preview.ts";
+import {
   baselineHighlightedDiff,
   changedFileMetadata,
   makeMetadata,
@@ -243,6 +247,22 @@ test("unsupported languages keep the same empty-highlight behavior", () => {
   assert.deepEqual(
     buildPiHighlightedDiff(metadata, config),
     baselineHighlightedDiff(metadata, config),
+  );
+});
+
+test("best-effort preview builders do not throw for unpreviewable diffs", () => {
+  assert.equal(
+    buildCreateFilePreview({ path: "empty.txt", newContent: "" }),
+    undefined,
+  );
+  assert.equal(
+    buildUpdateFilePreview({
+      oldPath: "a.txt",
+      newPath: "b.txt",
+      oldContent: "same\n",
+      newContent: "same\n",
+    }),
+    undefined,
   );
 });
 

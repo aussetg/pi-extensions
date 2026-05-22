@@ -20,6 +20,14 @@ export interface LineMatchCache {
   preferRawIndex?: boolean;
 }
 
+export type FuzzyMatchKind = "trim-end" | "trim" | "unicode" | "eof";
+
+interface ContextMatchResult {
+  index: number;
+  fuzz: number;
+  fuzzKinds: FuzzyMatchKind[];
+}
+
 const INDEXED_CONTEXT_MATCH_MIN_LINES = 256;
 
 function buildLineIndex(lines: string[]): Map<string, number[]> {
@@ -270,20 +278,20 @@ function findContextCore(
   cache: LineMatchCache,
   contextRaw: string[],
   start: number,
-): { index: number; fuzz: number } {
+): ContextMatchResult {
   const lines = cache.raw;
-  if (contextRaw.length === 0) return { index: start, fuzz: 0 };
+  if (contextRaw.length === 0) return { index: start, fuzz: 0, fuzzKinds: [] };
   if (contextRaw.length === 1) {
     let idx = findLineFrom(lines, start, contextRaw[0]!);
-    if (idx !== -1) return { index: idx, fuzz: 0 };
+    if (idx !== -1) return { index: idx, fuzz: 0, fuzzKinds: [] };
 
     const linesTrimEnd = getTrimEndLines(cache);
     idx = findLineFrom(linesTrimEnd, start, contextRaw[0]!.trimEnd());
-    if (idx !== -1) return { index: idx, fuzz: 1 };
+    if (idx !== -1) return { index: idx, fuzz: 1, fuzzKinds: ["trim-end"] };
 
     const linesTrimmed = getTrimmedLines(cache);
     idx = findLineFrom(linesTrimmed, start, contextRaw[0]!.trim());
-    if (idx !== -1) return { index: idx, fuzz: 100 };
+    if (idx !== -1) return { index: idx, fuzz: 100, fuzzKinds: ["trim"] };
 
     const linesUnicode = getUnicodeLines(cache);
     idx = findLineFrom(
@@ -291,9 +299,9 @@ function findContextCore(
       start,
       normalizeLineForUnicodeMatch(contextRaw[0]!),
     );
-    if (idx !== -1) return { index: idx, fuzz: 1000 };
+    if (idx !== -1) return { index: idx, fuzz: 1000, fuzzKinds: ["unicode"] };
 
-    return { index: -1, fuzz: 0 };
+    return { index: -1, fuzz: 0, fuzzKinds: [] };
   }
 
   let exactIndex =
@@ -319,7 +327,7 @@ function findContextCore(
     }
   }
 
-  if (exactIndex !== -1) return { index: exactIndex, fuzz: 0 };
+  if (exactIndex !== -1) return { index: exactIndex, fuzz: 0, fuzzKinds: [] };
 
   let contextTrimEnd: string[] | undefined;
   const getContextTrimEnd = () => {
@@ -342,7 +350,8 @@ function findContextCore(
           getTrimEndLineIndex(cache),
         )
       : findContextByScan(linesTrimEnd, getContextTrimEnd(), start);
-  if (rstripIndex !== -1) return { index: rstripIndex, fuzz: 1 };
+  if (rstripIndex !== -1)
+    return { index: rstripIndex, fuzz: 1, fuzzKinds: ["trim-end"] };
 
   let contextTrimmed: string[] | undefined;
   const getContextTrimmed = () => {
@@ -365,7 +374,8 @@ function findContextCore(
           getTrimmedLineIndex(cache),
         )
       : findContextByScan(linesTrimmed, getContextTrimmed(), start);
-  if (trimIndex !== -1) return { index: trimIndex, fuzz: 100 };
+  if (trimIndex !== -1)
+    return { index: trimIndex, fuzz: 100, fuzzKinds: ["trim"] };
 
   let contextUnicode: string[] | undefined;
   const getContextUnicode = () => {
@@ -388,9 +398,10 @@ function findContextCore(
           getUnicodeLineIndex(cache),
         )
       : findContextByScan(linesUnicode, getContextUnicode(), start);
-  if (unicodeIndex !== -1) return { index: unicodeIndex, fuzz: 1000 };
+  if (unicodeIndex !== -1)
+    return { index: unicodeIndex, fuzz: 1000, fuzzKinds: ["unicode"] };
 
-  return { index: -1, fuzz: 0 };
+  return { index: -1, fuzz: 0, fuzzKinds: [] };
 }
 
 // If the section is marked EOF, prefer matching near file end; otherwise match forward.
@@ -399,7 +410,7 @@ export function findContext(
   contextRaw: string[],
   start: number,
   eof: boolean,
-): { index: number; fuzz: number } {
+): ContextMatchResult {
   if (eof) {
     const atEof = findContextCore(
       cache,
@@ -408,7 +419,11 @@ export function findContext(
     );
     if (atEof.index !== -1) return atEof;
     const fallback = findContextCore(cache, contextRaw, start);
-    return { index: fallback.index, fuzz: fallback.fuzz + 10000 };
+    return {
+      index: fallback.index,
+      fuzz: fallback.fuzz + 10000,
+      fuzzKinds: [...fallback.fuzzKinds, "eof"],
+    };
   }
   return findContextCore(cache, contextRaw, start);
 }
@@ -417,24 +432,30 @@ export function matchDeletedLines(
   cache: LineMatchCache,
   start: number,
   expected: string[],
-): { matched: boolean; actual: string[]; fuzz: number } {
+): {
+  matched: boolean;
+  actual: string[];
+  fuzz: number;
+  fuzzKinds: FuzzyMatchKind[];
+} {
   const actual = expected.map((_, i) => cache.raw[start + i] ?? "");
   if (start < 0 || start + expected.length > cache.raw.length) {
-    return { matched: false, actual, fuzz: 0 };
+    return { matched: false, actual, fuzz: 0, fuzzKinds: [] };
   }
 
-  if (expected.length === 0) return { matched: true, actual: [], fuzz: 0 };
+  if (expected.length === 0)
+    return { matched: true, actual: [], fuzz: 0, fuzzKinds: [] };
 
   if (expected.every((line, i) => line === actual[i])) {
-    return { matched: true, actual, fuzz: 0 };
+    return { matched: true, actual, fuzz: 0, fuzzKinds: [] };
   }
 
   if (expected.every((line, i) => line.trimEnd() === actual[i]!.trimEnd())) {
-    return { matched: true, actual, fuzz: 1 };
+    return { matched: true, actual, fuzz: 1, fuzzKinds: ["trim-end"] };
   }
 
   if (expected.every((line, i) => line.trim() === actual[i]!.trim())) {
-    return { matched: true, actual, fuzz: 100 };
+    return { matched: true, actual, fuzz: 100, fuzzKinds: ["trim"] };
   }
 
   if (
@@ -444,9 +465,9 @@ export function matchDeletedLines(
         normalizeLineForUnicodeMatch(actual[i]!),
     )
   ) {
-    return { matched: true, actual, fuzz: 1000 };
+    return { matched: true, actual, fuzz: 1000, fuzzKinds: ["unicode"] };
   }
 
-  return { matched: false, actual, fuzz: 0 };
+  return { matched: false, actual, fuzz: 0, fuzzKinds: [] };
 }
 

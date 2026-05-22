@@ -1,9 +1,9 @@
-import type { Component } from "@mariozechner/pi-tui";
+import type { Component } from "@earendil-works/pi-tui";
 import {
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 import {
   ANSI_RESET,
   openAnsi,

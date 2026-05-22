@@ -8,6 +8,7 @@ import {
   matchDeletedLines,
   normalizeLineForUnicodeMatch,
   peekNextSection,
+  type FuzzyMatchKind,
   type LineMatchCache,
 } from "./context-match.ts";
 import {
@@ -18,6 +19,7 @@ import {
 export interface ApplyUpdateResult {
   output: string;
   fuzz: number;
+  fuzzKinds: FuzzyMatchKind[];
   replacements: LineReplacement[];
   normalizedMarkers?: string[];
 }
@@ -32,6 +34,7 @@ export function applyCodexUpdateWithRecovery(
     return {
       output: strict.output,
       fuzz: strict.fuzz,
+      fuzzKinds: strict.fuzzKinds,
       replacements: strict.replacements,
     };
   } catch (err) {
@@ -44,6 +47,7 @@ export function applyCodexUpdateWithRecovery(
     return {
       output: recovered.output,
       fuzz: recovered.fuzz,
+      fuzzKinds: recovered.fuzzKinds,
       replacements: recovered.replacements,
       normalizedMarkers: normalized.markers,
     };
@@ -55,7 +59,12 @@ export function applyCodexUpdateWithRecovery(
 export function applyCodexUpdateBody(
   input: string,
   diff: string,
-): { output: string; fuzz: number; replacements: LineReplacement[] } {
+): {
+  output: string;
+  fuzz: number;
+  fuzzKinds: FuzzyMatchKind[];
+  replacements: LineReplacement[];
+} {
   // IMPORTANT: do NOT trim() here. Codex context lines start with a leading space.
   const normalizedDiff = normalizeLineEndings(diff);
   const patchLines = normalizedDiff.split("\n");
@@ -67,6 +76,7 @@ export function applyCodexUpdateBody(
   const fileLineCache: LineMatchCache = { raw: fileLines };
 
   let fuzz = 0;
+  const fuzzKinds = new Set<FuzzyMatchKind>();
   let patchIndex = 0;
   let fileIndex = 0;
   const replacements: LineReplacement[] = [];
@@ -156,6 +166,7 @@ export function applyCodexUpdateBody(
             if (trimPos !== -1) {
               fileIndex = trimPos + 1;
               fuzz += 1;
+              fuzzKinds.add("trim");
             } else {
               const defStrUnicode = normalizeLineForUnicodeMatch(defStr);
               const unicodeLines = getUnicodeLines(fileLineCache);
@@ -168,6 +179,7 @@ export function applyCodexUpdateBody(
                 if (unicodePos !== -1) {
                   fileIndex = unicodePos + 1;
                   fuzz += 1000;
+                  fuzzKinds.add("unicode");
                 }
               }
             }
@@ -193,6 +205,7 @@ export function applyCodexUpdateBody(
     }
 
     fuzz += found.fuzz;
+    for (const kind of found.fuzzKinds) fuzzKinds.add(kind);
     for (const ch of sectionChunks) {
       const chunkOrigIndex =
         ch.delLines.length === 0 && context.length === 0
@@ -213,6 +226,7 @@ export function applyCodexUpdateBody(
         );
       }
       fuzz += matchedDelete.fuzz;
+      for (const kind of matchedDelete.fuzzKinds) fuzzKinds.add(kind);
 
       replacements.push({
         oldStart: chunkOrigIndex,
@@ -251,6 +265,7 @@ export function applyCodexUpdateBody(
   return {
     output: outputLines.join("\n"),
     fuzz,
+    fuzzKinds: [...fuzzKinds],
     replacements: sortedReplacements.map(({ index: _index, ...rest }) => rest),
   };
 }

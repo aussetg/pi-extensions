@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "postinstall": "node scripts/prune-tree-sitter.mjs",
+    "test": "node --test scripts/*.test.mjs",
     "test:rendering": "node --test scripts/rendering-equivalence.test.mjs",
     "bench:rendering": "node --expose-gc scripts/benchmark-rendering.mjs"
   },

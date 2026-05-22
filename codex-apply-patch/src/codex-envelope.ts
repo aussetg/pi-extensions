@@ -9,6 +9,13 @@ const ENVELOPE_UPDATE_PREFIX = "*** Update File:";
 const ENVELOPE_ADD_PREFIX = "*** Add File:";
 const ENVELOPE_DELETE_PREFIX = "*** Delete File:";
 const ENVELOPE_MOVE_PREFIX = "*** Move to:";
+const PREPARED_REPAIR_WARNINGS = Symbol("apply_patch_repair_warnings");
+const PREPARED_WARNING_TTL_MS = 60_000;
+
+const preparedWarningsByOperationsKey = new Map<
+  string,
+  { warnings: string[]; expiresAt: number }
+>();
 
 /*
  * Codex apply_patch reference implementation:
@@ -45,6 +52,19 @@ export function isEnvelopeMarkerParseError(err: unknown): boolean {
 export interface NormalizedEnvelopeDiff {
   diff: string;
   markers: string[];
+}
+
+export interface ParsedCodexPatchEnvelope {
+  operations: ApplyPatchOperation[];
+  warnings: string[];
+}
+
+export interface PrepareApplyPatchArgumentsOptions {
+  /**
+   * Store repair warnings for execute() to surface. Renderers call argument
+   * preparation too, so they pass false to avoid stale warning side effects.
+   */
+  recordRepairs?: boolean;
 }
 
 export function tryNormalizeUpdateDiffEnvelope(
@@ -96,61 +116,257 @@ export function tryNormalizeUpdateDiffEnvelope(
   return { diff: candidateLines.join("\n"), markers };
 }
 
+function markerText(line: string): string {
+  return line.trimStart();
+}
+
+function isMarkerLine(line: string, marker: string): boolean {
+  return line.trim() === marker;
+}
+
 function isEnvelopeOperationMarker(line: string): boolean {
+  const marker = markerText(line);
   return (
-    line === ENVELOPE_BEGIN_MARKER ||
-    line === ENVELOPE_END_MARKER ||
-    line.startsWith(ENVELOPE_UPDATE_PREFIX) ||
-    line.startsWith(ENVELOPE_ADD_PREFIX) ||
-    line.startsWith(ENVELOPE_DELETE_PREFIX)
+    isMarkerLine(line, ENVELOPE_BEGIN_MARKER) ||
+    isMarkerLine(line, ENVELOPE_END_MARKER) ||
+    marker.startsWith(ENVELOPE_UPDATE_PREFIX) ||
+    marker.startsWith(ENVELOPE_ADD_PREFIX) ||
+    marker.startsWith(ENVELOPE_DELETE_PREFIX)
   );
 }
 
-function stripCodexHeredocWrapper(patch: string): string {
-  const trimmed = normalizeLineEndings(patch).trim();
-  const lines = trimmed.split("\n");
-  if (lines.length < 4) return patch;
+function trimBlankEdges(lines: string[]): { lo: number; hi: number } {
+  let lo = 0;
+  let hi = lines.length;
+  while (lo < hi && lines[lo]!.trim() === "") lo++;
+  while (hi > lo && lines[hi - 1]!.trim() === "") hi--;
+  return { lo, hi };
+}
 
-  const first = lines[0];
-  const last = lines[lines.length - 1];
+function markdownFenceInfo(line: string): { marker: string } | undefined {
+  const trimmed = line.trim();
+  const match = /^(```+|~~~+)/.exec(trimmed);
+  return match ? { marker: match[1]! } : undefined;
+}
+
+function isMarkdownFenceClose(line: string, marker: string): boolean {
+  return line.trim() === marker;
+}
+
+function heredocInfo(line: string): { terminator: string } | undefined {
+  const trimmed = line.trim();
+  const match = /^<<(?:(['"])([A-Za-z_][A-Za-z0-9_]*)\1|([A-Za-z_][A-Za-z0-9_]*))$/.exec(
+    trimmed,
+  );
+  const terminator = match?.[2] ?? match?.[3];
+  return terminator ? { terminator } : undefined;
+}
+
+function normalizeEnvelopeLines(patch: string): {
+  lines: string[];
+  warnings: string[];
+} {
+  let lines = normalizeLineEndings(patch).split("\n");
+  const warnings: string[] = [];
+
+  let edges = trimBlankEdges(lines);
+  lines = lines.slice(edges.lo, edges.hi);
+  if (lines.length === 0) return { lines, warnings };
+
+  const fence = markdownFenceInfo(lines[0]!);
   if (
-    (first === "<<EOF" || first === "<<'EOF'" || first === '<<"EOF"') &&
-    typeof last === "string" &&
-    last.endsWith("EOF")
+    fence &&
+    lines.length >= 3 &&
+    isMarkdownFenceClose(lines[lines.length - 1]!, fence.marker)
   ) {
-    return lines.slice(1, -1).join("\n").trim();
+    lines = lines.slice(1, -1);
+    warnings.push(
+      "Warning: repaired apply_patch envelope: stripped markdown code fence wrapper.",
+    );
+    edges = trimBlankEdges(lines);
+    lines = lines.slice(edges.lo, edges.hi);
   }
 
-  return patch;
+  const heredoc = lines.length >= 4 ? heredocInfo(lines[0]!) : undefined;
+  if (heredoc && lines[lines.length - 1]!.trim() === heredoc.terminator) {
+    lines = lines.slice(1, -1);
+    warnings.push(
+      `Warning: repaired apply_patch envelope: stripped heredoc wrapper (${heredoc.terminator}).`,
+    );
+    edges = trimBlankEdges(lines);
+    lines = lines.slice(edges.lo, edges.hi);
+  }
+
+  return { lines, warnings };
+}
+
+function repairEnvelopeBounds(lines: string[]): {
+  lo: number;
+  hi: number;
+  hadBegin: boolean;
+  warnings: string[];
+} | undefined {
+  const { lo, hi } = trimBlankEdges(lines);
+  if (lo >= hi) return undefined;
+
+  const warnings: string[] = [];
+  const hadBegin = isMarkerLine(lines[lo]!, ENVELOPE_BEGIN_MARKER);
+  if (!hadBegin) return { lo, hi, hadBegin, warnings };
+
+  let endIndex = -1;
+  for (let i = hi - 1; i > lo; i--) {
+    if (isMarkerLine(lines[i]!, ENVELOPE_END_MARKER)) {
+      endIndex = i;
+      break;
+    }
+  }
+
+  if (endIndex === -1) {
+    let repairedHi = hi;
+    const lastLine = lines[hi - 1]!;
+    const fence = markdownFenceInfo(lastLine);
+    if (fence && isMarkdownFenceClose(lastLine, fence.marker)) {
+      warnings.push(
+        "Warning: repaired apply_patch envelope: ignored trailing markdown fence after missing end marker.",
+      );
+      repairedHi = hi - 1;
+    }
+    warnings.push(
+      `Warning: repaired apply_patch envelope: added missing '${ENVELOPE_END_MARKER}'.`,
+    );
+    return { lo, hi: repairedHi, hadBegin, warnings };
+  }
+
+  const trailing = lines.slice(endIndex + 1, hi);
+  const nonBlankTrailing = trailing.filter((line) => line.trim() !== "");
+  if (nonBlankTrailing.length === 0) return { lo, hi: endIndex, hadBegin, warnings };
+
+  if (
+    nonBlankTrailing.length === 1 &&
+    markdownFenceInfo(nonBlankTrailing[0]!) &&
+    isMarkdownFenceClose(
+      nonBlankTrailing[0]!,
+      markdownFenceInfo(nonBlankTrailing[0]!)!.marker,
+    )
+  ) {
+    warnings.push(
+      `Warning: repaired apply_patch envelope: ignored trailing markdown fence after '${ENVELOPE_END_MARKER}'.`,
+    );
+    return { lo, hi: endIndex, hadBegin, warnings };
+  }
+
+  return undefined;
+}
+
+function operationsKey(operations: ApplyPatchOperation[]): string | undefined {
+  try {
+    return JSON.stringify(operations);
+  } catch {
+    return undefined;
+  }
+}
+
+function prunePreparedWarnings(): void {
+  const now = Date.now();
+  for (const [key, entry] of preparedWarningsByOperationsKey) {
+    if (entry.expiresAt <= now) preparedWarningsByOperationsKey.delete(key);
+  }
+}
+
+function withPreparedRepairWarnings(
+  args: { operations: unknown[] },
+  warnings: string[],
+  record: boolean,
+): { operations: unknown[] } {
+  if (warnings.length === 0) return args;
+
+  Object.defineProperty(args, PREPARED_REPAIR_WARNINGS, {
+    value: warnings,
+    enumerable: false,
+  });
+
+  if (record) {
+    prunePreparedWarnings();
+    const key = operationsKey(args.operations as ApplyPatchOperation[]);
+    if (key) {
+      preparedWarningsByOperationsKey.set(key, {
+        warnings,
+        expiresAt: Date.now() + PREPARED_WARNING_TTL_MS,
+      });
+    }
+  }
+
+  return args;
+}
+
+export function takePreparedApplyPatchWarnings(input: unknown): string[] {
+  if (!input || typeof input !== "object") return [];
+  const direct = (input as { [PREPARED_REPAIR_WARNINGS]?: unknown })[
+    PREPARED_REPAIR_WARNINGS
+  ];
+  if (Array.isArray(direct)) {
+    const operations = (input as { operations?: unknown }).operations;
+    if (Array.isArray(operations)) {
+      const key = operationsKey(operations as ApplyPatchOperation[]);
+      if (key) preparedWarningsByOperationsKey.delete(key);
+    }
+    return direct.filter((warning): warning is string => typeof warning === "string");
+  }
+
+  const operations = (input as { operations?: unknown }).operations;
+  if (!Array.isArray(operations)) return [];
+
+  prunePreparedWarnings();
+  const key = operationsKey(operations as ApplyPatchOperation[]);
+  if (!key) return [];
+  const entry = preparedWarningsByOperationsKey.get(key);
+  preparedWarningsByOperationsKey.delete(key);
+  return entry?.warnings ?? [];
 }
 
 export function parseCodexPatchEnvelope(
   patch: string,
 ): ApplyPatchOperation[] | undefined {
-  const lines = normalizeLineEndings(stripCodexHeredocWrapper(patch)).split("\n");
+  return parseCodexPatchEnvelopeDetailed(patch)?.operations;
+}
 
-  let lo = 0;
-  let hi = lines.length;
-  while (lo < hi && lines[lo] === "") lo++;
-  while (hi > lo && lines[hi - 1] === "") hi--;
+export function parseCodexPatchEnvelopeDetailed(
+  patch: string,
+): ParsedCodexPatchEnvelope | undefined {
+  const normalized = normalizeEnvelopeLines(patch);
+  const lines = normalized.lines;
+  const bounds = repairEnvelopeBounds(lines);
+  if (!bounds) return undefined;
+
+  const { lo, hi, hadBegin } = bounds;
+  const warnings = [...normalized.warnings, ...bounds.warnings];
   if (lo >= hi) return undefined;
+
+  const first = markerText(lines[lo]!);
+  const looksLikeEnvelope =
+    hadBegin ||
+    first.startsWith(ENVELOPE_ADD_PREFIX) ||
+    first.startsWith(ENVELOPE_UPDATE_PREFIX) ||
+    first.startsWith(ENVELOPE_DELETE_PREFIX);
+  if (!looksLikeEnvelope) return undefined;
 
   const ops: ApplyPatchOperation[] = [];
   let i = lo;
-  if (lines[i] === ENVELOPE_BEGIN_MARKER) i++;
-  if (i < hi && lines[i]!.trimStart().startsWith(ENVELOPE_ENVIRONMENT_PREFIX)) {
+  if (hadBegin) i++;
+  if (i < hi && markerText(lines[i]!).startsWith(ENVELOPE_ENVIRONMENT_PREFIX)) {
     i++;
   }
 
   while (i < hi) {
-    while (i < hi && lines[i] === "") i++;
+    while (i < hi && lines[i]!.trim() === "") i++;
     if (i >= hi) break;
 
     const line = lines[i]!;
-    if (line === ENVELOPE_END_MARKER) break;
+    if (isMarkerLine(line, ENVELOPE_END_MARKER)) break;
+    const opLine = markerText(line);
 
-    if (line.startsWith(ENVELOPE_ADD_PREFIX)) {
-      const rawPath = line.slice(ENVELOPE_ADD_PREFIX.length).trim();
+    if (opLine.startsWith(ENVELOPE_ADD_PREFIX)) {
+      const rawPath = opLine.slice(ENVELOPE_ADD_PREFIX.length).trim();
       if (!rawPath) return undefined;
       i++;
 
@@ -168,14 +384,14 @@ export function parseCodexPatchEnvelope(
       continue;
     }
 
-    if (line.startsWith(ENVELOPE_UPDATE_PREFIX)) {
-      const rawPath = line.slice(ENVELOPE_UPDATE_PREFIX.length).trim();
+    if (opLine.startsWith(ENVELOPE_UPDATE_PREFIX)) {
+      const rawPath = opLine.slice(ENVELOPE_UPDATE_PREFIX.length).trim();
       if (!rawPath) return undefined;
       i++;
 
       let movePath: string | undefined;
-      if (i < hi && lines[i]!.startsWith(ENVELOPE_MOVE_PREFIX)) {
-        movePath = lines[i]!.slice(ENVELOPE_MOVE_PREFIX.length).trim();
+      if (i < hi && markerText(lines[i]!).startsWith(ENVELOPE_MOVE_PREFIX)) {
+        movePath = markerText(lines[i]!).slice(ENVELOPE_MOVE_PREFIX.length).trim();
         if (!movePath) return undefined;
         i++;
       }
@@ -195,8 +411,8 @@ export function parseCodexPatchEnvelope(
       continue;
     }
 
-    if (line.startsWith(ENVELOPE_DELETE_PREFIX)) {
-      const rawPath = line.slice(ENVELOPE_DELETE_PREFIX.length).trim();
+    if (opLine.startsWith(ENVELOPE_DELETE_PREFIX)) {
+      const rawPath = opLine.slice(ENVELOPE_DELETE_PREFIX.length).trim();
       if (!rawPath) return undefined;
       i++;
 
@@ -216,13 +432,24 @@ export function parseCodexPatchEnvelope(
     return undefined;
   }
 
-  return ops.length > 0 ? ops : undefined;
+  return ops.length > 0 ? { operations: ops, warnings } : undefined;
 }
 
-export function prepareApplyPatchArguments(input: unknown): unknown {
+export function prepareApplyPatchArguments(
+  input: unknown,
+  options: PrepareApplyPatchArgumentsOptions = {},
+): unknown {
+  const recordRepairs = options.recordRepairs ?? true;
+
   if (typeof input === "string") {
-    const envelopeOps = parseCodexPatchEnvelope(input);
-    return envelopeOps ? { operations: envelopeOps } : input;
+    const envelope = parseCodexPatchEnvelopeDetailed(input);
+    return envelope
+      ? withPreparedRepairWarnings(
+          { operations: envelope.operations },
+          envelope.warnings,
+          recordRepairs,
+        )
+      : input;
   }
 
   if (!input || typeof input !== "object") return input;
@@ -247,8 +474,13 @@ export function prepareApplyPatchArguments(input: unknown): unknown {
       // Fall through to Codex envelope parsing below.
     }
 
-    const envelopeOps = parseCodexPatchEnvelope(args.operations);
-    if (envelopeOps) return { operations: envelopeOps };
+    const envelope = parseCodexPatchEnvelopeDetailed(args.operations);
+    if (envelope)
+      return withPreparedRepairWarnings(
+        { operations: envelope.operations },
+        envelope.warnings,
+        recordRepairs,
+      );
   }
 
   const patchText =
@@ -263,8 +495,13 @@ export function prepareApplyPatchArguments(input: unknown): unknown {
             : undefined;
 
   if (patchText) {
-    const envelopeOps = parseCodexPatchEnvelope(patchText);
-    if (envelopeOps) return { operations: envelopeOps };
+    const envelope = parseCodexPatchEnvelopeDetailed(patchText);
+    if (envelope)
+      return withPreparedRepairWarnings(
+        { operations: envelope.operations },
+        envelope.warnings,
+        recordRepairs,
+      );
   }
 
   return input;

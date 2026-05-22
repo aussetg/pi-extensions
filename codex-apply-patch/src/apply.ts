@@ -1,21 +1,16 @@
-import { withFileMutationQueue } from "@mariozechner/pi-coding-agent";
 import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ApplyPatchOperation, ApplyPatchOpType } from "./types.ts";
 import { applyCodexCreateBody, applyCodexUpdateWithRecovery } from "./apply-body.ts";
+import type { FuzzyMatchKind } from "./context-match.ts";
 import { generateDiffFromReplacements } from "./diff-generate.ts";
 import {
-  MAX_DIFF_INPUT_BYTES,
-  buildPierreCreatePayload,
-  buildPierreDeletePayload,
-  buildPierreUpdatePayload,
-} from "./pierre/metadata.ts";
-import { getPierreRendererConfig } from "./pierre/config.ts";
-import {
-  buildPiHighlightedDiff,
-  hasHighlightedLines,
-} from "./pierre/highlight.ts";
+  MAX_PREVIEW_INPUT_BYTES,
+  buildCreateFilePreview,
+  buildDeleteFilePreview,
+  buildUpdateFilePreview,
+} from "./preview.ts";
 import type { PierreDiffPayload } from "./pierre/types.ts";
 import {
   detectLineEnding,
@@ -30,6 +25,49 @@ import {
 } from "./util.ts";
 
 let tempCounter = 0;
+
+type FileMutationQueue = <T>(
+  filePath: string,
+  fn: () => Promise<T>,
+) => Promise<T>;
+
+let piFileMutationQueue: FileMutationQueue | null | undefined;
+const localMutationQueues = new Map<string, Promise<unknown>>();
+
+async function getFileMutationQueue(): Promise<FileMutationQueue> {
+  if (piFileMutationQueue !== undefined) {
+    return piFileMutationQueue ?? localWithFileMutationQueue;
+  }
+
+  try {
+    const mod = (await import("@earendil-works/pi-coding-agent")) as {
+      withFileMutationQueue?: FileMutationQueue;
+    };
+    piFileMutationQueue =
+      typeof mod.withFileMutationQueue === "function"
+        ? mod.withFileMutationQueue
+        : null;
+  } catch {
+    piFileMutationQueue = null;
+  }
+
+  return piFileMutationQueue ?? localWithFileMutationQueue;
+}
+
+async function localWithFileMutationQueue<T>(
+  filePath: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const previous = localMutationQueues.get(filePath) ?? Promise.resolve();
+  const run = previous.catch(() => {}).then(fn);
+  const cleanup = run.finally(() => {
+    if (localMutationQueues.get(filePath) === cleanup) {
+      localMutationQueues.delete(filePath);
+    }
+  });
+  localMutationQueues.set(filePath, cleanup);
+  return run;
+}
 
 function nextSiblingTempPath(abs: string, tag: string): string {
   const dir = path.dirname(abs);
@@ -167,6 +205,7 @@ export async function withMutationQueues<T>(
   touchedPaths: string[],
   fn: () => Promise<T>,
 ): Promise<T> {
+  const withFileMutationQueue = await getFileMutationQueue();
   const uniquePaths = [...new Set(touchedPaths)].sort();
   let run = fn;
 
@@ -201,14 +240,6 @@ export interface PreparedApplyTask {
   diff?: string;
   moveRel?: string;
   moveAbs?: string;
-}
-
-function withHighlightedPierre(pierre: PierreDiffPayload): PierreDiffPayload {
-  const highlighted = buildPiHighlightedDiff(
-    pierre.metadata,
-    getPierreRendererConfig(),
-  );
-  return hasHighlightedLines(highlighted) ? { ...pierre, highlighted } : pierre;
 }
 
 interface VirtualFileState {
@@ -361,6 +392,25 @@ function skippedResult(task: PreparedApplyTask, output: string): ApplyOperationR
   };
 }
 
+function fuzzyMatchWarning(
+  rel: string,
+  fuzz: number,
+  kinds: readonly FuzzyMatchKind[],
+): string | undefined {
+  if (fuzz <= 0) return undefined;
+
+  const uniqueKinds = new Set(kinds);
+  const labels: string[] = [];
+  if (uniqueKinds.has("eof")) labels.push("EOF fallback");
+  if (uniqueKinds.has("unicode")) labels.push("Unicode normalization");
+  if (uniqueKinds.has("trim")) labels.push("trimmed whitespace");
+  if (uniqueKinds.has("trim-end")) labels.push("trailing whitespace");
+
+  const detail =
+    labels.length > 0 ? `${labels.join(", ")}; score ${fuzz}` : `score ${fuzz}`;
+  return `Warning: ${rel} applied with fuzzy context matching (${detail}). Review the diff.`;
+}
+
 // Preflight every operation against a virtual filesystem state before committing
 // any writes. This avoids partially applying a multi-file patch when an earlier
 // operation is valid but a later operation has a conflict, missing file, or path
@@ -472,9 +522,7 @@ export async function applyOperations(
             type,
             path: rel,
             status: "completed",
-            pierre: withHighlightedPierre(
-              buildPierreCreatePayload({ path: rel, newContent: content }),
-            ),
+            pierre: buildCreateFilePreview({ path: rel, newContent: content }),
           },
           mutation: { kind: "write", abs, content, replace: false },
           fuzz: 0,
@@ -504,7 +552,7 @@ export async function applyOperations(
         const rawCurrent = state.content ?? "";
         const { bom, text: current } = stripBom(rawCurrent);
         const originalEnding = detectLineEnding(current);
-        const { output, fuzz, replacements, normalizedMarkers } =
+        const { output, fuzz, fuzzKinds, replacements, normalizedMarkers } =
           applyCodexUpdateWithRecovery(current, diff, rel);
         if (!task.moveAbs && normalizeLineEndings(current) === output) {
           throw new DiffError(`No changes made to ${rel}.`);
@@ -517,18 +565,22 @@ export async function applyOperations(
         );
         const finalOutput = bom + restoreLineEndings(output, originalEnding);
         const buildPierre = (newPath: string) =>
-          withHighlightedPierre(
-            buildPierreUpdatePayload({
-              oldPath: rel,
-              newPath,
-              oldContent: current,
-              newContent: output,
-            }),
+          buildUpdateFilePreview({
+            oldPath: rel,
+            newPath,
+            oldContent: current,
+            newContent: output,
+          });
+        const warningLines: string[] = [];
+        if (normalizedMarkers && normalizedMarkers.length > 0) {
+          warningLines.push(
+            `Warning: forbidden marker lines were auto-removed: ${normalizedMarkers.join(", ")}. Use only @@/space/+/- lines.`,
           );
+        }
+        const fuzzyWarning = fuzzyMatchWarning(rel, fuzz, fuzzKinds);
+        if (fuzzyWarning) warningLines.push(fuzzyWarning);
         const warning =
-          normalizedMarkers && normalizedMarkers.length > 0
-            ? `Warning: forbidden marker lines were auto-removed: ${normalizedMarkers.join(", ")}. Use only @@/space/+/- lines.`
-            : undefined;
+          warningLines.length > 0 ? warningLines.join("\n") : undefined;
 
         if (task.moveAbs && task.moveRel) {
           const relTo = task.moveRel;
@@ -613,17 +665,15 @@ export async function applyOperations(
       if (
         state.isFile &&
         !state.isSymlink &&
-        (state.content !== undefined || (state.size ?? 0) <= MAX_DIFF_INPUT_BYTES)
+        (state.content !== undefined || (state.size ?? 0) <= MAX_PREVIEW_INPUT_BYTES)
       ) {
         try {
           const contentState = await getVirtualState(abs, true);
           if (contentState.content !== undefined) {
-            pierre = withHighlightedPierre(
-              buildPierreDeletePayload({
-                path: rel,
-                oldContent: contentState.content,
-              }),
-            );
+            pierre = buildDeleteFilePreview({
+              path: rel,
+              oldContent: contentState.content,
+            });
           }
         } catch {
           // Delete previews are best-effort. Unlink permission depends on the

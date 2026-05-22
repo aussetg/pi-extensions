@@ -1,8 +1,11 @@
-import { StringEnum } from "@mariozechner/pi-ai";
-import type { AgentToolUpdateCallback, ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { StringEnum } from "@earendil-works/pi-ai";
+import type { AgentToolUpdateCallback, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { applyOperations, prepareApplyTasks, withMutationQueues } from "./apply.ts";
-import { prepareApplyPatchArguments } from "./codex-envelope.ts";
+import {
+  prepareApplyPatchArguments,
+  takePreparedApplyPatchWarnings,
+} from "./codex-envelope.ts";
 import { createThrottledProgressEmitter } from "./progress.ts";
 import { collectProgressPreview, collectSuccessPreviews, renderApplyPatchCall, renderApplyPatchResult } from "./render.ts";
 import type { ApplyPatchDetails, ApplyPatchOperation } from "./types.ts";
@@ -30,6 +33,7 @@ export function registerApplyPatchTool(pi: ExtensionAPI): void {
             },
             { additionalProperties: false },
           ),
+          { minItems: 1 },
         ),
       },
       { additionalProperties: false },
@@ -52,11 +56,16 @@ export function registerApplyPatchTool(pi: ExtensionAPI): void {
       const progressEmitter = createThrottledProgressEmitter(update, 40);
 
       const ops = params.operations as ApplyPatchOperation[];
+      if (ops.length === 0) {
+        throw new DiffError("apply_patch requires at least one operation.");
+      }
+      const preparedWarnings = takePreparedApplyPatchWarnings(params);
+
       const queueTasks = prepareApplyTasks(ops, ctx.cwd).tasks;
       const queuePaths = queueTasks.flatMap((task) => task.touchedPaths);
       const preview = collectProgressPreview(ops);
       progressEmitter.emit("Applying patch operations...", preview, true);
-      const { fuzz, results, warnings } = await (async () => {
+      const { fuzz, results, warnings: applyWarnings } = await (async () => {
         try {
           return await withMutationQueues(
             queuePaths,
@@ -72,6 +81,7 @@ export function registerApplyPatchTool(pi: ExtensionAPI): void {
           progressEmitter.flush();
         }
       })();
+      const warnings = [...preparedWarnings, ...applyWarnings];
 
       const failed = results.filter((r) => r.status === "failed");
       const warningText = warnings.length > 0 ? warnings.join("\n") : undefined;

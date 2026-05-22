@@ -1,4 +1,4 @@
-import { Text, type Component } from "@mariozechner/pi-tui";
+import { Text, type Component } from "@earendil-works/pi-tui";
 import type {
   ApplyPatchDetails,
   ApplyPatchOperation,
@@ -397,7 +397,7 @@ export function renderApplyPatchCall(
 ) {
   let out = theme.fg("toolTitle", theme.bold("apply_patch"));
   try {
-    const renderArgs = prepareApplyPatchArguments(args);
+    const renderArgs = prepareApplyPatchArguments(args, { recordRepairs: false });
     const { operationCount, headerPath, headerLine } =
       summarizeOperationsArgs(renderArgs);
     if (headerPath) {

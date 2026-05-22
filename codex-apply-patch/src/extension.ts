@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createApplyPatchToolPolicy, isCodexModel } from "./policy.ts";
 import { reloadPierreRendererConfig } from "./pierre/config.ts";
 import { registerApplyPatchTool } from "./tool.ts";
