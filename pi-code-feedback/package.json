@@ -1,0 +1,17 @@
+{
+  "name": "pi-code-feedback",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Pi extension for touched-line LSP diagnostics and formatter feedback.",
+  "main": "index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "typescript": "^5.8.3"
+  }
+}
+
