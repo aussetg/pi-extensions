@@ -68,6 +68,7 @@ test("inline diagnostics are mirrored into structured tool-result details", asyn
     assert.match(feedback.inlineText, /pi-code-feedback:/);
     assert.match(feedback.inlineText, /typescript\/2322/);
     assert.equal(result.content.at(-1).text, feedback.inlineText);
+    assert.equal(Object.hasOwn(result, "isError"), false);
 
     assert.equal(feedback.edits.length, 1);
     assert.equal(feedback.edits[0].displayPath, "probe.ts");

@@ -35,13 +35,14 @@ export async function handleToolCall(event: ToolCallEvent, ctx: ToolCallContext,
     toolName: event.toolName,
     filePath,
     beforeContent,
-    beforeDiagnostics: await captureBeforeDiagnostics(lspService, filePath, beforeContent, runtime),
+    beforeDiagnostics: captureBeforeDiagnostics(lspService, filePath, beforeContent, runtime),
     turnIndex: runtime.turnIndex,
     writeIndex,
     startedAt: Date.now(),
   };
 
   recordPendingEdit(runtime, edit);
+  prewarmDiagnostics(lspService, filePath, beforeContent, runtime);
 }
 
 function fallbackEditId(toolName: "write" | "edit", filePath: string, turnIndex: number, writeIndex: number): string {
@@ -68,7 +69,7 @@ async function handleApplyPatchToolCall(event: ToolCallEvent, ctx: ToolCallConte
       toolName: "apply_patch",
       filePath: finalPath,
       beforeContent,
-      beforeDiagnostics: await captureBeforeDiagnostics(lspService, operationPath, beforeContent, runtime),
+      beforeDiagnostics: captureBeforeDiagnostics(lspService, operationPath, beforeContent, runtime),
       turnIndex: runtime.turnIndex,
       writeIndex,
       startedAt: Date.now(),
@@ -77,21 +78,30 @@ async function handleApplyPatchToolCall(event: ToolCallEvent, ctx: ToolCallConte
     };
 
     recordPendingEdit(runtime, edit);
+    prewarmDiagnostics(lspService, operationPath, beforeContent, runtime);
   }
 }
 
-async function captureBeforeDiagnostics(
+function captureBeforeDiagnostics(
   lspService: LspService | undefined,
   filePath: string,
   content: string | undefined,
   runtime: CodeFeedbackRuntime,
-): Promise<DiagnosticSnapshot | undefined> {
+): DiagnosticSnapshot | undefined {
   if (!lspService || content === undefined) return undefined;
   if (!runtime.config.lsp.enabled) return undefined;
-  return lspService.diagnosticsForFile(filePath, content, {
-    timeoutMs: Math.min(400, runtime.config.diagnostics.timeoutMs),
-    settleMs: 0,
-  });
+  return lspService.cachedDiagnosticsIfKnown(filePath);
+}
+
+function prewarmDiagnostics(
+  lspService: LspService | undefined,
+  filePath: string,
+  content: string | undefined,
+  runtime: CodeFeedbackRuntime,
+): void {
+  if (!lspService || content === undefined) return;
+  if (!runtime.config.lsp.enabled) return;
+  lspService.prewarm(filePath);
 }
 
 export function applyPatchOperationId(toolCallId: string | undefined, turnIndex: number, writeIndex: number, operationIndex: number): string {

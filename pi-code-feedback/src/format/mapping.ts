@@ -1,7 +1,7 @@
 import { pathToFileURL } from "node:url";
 import type { RangeConfidence, TouchedRange } from "../types.ts";
 
-const MAX_MAPPING_CELLS = 4_000_000;
+const MAX_EXACT_MAPPING_CELLS = 1_000_000;
 
 interface DiffHunk {
   beforeStart: number;
@@ -17,8 +17,8 @@ export function mapTouchedRangesThroughFormatting(filePath: string, beforeFormat
   const afterLines = splitLines(afterFormatContent);
   const maxAfterLine = Math.max(1, afterLines.length);
 
-  if (beforeLines.length * afterLines.length > MAX_MAPPING_CELLS) {
-    return [makeMappedRange(filePath, 1, maxAfterLine, "approximate")];
+  if (beforeLines.length * afterLines.length > MAX_EXACT_MAPPING_CELLS) {
+    return mapTouchedRangesApproximately(filePath, beforeLines, afterLines, touchedRanges);
   }
 
   const hunks = buildDiffHunks(beforeLines, afterLines);
@@ -31,6 +31,72 @@ export function mapTouchedRangesThroughFormatting(filePath: string, beforeFormat
   }
 
   return mergeRanges(mapped, maxAfterLine);
+}
+
+function mapTouchedRangesApproximately(filePath: string, beforeLines: string[], afterLines: string[], touchedRanges: TouchedRange[]): TouchedRange[] {
+  const maxAfterLine = Math.max(1, afterLines.length);
+  const change = findOuterChange(beforeLines, afterLines);
+  const mapped: TouchedRange[] = [];
+
+  for (const range of touchedRanges) {
+    mapped.push(...mapOneRangeApproximately(filePath, range, change, maxAfterLine));
+  }
+
+  return mergeRanges(mapped, maxAfterLine);
+}
+
+interface OuterChange {
+  beforeStart: number;
+  beforeEnd: number;
+  afterStart: number;
+  afterEnd: number;
+  delta: number;
+}
+
+function findOuterChange(before: string[], after: string[]): OuterChange {
+  let prefix = 0;
+  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) {
+    prefix += 1;
+  }
+
+  let suffix = 0;
+  while (
+    suffix < before.length - prefix &&
+    suffix < after.length - prefix &&
+    before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+
+  return {
+    beforeStart: prefix + 1,
+    beforeEnd: before.length - suffix,
+    afterStart: prefix + 1,
+    afterEnd: after.length - suffix,
+    delta: after.length - before.length,
+  };
+}
+
+function mapOneRangeApproximately(filePath: string, range: TouchedRange, change: OuterChange, maxAfterLine: number): TouchedRange[] {
+  const output: TouchedRange[] = [];
+
+  if (range.startLine < change.beforeStart) {
+    const beforeEnd = Math.min(range.endLine, change.beforeStart - 1);
+    output.push(makeMappedRange(filePath, range.startLine, beforeEnd, range.confidence));
+  }
+
+  if (range.endLine > change.beforeEnd) {
+    const afterStart = Math.max(range.startLine, change.beforeEnd + 1);
+    output.push(makeMappedRange(filePath, afterStart + change.delta, range.endLine + change.delta, range.confidence));
+  }
+
+  if (range.startLine <= change.beforeEnd && range.endLine >= change.beforeStart) {
+    const afterStart = clampLine(change.afterStart, maxAfterLine);
+    const afterEnd = change.afterEnd >= change.afterStart ? clampLine(change.afterEnd, maxAfterLine) : afterStart;
+    output.push(makeMappedRange(filePath, afterStart, afterEnd, "approximate"));
+  }
+
+  return output;
 }
 
 function mapOneRange(filePath: string, range: TouchedRange, hunks: DiffHunk[], beforeLineCount: number, afterLineCount: number): TouchedRange[] {

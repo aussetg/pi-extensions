@@ -38,13 +38,14 @@ const scenarioSpecs = [
   ["edit/no-lsp-no-format", () => runEditScenario({ name: "edit/no-lsp-no-format", iterations: baseIterations, enabled: true, lsp: false, format: false })],
   ["edit/formatter-detect-none", () => runEditScenario({ name: "edit/formatter-detect-none", iterations: baseIterations, enabled: true, lsp: false, format: "detect-none" })],
   ["apply-patch/no-lsp-no-format", () => runApplyPatchScenario(Math.max(3, Math.ceil(baseIterations / 3)))],
+  ["formatter/fake-unchanged", () => runEditScenario({ name: "formatter/fake-unchanged", iterations: Math.max(5, Math.ceil(baseIterations / 2)), enabled: true, lsp: false, format: "fake-noop", lineCount: 400, unchanged: true })],
   ["formatter/fake-noop", () => runEditScenario({ name: "formatter/fake-noop", iterations: Math.max(5, Math.ceil(baseIterations / 2)), enabled: true, lsp: false, format: "fake-noop", lineCount: 400 })],
   ["formatter/fake-change", () => runEditScenario({ name: "formatter/fake-change", iterations: Math.max(5, Math.ceil(baseIterations / 2)), enabled: true, lsp: false, format: "fake-change", lineCount: 400 })],
   ["formatter/fake-map-large", () => runEditScenario({ name: "formatter/fake-map-large", iterations: Math.max(2, Math.ceil(baseIterations / 15)), enabled: true, lsp: false, format: "fake-change", lineCount: 1800 })],
   ["lsp/fake-cold", () => runFakeLspScenario({ name: "lsp/fake-cold", iterations: 1, warmup: 0 })],
   ["lsp/fake-warm", () => runFakeLspScenario({ name: "lsp/fake-warm", iterations: baseIterations, warmup: 2 })],
-  ["lsp/fake-delay-200", () => runFakeLspScenario({ name: "lsp/fake-delay-200", iterations: Math.max(3, Math.ceil(baseIterations / 10)), warmup: 1, mode: "diagnostics-delay-200" })],
-  ["lsp/fake-timeout-120", () => runFakeLspScenario({ name: "lsp/fake-timeout-120", iterations: Math.max(3, Math.ceil(baseIterations / 10)), warmup: 0, mode: "no-diagnostics", timeoutMs: 120, inline: "off" })],
+  ["lsp/fake-delay-200", () => runFakeLspScenario({ name: "lsp/fake-delay-200", iterations: Math.max(3, Math.ceil(baseIterations / 10)), warmup: 1, mode: "diagnostics-delay-200", inlineTimeoutMs: 80, expectInline: false })],
+  ["lsp/fake-timeout-120", () => runFakeLspScenario({ name: "lsp/fake-timeout-120", iterations: Math.max(3, Math.ceil(baseIterations / 10)), warmup: 0, mode: "no-diagnostics", timeoutMs: 120, inlineTimeoutMs: 80, inline: "off" })],
 ];
 
 if (args.live) {
@@ -148,7 +149,9 @@ async function runEditScenario(options) {
     filePath,
     formatService,
     content: (version) => makeTsContent(version, lineCount),
+    unchanged: options.unchanged === true,
     expectCompletedEdit: options.enabled,
+    expectTouchedRanges: options.unchanged !== true,
     expectFormatted: options.format === "fake-change",
   });
 
@@ -216,7 +219,8 @@ async function runFakeLspScenario(options) {
 
   const runtime = makeRuntime(root, { enabled: true, lsp: true, format: false });
   runtime.config.diagnostics.timeoutMs = options.timeoutMs ?? 1000;
-  runtime.config.diagnostics.delayedTimeoutMs = runtime.config.diagnostics.timeoutMs;
+  runtime.config.diagnostics.inlineTimeoutMs = options.inlineTimeoutMs ?? runtime.config.diagnostics.inlineTimeoutMs;
+  runtime.config.diagnostics.delayedTimeoutMs = options.delayedTimeoutMs ?? runtime.config.diagnostics.timeoutMs;
   runtime.config.diagnostics.settleMs = 0;
   if (options.inline) runtime.config.diagnostics.inline = options.inline;
   const lspService = createLspService({
@@ -236,7 +240,7 @@ async function runFakeLspScenario(options) {
     filePath,
     content: (version) => makeTsContent(version, 30),
     expectCompletedEdit: true,
-    expectFeedback: (options.inline ?? runtime.config.diagnostics.inline) !== "off" && options.mode !== "no-diagnostics",
+    expectFeedback: options.expectInline ?? ((options.inline ?? runtime.config.diagnostics.inline) !== "off" && options.mode !== "no-diagnostics"),
   });
 
   try {
@@ -255,8 +259,8 @@ async function runFakeLspScenario(options) {
 }
 
 function fakeLspNotes(options) {
-  if (options.mode === "diagnostics-delay-200") return "fake LSP delays each diagnostic publish by 200ms; before and after refresh should add roughly 400ms";
-  if (options.mode === "no-diagnostics") return "fake LSP never publishes diagnostics; wall time should track the configured 120ms timeout twice";
+  if (options.mode === "diagnostics-delay-200") return `fake LSP delays diagnostics by 200ms; inline budget is ${options.inlineTimeoutMs ?? 200}ms and delayed diagnostics continue in the background`;
+  if (options.mode === "no-diagnostics") return `fake LSP never publishes diagnostics; inline wall time should track the ${options.inlineTimeoutMs ?? options.timeoutMs ?? 200}ms budget`;
   return "deterministic stdio LSP with one diagnostic; includes before and after diagnostic refresh";
 }
 
@@ -339,13 +343,14 @@ function makeFormatService(root, runtime, mode) {
   return createFormatService({ projectRoot: root, formatterOverrides: runtime.config.formatters });
 }
 
-function makeEditOperation({ root, runtime, filePath, lspService, formatService, content, expectCompletedEdit = false, expectFeedback = false, expectFormatted = false }) {
+function makeEditOperation({ root, runtime, filePath, lspService, formatService, content, unchanged = false, expectCompletedEdit = false, expectTouchedRanges = true, expectFeedback = false, expectFormatted = false }) {
   let version = 0;
   return async (index) => {
     beginTurn(runtime);
-    const toolCallId = `edit-${index}-${version + 1}`;
+    const nextVersion = unchanged ? version : version + 1;
+    const toolCallId = `edit-${index}-${nextVersion}`;
     const before = content(version);
-    const after = content(version + 1);
+    const after = content(nextVersion);
     const input = { path: path.relative(root, filePath) };
 
     const call = await timed("tool_call", () => handleToolCall({ toolName: "edit", toolCallId, input }, { cwd: root }, runtime, lspService));
@@ -354,14 +359,14 @@ function makeEditOperation({ root, runtime, filePath, lspService, formatService,
       toolName: "edit",
       toolCallId,
       input,
-      details: { diff: firstLineDiff(before, after) },
+      details: unchanged ? {} : { diff: firstLineDiff(before, after) },
       content: [{ type: "text", text: "edited" }],
       isError: false,
     }, { cwd: root }, runtime, lspService, formatService));
-    if (expectCompletedEdit) assertCompletedEdit(runtime);
+    if (expectCompletedEdit) assertCompletedEdit(runtime, { expectTouchedRanges });
     if (expectFeedback) assertPiFeedback(result.value);
     if (expectFormatted) await assertFormatted(filePath);
-    version += 1;
+    version = nextVersion;
     return withTotal([call, result]);
   };
 }
@@ -429,9 +434,10 @@ async function timed(label, fn) {
   return { label, wallMs, cpuMs: microsecondsToMilliseconds(cpu.user + cpu.system), value };
 }
 
-function assertCompletedEdit(runtime) {
+function assertCompletedEdit(runtime, options = {}) {
   const edit = runtime.completedEdits.at(-1);
-  if (!edit || edit.touchedRanges.length === 0) throw new Error("benchmark sanity check failed: edit was not recorded with touched ranges");
+  if (!edit) throw new Error("benchmark sanity check failed: edit was not recorded");
+  if (options.expectTouchedRanges !== false && edit.touchedRanges.length === 0) throw new Error("benchmark sanity check failed: edit was not recorded with touched ranges");
 }
 
 function assertPiFeedback(result) {
@@ -503,6 +509,7 @@ function printHuman(output) {
 function editScenarioNotes(options) {
   if (!options.enabled) return "same edit workload with pi-code-feedback disabled";
   if (options.format === "detect-none") return "LSP disabled; auto-format enabled but no formatter is configured";
+  if (options.unchanged) return "LSP disabled; fake formatter is configured, but the tool result leaves file content unchanged";
   if (options.format === "fake-noop") return "LSP disabled; fake formatter is configured and spawned but leaves the file unchanged";
   if (options.name === "formatter/fake-map-large") return "LSP disabled; fake formatter rewrites a large file so LCS touched-range remapping is stressed";
   if (options.format === "fake-change") return "LSP disabled; fake formatter rewrites the file so formatter mapping is exercised";

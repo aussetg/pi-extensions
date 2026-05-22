@@ -258,6 +258,7 @@ export interface FeedbackConfig {
   diagnostics: {
     inline: "touched" | "all" | "off";
     maxInline: number;
+    inlineTimeoutMs: number;
     settleMs: number;
     timeoutMs: number;
     delayedTimeoutMs: number;

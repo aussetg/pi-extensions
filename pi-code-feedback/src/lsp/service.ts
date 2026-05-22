@@ -98,6 +98,30 @@ export class LspService {
     return createDiagnosticSnapshot(snapshot.byUri.get(uri) ?? []);
   }
 
+  cachedDiagnosticsIfKnown(filePath: string): DiagnosticSnapshot | undefined {
+    const resolved = path.resolve(this.projectRoot, filePath);
+    const uri = filePathToUri(resolved);
+    const clients = this.cachedClientsForFile(resolved);
+    if (!clients) return undefined;
+
+    const diagnostics = clients.flatMap((client) => client.diagnosticsForUri(uri));
+    return createDiagnosticSnapshot(diagnostics);
+  }
+
+  prewarm(filePath: string): void {
+    const resolved = path.resolve(this.projectRoot, filePath);
+    const clients = this.getOrCreateClients(resolved);
+    if (clients.length === 0) return;
+
+    void Promise.all(clients.map(async (client) => {
+      try {
+        await client.start();
+      } catch (error) {
+        this.markClientInstanceError(resolved, client, error);
+      }
+    })).finally(() => this.armIdleTimer());
+  }
+
   forgetFile(filePath: string): void {
     const resolved = path.resolve(this.projectRoot, filePath);
     for (const client of this.clients.values()) client.forgetDocument(resolved);
@@ -368,6 +392,22 @@ export class LspService {
     }
 
     return clients;
+  }
+
+  private cachedClientsForFile(filePath: string): LspClient[] | undefined {
+    const resolved = path.resolve(filePath);
+    const uri = filePathToUri(resolved);
+    const clients: LspClient[] = [];
+
+    for (const resolvedServer of resolveLanguageServers(resolved, this.serverOverrides, this.projectRoot)) {
+      if (!resolvedServer.available) continue;
+      const key = clientKey(this.projectRoot, resolvedServer.definition);
+      const client = this.clients.get(key);
+      if (!client || !client.hasDiagnosticsForUri(uri)) return undefined;
+      clients.push(client);
+    }
+
+    return clients.length > 0 ? clients : undefined;
   }
 
   private firstReadyOrAnyClient(): LspClient | undefined {

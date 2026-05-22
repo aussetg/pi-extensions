@@ -10,7 +10,8 @@ export function createDefaultConfig(): FeedbackConfig {
     diagnostics: {
       inline: "touched",
       maxInline: 8,
-      settleMs: 700,
+      inlineTimeoutMs: 1200,
+      settleMs: 0,
       timeoutMs: 1800,
       delayedTimeoutMs: 8000,
       expandToSymbol: true,

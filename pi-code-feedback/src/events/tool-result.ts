@@ -70,7 +70,7 @@ export async function handleToolResult(
     detailsDiff,
   });
 
-  const formatter = await maybeFormatFile(formatService, runtime, filePath, afterAgentContent);
+  const formatter = await maybeFormatFile(formatService, runtime, filePath, afterAgentContent, touchedRanges.length > 0);
   const finalContent = formatter?.finalContent ?? afterAgentContent;
   if (formatter?.changed) {
     touchedRanges = mapTouchedRangesThroughFormatting(filePath, afterAgentContent, finalContent, touchedRanges);
@@ -142,7 +142,7 @@ async function handleApplyPatchToolResult(
           detailsDiff,
         });
 
-    const formatter = afterAgentContent === undefined ? undefined : await maybeFormatFile(formatService, runtime, filePath, afterAgentContent);
+    const formatter = afterAgentContent === undefined ? undefined : await maybeFormatFile(formatService, runtime, filePath, afterAgentContent, touchedRanges.length > 0);
     const finalContent = formatter?.finalContent ?? afterAgentContent;
     if (formatter?.changed && afterAgentContent !== undefined && finalContent !== undefined) {
       touchedRanges = mapTouchedRangesThroughFormatting(filePath, afterAgentContent, finalContent, touchedRanges);
@@ -205,9 +205,18 @@ async function captureAfterDiagnosticRefresh(
   if (!lspService) return undefined;
   if (!runtime.config.lsp.enabled) return undefined;
   return lspService.diagnosticsForFileDetailed(filePath, content, {
-    timeoutMs: runtime.config.diagnostics.timeoutMs,
-    settleMs: runtime.config.diagnostics.settleMs,
+    timeoutMs: inlineDiagnosticTimeoutMs(runtime),
+    settleMs: inlineDiagnosticSettleMs(runtime),
   });
+}
+
+function inlineDiagnosticTimeoutMs(runtime: CodeFeedbackRuntime): number {
+  if (runtime.config.strict) return runtime.config.diagnostics.timeoutMs;
+  return Math.min(runtime.config.diagnostics.inlineTimeoutMs, runtime.config.diagnostics.timeoutMs);
+}
+
+function inlineDiagnosticSettleMs(runtime: CodeFeedbackRuntime): number {
+  return runtime.config.strict ? runtime.config.diagnostics.settleMs : 0;
 }
 
 async function maybeFormatFile(
@@ -215,9 +224,19 @@ async function maybeFormatFile(
   runtime: CodeFeedbackRuntime,
   filePath: string,
   content: string,
+  changedByTool: boolean,
 ): Promise<FormatterResult | undefined> {
   if (!formatService) return undefined;
   if (!runtime.config.autoFormat || runtime.config.formatMode !== "immediate") return undefined;
+  if (!changedByTool) {
+    return {
+      changed: false,
+      finalContent: content,
+      errors: [],
+      skippedReason: "unchanged by tool",
+      durationMs: 0,
+    };
+  }
   if (hasPendingEditForFile(runtime, filePath)) {
     return {
       changed: false,
@@ -372,8 +391,8 @@ function appendInlineFeedback(event: ToolResultEvent, completed: CompletedEdit, 
   const isStrictError = runtime.config.strict && completed.diagnosticFilter?.linked.some((linked) => linked.diagnostic.severity === "error");
   const result: PiToolResult = {
     content: [...(event.content ?? []), { type: "text", text: feedback }],
-    isError: isStrictError || undefined,
   };
+  if (isStrictError) result.isError = true;
   const details = appendCodeFeedbackDetails(event.details, runtime, feedback, [completed]);
   if (details !== undefined) result.details = details;
   return result;
@@ -391,8 +410,8 @@ function appendInlineFeedbackForEdits(event: ToolResultEvent, completedEdits: Co
   const isStrictError = runtime.config.strict && completedEdits.some((edit) => edit.diagnosticFilter?.linked.some((linked) => linked.diagnostic.severity === "error"));
   const result: PiToolResult = {
     content: [...(event.content ?? []), { type: "text", text: feedback }],
-    isError: isStrictError || undefined,
   };
+  if (isStrictError) result.isError = true;
   const details = appendCodeFeedbackDetails(event.details, runtime, feedback, feedbackEdits);
   if (details !== undefined) result.details = details;
   return result;

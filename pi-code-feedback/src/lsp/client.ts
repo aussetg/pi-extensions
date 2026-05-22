@@ -174,6 +174,10 @@ export class LspClient {
     return entry ? this.normalizeDiagnostics(entry) : [];
   }
 
+  hasDiagnosticsForUri(uri: string): boolean {
+    return this.diagnostics.has(uri);
+  }
+
   forgetDocument(filePath: string): void {
     const uri = filePathToUri(filePath);
     if (this.documents.has(uri) && this.state === "ready") {

@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { readUtf8IfExists } from "../fs.ts";
 import type { FormatterResult, FormatterRunRecord, FormatServiceStatus } from "../types.ts";
-import { listFormatterCommandStatus, selectFormatter, type SelectedFormatter } from "./formatters.ts";
+import { listFormatterCommandStatus, selectFormatter, type FormatterSelection, type SelectedFormatter } from "./formatters.ts";
 
 export interface FormatServiceOptions {
   projectRoot: string;
@@ -18,6 +19,12 @@ interface SpawnResult {
   timedOut: boolean;
 }
 
+interface CachedFormatterSelection {
+  selection: FormatterSelection;
+  configPath?: string;
+  configMtimeMs?: number;
+}
+
 const DEFAULT_FORMAT_TIMEOUT_MS = 15_000;
 const MAX_OUTPUT_CHARS = 8_000;
 
@@ -26,6 +33,7 @@ export class FormatService {
   private formatterOverrides: Record<string, unknown>;
   private timeoutMs: number;
   private recentRuns: FormatterRunRecord[] = [];
+  private selectionCache = new Map<string, CachedFormatterSelection>();
 
   constructor(options: FormatServiceOptions) {
     this.projectRoot = path.resolve(options.projectRoot);
@@ -37,12 +45,13 @@ export class FormatService {
     this.projectRoot = path.resolve(options.projectRoot);
     this.formatterOverrides = options.formatterOverrides ?? {};
     this.timeoutMs = options.timeoutMs ?? this.timeoutMs;
+    this.selectionCache.clear();
   }
 
   async formatFile(filePath: string, beforeContent: string): Promise<FormatterResult> {
     const startedAt = Date.now();
     const resolved = path.resolve(this.projectRoot, filePath);
-    const selection = selectFormatter(resolved, this.projectRoot, this.formatterOverrides);
+    const selection = this.selectFormatter(resolved);
 
     if (selection.kind === "none") {
       return this.record(resolved, {
@@ -104,6 +113,25 @@ export class FormatService {
     }
     return result;
   }
+
+  private selectFormatter(filePath: string): FormatterSelection {
+    const cached = this.selectionCache.get(filePath);
+    if (cached && cachedSelectionIsValid(cached)) return cached.selection;
+
+    const selection = selectFormatter(filePath, this.projectRoot, this.formatterOverrides);
+    if (selection.kind !== "none") {
+      this.selectionCache.set(filePath, {
+        selection,
+        ...(selection.kind === "selected" && selection.formatter.configPath
+          ? {
+              configPath: selection.formatter.configPath,
+              configMtimeMs: statMtimeMs(selection.formatter.configPath),
+            }
+          : {}),
+      });
+    }
+    return selection;
+  }
 }
 
 export function createFormatService(options: FormatServiceOptions): FormatService {
@@ -163,4 +191,17 @@ function formatterErrors(formatter: SelectedFormatter, result: SpawnResult): str
 function appendLimited(existing: string, extra: string): string {
   const combined = existing + extra;
   return combined.length <= MAX_OUTPUT_CHARS ? combined : combined.slice(-MAX_OUTPUT_CHARS);
+}
+
+function cachedSelectionIsValid(cached: CachedFormatterSelection): boolean {
+  if (!cached.configPath) return true;
+  return statMtimeMs(cached.configPath) === cached.configMtimeMs;
+}
+
+function statMtimeMs(filePath: string): number | undefined {
+  try {
+    return fs.statSync(filePath).mtimeMs;
+  } catch {
+    return undefined;
+  }
 }
