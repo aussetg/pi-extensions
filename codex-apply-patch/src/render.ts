@@ -123,7 +123,9 @@ function textFromContent(content: unknown): string {
 }
 
 function withResultSpacing(text: string): string {
-  return text ? `\n${text}` : text;
+  // Vertical spacing around tool output is owned by renderApplyPatchCall()
+  // above the result and by ApplyPatchTextResultComponent/Pierre below it.
+  return text;
 }
 
 function renderOperationLine(
@@ -269,6 +271,7 @@ class ApplyPatchPierreResultComponent implements Component {
     this.diff = new PierreInlineDiffComponent(payloads, theme, {
       showFileHeaders: payloads.length > 1,
       expandCollapsedHunks: options.expanded,
+      suppressLeadingSpacing: true,
       onInvalidate: options.invalidate,
     });
     this.update(payloads, theme, options);
@@ -286,6 +289,7 @@ class ApplyPatchPierreResultComponent implements Component {
     this.diff.update(payloads, theme, {
       showFileHeaders: payloads.length > 1,
       expandCollapsedHunks: options.expanded,
+      suppressLeadingSpacing: true,
       onInvalidate: options.invalidate,
     });
     this.footerText = options.footerText;
@@ -296,7 +300,7 @@ class ApplyPatchPierreResultComponent implements Component {
     const lines = this.diff.render(width);
     if (!this.footerText) return lines;
 
-    const footer = new Text(`\n${this.footerText}\n`, 1, 0, this.footerBg);
+    const footer = new Text(`${this.footerText}\n`, 1, 0, this.footerBg);
     return [...lines, ...footer.render(width)];
   }
 
@@ -411,7 +415,7 @@ export function renderApplyPatchCall(
   } catch {
     // Keep renderer resilient; fallback to just tool title.
   }
-  return new Text(`\n${out}`, 1, 0, toolBackground(theme, context));
+  return new Text(out, 1, 1, toolBackground(theme, context));
 }
 
 export function renderApplyPatchResult(
@@ -421,7 +425,7 @@ export function renderApplyPatchResult(
   context?: ShellContextLike,
 ) {
   const renderText = (text: string) =>
-    new ApplyPatchTextResultComponent(`${text}\n`, theme, {
+    new ApplyPatchTextResultComponent(text, theme, {
       ...context,
       isPartial,
     });

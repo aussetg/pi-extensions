@@ -45,6 +45,7 @@ interface RenderSegment {
 export interface PierreInlineDiffOptions {
   showFileHeaders?: boolean;
   expandCollapsedHunks?: boolean;
+  suppressLeadingSpacing?: boolean;
   onInvalidate?: () => void;
 }
 
@@ -100,6 +101,7 @@ export class PierreInlineDiffComponent implements Component {
   private showFileHeaders: boolean;
   private explicitShowFileHeaders: boolean | undefined;
   private expandCollapsedHunks: boolean;
+  private suppressLeadingSpacing: boolean;
   private invalidateView: (() => void) | undefined;
   private highlightedByKey = new Map<string, HighlightedDiffSet>();
   private piHighlightedByKey = globalPiHighlightCache();
@@ -113,6 +115,7 @@ export class PierreInlineDiffComponent implements Component {
     this.theme = theme;
     this.explicitShowFileHeaders = options.showFileHeaders;
     this.expandCollapsedHunks = Boolean(options.expandCollapsedHunks);
+    this.suppressLeadingSpacing = Boolean(options.suppressLeadingSpacing);
     this.invalidateView = options.onInvalidate;
     this.config = getPierreRendererConfig();
     this.palette = getPierrePalette(theme, this.config);
@@ -133,6 +136,7 @@ export class PierreInlineDiffComponent implements Component {
     this.theme = theme;
     this.explicitShowFileHeaders = options.showFileHeaders;
     this.expandCollapsedHunks = Boolean(options.expandCollapsedHunks);
+    this.suppressLeadingSpacing = Boolean(options.suppressLeadingSpacing);
     this.invalidateView = options.onInvalidate;
     this.config = getPierreRendererConfig();
     this.palette = getPierrePalette(theme, this.config);
@@ -155,7 +159,10 @@ export class PierreInlineDiffComponent implements Component {
     const safeWidth = Math.max(20, width);
     const lines: string[] = [];
 
-    for (let i = 0; i < this.config.spacing.beforeDiff; i += 1) {
+    const beforeDiff = this.suppressLeadingSpacing
+      ? 0
+      : this.config.spacing.beforeDiff;
+    for (let i = 0; i < beforeDiff; i += 1) {
       lines.push(renderBlankLine(safeWidth, this.palette.editorBg));
     }
 
