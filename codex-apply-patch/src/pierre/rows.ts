@@ -71,7 +71,7 @@ export function buildDiffRows(
           ),
           rowFg: palette.deletionFg,
           rowBg: palette.deletionRowBg,
-          lineNumberFg: palette.lineNumberFg,
+          lineNumberFg: palette.deletionLineNumberFg,
         });
       }
 
@@ -96,7 +96,7 @@ export function buildDiffRows(
           ),
           rowFg: palette.additionFg,
           rowBg: palette.additionRowBg,
-          lineNumberFg: palette.lineNumberFg,
+          lineNumberFg: palette.additionLineNumberFg,
         });
       }
 

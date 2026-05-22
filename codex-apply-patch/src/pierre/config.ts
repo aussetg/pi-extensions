@@ -20,6 +20,7 @@ export interface PierreRendererConfig {
     showFileHeaders: "auto" | "always" | "never";
   };
   gutter: {
+    barPosition: "before-number" | "after-number";
     lineNumberMinWidth: number;
     lineNumberPaddingRight: number;
     separator: string;
@@ -52,6 +53,10 @@ export interface PierreRendererConfig {
     deletionRowBg: PierreColorValue;
     lineNumberFg: PierreColorValue;
     lineNumberBg: PierreColorValue;
+    additionLineNumberFg: PierreColorValue;
+    additionLineNumberBg: PierreColorValue;
+    deletionLineNumberFg: PierreColorValue;
+    deletionLineNumberBg: PierreColorValue;
     gutterFg: PierreColorValue;
     gutterBg: PierreColorValue;
     contextBarFg: PierreColorValue;
@@ -93,15 +98,16 @@ export const DEFAULT_PIERRE_RENDERER_CONFIG: PierreRendererConfig = {
     showFileHeaders: "auto",
   },
   gutter: {
+    barPosition: "before-number",
     lineNumberMinWidth: 3,
     lineNumberPaddingRight: 1,
-    separator: "",
+    separator: " ",
     barGap: " ",
-    contextBar: "│",
-    additionBar: "┃",
-    deletionBar: "┃",
-    continuationBar: "│",
-    hunkBar: "│",
+    contextBar: " ",
+    additionBar: "▌",
+    deletionBar: "▤",
+    continuationBar: " ",
+    hunkBar: " ",
   },
   hunk: {
     collapsedLabel: "{count} unmodified {line|lines}",
@@ -125,6 +131,10 @@ export const DEFAULT_PIERRE_RENDERER_CONFIG: PierreRendererConfig = {
     deletionRowBg: "toolErrorBg",
     lineNumberFg: "dim",
     lineNumberBg: "toolSuccessBg",
+    additionLineNumberFg: "toolDiffAdded",
+    additionLineNumberBg: "toolSuccessBg",
+    deletionLineNumberFg: "toolDiffRemoved",
+    deletionLineNumberBg: "toolErrorBg",
     gutterFg: "dim",
     gutterBg: "toolSuccessBg",
     contextBarFg: "dim",
@@ -234,6 +244,10 @@ function sanitizeConfig(config: PierreRendererConfig): PierreRendererConfig {
     },
     gutter: {
       ...config.gutter,
+      barPosition:
+        config.gutter.barPosition === "after-number"
+          ? "after-number"
+          : "before-number",
       lineNumberMinWidth: clampInt(config.gutter.lineNumberMinWidth, 1, 8),
       lineNumberPaddingRight: clampInt(config.gutter.lineNumberPaddingRight, 0, 4),
       separator: safeGlyph(config.gutter.separator, ""),

@@ -27,6 +27,10 @@ export interface PierreTerminalPalette {
   deletionRowBg: string;
   lineNumberFg: string;
   lineNumberBg: string;
+  additionLineNumberFg: string;
+  additionLineNumberBg: string;
+  deletionLineNumberFg: string;
+  deletionLineNumberBg: string;
   gutterFg: string;
   gutterBg: string;
   contextBarFg: string;
@@ -119,6 +123,18 @@ function buildPalette(
       theme,
       pickColor(colors.lineNumberBg, appearance),
       fallback(appearance, "#1e2e1e", "#e8f5e8"),
+    ),
+    additionLineNumberFg: fg(theme, pickColor(colors.additionLineNumberFg, appearance), fallback(appearance, "#00d787", "#00875f")),
+    additionLineNumberBg: bg(
+      theme,
+      pickColor(colors.additionLineNumberBg, appearance),
+      fallback(appearance, "#1e2e1e", "#e8f5e8"),
+    ),
+    deletionLineNumberFg: fg(theme, pickColor(colors.deletionLineNumberFg, appearance), fallback(appearance, "#ff5f5f", "#d70000")),
+    deletionLineNumberBg: bg(
+      theme,
+      pickColor(colors.deletionLineNumberBg, appearance),
+      fallback(appearance, "#2e1e1e", "#f8e8e8"),
     ),
     gutterFg: fg(theme, pickColor(colors.gutterFg, appearance), fallback(appearance, "#6f6f6f", "#8a8a8a")),
     gutterBg: bg(

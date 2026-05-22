@@ -216,37 +216,13 @@ export class PierreInlineDiffComponent implements Component {
       payload.metadata,
       this.config.gutter.lineNumberMinWidth,
     );
-    const bar = lineBar(row.lineType, this.config);
-    const barColors = lineBarColors(row.lineType, this.palette);
-    const prefixSegments: RenderSegment[] = [
-      {
-        text: " ".repeat(this.config.layout.leftPadding),
-        fg: row.rowFg,
-        bg: this.palette.editorBg,
-      },
-      {
-        text:
-          formatLineNumber(row.lineNumber, lineNumberWidth) +
-          " ".repeat(this.config.gutter.lineNumberPaddingRight),
-        fg: row.lineNumberFg,
-        bg: this.palette.lineNumberBg,
-      },
-      {
-        text: this.config.gutter.separator,
-        fg: this.palette.gutterFg,
-        bg: this.palette.gutterBg,
-      },
-      { text: bar, ...barColors },
-      { text: this.config.gutter.barGap, fg: row.rowFg, bg: row.rowBg },
-    ];
-
-    const prefix =
-      " ".repeat(this.config.layout.leftPadding) +
-      formatLineNumber(row.lineNumber, lineNumberWidth) +
-      " ".repeat(this.config.gutter.lineNumberPaddingRight) +
-      this.config.gutter.separator +
-      bar +
-      this.config.gutter.barGap;
+    const prefixSegments = linePrefixSegments(
+      row,
+      lineNumberWidth,
+      this.palette,
+      this.config,
+    );
+    const prefix = linePrefixText(row, lineNumberWidth, this.config);
     const prefixWidth = visibleWidth(prefix);
     const contentWidth = Math.max(8, width - prefixWidth);
     const prefixAnsi = renderSegments(prefixSegments, {
@@ -344,23 +320,95 @@ function renderHunkNoticeLine(
   const lineNumberWidth = payload
     ? lineNumberWidthFor(payload.metadata, config.gutter.lineNumberMinWidth)
     : config.gutter.lineNumberMinWidth;
-  const prefixSegments: RenderSegment[] = [
-    { text: " ".repeat(config.layout.leftPadding), fg: palette.hunkFg, bg: palette.hunkBg },
-    {
-      text: " ".repeat(lineNumberWidth + config.gutter.lineNumberPaddingRight),
-      fg: palette.lineNumberFg,
-      bg: palette.hunkBg,
-    },
-    { text: config.gutter.separator, fg: palette.gutterFg, bg: palette.hunkBg },
-    { text: config.gutter.hunkBar, fg: palette.hunkFg, bg: palette.hunkBg },
-    { text: config.gutter.barGap, fg: palette.hunkFg, bg: palette.hunkBg },
-    { text, fg: palette.hunkFg, bg: palette.hunkBg },
-  ];
+  const prefixSegments = hunkPrefixSegments(lineNumberWidth, palette, config);
+  prefixSegments.push({ text, fg: palette.hunkFg, bg: palette.hunkBg });
 
   return renderFullWidthLine(prefixSegments, width, {
     fg: palette.hunkFg,
     bg: palette.hunkBg,
   });
+}
+
+function linePrefixSegments(
+  row: Extract<DiffRow, { kind: "line" }>,
+  lineNumberWidth: number,
+  palette: PierreTerminalPalette,
+  config: PierreRendererConfig,
+): RenderSegment[] {
+  const pad = {
+    text: " ".repeat(config.layout.leftPadding),
+    fg: row.rowFg,
+    bg: palette.editorBg,
+  };
+  const number = {
+    text:
+      formatLineNumber(row.lineNumber, lineNumberWidth) +
+      " ".repeat(config.gutter.lineNumberPaddingRight),
+    fg: row.lineNumberFg,
+    bg: lineNumberBg(row.lineType, palette),
+  };
+  const separator = {
+    text: config.gutter.separator,
+    fg: palette.gutterFg,
+    bg: palette.editorBg,
+  };
+  const bar = {
+    text: lineBar(row.lineType, config),
+    ...lineBarColors(row.lineType, palette),
+  };
+  const barGap = {
+    text: config.gutter.barGap,
+    fg: palette.gutterFg,
+    bg: lineNumberBg(row.lineType, palette),
+  };
+
+  return config.gutter.barPosition === "after-number"
+    ? [pad, number, separator, bar, { ...barGap, bg: row.rowBg }]
+    : [pad, bar, barGap, number, separator];
+}
+
+function linePrefixText(
+  row: Extract<DiffRow, { kind: "line" }>,
+  lineNumberWidth: number,
+  config: PierreRendererConfig,
+): string {
+  const number =
+    formatLineNumber(row.lineNumber, lineNumberWidth) +
+    " ".repeat(config.gutter.lineNumberPaddingRight);
+  const bar = lineBar(row.lineType, config);
+  const pad = " ".repeat(config.layout.leftPadding);
+
+  return config.gutter.barPosition === "after-number"
+    ? pad + number + config.gutter.separator + bar + config.gutter.barGap
+    : pad + bar + config.gutter.barGap + number + config.gutter.separator;
+}
+
+function hunkPrefixSegments(
+  lineNumberWidth: number,
+  palette: PierreTerminalPalette,
+  config: PierreRendererConfig,
+): RenderSegment[] {
+  const pad = {
+    text: " ".repeat(config.layout.leftPadding),
+    fg: palette.hunkFg,
+    bg: palette.hunkBg,
+  };
+  const numberSpace = {
+    text: " ".repeat(lineNumberWidth + config.gutter.lineNumberPaddingRight),
+    fg: palette.lineNumberFg,
+    bg: palette.hunkBg,
+  };
+  const separator = {
+    text: config.gutter.separator,
+    fg: palette.gutterFg,
+    bg: palette.hunkBg,
+  };
+  const bar = { text: config.gutter.hunkBar, fg: palette.hunkFg, bg: palette.hunkBg };
+  const barGap = { text: config.gutter.barGap, fg: palette.hunkFg, bg: palette.hunkBg };
+
+  return config.gutter.barPosition === "after-number"
+    ? [pad, numberSpace, separator, bar, barGap]
+    : [pad, bar, barGap, numberSpace, separator];
 }
 
 function continuationPrefixSegments(
@@ -370,6 +418,27 @@ function continuationPrefixSegments(
   config: PierreRendererConfig,
 ): RenderSegment[] {
   const pad = " ".repeat(config.layout.leftPadding);
+  const numberBg = lineNumberBg(row.lineType, palette);
+
+  if (config.gutter.barPosition === "before-number") {
+    const rest = Math.max(
+      0,
+      prefixWidth -
+        visibleWidth(
+          pad + config.gutter.continuationBar + config.gutter.barGap,
+        ) -
+        visibleWidth(config.gutter.separator),
+    );
+
+    return [
+      { text: pad, fg: row.rowFg, bg: palette.editorBg },
+      { text: config.gutter.continuationBar, fg: palette.contextBarFg, bg: numberBg },
+      { text: config.gutter.barGap, fg: palette.gutterFg, bg: numberBg },
+      { text: " ".repeat(rest), fg: palette.lineNumberFg, bg: numberBg },
+      { text: config.gutter.separator, fg: palette.gutterFg, bg: palette.editorBg },
+    ];
+  }
+
   const rest = Math.max(
     0,
     prefixWidth -
@@ -380,10 +449,19 @@ function continuationPrefixSegments(
 
   return [
     { text: pad, fg: row.rowFg, bg: palette.editorBg },
-    { text: " ".repeat(rest), fg: palette.lineNumberFg, bg: palette.lineNumberBg },
+    { text: " ".repeat(rest), fg: palette.lineNumberFg, bg: numberBg },
     { text: config.gutter.continuationBar, fg: palette.contextBarFg, bg: palette.contextBarBg },
     { text: config.gutter.barGap, fg: row.rowFg, bg: row.rowBg },
   ];
+}
+
+function lineNumberBg(
+  lineType: "context" | "addition" | "deletion",
+  palette: PierreTerminalPalette,
+): string {
+  if (lineType === "addition") return palette.additionLineNumberBg;
+  if (lineType === "deletion") return palette.deletionLineNumberBg;
+  return palette.lineNumberBg;
 }
 
 function lineBar(
