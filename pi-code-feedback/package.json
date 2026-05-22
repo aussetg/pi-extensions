@@ -6,7 +6,9 @@
   "description": "Pi extension for touched-line LSP diagnostics and formatter feedback.",
   "main": "index.ts",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.mjs",
+    "check": "npm run typecheck && npm test"
   },
   "devDependencies": {
     "@types/node": "^22.15.21"
