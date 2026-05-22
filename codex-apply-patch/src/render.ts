@@ -209,13 +209,17 @@ class ApplyPatchTextResultComponent implements Component {
   render(width: number): string[] {
     const lines = new Text(this.text, 1, 0, this.background).render(width);
     for (let i = 0; i < this.footerLines; i += 1) {
-      const blank = " ".repeat(Math.max(0, width));
+      const blank = persistentBlankLine(width);
       lines.push(this.background ? this.background(blank) : blank);
     }
     return lines;
   }
 
   invalidate(): void {}
+}
+
+function persistentBlankLine(width: number): string {
+  return `\u200b${" ".repeat(Math.max(0, width))}`;
 }
 
 const DEGRADED_PIERRE_CACHE_LIMIT = 128;
