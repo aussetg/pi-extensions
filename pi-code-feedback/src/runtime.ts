@@ -4,7 +4,6 @@ import type { CompletedEdit, DelayedDiagnosticFeedback, FeedbackConfig, PendingE
 export interface CodeFeedbackRuntime {
   config: FeedbackConfig;
   projectRoot: string;
-  sessionStartedAt: number;
   turnIndex: number;
   writeIndex: number;
   lspRestartCount: number;
@@ -20,7 +19,6 @@ export function createRuntime(config: FeedbackConfig): CodeFeedbackRuntime {
   return {
     config,
     projectRoot: fallbackCwd(),
-    sessionStartedAt: Date.now(),
     turnIndex: 0,
     writeIndex: 0,
     lspRestartCount: 0,
@@ -60,11 +58,8 @@ export function takePendingEdit(
   toolName: TrackedToolName,
 ): PendingEdit | undefined {
   if (id) {
-    const exact = runtime.pendingEdits.get(id);
-    if (exact) {
-      runtime.pendingEdits.delete(id);
-      return exact;
-    }
+    const exact = takePendingEditById(runtime, id);
+    if (exact) return exact;
   }
 
   const resolvedFilePath = path.resolve(filePath);
@@ -82,15 +77,38 @@ export function takePendingEdit(
   return fallback;
 }
 
+export function takePendingEditById(runtime: CodeFeedbackRuntime, id: string | undefined): PendingEdit | undefined {
+  if (!id) return undefined;
+  const edit = runtime.pendingEdits.get(id);
+  if (!edit) return undefined;
+  runtime.pendingEdits.delete(id);
+  return edit;
+}
+
+export function discardPendingEditsForToolCall(
+  runtime: CodeFeedbackRuntime,
+  toolCallId: string | undefined,
+  toolName: TrackedToolName,
+): PendingEdit[] {
+  if (!toolCallId) return [];
+
+  const prefix = `${toolCallId}:`;
+  const discarded: PendingEdit[] = [];
+  for (const [id, edit] of [...runtime.pendingEdits.entries()]) {
+    if (edit.toolName !== toolName) continue;
+    if (id !== toolCallId && !id.startsWith(prefix)) continue;
+    runtime.pendingEdits.delete(id);
+    discarded.push(edit);
+  }
+
+  return discarded;
+}
+
 export function recordCompletedEdit(runtime: CodeFeedbackRuntime, edit: CompletedEdit): void {
   runtime.completedEdits.push(edit);
   if (runtime.completedEdits.length > 50) {
     runtime.completedEdits.splice(0, runtime.completedEdits.length - 50);
   }
-}
-
-export function getRecentCompletedEdits(runtime: CodeFeedbackRuntime, limit = 5): CompletedEdit[] {
-  return runtime.completedEdits.slice(-limit).reverse();
 }
 
 export function hasPendingEditForFile(runtime: CodeFeedbackRuntime, filePath: string): boolean {
@@ -129,10 +147,6 @@ export function restartLsp(runtime: CodeFeedbackRuntime, reason: string): void {
   runtime.lspRestartCount += 1;
   runtime.lastLspRestartAt = Date.now();
   runtime.lastReloadReason = reason;
-}
-
-export function runtimeAgeMs(runtime: CodeFeedbackRuntime): number {
-  return Date.now() - runtime.sessionStartedAt;
 }
 
 function fallbackCwd(): string {

@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { diagnosticSeverityRank, flattenDiagnosticSnapshot } from "./snapshots.ts";
 import type {
   DiagnosticFilterResult,
   DiagnosticLinkReason,
@@ -20,7 +21,7 @@ export interface LinkDiagnosticsInput {
 }
 
 export function linkDiagnosticsToTouchedRanges(input: LinkDiagnosticsInput): DiagnosticFilterResult {
-  const allAfter = flattenSnapshot(input.afterSnapshot);
+  const allAfter = flattenDiagnosticSnapshot(input.afterSnapshot);
   if (allAfter.length === 0 || input.touchedRanges.length === 0) {
     return emptyResult(allAfter.length);
   }
@@ -113,16 +114,16 @@ function relatedInformationOverlapsTouchedRange(diagnostic: LspDiagnostic, touch
 function diagnosticIsNewOrWorsened(diagnostic: LspDiagnostic, beforeSeverityByIdentity: Map<string, number>, hasBeforeSnapshot: boolean): boolean {
   if (!hasBeforeSnapshot) return false;
   const beforeSeverity = beforeSeverityByIdentity.get(diagnosticIdentity(diagnostic));
-  return beforeSeverity === undefined || severityRank(diagnostic.severity) > beforeSeverity;
+  return beforeSeverity === undefined || diagnosticSeverityRank(diagnostic.severity) > beforeSeverity;
 }
 
 function buildBeforeSeverityMap(snapshot: DiagnosticSnapshot | undefined): Map<string, number> {
   const map = new Map<string, number>();
   if (!snapshot) return map;
 
-  for (const diagnostic of flattenSnapshot(snapshot)) {
+  for (const diagnostic of flattenDiagnosticSnapshot(snapshot)) {
     const key = diagnosticIdentity(diagnostic);
-    const rank = severityRank(diagnostic.severity);
+    const rank = diagnosticSeverityRank(diagnostic.severity);
     const existing = map.get(key);
     if (existing === undefined || rank > existing) {
       map.set(key, rank);
@@ -147,7 +148,7 @@ function normalizeMessage(message: string): string {
 
 function compareLinkedDiagnostics(left: LinkedDiagnostic, right: LinkedDiagnostic): number {
   return (
-    severityRank(right.diagnostic.severity) - severityRank(left.diagnostic.severity) ||
+    diagnosticSeverityRank(right.diagnostic.severity) - diagnosticSeverityRank(left.diagnostic.severity) ||
     linkReasonRank(left.linkReason) - linkReasonRank(right.linkReason) ||
     normalizeUri(left.diagnostic.uri).localeCompare(normalizeUri(right.diagnostic.uri)) ||
     diagnosticLineRange(left.diagnostic).startLine - diagnosticLineRange(right.diagnostic).startLine ||
@@ -166,10 +167,8 @@ function linkReasonRank(reason: DiagnosticLinkReason): number {
       return 2;
     case "new-on-touched-file":
       return 3;
-    case "expanded-symbol":
-      return 4;
     case "all-diagnostics":
-      return 5;
+      return 4;
   }
 }
 
@@ -182,10 +181,6 @@ function externalRangeLineSpan(range: LspDiagnostic["range"]): { startLine: numb
   const rawEndLine = normalizeLine(range.end.line);
   const endLine = rawEndLine > startLine && normalizeLine(range.end.character) <= 1 ? rawEndLine - 1 : rawEndLine;
   return { startLine: Math.min(startLine, endLine), endLine: Math.max(startLine, endLine) };
-}
-
-function flattenSnapshot(snapshot: DiagnosticSnapshot): LspDiagnostic[] {
-  return [...snapshot.byUri.values()].flat();
 }
 
 function emptyResult(totalDiagnostics: number): DiagnosticFilterResult {
@@ -228,18 +223,5 @@ function uriToPath(uri: string): string | undefined {
 function normalizeLine(line: number): number {
   if (!Number.isFinite(line)) return 1;
   return Math.max(1, Math.floor(line));
-}
-
-function severityRank(severity: LspDiagnostic["severity"]): number {
-  switch (severity) {
-    case "error":
-      return 4;
-    case "warning":
-      return 3;
-    case "information":
-      return 2;
-    case "hint":
-      return 1;
-  }
 }
 

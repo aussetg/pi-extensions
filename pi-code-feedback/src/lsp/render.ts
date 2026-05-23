@@ -59,16 +59,22 @@ export function renderCodeActionApplySelectionError(error: string, candidates: R
 function renderHover(result: unknown): string {
   if (!isRecord(result)) return "No hover result.";
   const text = markupToText(result.contents);
-  return text.trim().length > 0 ? truncate(text.trim(), 12_000) : "No hover result.";
+  const trimmed = text.trim();
+  return trimmed.length > 0 ? truncate(stripSingleCodeFence(trimmed), 12_000) : "No hover result.";
 }
 
 function markupToText(value: unknown): string {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) return value.map(markupToText).filter(Boolean).join("\n\n");
   if (!isRecord(value)) return "";
-  if (typeof value.language === "string" && typeof value.value === "string") return `\`\`\`${value.language}\n${value.value}\n\`\`\``;
+  if (typeof value.language === "string" && typeof value.value === "string") return value.value;
   if (typeof value.value === "string") return value.value;
   return "";
+}
+
+function stripSingleCodeFence(text: string): string {
+  const match = /^```[^\n`]*\n([\s\S]*?)\n```\s*$/.exec(text.trim());
+  return match ? match[1] ?? "" : text;
 }
 
 function renderLocations(result: unknown, projectRoot: string, emptyText: string): string {

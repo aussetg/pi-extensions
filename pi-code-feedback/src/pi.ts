@@ -43,6 +43,9 @@ export interface PiToolDefinition {
   promptSnippet?: string;
   promptGuidelines?: string[];
   parameters: Record<string, unknown>;
+  renderShell?: "self";
+  renderCall?: (args: Record<string, unknown>, theme: any, context: any) => unknown;
+  renderResult?: (result: PiToolResult, options: any, theme: any, context: any) => unknown;
   execute(
     toolCallId: string,
     params: Record<string, unknown>,

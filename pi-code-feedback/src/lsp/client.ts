@@ -198,10 +198,6 @@ export class LspClient {
     this.root = path.resolve(root);
   }
 
-  async touchDocument(filePath: string, content: string, options: TouchDocumentOptions): Promise<DiagnosticSnapshot | undefined> {
-    return (await this.touchDocumentDetailed(filePath, content, options)).snapshot;
-  }
-
   async touchDocumentDetailed(filePath: string, content: string, options: TouchDocumentOptions): Promise<DiagnosticRefreshResult> {
     await this.ensureStarted();
 

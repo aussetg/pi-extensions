@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { createDiagnosticSnapshot } from "../diagnostics/snapshots.ts";
+import { createDiagnosticSnapshot, flattenDiagnosticSnapshot } from "../diagnostics/snapshots.ts";
 import { readUtf8IfExists } from "../fs.ts";
 import { LSP_RESULT_SERVER_ID_KEY, type DiagnosticRefreshResult, type DiagnosticSnapshot, type LspDiagnostic, type LspServiceStatus, type LspUnavailableServer } from "../types.ts";
 import { LspClient, type SemanticTokensOverlayOptions } from "./client.ts";
@@ -132,7 +132,7 @@ export class LspService {
   }
 
   snapshotAll(): DiagnosticSnapshot {
-    const diagnostics = [...this.clients.values()].flatMap((client) => [...client.snapshot().byUri.values()].flat());
+    const diagnostics = [...this.clients.values()].flatMap((client) => flattenDiagnosticSnapshot(client.snapshot()));
     return createDiagnosticSnapshot(diagnostics);
   }
 
@@ -156,32 +156,32 @@ export class LspService {
 
   async hover(filePath: string, line: unknown, character: unknown): Promise<unknown> {
     const position = externalPositionToLsp(line, character);
-    if (!position) throw new Error("hover requires 1-based line and character");
+    if (!position) throw new Error("hover requires 1-based line and column");
     const results = await this.documentRequests(filePath, "textDocument/hover", { position });
     return results.map((result) => result.result).find(hasHoverContent);
   }
 
   async definition(filePath: string, line: unknown, character: unknown): Promise<unknown> {
     const position = externalPositionToLsp(line, character);
-    if (!position) throw new Error("definition requires 1-based line and character");
+    if (!position) throw new Error("definition requires 1-based line and column");
     return mergeArrayLikeResults(await this.documentRequests(filePath, "textDocument/definition", { position }));
   }
 
   async references(filePath: string, line: unknown, character: unknown): Promise<unknown> {
     const position = externalPositionToLsp(line, character);
-    if (!position) throw new Error("references requires 1-based line and character");
+    if (!position) throw new Error("references requires 1-based line and column");
     return mergeArrayLikeResults(await this.documentRequests(filePath, "textDocument/references", { position, context: { includeDeclaration: true } }));
   }
 
   async implementation(filePath: string, line: unknown, character: unknown): Promise<unknown> {
     const position = externalPositionToLsp(line, character);
-    if (!position) throw new Error("implementation requires 1-based line and character");
+    if (!position) throw new Error("implementation requires 1-based line and column");
     return mergeArrayLikeResults(await this.documentRequests(filePath, "textDocument/implementation", { position }));
   }
 
   async typeDefinition(filePath: string, line: unknown, character: unknown): Promise<unknown> {
     const position = externalPositionToLsp(line, character);
-    if (!position) throw new Error("type_definition requires 1-based line and character");
+    if (!position) throw new Error("type_definition requires 1-based line and column");
     return mergeArrayLikeResults(await this.documentRequests(filePath, "textDocument/typeDefinition", { position }));
   }
 
@@ -225,7 +225,8 @@ export class LspService {
   }
 
   async codeActions(filePath: string, line: unknown, character: unknown): Promise<unknown> {
-    const position = externalPositionToLsp(line, character) ?? { line: 0, character: 0 };
+    const position = externalPositionToLsp(line, character);
+    if (!position) throw new Error("code_actions requires 1-based line and column");
     const range = oneLineLspRange(position);
     const resolved = path.resolve(this.projectRoot, filePath);
     const content = readUtf8IfExists(resolved);
@@ -255,7 +256,7 @@ export class LspService {
 
   async rename(filePath: string, line: unknown, character: unknown, newName: unknown): Promise<unknown> {
     const position = externalPositionToLsp(line, character);
-    if (!position) throw new Error("rename requires 1-based line and character");
+    if (!position) throw new Error("rename requires 1-based line and column");
     if (typeof newName !== "string" || newName.length === 0) throw new Error("rename requires newName");
     return this.documentRequest(filePath, "textDocument/rename", { position, newName });
   }
@@ -626,7 +627,7 @@ export class LspService {
 }
 
 function mergeSnapshots(snapshots: DiagnosticSnapshot[]): DiagnosticSnapshot {
-  const diagnostics = snapshots.flatMap((snapshot) => [...snapshot.byUri.values()].flat());
+  const diagnostics = snapshots.flatMap(flattenDiagnosticSnapshot);
   return createDiagnosticSnapshot(diagnostics);
 }
 

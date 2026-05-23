@@ -56,6 +56,7 @@ function handleMessage(message) {
           diagnosticProvider: { interFileDependencies: false, workspaceDiagnostics: false },
           codeActionProvider: true,
           hoverProvider: true,
+          renameProvider: true,
           semanticTokensProvider: semanticTokensEnabled(mode) ? {
             legend: {
               tokenTypes: ["variable", "class", "function"],
@@ -91,11 +92,16 @@ function handleMessage(message) {
     return;
   }
 
+  if (message.id !== undefined && message.method === "textDocument/rename") {
+    send({ jsonrpc: "2.0", id: message.id, result: renameEdit(message.params?.textDocument?.uri, message.params?.newName) });
+    return;
+  }
+
   if (message.id !== undefined && message.method === "textDocument/hover") {
     const response = {
       jsonrpc: "2.0",
       id: message.id,
-      result: mode === "empty" ? null : { contents: { kind: "plaintext", value: `${source} hover` } },
+      result: mode === "empty" ? null : { contents: hoverContents() },
     };
     const delayMs = hoverDelayMs(mode);
     if (delayMs > 0) setTimeout(() => send(response), delayMs);
@@ -162,6 +168,16 @@ function handleMessage(message) {
   }
 }
 
+function hoverContents() {
+  if (mode === "hover-code") {
+    return {
+      kind: "markdown",
+      value: "```typescript\nfunction fakeHover(value: number): number\n```",
+    };
+  }
+  return { kind: "plaintext", value: `${source} hover` };
+}
+
 function log(entry) {
   if (typeof logPath !== "string" || logPath.length === 0) return;
   fs.appendFileSync(logPath, `${JSON.stringify(entry)}\n`, "utf8");
@@ -187,6 +203,31 @@ function editForUri(uri) {
             end: { line: 0, character: 0 },
           },
           newText: `# fixed by ${source}\n`,
+        },
+      ],
+    },
+  };
+}
+
+function renameEdit(uri, newName) {
+  if (typeof uri !== "string") return undefined;
+  const text = typeof newName === "string" && newName.length > 0 ? newName : "renamed";
+  return {
+    changes: {
+      [uri]: [
+        {
+          range: {
+            start: { line: 0, character: 6 },
+            end: { line: 0, character: 13 },
+          },
+          newText: text,
+        },
+        {
+          range: {
+            start: { line: 1, character: 0 },
+            end: { line: 1, character: 7 },
+          },
+          newText: text,
         },
       ],
     },

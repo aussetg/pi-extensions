@@ -113,7 +113,7 @@ export function applyPatchOperationId(toolCallId: string | undefined, turnIndex:
   return `${toolCallId || `${turnIndex}:${writeIndex}:apply_patch`}:${operationIndex}`;
 }
 
-function readApplyPatchOperations(input: unknown): ApplyPatchOperationInput[] {
+export function readApplyPatchOperations(input: unknown): ApplyPatchOperationInput[] {
   if (!input || typeof input !== "object") return [];
   const operations = (input as { operations?: unknown }).operations;
   if (!Array.isArray(operations)) return [];
@@ -135,7 +135,7 @@ function resolvePatchPath(rawPath: string | undefined, cwd: string | undefined, 
   return resolveInputPath({ path: rawPath }, cwd, projectRoot);
 }
 
-interface ApplyPatchOperationInput {
+export interface ApplyPatchOperationInput {
   type: "create_file" | "update_file" | "delete_file";
   path: string;
   move_path?: string;

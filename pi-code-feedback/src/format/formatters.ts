@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { spawnSync } from "node:child_process";
+import { resolveCommand, walkUpInsideProject } from "../command-path.ts";
 import type { FormatterCommandStatus } from "../types.ts";
 
 export interface SelectedFormatter {
@@ -122,8 +122,6 @@ const FORMATTERS: FormatterCandidate[] = [
     configured: (filePath, projectRoot, overrides) => findUp(path.dirname(filePath), projectRoot, ["stylua.toml", ".stylua.toml"]) ?? forced(overrides, "stylua"),
   },
 ];
-
-const commandAvailabilityCache = new Map<string, boolean>();
 
 export function selectFormatter(filePath: string, projectRoot: string, overrides: Record<string, unknown> = {}): FormatterSelection {
   if (shouldSkipFormatting(filePath)) return { kind: "none", reason: "generated or lock file" };
@@ -247,7 +245,7 @@ function readOverride(overrides: Record<string, unknown>, id: string): Formatter
 }
 
 function findUp(startDir: string, projectRoot: string, names: string[]): string | undefined {
-  for (const dir of walkUp(startDir, projectRoot)) {
+  for (const dir of walkUpInsideProject(startDir, projectRoot)) {
     for (const name of names) {
       const candidate = path.join(dir, name);
       if (fs.existsSync(candidate)) return candidate;
@@ -257,7 +255,7 @@ function findUp(startDir: string, projectRoot: string, names: string[]): string 
 }
 
 function packageJsonHas(startDir: string, projectRoot: string, predicate: (json: Record<string, unknown>) => boolean): string | undefined {
-  for (const dir of walkUp(startDir, projectRoot)) {
+  for (const dir of walkUpInsideProject(startDir, projectRoot)) {
     const packageJson = path.join(dir, "package.json");
     if (!fs.existsSync(packageJson)) continue;
     try {
@@ -284,7 +282,7 @@ function packageJsonHasDependency(startDir: string, projectRoot: string, names: 
 }
 
 function pyprojectHas(startDir: string, projectRoot: string, needle: string): string | undefined {
-  for (const dir of walkUp(startDir, projectRoot)) {
+  for (const dir of walkUpInsideProject(startDir, projectRoot)) {
     const pyproject = path.join(dir, "pyproject.toml");
     if (!fs.existsSync(pyproject)) continue;
     try {
@@ -296,54 +294,3 @@ function pyprojectHas(startDir: string, projectRoot: string, needle: string): st
   return undefined;
 }
 
-function walkUp(startDir: string, projectRoot: string): string[] {
-  const root = path.resolve(projectRoot);
-  const dirs: string[] = [];
-  let current = path.resolve(startDir);
-
-  while (true) {
-    if (isInsideOrEqual(current, root)) dirs.push(current);
-    if (current === root || current === path.dirname(current)) break;
-    current = path.dirname(current);
-  }
-
-  return dirs;
-}
-
-function resolveCommand(command: string, startDir: string, projectRoot: string): string | undefined {
-  if (path.isAbsolute(command) || command.includes(path.sep)) {
-    return fs.existsSync(command) ? command : undefined;
-  }
-
-  const local = findLocalBin(command, startDir, projectRoot);
-  if (local) return local;
-
-  return commandExists(command) ? command : undefined;
-}
-
-function findLocalBin(command: string, startDir: string, projectRoot: string): string | undefined {
-  for (const dir of walkUp(startDir, projectRoot)) {
-    const candidate = path.join(dir, "node_modules", ".bin", command);
-    if (fs.existsSync(candidate)) return candidate;
-  }
-  return undefined;
-}
-
-function commandExists(command: string): boolean {
-  const cached = commandAvailabilityCache.get(command);
-  if (cached !== undefined) return cached;
-
-  const result = spawnSync("sh", ["-lc", `command -v ${shellQuote(command)}`], { stdio: "ignore" });
-  const available = result.status === 0;
-  commandAvailabilityCache.set(command, available);
-  return available;
-}
-
-function isInsideOrEqual(child: string, parent: string): boolean {
-  const relative = path.relative(parent, child);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
-}

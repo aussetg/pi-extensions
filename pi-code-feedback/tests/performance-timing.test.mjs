@@ -86,7 +86,7 @@ test("edit phase timings are recorded and mirrored into feedback details", async
     assert.deepEqual(detailsTiming, edit.timing);
 
     const diagnosticsStatus = renderDiagnosticsStatus(runtime, "probe.ts", createDiagnosticSnapshot([diagnostic]));
-    assert.match(diagnosticsStatus, /timing: total/);
+    assert.doesNotMatch(diagnosticsStatus, /timing: total/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

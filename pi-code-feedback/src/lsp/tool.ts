@@ -1,25 +1,82 @@
+import { createHash } from "node:crypto";
+import * as path from "node:path";
 import { renderCapabilities, renderDiagnosticsStatus, renderStatus } from "../render.ts";
 import type { FormatService } from "../format/service.ts";
+import { readUtf8IfExists } from "../fs.ts";
 import type { LspService } from "./service.ts";
 import { normalizeToolPath } from "../paths.ts";
 import { restartLsp, setProjectRoot, type CodeFeedbackRuntime } from "../runtime.ts";
-import { LSP_ACTIONS, type LspAction } from "../types.ts";
+import { LSP_ACTIONS, LSP_METHODS, LSP_RESULT_SERVER_ID_KEY, type LspAction, type LspMethod } from "../types.ts";
 import type { PiApi, PiToolResult } from "../pi.ts";
 import { renderCodeActionApplySelectionError, renderLspActionResult, renderWorkspaceEditApplyResult } from "./render.ts";
-import { applyWorkspaceEdit, selectCodeActionForApply } from "./workspace-edit.ts";
+import { limitLspToolText, type LspToolTruncation } from "./tool-output.ts";
+import { renderLspToolCall, renderLspToolResult } from "./tool-renderer.ts";
+import { applyWorkspaceEdit, selectCodeActionForApply, workspaceEditSummary, workspaceEditTargetFiles, type WorkspaceEditTargetFilesResult } from "./workspace-edit.ts";
+
+interface ParsedLspMethod {
+  method?: LspMethod;
+  error?: string;
+}
+
+interface LspToolState {
+  nextCodeActionId: number;
+  codeActions: Map<string, CachedCodeAction>;
+}
+
+interface CachedCodeAction {
+  id: string;
+  createdAt: number;
+  projectRoot: string;
+  requestFile: CachedFileState;
+  editTargets: CachedFileState[];
+  targetResolutionError?: string;
+  action: Record<string, unknown>;
+  summary: CodeActionSummary;
+}
+
+interface CachedFileState {
+  filePath: string;
+  exists: boolean;
+  sha256?: string;
+  bytes?: number;
+}
+
+interface CodeActionSummary {
+  id: string;
+  title: string;
+  kind?: string;
+  preferred: boolean;
+  server?: string;
+  diagnostics: string[];
+  applyable: boolean;
+  editSummary?: string;
+}
 
 export function registerLspTool(pi: PiApi, runtime: CodeFeedbackRuntime, lspService: LspService, formatService?: FormatService): void {
+  const toolState: LspToolState = {
+    nextCodeActionId: 1,
+    codeActions: new Map(),
+  };
+
   pi.registerTool({
     name: "lsp",
     label: "LSP",
-    description: "Inspect language-server state and ask language-server questions. Formatting is intentionally not part of this tool.",
-    promptSnippet: "Inspect LSP status/capabilities, diagnostics, and navigation for source files.",
+    description: "LSP-lite language-server tool: real LSP method names, flat path/line/column inputs, 1-based positions. Formatting is intentionally not part of this tool.",
+    promptSnippet: "Inspect LSP status/capabilities, diagnostics, navigation, semantic tokens, code actions, and renames for source files.",
     promptGuidelines: [
-      "Use lsp with action=\"status\" when language-server feedback seems missing or stale.",
-      "Use lsp with action=\"diagnostics\" for explicit diagnostic inspection; inline edit feedback already filters diagnostics to touched lines.",
+      "Use lsp with method=\"server/status\" when language-server feedback seems missing or stale.",
+      "Use lsp with real LSP method names such as method=\"textDocument/hover\", method=\"textDocument/definition\", and method=\"workspace/symbol\"; line and column are 1-based.",
+      "Use lsp method=\"textDocument/diagnostic\" with path to refresh one file, or method=\"workspace/diagnostic\" for cached known diagnostics; explicit diagnostics are not touched-line filtered.",
+      "Use lsp method=\"textDocument/codeAction\" with path, line, and column to list code actions, then method=\"codeAction/apply\" with the returned id to apply one safely.",
       "Do not use lsp for formatting; formatting is handled by pi-code-feedback's edit pipeline or normal shell/editor tools.",
     ],
     parameters: LspToolParameters,
+    renderCall(args, theme) {
+      return renderLspToolCall(args, theme);
+    },
+    renderResult(result, options, theme, context) {
+      return renderLspToolResult(result, options, theme, context);
+    },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       setProjectRoot(runtime, ctx?.cwd);
       lspService.configure({
@@ -31,37 +88,42 @@ export function registerLspTool(pi: PiApi, runtime: CodeFeedbackRuntime, lspServ
         projectRoot: runtime.projectRoot,
         formatterOverrides: runtime.config.formatters,
       });
-      const action = parseAction(params.action);
+      const parsed = parseToolMethod(params);
+      const method = parsed.method;
 
-      if (!action) {
-        return textResult(`Unknown lsp action: ${String(params.action)}\nValid actions: ${LSP_ACTIONS.join(", ")}`, true, {
-          validActions: LSP_ACTIONS,
+      if (!method) {
+        return errorResult(undefined, parsed.error ?? "lsp requires method", {
+          validMethods: LSP_METHODS,
+          legacyActions: LSP_ACTIONS,
         });
       }
 
-      if (!runtime.config.enabled && action !== "status") {
+      if (!runtime.config.enabled && method !== "server/status") {
         return textResult("pi-code-feedback is disabled for this session.", true, statusDetails(runtime, lspService, formatService));
       }
 
-      if (!runtime.config.lsp.enabled && actionRequiresEnabledLsp(action, params)) {
+      if (!runtime.config.lsp.enabled && methodRequiresEnabledLsp(method, params)) {
         return textResult("pi-code-feedback LSP clients are disabled for this session. Use /lsp enable to turn them back on.", true, statusDetails(runtime, lspService, formatService));
       }
 
       try {
-        switch (action) {
-        case "status":
+        switch (method) {
+        case "server/status":
           return textResult(renderStatus(runtime, lspService.getStatus(), formatService?.getStatus()), false, statusDetails(runtime, lspService, formatService));
 
-        case "capabilities":
+        case "server/capabilities":
           return textResult(renderCapabilities(runtime, lspService.getStatus(), await lspService.capabilities(readPath(params))), false, {
-            activeServers: lspService.getStatus().clients,
-            implementedActions: LSP_ACTIONS,
+            clients: lspService.getStatus().clients,
+            implementedMethods: LSP_METHODS,
+            legacyActions: LSP_ACTIONS,
           });
 
-        case "diagnostics":
-          return textResult(renderDiagnosticsStatus(runtime, params.all === true ? "all" : readPath(params), await diagnosticsSnapshot(params, runtime, lspService)), false, {
+        case "textDocument/diagnostic":
+        case "workspace/diagnostic":
+          return textResult(renderDiagnosticsStatus(runtime, diagnosticsTarget(method, params), await diagnosticsSnapshot(method, params, runtime, lspService)), false, {
             implemented: true,
             diagnosticSnapshots: true,
+            hint: "workspace/diagnostic returns cached diagnostics for files the LSP already knows. Use textDocument/diagnostic with path to refresh one file.",
             recentTouchedRanges: runtime.completedEdits.slice(-5).map((edit) => ({
               filePath: edit.filePath,
               toolName: edit.toolName,
@@ -71,57 +133,55 @@ export function registerLspTool(pi: PiApi, runtime: CodeFeedbackRuntime, lspServ
             })),
           });
 
-        case "reload":
+        case "server/reload":
           restartLsp(runtime, "lsp tool");
           await lspService.restart();
           return textResult("pi-code-feedback LSP clients restarted and will be relaunched on demand.", false, statusDetails(runtime, lspService, formatService));
 
-        case "hover":
-          return rawOrPretty(params, await lspService.hover(requirePath(params), params.line, params.character), runtime.projectRoot);
+        case "textDocument/hover":
+          return rawOrPretty(method, params, await lspService.hover(requirePath(params), params.line, readColumn(params)), runtime.projectRoot);
 
-        case "definition":
-          return rawOrPretty(params, await lspService.definition(requirePath(params), params.line, params.character), runtime.projectRoot);
+        case "textDocument/definition":
+          return rawOrPretty(method, params, await lspService.definition(requirePath(params), params.line, readColumn(params)), runtime.projectRoot);
 
-        case "references":
-          return rawOrPretty(params, await lspService.references(requirePath(params), params.line, params.character), runtime.projectRoot);
+        case "textDocument/references":
+          return rawOrPretty(method, params, await lspService.references(requirePath(params), params.line, readColumn(params)), runtime.projectRoot);
 
-        case "implementation":
-          return rawOrPretty(params, await lspService.implementation(requirePath(params), params.line, params.character), runtime.projectRoot);
+        case "textDocument/implementation":
+          return rawOrPretty(method, params, await lspService.implementation(requirePath(params), params.line, readColumn(params)), runtime.projectRoot);
 
-        case "type_definition":
-          return rawOrPretty(params, await lspService.typeDefinition(requirePath(params), params.line, params.character), runtime.projectRoot);
+        case "textDocument/typeDefinition":
+          return rawOrPretty(method, params, await lspService.typeDefinition(requirePath(params), params.line, readColumn(params)), runtime.projectRoot);
 
-        case "symbols":
-          return rawOrPretty(params, await lspService.documentSymbols(requirePath(params)), runtime.projectRoot);
+        case "textDocument/documentSymbol":
+          return rawOrPretty(method, params, await lspService.documentSymbols(requirePath(params)), runtime.projectRoot);
 
-        case "workspace_symbols":
-          return rawOrPretty(params, await lspService.workspaceSymbols(params.query, readPath(params)), runtime.projectRoot);
+        case "workspace/symbol":
+          return rawOrPretty(method, params, await lspService.workspaceSymbols(params.query, readPath(params)), runtime.projectRoot);
 
-        case "semantic_tokens":
-          return rawOrPretty(params, await lspService.semanticTokens(requirePath(params), {
+        case "textDocument/semanticTokens":
+          return rawOrPretty(method, params, await lspService.semanticTokens(requirePath(params), {
             waitMs: readNonNegativeNumber(params.waitMs),
             timeoutMs: readNonNegativeNumber(params.timeoutMs),
             forceRefresh: params.refresh === true,
           }), runtime.projectRoot);
 
-        case "code_actions":
-          return handleCodeActions(params, runtime, lspService);
+        case "textDocument/codeAction":
+          return await handleCodeActions(method, params, runtime, lspService, toolState);
 
-        case "rename":
-          return handleRename(params, runtime, lspService);
+        case "codeAction/apply":
+          return await handleCodeActionApply(method, params, runtime, lspService, toolState);
 
-        case "request":
-          return rawOrPretty(params, await lspService.rawRequest(readPath(params), params.request, params.params), runtime.projectRoot);
+        case "textDocument/rename":
+          return await handleRename(params, runtime, lspService);
 
-        default:
-          return textResult(renderActionStub(action, params), false, {
-            action,
-            implemented: false,
-            next: "This should be unreachable; all declared LSP actions are handled.",
-          });
+        case "raw/request":
+          return rawOrPretty(method, params, await lspService.rawRequest(readPath(params), params.request, params.params), runtime.projectRoot);
         }
       } catch (error) {
-        return textResult(`lsp ${action} failed: ${error instanceof Error ? error.message : String(error)}`, true, statusDetails(runtime, lspService, formatService));
+        const message = error instanceof Error ? error.message : String(error);
+        const displayMessage = projectRelativeErrorMessage(message, runtime.projectRoot);
+        return errorResult(method, `lsp ${method} failed: ${displayMessage}`, statusDetails(runtime, lspService, formatService), hintForError(message));
       }
     },
   });
@@ -134,43 +194,139 @@ const LspToolParameters = {
     action: {
       type: "string",
       enum: LSP_ACTIONS,
-      description: "LSP action to run.",
+      description: "Deprecated compatibility alias. Prefer method with LSP names like textDocument/hover.",
+    },
+    method: {
+      type: "string",
+      enum: LSP_METHODS,
+      description: "LSP-lite method to run. Uses real LSP method names where possible; positions are still 1-based.",
     },
     path: { type: "string", description: "File path for file-scoped LSP actions." },
-    line: { type: "number", description: "1-based line for position-scoped LSP actions." },
-    character: { type: "number", description: "1-based character/column for position-scoped LSP actions." },
-    query: { type: "string", description: "Search query for workspace_symbols, or a title/kind substring to select a code action when apply:true." },
+    line: { type: "number", minimum: 1, multipleOf: 1, description: "1-based line for position-scoped LSP actions." },
+    column: { type: "number", minimum: 1, multipleOf: 1, description: "1-based column for position-scoped LSP actions. Preferred over legacy character." },
+    character: { type: "number", minimum: 1, multipleOf: 1, description: "Legacy 1-based column alias." },
+    query: { type: "string", description: "Search query for workspace/symbol, or legacy title/kind substring to select a code action when apply:true." },
+    id: { type: "string", description: "Stable id returned by textDocument/codeAction; required for codeAction/apply." },
     newName: { type: "string", description: "New symbol name for rename." },
-    apply: { type: "boolean", description: "Apply safe text edits for rename or the selected code action. Resource operations are rejected." },
-    all: { type: "boolean", description: "For diagnostics, include all diagnostics instead of touched/provenance-filtered diagnostics." },
+    apply: { type: "boolean", description: "Legacy shortcut: apply safe text edits for rename or a query-selected code action. Prefer codeAction/apply with id." },
+    all: { type: "boolean", description: "Legacy diagnostics flag. Explicit diagnostic methods already return unfiltered diagnostics for the requested target." },
     raw: { type: "boolean", description: "Return raw LSP-ish payloads when useful for debugging." },
     waitMs: { type: "number", description: "Milliseconds to wait for lazy semantic tokens before returning cached/stale overlay state." },
     timeoutMs: { type: "number", description: "Request timeout in milliseconds for semantic token refreshes." },
     refresh: { type: "boolean", description: "Force a semantic token refresh even when cached tokens match the current document version." },
-    request: { type: "string", description: "Raw LSP request method for action=request." },
-    params: { description: "Raw LSP request params for action=request." },
+    request: { type: "string", description: "Raw LSP request method for method=raw/request." },
+    params: { description: "Raw LSP request params for method=raw/request." },
   },
-  required: ["action"],
 } satisfies Record<string, unknown>;
 
 function parseAction(value: unknown): LspAction | undefined {
   return typeof value === "string" && (LSP_ACTIONS as readonly string[]).includes(value) ? (value as LspAction) : undefined;
 }
 
+function parseMethod(value: unknown): LspMethod | undefined {
+  return typeof value === "string" && (LSP_METHODS as readonly string[]).includes(value) ? (value as LspMethod) : undefined;
+}
+
+function parseToolMethod(params: Record<string, unknown>): ParsedLspMethod {
+  const method = parseMethod(params.method);
+  if (method) return { method };
+  if (params.method !== undefined) {
+    return { error: `Unknown lsp method: ${String(params.method)}` };
+  }
+
+  const action = parseAction(params.action);
+  if (action) return { method: legacyActionToMethod(action, params) };
+  if (params.action !== undefined) {
+    return { error: `Unknown legacy lsp action: ${String(params.action)}` };
+  }
+
+  return { error: "lsp requires method. Example: method=\"server/status\" or method=\"textDocument/hover\"." };
+}
+
+function legacyActionToMethod(action: LspAction, params: Record<string, unknown>): LspMethod {
+  switch (action) {
+    case "status":
+      return "server/status";
+    case "capabilities":
+      return "server/capabilities";
+    case "reload":
+      return "server/reload";
+    case "diagnostics":
+      return params.all === true || !readPath(params) ? "workspace/diagnostic" : "textDocument/diagnostic";
+    case "hover":
+      return "textDocument/hover";
+    case "definition":
+      return "textDocument/definition";
+    case "references":
+      return "textDocument/references";
+    case "implementation":
+      return "textDocument/implementation";
+    case "type_definition":
+      return "textDocument/typeDefinition";
+    case "symbols":
+      return "textDocument/documentSymbol";
+    case "workspace_symbols":
+      return "workspace/symbol";
+    case "semantic_tokens":
+      return "textDocument/semanticTokens";
+    case "code_actions":
+      return "textDocument/codeAction";
+    case "rename":
+      return "textDocument/rename";
+    case "request":
+      return "raw/request";
+  }
+}
+
 function textResult(text: string, isError = false, details?: unknown): PiToolResult {
+  const limited = limitLspToolText(text);
   return {
-    content: [{ type: "text", text }],
+    content: [{ type: "text", text: limited.text }],
     isError: isError || undefined,
-    details,
+    details: withTruncationDetails(details, limited.truncation),
   };
 }
 
-async function diagnosticsSnapshot(params: Record<string, unknown>, runtime: CodeFeedbackRuntime, lspService: LspService) {
-  if (params.all === true) return lspService.cachedDiagnostics("all");
-  const filePath = readPath(params);
+function errorResult(method: LspMethod | undefined, error: string, details?: unknown, hint?: string): PiToolResult {
+  const payload = {
+    ok: false,
+    ...(method ? { method } : {}),
+    error,
+    ...(hint ? { hint } : {}),
+  };
+  const text = [error, hint ? `hint: ${hint}` : undefined].filter(Boolean).join("\n");
+  return {
+    content: [{ type: "text", text }],
+    isError: true,
+    details: details === undefined ? payload : { ...payload, details },
+  };
+}
+
+function structuredResult(payload: Record<string, unknown>, details?: unknown, isError = false): PiToolResult {
+  const limited = limitLspToolText(JSON.stringify(payload, null, 2));
+  return {
+    content: [{ type: "text", text: limited.text }],
+    isError: isError || undefined,
+    details: withTruncationDetails(details === undefined ? payload : details, limited.truncation),
+  };
+}
+
+function withTruncationDetails(details: unknown, truncation: LspToolTruncation | undefined): unknown {
+  if (!truncation) return details;
+  if (isRecord(details)) return { ...details, truncation };
+  return { value: details, truncation };
+}
+
+async function diagnosticsSnapshot(method: LspMethod, params: Record<string, unknown>, runtime: CodeFeedbackRuntime, lspService: LspService) {
+  if (method === "workspace/diagnostic" || params.all === true) return lspService.cachedDiagnostics("all");
+  const filePath = requirePath(params);
   if (!runtime.config.enabled || !runtime.config.lsp.enabled) return lspService.cachedDiagnostics(filePath);
-  if (!filePath) return lspService.cachedDiagnostics();
   return (await lspService.diagnosticsForFile(filePath, undefined, { timeoutMs: 1200, settleMs: 100 })) ?? lspService.cachedDiagnostics(filePath);
+}
+
+function diagnosticsTarget(method: LspMethod, params: Record<string, unknown>): string {
+  if (method === "workspace/diagnostic" || params.all === true) return "all";
+  return requirePath(params);
 }
 
 function statusDetails(runtime: CodeFeedbackRuntime, lspService: LspService, formatService?: FormatService): Record<string, unknown> {
@@ -181,7 +337,7 @@ function statusDetails(runtime: CodeFeedbackRuntime, lspService: LspService, for
     autoFormat: runtime.config.autoFormat,
     strict: runtime.config.strict,
     projectRoot: runtime.projectRoot,
-    activeClients: serviceStatus.activeClients,
+    clientSummary: serviceStatus.clients.length === 0 ? "none yet — starts lazily when you query a source file" : `${serviceStatus.clients.length} client(s)`,
     clients: serviceStatus.clients,
     unavailableServers: serviceStatus.unavailableServers,
     restartCount: runtime.lspRestartCount,
@@ -199,13 +355,18 @@ function readPath(params: Record<string, unknown>): string | undefined {
   return normalized.length > 0 ? normalized : undefined;
 }
 
-function actionRequiresEnabledLsp(action: LspAction, params: Record<string, unknown>): boolean {
-  switch (action) {
-    case "status":
-    case "reload":
-    case "diagnostics":
+function readColumn(params: Record<string, unknown>): unknown {
+  return params.column ?? params.character;
+}
+
+function methodRequiresEnabledLsp(method: LspMethod, params: Record<string, unknown>): boolean {
+  switch (method) {
+    case "server/status":
+    case "server/reload":
+    case "workspace/diagnostic":
+    case "textDocument/diagnostic":
       return false;
-    case "capabilities":
+    case "server/capabilities":
       return readPath(params) !== undefined;
     default:
       return true;
@@ -214,7 +375,7 @@ function actionRequiresEnabledLsp(action: LspAction, params: Record<string, unkn
 
 function requirePath(params: Record<string, unknown>): string {
   const filePath = readPath(params);
-  if (!filePath) throw new Error("lsp action requires path");
+  if (!filePath) throw new Error("lsp method requires path");
   return filePath;
 }
 
@@ -222,13 +383,41 @@ function readNonNegativeNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
-function rawOrPretty(params: Record<string, unknown>, result: unknown, projectRoot: string): PiToolResult {
-  const action = parseAction(params.action);
+function rawOrPretty(method: LspMethod, params: Record<string, unknown>, result: unknown, projectRoot: string): PiToolResult {
+  const action = methodToRenderAction(method);
   const text = params.raw === true ? (JSON.stringify(result, null, 2) ?? "undefined") : renderLspResult(action, result, projectRoot);
+  const limited = limitLspToolText(text);
   return {
-    content: [{ type: "text", text }],
-    details: { result },
+    content: [{ type: "text", text: limited.text }],
+    details: withTruncationDetails({ ok: true, method, result }, limited.truncation),
   };
+}
+
+function methodToRenderAction(method: LspMethod): LspAction | undefined {
+  switch (method) {
+    case "textDocument/hover":
+      return "hover";
+    case "textDocument/definition":
+      return "definition";
+    case "textDocument/references":
+      return "references";
+    case "textDocument/implementation":
+      return "implementation";
+    case "textDocument/typeDefinition":
+      return "type_definition";
+    case "textDocument/documentSymbol":
+      return "symbols";
+    case "workspace/symbol":
+      return "workspace_symbols";
+    case "textDocument/semanticTokens":
+      return "semantic_tokens";
+    case "textDocument/codeAction":
+      return "code_actions";
+    case "textDocument/rename":
+      return "rename";
+    default:
+      return undefined;
+  }
 }
 
 function renderLspResult(action: LspAction | undefined, result: unknown, projectRoot: string): string {
@@ -238,14 +427,45 @@ function renderLspResult(action: LspAction | undefined, result: unknown, project
   return text.length <= 12_000 ? text : `${text.slice(0, 12_000)}\n... truncated`;
 }
 
-async function handleCodeActions(params: Record<string, unknown>, runtime: CodeFeedbackRuntime, lspService: LspService): Promise<PiToolResult> {
+async function handleCodeActions(method: LspMethod, params: Record<string, unknown>, runtime: CodeFeedbackRuntime, lspService: LspService, state: LspToolState): Promise<PiToolResult> {
   if (params.apply === true) {
     const pendingGuard = rejectApplyDuringPendingEdits(runtime, "code action");
     if (pendingGuard) return pendingGuard;
   }
 
-  const result = await lspService.codeActions(requirePath(params), params.line, params.character);
-  if (params.apply !== true) return rawOrPretty(params, result, runtime.projectRoot);
+  const filePath = requirePath(params);
+  const requestFileStateBefore = readCachedFileState(path.resolve(runtime.projectRoot, filePath));
+  const column = readColumn(params);
+  const result = await lspService.codeActions(filePath, params.line, column);
+  const requestFileStateAfter = readCachedFileState(path.resolve(runtime.projectRoot, filePath));
+  if (!sameCachedFileState(requestFileStateBefore, requestFileStateAfter)) {
+    return errorResult(method, `File changed while collecting code actions: ${relativePath(runtime.projectRoot, requestFileStateAfter.filePath)}`, {
+      before: displayFileState(runtime.projectRoot, requestFileStateBefore),
+      after: displayFileState(runtime.projectRoot, requestFileStateAfter),
+    }, "Rerun textDocument/codeAction so returned ids match the current file contents.");
+  }
+  if (params.raw === true) return rawOrPretty(method, params, result, runtime.projectRoot);
+
+  if (params.apply !== true) {
+    const actions = Array.isArray(result) ? result.filter(isRecord) : [];
+    const summaries = actions.map((action) => cacheCodeAction(state, runtime.projectRoot, action, requestFileStateAfter));
+    return structuredResult({
+      ok: true,
+      method,
+      path: filePath,
+      line: typeof params.line === "number" ? params.line : undefined,
+      column: typeof column === "number" ? column : undefined,
+      actions: summaries,
+      hint: summaries.some((action) => action.applyable)
+        ? "Apply one with method=\"codeAction/apply\" and id."
+        : undefined,
+    }, {
+      ok: true,
+      method,
+      result,
+      actions: summaries,
+    });
+  }
 
   const selection = selectCodeActionForApply(result, params.query);
   if (!selection.action) {
@@ -264,21 +484,208 @@ async function handleCodeActions(params: Record<string, unknown>, runtime: CodeF
   });
 }
 
+async function handleCodeActionApply(method: LspMethod, params: Record<string, unknown>, runtime: CodeFeedbackRuntime, lspService: LspService, state: LspToolState): Promise<PiToolResult> {
+  const pendingGuard = rejectApplyDuringPendingEdits(runtime, "code action");
+  if (pendingGuard) return pendingGuard;
+
+  const id = typeof params.id === "string" ? params.id.trim() : "";
+  if (!id) return errorResult(method, "codeAction/apply requires id", { cachedIds: [...state.codeActions.keys()].slice(-20) }, "Call textDocument/codeAction first and pass one returned id.");
+
+  const cached = state.codeActions.get(id);
+  if (!cached) return errorResult(method, `Unknown code action id: ${id}`, { cachedIds: [...state.codeActions.keys()].slice(-20) }, "Call textDocument/codeAction again; code action ids are session-local and bounded.");
+  state.codeActions.delete(id);
+  if (path.resolve(cached.projectRoot) !== path.resolve(runtime.projectRoot)) {
+    return errorResult(method, `Code action id ${id} belongs to a different project root`, { id, actionProjectRoot: cached.projectRoot, projectRoot: runtime.projectRoot });
+  }
+
+  if (!cached.summary.applyable) {
+    return errorResult(method, `Code action id ${id} is not safely applyable`, {
+      id,
+      action: cached.summary,
+      targetResolutionError: cached.targetResolutionError,
+    }, "Choose an action with applyable: true from textDocument/codeAction.");
+  }
+
+  const stale = validateCachedCodeAction(cached, runtime.projectRoot);
+  if (stale) {
+    return errorResult(method, `Code action id ${id} is stale: ${stale.reason}`, {
+      id,
+      action: cached.summary,
+      stale,
+    }, "Call textDocument/codeAction again and apply one of the fresh ids.");
+  }
+
+  const applyResult = await applyWorkspaceEdit(cached.action.edit, runtime.projectRoot);
+  if (applyResult.applied) await resyncChangedFiles(lspService, applyResult.changedFiles, runtime);
+
+  const payload = {
+    ok: applyResult.applied,
+    method,
+    id,
+    title: cached.summary.title,
+    applied: applyResult.applied,
+    editCount: applyResult.editCount,
+    changedFiles: applyResult.changedFiles.map((filePath) => relativePath(runtime.projectRoot, filePath)),
+    rejected: applyResult.rejected,
+  };
+  return structuredResult(payload, {
+    ...payload,
+    action: cached.action,
+    applyResult,
+  }, !applyResult.applied);
+}
+
 async function handleRename(params: Record<string, unknown>, runtime: CodeFeedbackRuntime, lspService: LspService): Promise<PiToolResult> {
   if (params.apply === true) {
     const pendingGuard = rejectApplyDuringPendingEdits(runtime, "rename");
     if (pendingGuard) return pendingGuard;
   }
 
-  const result = await lspService.rename(requirePath(params), params.line, params.character, params.newName);
-  if (params.apply !== true) return rawOrPretty(params, result, runtime.projectRoot);
+  const result = await lspService.rename(requirePath(params), params.line, readColumn(params), params.newName);
+  if (params.apply !== true) return rawOrPretty("textDocument/rename", params, result, runtime.projectRoot);
 
   const applyResult = await applyWorkspaceEdit(result, runtime.projectRoot);
   if (applyResult.applied) await resyncChangedFiles(lspService, applyResult.changedFiles, runtime);
-  return textResult(renderWorkspaceEditApplyResult(applyResult, runtime.projectRoot, `rename to "${String(params.newName)}"`), !applyResult.applied, {
+
+  const payload = {
+    ok: applyResult.applied,
+    method: "textDocument/rename",
+    newName: String(params.newName),
+    applied: applyResult.applied,
+    editCount: applyResult.editCount,
+    changedFiles: applyResult.changedFiles.map((filePath) => relativePath(runtime.projectRoot, filePath)),
+    rejected: applyResult.rejected,
+  };
+  return structuredResult(payload, {
+    ...payload,
     workspaceEdit: result,
     applyResult,
+  }, !applyResult.applied);
+}
+
+function cacheCodeAction(
+  state: LspToolState,
+  projectRoot: string,
+  action: Record<string, unknown>,
+  requestFile: CachedFileState,
+): CodeActionSummary {
+  pruneCodeActionCache(state);
+  const id = `ca_${(state.nextCodeActionId++).toString(36).padStart(4, "0")}`;
+  const targetFiles = workspaceEditTargetFiles(action.edit, projectRoot);
+  const summary = summarizeCodeAction(id, action, targetFiles);
+  state.codeActions.set(id, {
+    id,
+    createdAt: Date.now(),
+    projectRoot,
+    requestFile,
+    editTargets: targetFiles.ok ? targetFiles.files.map((filePath) => readEditTargetFileState(filePath, requestFile)) : [],
+    targetResolutionError: targetFiles.ok ? undefined : targetFiles.reason,
+    action,
+    summary,
   });
+  return summary;
+}
+
+function pruneCodeActionCache(state: LspToolState): void {
+  const maxEntries = 200;
+  if (state.codeActions.size < maxEntries) return;
+  const stale = [...state.codeActions.values()]
+    .sort((left, right) => left.createdAt - right.createdAt)
+    .slice(0, Math.max(1, state.codeActions.size - maxEntries + 1));
+  for (const entry of stale) state.codeActions.delete(entry.id);
+}
+
+function summarizeCodeAction(id: string, action: Record<string, unknown>, targetFiles: WorkspaceEditTargetFilesResult): CodeActionSummary {
+  const title = typeof action.title === "string" ? action.title : typeof action.command === "string" ? action.command : "untitled action";
+  const kind = typeof action.kind === "string" ? action.kind : undefined;
+  const server = typeof action[LSP_RESULT_SERVER_ID_KEY] === "string" ? action[LSP_RESULT_SERVER_ID_KEY] : undefined;
+  const diagnostics = Array.isArray(action.diagnostics)
+    ? action.diagnostics.map(diagnosticMessage).filter((message): message is string => Boolean(message)).slice(0, 5)
+    : [];
+  const edit = workspaceEditSummary(action.edit);
+  const hasEdit = edit.edits > 0 || edit.resourceOperations > 0;
+  return {
+    id,
+    title,
+    kind,
+    preferred: action.isPreferred === true,
+    server,
+    diagnostics,
+    applyable: targetFiles.ok && edit.edits > 0 && edit.resourceOperations === 0,
+    editSummary: hasEdit ? formatWorkspaceEditSummary(edit) : undefined,
+  };
+}
+
+function diagnosticMessage(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  return typeof value.message === "string" ? value.message : undefined;
+}
+
+function formatWorkspaceEditSummary(summary: { files: number; edits: number; resourceOperations: number }): string {
+  const parts = [`${summary.edits} text edit${summary.edits === 1 ? "" : "s"} across ${summary.files} file${summary.files === 1 ? "" : "s"}`];
+  if (summary.resourceOperations > 0) parts.push(`${summary.resourceOperations} resource operation${summary.resourceOperations === 1 ? "" : "s"}`);
+  return parts.join(", ");
+}
+
+function validateCachedCodeAction(cached: CachedCodeAction, projectRoot: string): { reason: string; files?: Array<{ before: Record<string, unknown>; after: Record<string, unknown> }> } | undefined {
+  const changedFiles: Array<{ before: Record<string, unknown>; after: Record<string, unknown> }> = [];
+  for (const expected of dedupeFileStates([cached.requestFile, ...cached.editTargets])) {
+    const current = readCachedFileState(expected.filePath);
+    if (sameCachedFileState(expected, current)) continue;
+    changedFiles.push({
+      before: displayFileState(projectRoot, expected),
+      after: displayFileState(projectRoot, current),
+    });
+  }
+
+  if (changedFiles.length === 0) return undefined;
+  return {
+    reason: `file state changed since textDocument/codeAction: ${changedFiles.map((entry) => String(entry.after.path)).join(", ")}`,
+    files: changedFiles,
+  };
+}
+
+function dedupeFileStates(states: CachedFileState[]): CachedFileState[] {
+  const byPath = new Map<string, CachedFileState>();
+  for (const state of states) byPath.set(path.resolve(state.filePath), state);
+  return [...byPath.values()];
+}
+
+function readCachedFileState(filePath: string): CachedFileState {
+  const resolved = path.resolve(filePath);
+  const content = readUtf8IfExists(resolved);
+  if (content === undefined) return { filePath: resolved, exists: false };
+  return {
+    filePath: resolved,
+    exists: true,
+    sha256: createHash("sha256").update(content).digest("hex"),
+    bytes: Buffer.byteLength(content, "utf8"),
+  };
+}
+
+function readEditTargetFileState(filePath: string, requestFile: CachedFileState): CachedFileState {
+  return path.resolve(filePath) === path.resolve(requestFile.filePath) ? requestFile : readCachedFileState(filePath);
+}
+
+function sameCachedFileState(left: CachedFileState, right: CachedFileState): boolean {
+  return (
+    path.resolve(left.filePath) === path.resolve(right.filePath) &&
+    left.exists === right.exists &&
+    left.sha256 === right.sha256
+  );
+}
+
+function displayFileState(projectRoot: string, state: CachedFileState): Record<string, unknown> {
+  return {
+    path: relativePath(projectRoot, state.filePath),
+    exists: state.exists,
+    bytes: state.bytes,
+    sha256: state.sha256 ? state.sha256.slice(0, 12) : undefined,
+  };
+}
+
+function relativePath(projectRoot: string, filePath: string): string {
+  return path.relative(projectRoot, filePath) || filePath;
 }
 
 function rejectApplyDuringPendingEdits(runtime: CodeFeedbackRuntime, label: string): PiToolResult | undefined {
@@ -297,11 +704,23 @@ async function resyncChangedFiles(lspService: LspService, changedFiles: string[]
   }).catch(() => undefined)));
 }
 
-function renderActionStub(action: LspAction, params: Record<string, unknown>): string {
-  const target = typeof params.path === "string" ? ` for ${params.path}` : "";
-  return [
-    `lsp action \"${action}\"${target} is declared but was not dispatched.`,
-    "This should be unreachable; all declared LSP actions have handlers.",
-  ].join("\n");
+function hintForError(message: string): string | undefined {
+  if (/requires 1-based line and character|requires 1-based line and column/i.test(message)) return "Pass line and column as 1-based numbers.";
+  if (/requires path/i.test(message)) return "Pass path for textDocument methods.";
+  if (/Cannot read file for LSP request/i.test(message)) return "Check that the path exists and rerun the request against a current file.";
+  if (/No language server configured/i.test(message)) return "No configured language server matched this file. Check file extension, config, and installed server commands.";
+  if (/No active LSP client|No LSP client available/i.test(message)) return "Pass path to a source file to choose and lazily start a language server.";
+  return undefined;
 }
+
+function projectRelativeErrorMessage(message: string, projectRoot: string): string {
+  const root = path.resolve(projectRoot);
+  const prefix = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  return message.split(prefix).join("");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 

@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { linkDiagnosticsToTouchedRanges } from "../diagnostics/provenance.ts";
 import { computeTouchedRanges } from "../diagnostics/ranges.ts";
-import { readDiagnosticSnapshotFromDetails } from "../diagnostics/snapshots.ts";
+import { diagnosticSeverityRank, flattenDiagnosticSnapshot, readDiagnosticSnapshotFromDetails } from "../diagnostics/snapshots.ts";
 import { mapTouchedRangesThroughFormatting } from "../format/mapping.ts";
 import type { FormatService } from "../format/service.ts";
 import { readUtf8IfExists } from "../fs.ts";
@@ -10,7 +10,7 @@ import { resolveInputPath, shouldTrackFile } from "../paths.ts";
 import { addTimingPhase, createTimingRecorder, type TimingRecorder } from "../perf.ts";
 import type { PiToolResult } from "../pi.ts";
 import { renderDelayedDiagnosticFeedback, renderInlineDiagnosticFeedback } from "../render.ts";
-import { enqueueDelayedFeedback, hasPendingEditForFile, recordCompletedEdit, takePendingEdit, type CodeFeedbackRuntime } from "../runtime.ts";
+import { discardPendingEditsForToolCall, enqueueDelayedFeedback, hasPendingEditForFile, recordCompletedEdit, takePendingEdit, takePendingEditById, type CodeFeedbackRuntime } from "../runtime.ts";
 import {
   CODE_FEEDBACK_DETAILS_KEY,
   type CodeFeedbackEditDetails,
@@ -24,7 +24,7 @@ import {
   type LspDiagnostic,
   type PendingEdit,
 } from "../types.ts";
-import { applyPatchOperationId } from "./tool-call.ts";
+import { applyPatchOperationId, readApplyPatchOperations } from "./tool-call.ts";
 
 export interface ToolResultEvent {
   toolName?: string;
@@ -114,86 +114,123 @@ async function handleApplyPatchToolResult(
   lspService?: LspService,
   formatService?: FormatService,
 ): Promise<PiToolResult | void> {
-  if (event.isError) return;
+  if (event.isError) {
+    discardApplyPatchPendingBatch(event, runtime);
+    return;
+  }
   const results = readApplyPatchResults(event.details);
-  if (results.length === 0) return;
+  if (results.length === 0) {
+    discardApplyPatchPendingBatch(event, runtime);
+    return;
+  }
 
   const completedEdits: CompletedEdit[] = [];
   const timingsByEditId = new Map<string, TimingRecorder>();
 
   for (const [index, result] of results.entries()) {
-    if (result.status !== "completed") continue;
+    if (result.status === "completed") continue;
+    takeApplyPatchPendingEdit(event, ctx, runtime, index, result.path);
+  }
 
-    const resultPath = resolveInputPath({ path: result.path }, ctx.cwd, runtime.projectRoot);
-    if (!resultPath) continue;
+  try {
+    for (const [index, result] of results.entries()) {
+      if (result.status !== "completed") continue;
 
-    const pendingId = applyPatchOperationId(event.toolCallId, runtime.turnIndex, runtime.writeIndex, index);
-    const pending = takePendingEdit(runtime, pendingId, resultPath, "apply_patch");
-    const timing = createTimingRecorder(pending?.timing);
-    const filePath = pending?.filePath ?? resultPath;
-    if (!shouldTrackFile(filePath, runtime.projectRoot)) {
+      const resultPath = resolveInputPath({ path: result.path }, ctx.cwd, runtime.projectRoot);
+      const pending = takeApplyPatchPendingEdit(event, ctx, runtime, index, result.path, resultPath);
+      if (!resultPath) continue;
+
+      const pendingId = applyPatchOperationId(event.toolCallId, runtime.turnIndex, runtime.writeIndex, index);
+      const timing = createTimingRecorder(pending?.timing);
+      const filePath = pending?.filePath ?? resultPath;
+      if (!shouldTrackFile(filePath, runtime.projectRoot)) {
+        forgetOriginalPathIfMoved(lspService, pending, filePath);
+        continue;
+      }
+      const afterAgentContent = result.type === "delete_file" ? undefined : timing.measure("tool_result.read_after", () => readUtf8IfExists(filePath));
+      if (result.type !== "delete_file" && afterAgentContent === undefined) continue;
+
+      const detailsDiff = typeof result.diff === "string" && result.diff.length > 0 ? result.diff : undefined;
+      let touchedRanges = afterAgentContent === undefined
+        ? []
+        : timing.measure("tool_result.touched_ranges", () => computeTouchedRanges({
+            filePath,
+            beforeContent: pending?.beforeContent,
+            afterContent: afterAgentContent,
+            toolName: "apply_patch",
+            detailsDiff,
+          }));
+
+      const formatter = afterAgentContent === undefined ? undefined : await timing.measureAsync("tool_result.format", () => maybeFormatFile(formatService, runtime, filePath, afterAgentContent, touchedRanges.length > 0));
+      const finalContent = formatter?.finalContent ?? afterAgentContent;
+      if (formatter?.changed && afterAgentContent !== undefined && finalContent !== undefined) {
+        touchedRanges = timing.measure("tool_result.format_map", () => mapTouchedRangesThroughFormatting(filePath, afterAgentContent, finalContent, touchedRanges));
+      }
+
+      const completed: CompletedEdit = {
+        id: pending?.id ?? pendingId,
+        toolName: "apply_patch",
+        filePath,
+        beforeContent: pending?.beforeContent,
+        afterAgentContent,
+        afterContent: finalContent,
+        touchedRanges,
+        turnIndex: pending?.turnIndex ?? runtime.turnIndex,
+        writeIndex: pending?.writeIndex ?? runtime.writeIndex,
+        startedAt: pending?.startedAt ?? Date.now(),
+        completedAt: Date.now(),
+        skippedReason: result.type === "delete_file" ? "deleted" : undefined,
+        detailsDiffPresent: detailsDiff !== undefined,
+        formatter: summarizeFormatter(formatter),
+        applyPatchOperationIndex: index,
+        originalPath: pending?.originalPath,
+      };
+
+      const afterRefresh = finalContent === undefined
+        ? undefined
+        : await timing.measureAsync("tool_result.after_diagnostics", () => captureAfterDiagnosticRefresh(lspService, filePath, finalContent, runtime));
+      const afterDiagnostics = afterRefresh?.fresh
+        ? afterRefresh.snapshot
+        : readDiagnosticSnapshotFromDetails(event.details, ["afterDiagnostics", "postDiagnostics", "diagnostics"]);
+      timing.measure("tool_result.filter_diagnostics", () => attachDiagnosticFilter(event, pending, completed, runtime, afterDiagnostics));
+      completed.timing = timing.snapshot();
+      timing.measure("tool_result.record_completed", () => recordCompletedEdit(runtime, completed));
+      completed.timing = timing.snapshot();
       forgetOriginalPathIfMoved(lspService, pending, filePath);
-      continue;
+      if (result.type === "delete_file") lspService?.forgetFile(filePath);
+      if (finalContent !== undefined) {
+        scheduleDelayedDiagnosticsIfNeeded(afterRefresh, lspService, runtime, completed, pending?.beforeDiagnostics, finalContent);
+      }
+      completedEdits.push(completed);
+      timingsByEditId.set(completed.id, timing);
     }
-    const afterAgentContent = result.type === "delete_file" ? undefined : timing.measure("tool_result.read_after", () => readUtf8IfExists(filePath));
-    if (result.type !== "delete_file" && afterAgentContent === undefined) continue;
-
-    const detailsDiff = typeof result.diff === "string" && result.diff.length > 0 ? result.diff : undefined;
-    let touchedRanges = afterAgentContent === undefined
-      ? []
-      : timing.measure("tool_result.touched_ranges", () => computeTouchedRanges({
-          filePath,
-          beforeContent: pending?.beforeContent,
-          afterContent: afterAgentContent,
-          toolName: "apply_patch",
-          detailsDiff,
-        }));
-
-    const formatter = afterAgentContent === undefined ? undefined : await timing.measureAsync("tool_result.format", () => maybeFormatFile(formatService, runtime, filePath, afterAgentContent, touchedRanges.length > 0));
-    const finalContent = formatter?.finalContent ?? afterAgentContent;
-    if (formatter?.changed && afterAgentContent !== undefined && finalContent !== undefined) {
-      touchedRanges = timing.measure("tool_result.format_map", () => mapTouchedRangesThroughFormatting(filePath, afterAgentContent, finalContent, touchedRanges));
-    }
-
-    const completed: CompletedEdit = {
-      id: pending?.id ?? pendingId,
-      toolName: "apply_patch",
-      filePath,
-      beforeContent: pending?.beforeContent,
-      afterAgentContent,
-      afterContent: finalContent,
-      touchedRanges,
-      turnIndex: pending?.turnIndex ?? runtime.turnIndex,
-      writeIndex: pending?.writeIndex ?? runtime.writeIndex,
-      startedAt: pending?.startedAt ?? Date.now(),
-      completedAt: Date.now(),
-      skippedReason: result.type === "delete_file" ? "deleted" : undefined,
-      detailsDiffPresent: detailsDiff !== undefined,
-      formatter: summarizeFormatter(formatter),
-      applyPatchOperationIndex: index,
-      originalPath: pending?.originalPath,
-    };
-
-    const afterRefresh = finalContent === undefined
-      ? undefined
-      : await timing.measureAsync("tool_result.after_diagnostics", () => captureAfterDiagnosticRefresh(lspService, filePath, finalContent, runtime));
-    const afterDiagnostics = afterRefresh?.fresh
-      ? afterRefresh.snapshot
-      : readDiagnosticSnapshotFromDetails(event.details, ["afterDiagnostics", "postDiagnostics", "diagnostics"]);
-    timing.measure("tool_result.filter_diagnostics", () => attachDiagnosticFilter(event, pending, completed, runtime, afterDiagnostics));
-    completed.timing = timing.snapshot();
-    timing.measure("tool_result.record_completed", () => recordCompletedEdit(runtime, completed));
-    completed.timing = timing.snapshot();
-    forgetOriginalPathIfMoved(lspService, pending, filePath);
-    if (result.type === "delete_file") lspService?.forgetFile(filePath);
-    if (finalContent !== undefined) {
-      scheduleDelayedDiagnosticsIfNeeded(afterRefresh, lspService, runtime, completed, pending?.beforeDiagnostics, finalContent);
-    }
-    completedEdits.push(completed);
-    timingsByEditId.set(completed.id, timing);
+  } finally {
+    discardApplyPatchPendingBatch(event, runtime);
   }
 
   return appendInlineFeedbackForEdits(event, completedEdits, runtime, timingsByEditId);
+}
+
+function takeApplyPatchPendingEdit(
+  event: ToolResultEvent,
+  ctx: ToolResultContext,
+  runtime: CodeFeedbackRuntime,
+  operationIndex: number,
+  rawPath: string | undefined,
+  resolvedPath = rawPath ? resolveInputPath({ path: rawPath }, ctx.cwd, runtime.projectRoot) : undefined,
+): PendingEdit | undefined {
+  const pendingId = applyPatchOperationId(event.toolCallId, runtime.turnIndex, runtime.writeIndex, operationIndex);
+  const byId = takePendingEditById(runtime, pendingId);
+  if (byId || !resolvedPath) return byId;
+  return takePendingEdit(runtime, undefined, resolvedPath, "apply_patch");
+}
+
+function discardApplyPatchPendingBatch(event: ToolResultEvent, runtime: CodeFeedbackRuntime): void {
+  discardPendingEditsForToolCall(runtime, event.toolCallId, "apply_patch");
+  const operations = readApplyPatchOperations(event.input);
+  for (const [index] of operations.entries()) {
+    takePendingEditById(runtime, applyPatchOperationId(event.toolCallId, runtime.turnIndex, runtime.writeIndex, index));
+  }
 }
 
 function forgetOriginalPathIfMoved(lspService: LspService | undefined, pending: PendingEdit | undefined, finalPath: string): void {
@@ -347,7 +384,7 @@ function scheduleDelayedDiagnosticsIfNeeded(
 }
 
 function allDiagnosticsFilter(snapshot: DiagnosticSnapshot, maxInline: number): DiagnosticFilterResult {
-  const allDiagnostics = flattenSnapshot(snapshot).sort(compareDiagnostics);
+  const allDiagnostics = flattenDiagnosticSnapshot(snapshot).sort(compareDiagnostics);
   const shownDiagnostics = allDiagnostics.slice(0, Math.max(0, maxInline));
   return {
     linked: shownDiagnostics.map((diagnostic) => ({
@@ -370,32 +407,15 @@ function allDiagnosticsFilter(snapshot: DiagnosticSnapshot, maxInline: number): 
   };
 }
 
-function flattenSnapshot(snapshot: DiagnosticSnapshot): LspDiagnostic[] {
-  return [...snapshot.byUri.values()].flat();
-}
-
 function compareDiagnostics(left: LspDiagnostic, right: LspDiagnostic): number {
   return (
-    severityRank(right.severity) - severityRank(left.severity) ||
+    diagnosticSeverityRank(right.severity) - diagnosticSeverityRank(left.severity) ||
     left.uri.localeCompare(right.uri) ||
     left.range.start.line - right.range.start.line ||
     left.range.start.character - right.range.start.character ||
     String(left.code ?? "").localeCompare(String(right.code ?? "")) ||
     left.message.localeCompare(right.message)
   );
-}
-
-function severityRank(severity: LspDiagnostic["severity"]): number {
-  switch (severity) {
-    case "error":
-      return 4;
-    case "warning":
-      return 3;
-    case "information":
-      return 2;
-    case "hint":
-      return 1;
-  }
 }
 
 function appendInlineFeedback(event: ToolResultEvent, completed: CompletedEdit, runtime: CodeFeedbackRuntime, timing?: TimingRecorder): PiToolResult | void {

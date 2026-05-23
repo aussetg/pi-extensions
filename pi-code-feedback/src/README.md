@@ -1,14 +1,13 @@
 # pi-code-feedback source layout
 
-This folder follows the target architecture in `.agent/pi-code-feedback-plan.md`.
-
 Current modules:
 
 - `config.ts` — config files, flags, defaults
+- `command-path.ts` — shared PATH / `node_modules/.bin` command resolution
 - `runtime.ts` — session state, pending edits, delayed findings
 - `render.ts` — compact human/agent-visible output
 - `events/` — pi lifecycle handlers, including delayed diagnostic context injection
-- `lsp/` — stdio LSP client/service, server detection, tool actions, result rendering, safe WorkspaceEdit text-edit application, position helpers
+- `lsp/` — stdio LSP client/service, server detection, LSP-lite tool methods, raw tool output/truncation, safe WorkspaceEdit text-edit application, position helpers
 - `diagnostics/ranges.ts` — touched-range calculation
 - `diagnostics/provenance.ts` — diagnostic-to-touched-range linking
 - `diagnostics/snapshots.ts` — diagnostic snapshot normalization helpers

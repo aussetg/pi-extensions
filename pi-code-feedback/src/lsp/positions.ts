@@ -26,12 +26,17 @@ export function uriToFilePath(uri: string): string | undefined {
 }
 
 export function externalPositionToLsp(line: unknown, character: unknown): LspPosition | undefined {
-  if (typeof line !== "number" || !Number.isFinite(line)) return undefined;
-  const rawCharacter = typeof character === "number" && Number.isFinite(character) ? character : 1;
+  const externalLine = readOneBasedInteger(line);
+  const externalCharacter = readOneBasedInteger(character);
+  if (externalLine === undefined || externalCharacter === undefined) return undefined;
   return {
-    line: Math.max(0, Math.floor(line) - 1),
-    character: Math.max(0, Math.floor(rawCharacter) - 1),
+    line: externalLine - 1,
+    character: externalCharacter - 1,
   };
+}
+
+function readOneBasedInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : undefined;
 }
 
 export function lspPositionToExternal(position: LspPosition): Position {

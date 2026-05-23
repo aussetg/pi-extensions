@@ -1,7 +1,8 @@
 import * as path from "node:path";
 import { formatTouchedRange } from "./diagnostics/ranges.ts";
+import { countDiagnosticSnapshotDiagnostics, flattenDiagnosticSnapshot } from "./diagnostics/snapshots.ts";
 import type { CodeFeedbackRuntime } from "./runtime.ts";
-import type { CodeFeedbackTiming, CompletedEdit, DelayedDiagnosticFeedback, DiagnosticFilterResult, DiagnosticSeverity, DiagnosticSnapshot, FormatServiceStatus, FormatterSummary, LinkedDiagnostic, LspDiagnostic, LspServiceStatus } from "./types.ts";
+import { LSP_METHODS, type CompletedEdit, type DelayedDiagnosticFeedback, type DiagnosticFilterResult, type DiagnosticSeverity, type DiagnosticSnapshot, type FormatServiceStatus, type FormatterSummary, type LinkedDiagnostic, type LspDiagnostic, type LspServiceStatus } from "./types.ts";
 
 export interface FooterTheme {
   fg?: (color: string, text: string) => string;
@@ -9,7 +10,6 @@ export interface FooterTheme {
 
 export function renderStatus(runtime: CodeFeedbackRuntime, lspStatus?: LspServiceStatus, formatStatus?: FormatServiceStatus): string {
   const config = runtime.config;
-  const activeClients = lspStatus?.activeClients ?? 0;
   const lines = [
     "pi-code-feedback / LSP status",
     `  extension: ${config.enabled ? "enabled" : "disabled"}`,
@@ -18,7 +18,7 @@ export function renderStatus(runtime: CodeFeedbackRuntime, lspStatus?: LspServic
     `  auto format: ${config.autoFormat ? config.formatMode : "disabled"}`,
     `  strict: ${config.strict ? "enabled" : "disabled"}`,
     `  project root: ${runtime.projectRoot}`,
-    `  active LSP clients: ${activeClients}`,
+    `  clients: ${formatClientSummary(lspStatus)}`,
     `  lsp restarts: ${runtime.lspRestartCount}`,
     `  captured edits: ${runtime.completedEdits.length}`,
     `  pending edits: ${runtime.pendingEdits.size}`,
@@ -30,15 +30,6 @@ export function renderStatus(runtime: CodeFeedbackRuntime, lspStatus?: LspServic
   }
   if (runtime.lastError) {
     lines.push(`  last error: ${runtime.lastError}`);
-  }
-
-  const recentTimedEdits = runtime.completedEdits.filter((edit) => edit.timing).slice(-5).reverse();
-  if (recentTimedEdits.length > 0) {
-    lines.push("", "  recent edit timings:");
-    for (const edit of recentTimedEdits) {
-      const relative = path.relative(runtime.projectRoot, edit.filePath) || edit.filePath;
-      lines.push(`    ${relative}: ${formatTimingSummary(edit.timing!)}`);
-    }
   }
 
   if (lspStatus && lspStatus.clients.length > 0) {
@@ -85,8 +76,8 @@ export function renderCapabilities(runtime: CodeFeedbackRuntime, lspStatus?: Lsp
   const lines = [
     "pi-code-feedback / LSP capabilities",
     `  lsp feedback: ${runtime.config.lsp.enabled ? "enabled" : "disabled"}`,
-    `  active servers: ${lspStatus?.activeClients ?? 0}`,
-    "  implemented: diagnostics, hover, definition, references, implementation, type_definition, symbols, workspace_symbols, semantic_tokens, code_actions, rename, capabilities, reload, request",
+    `  clients: ${formatClientSummary(lspStatus)}`,
+    `  implemented: ${LSP_METHODS.join(", ")}`,
   ];
 
   if (lspStatus && lspStatus.clients.length > 0) {
@@ -108,15 +99,15 @@ export function renderDiagnosticsStatus(runtime: CodeFeedbackRuntime, target?: s
   const lines = [
     "pi-code-feedback / diagnostics",
     `  target: ${target ?? "current session"}`,
-    `  cached LSP diagnostics: ${snapshot ? countSnapshotDiagnostics(snapshot) : 0}`,
+    `  known LSP diagnostics: ${snapshot ? countDiagnosticSnapshotDiagnostics(snapshot) : 0}`,
   ];
 
-  if (snapshot && countSnapshotDiagnostics(snapshot) > 0) {
-    lines.push("", "  cached diagnostics:");
-    for (const diagnostic of flattenSnapshot(snapshot).slice(0, 30)) {
+  if (snapshot && countDiagnosticSnapshotDiagnostics(snapshot) > 0) {
+    lines.push("", "  diagnostics:");
+    for (const diagnostic of flattenDiagnosticSnapshot(snapshot).slice(0, 30)) {
       lines.push(...formatDiagnostic(runtime.projectRoot, diagnostic, 4));
     }
-    const hidden = countSnapshotDiagnostics(snapshot) - 30;
+    const hidden = countDiagnosticSnapshotDiagnostics(snapshot) - 30;
     if (hidden > 0) lines.push(`    ... ${hidden} more`);
   }
 
@@ -146,9 +137,6 @@ export function renderDiagnosticsStatus(runtime: CodeFeedbackRuntime, target?: s
     if (edit.diagnosticFilter) {
       const summary = edit.diagnosticFilter.summary;
       lines.push(`      diagnostics: ${summary.shownDiagnostics}/${summary.linkedDiagnostics} linked shown, ${summary.hiddenUnrelated} unrelated hidden`);
-    }
-    if (edit.timing) {
-      lines.push(`      timing: ${formatTimingSummary(edit.timing)}`);
     }
   }
 
@@ -231,6 +219,22 @@ function footerStatusText(runtime: CodeFeedbackRuntime, lspStatus?: LspServiceSt
   return `lsp: ${shown.join(" ")}${hidden > 0 ? ` +${hidden}` : ""}`;
 }
 
+function formatClientSummary(lspStatus?: LspServiceStatus): string {
+  if (!lspStatus) return "unknown";
+  if (lspStatus.clients.length === 0) return "none yet — starts lazily when you query a source file";
+
+  const counts = new Map<string, number>();
+  for (const client of lspStatus.clients) {
+    counts.set(client.state, (counts.get(client.state) ?? 0) + 1);
+  }
+  const ordered = ["ready", "starting", "failed", "stopped"]
+    .map((state) => [state, counts.get(state) ?? 0] as const)
+    .filter(([, count]) => count > 0)
+    .map(([state, count]) => `${count} ${state}`)
+    .join(", ");
+  return `${lspStatus.clients.length} total${ordered ? ` (${ordered})` : ""}`;
+}
+
 function formatFooterClient(client: LspServiceStatus["clients"][number]): string {
   const label = footerClientLabel(client);
   const latency = formatClientDiagnosticLatency(client);
@@ -258,16 +262,6 @@ function formatClientDiagnosticLatency(client: LspServiceStatus["clients"][numbe
 
 function formatTimestamp(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-
-function flattenSnapshot(snapshot: DiagnosticSnapshot): LspDiagnostic[] {
-  return [...snapshot.byUri.values()].flat();
-}
-
-function countSnapshotDiagnostics(snapshot: DiagnosticSnapshot): number {
-  let count = 0;
-  for (const diagnostics of snapshot.byUri.values()) count += diagnostics.length;
-  return count;
 }
 
 function formatDiagnostic(projectRoot: string, diagnostic: LspDiagnostic, indentColumns: number): string[] {
@@ -330,25 +324,6 @@ function formatFormatterSummary(formatter: FormatterSummary, projectRoot?: strin
     parts.push(`format failed: ${name}: ${first}`);
   }
   return parts.join("; ");
-}
-
-function formatTimingSummary(timing: CodeFeedbackTiming): string {
-  const slowPhases = timing.phases
-    .filter((phase) => phase.durationMs >= 0.05)
-    .sort((left, right) => right.durationMs - left.durationMs)
-    .slice(0, 4)
-    .map((phase) => `${formatTimingPhaseName(phase.name)} ${formatDurationMs(phase.durationMs)}`);
-  return `total ${formatDurationMs(timing.totalMs)}${slowPhases.length > 0 ? ` (${slowPhases.join(", ")})` : ""}`;
-}
-
-function formatTimingPhaseName(name: string): string {
-  return name.replace(/^tool_(call|result)\./, "").replace(/^delayed\./, "delayed ").replace(/_/g, " ");
-}
-
-function formatDurationMs(ms: number): string {
-  if (ms < 10) return `${ms.toFixed(2)}ms`;
-  if (ms < 100) return `${ms.toFixed(1)}ms`;
-  return `${Math.round(ms)}ms`;
 }
 
 function countSeverities(diagnostics: LinkedDiagnostic[]): Record<DiagnosticSeverity, number> {

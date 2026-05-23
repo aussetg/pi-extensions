@@ -18,6 +18,28 @@ export const LSP_ACTIONS = [
 
 export type LspAction = (typeof LSP_ACTIONS)[number];
 
+export const LSP_METHODS = [
+  "server/status",
+  "server/capabilities",
+  "server/reload",
+  "textDocument/diagnostic",
+  "workspace/diagnostic",
+  "textDocument/hover",
+  "textDocument/definition",
+  "textDocument/references",
+  "textDocument/implementation",
+  "textDocument/typeDefinition",
+  "textDocument/documentSymbol",
+  "workspace/symbol",
+  "textDocument/semanticTokens",
+  "textDocument/codeAction",
+  "codeAction/apply",
+  "textDocument/rename",
+  "raw/request",
+] as const;
+
+export type LspMethod = (typeof LSP_METHODS)[number];
+
 export type DiagnosticSeverity = "error" | "warning" | "information" | "hint";
 
 export type RangeConfidence = "exact" | "expanded" | "approximate";
@@ -30,7 +52,6 @@ export type TouchedRangeSource =
 
 export type DiagnosticLinkReason =
   | "overlap"
-  | "expanded-symbol"
   | "related-information"
   | "new-on-touched-file"
   | "cascade-related"
@@ -307,7 +328,6 @@ export interface FeedbackConfig {
     settleMs: number;
     timeoutMs: number;
     delayedTimeoutMs: number;
-    expandToSymbol: boolean;
     includeCrossFileRelated: boolean;
   };
   lsp: {

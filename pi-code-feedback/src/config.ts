@@ -14,7 +14,6 @@ export function createDefaultConfig(): FeedbackConfig {
       settleMs: 0,
       timeoutMs: 1800,
       delayedTimeoutMs: 8000,
-      expandToSymbol: true,
       includeCrossFileRelated: true,
     },
     lsp: {

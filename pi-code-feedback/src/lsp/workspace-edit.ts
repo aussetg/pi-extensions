@@ -17,6 +17,10 @@ export interface WorkspaceEditApplyResult {
   rejected?: string;
 }
 
+export type WorkspaceEditTargetFilesResult =
+  | { ok: true; files: string[]; resourceOperations: number }
+  | { ok: false; files: string[]; reason: string; resourceOperations: number };
+
 interface TextEditInput {
   range?: LspRange;
   newText?: unknown;
@@ -31,6 +35,7 @@ interface ResolvedEdit {
   start: number;
   end: number;
   newText: string;
+  index: number;
 }
 
 interface PlannedFileEdit extends AppliedTextEdit {
@@ -50,6 +55,24 @@ export function workspaceEditSummary(value: unknown): { files: number; edits: nu
   let edits = 0;
   for (const fileEdits of grouped.editsByPath.values()) edits += fileEdits.length;
   return { files: grouped.editsByPath.size, edits, resourceOperations: grouped.resourceOperations };
+}
+
+export function workspaceEditTargetFiles(value: unknown, projectRoot: string): WorkspaceEditTargetFilesResult {
+  const collected = collectTextEdits(value, projectRoot, { validateProjectRoot: true });
+  if (!collected.ok) {
+    return {
+      ok: false,
+      files: [],
+      reason: collected.reason,
+      resourceOperations: collected.resourceOperations,
+    };
+  }
+
+  return {
+    ok: true,
+    files: [...collected.editsByPath.keys()],
+    resourceOperations: collected.resourceOperations,
+  };
 }
 
 export async function applyWorkspaceEdit(value: unknown, projectRoot: string): Promise<WorkspaceEditApplyResult> {
@@ -216,28 +239,52 @@ function isInsideProject(filePath: string, projectRoot: string): boolean {
 }
 
 function applyTextEditsToContent(content: string, edits: CollectedEdit[], filePath: string): string {
-  const resolved = edits.map((edit) => resolveEdit(content, edit, filePath));
-  resolved.sort((a, b) => a.start - b.start || a.end - b.end);
-  for (let i = 1; i < resolved.length; i += 1) {
-    if (resolved[i].start < resolved[i - 1].end) {
-      throw new Error(`Overlapping LSP text edits for ${filePath}`);
+  const resolved = edits.map((edit, index) => resolveEdit(content, edit, filePath, index));
+  resolved.sort((left, right) => left.start - right.start || left.index - right.index);
+
+  let output = "";
+  let cursor = 0;
+
+  for (let index = 0; index < resolved.length;) {
+    const start = resolved[index].start;
+    if (start < cursor) throw new Error(`Overlapping LSP text edits for ${filePath}`);
+
+    let endIndex = index + 1;
+    while (endIndex < resolved.length && resolved[endIndex].start === start) endIndex += 1;
+
+    const group = resolved.slice(index, endIndex);
+    const replacement = group.filter((edit) => edit.start !== edit.end);
+    if (replacement.length > 1) throw new Error(`Overlapping LSP text edits for ${filePath}`);
+
+    const replace = replacement[0];
+    const inserts = group.filter((edit) => edit.start === edit.end).sort((left, right) => left.index - right.index);
+    if (replace && inserts.some((edit) => edit.index > replace.index)) {
+      throw new Error(`Invalid same-position LSP text edit order for ${filePath}: inserts must precede the replace/delete edit`);
     }
+
+    output += content.slice(cursor, start);
+    for (const insert of inserts) output += insert.newText;
+
+    if (replace) {
+      output += replace.newText;
+      cursor = replace.end;
+    } else {
+      cursor = start;
+    }
+
+    index = endIndex;
   }
 
-  let next = content;
-  for (const edit of resolved.slice().sort((a, b) => b.start - a.start)) {
-    next = next.slice(0, edit.start) + edit.newText + next.slice(edit.end);
-  }
-  return next;
+  return output + content.slice(cursor);
 }
 
-function resolveEdit(content: string, edit: CollectedEdit, filePath: string): ResolvedEdit {
+function resolveEdit(content: string, edit: CollectedEdit, filePath: string, index: number): ResolvedEdit {
   const start = positionToOffset(content, edit.range.start);
   const end = positionToOffset(content, edit.range.end);
   if (start === undefined || end === undefined || start > end) {
     throw new Error(`Invalid LSP text edit range for ${filePath}`);
   }
-  return { start, end, newText: edit.newText };
+  return { start, end, newText: edit.newText, index };
 }
 
 function positionToOffset(content: string, position: LspPosition): number | undefined {

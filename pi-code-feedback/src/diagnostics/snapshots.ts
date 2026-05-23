@@ -11,6 +11,29 @@ export function createDiagnosticSnapshot(diagnostics: LspDiagnostic[], takenAt =
   return { takenAt, byUri };
 }
 
+export function flattenDiagnosticSnapshot(snapshot: DiagnosticSnapshot): LspDiagnostic[] {
+  return [...snapshot.byUri.values()].flat();
+}
+
+export function countDiagnosticSnapshotDiagnostics(snapshot: DiagnosticSnapshot): number {
+  let count = 0;
+  for (const diagnostics of snapshot.byUri.values()) count += diagnostics.length;
+  return count;
+}
+
+export function diagnosticSeverityRank(severity: DiagnosticSeverity): number {
+  switch (severity) {
+    case "error":
+      return 4;
+    case "warning":
+      return 3;
+    case "information":
+      return 2;
+    case "hint":
+      return 1;
+  }
+}
+
 export function readDiagnosticSnapshotFromDetails(details: unknown, keys: string[]): DiagnosticSnapshot | undefined {
   if (!details || typeof details !== "object") return undefined;
   const record = details as Record<string, unknown>;

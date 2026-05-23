@@ -1,6 +1,5 @@
-import * as fs from "node:fs";
 import * as path from "node:path";
-import { spawnSync } from "node:child_process";
+import { resolveCommand } from "../command-path.ts";
 
 export interface LanguageServerDefinition {
   id: string;
@@ -90,8 +89,6 @@ const DEFAULT_SERVERS: LanguageServerDefinition[] = [
     languageId: () => "lua",
   },
 ];
-const commandAvailabilityCache = new Map<string, boolean>();
-
 export function resolveLanguageServer(filePath: string, overrides: Record<string, unknown> | undefined, projectRoot = path.dirname(filePath)): ResolvedLanguageServer | undefined {
   return resolveLanguageServers(filePath, overrides, projectRoot)[0];
 }
@@ -126,10 +123,6 @@ function resolveOneLanguageServer(
   };
 }
 
-export function listDefaultServerDefinitions(): LanguageServerDefinition[] {
-  return [...DEFAULT_SERVERS];
-}
-
 function applyOverride(base: LanguageServerDefinition, value: unknown): LanguageServerDefinition | undefined {
   if (!value || typeof value !== "object") return base;
   const override = value as { disabled?: unknown; command?: unknown; args?: unknown; languageId?: unknown };
@@ -145,54 +138,6 @@ function applyOverride(base: LanguageServerDefinition, value: unknown): Language
     args,
     languageId: languageIdOverride ? () => languageIdOverride : base.languageId,
   };
-}
-
-function resolveCommand(command: string, startDir: string, projectRoot: string): string | undefined {
-  if (path.isAbsolute(command) || command.includes(path.sep)) {
-    return fs.existsSync(command) ? command : undefined;
-  }
-
-  const local = findLocalBin(command, startDir, projectRoot);
-  if (local) return local;
-
-  return commandExists(command) ? command : undefined;
-}
-
-function findLocalBin(command: string, startDir: string, projectRoot: string): string | undefined {
-  const root = path.resolve(projectRoot);
-  let current = path.resolve(startDir);
-
-  while (true) {
-    if (isInsideOrEqual(current, root)) {
-      const candidate = path.join(current, "node_modules", ".bin", command);
-      if (fs.existsSync(candidate)) return candidate;
-    }
-    if (current === root || current === path.dirname(current)) break;
-    current = path.dirname(current);
-  }
-
-  return undefined;
-}
-
-function commandExists(command: string): boolean {
-  const cached = commandAvailabilityCache.get(command);
-  if (cached !== undefined) return cached;
-
-  const result = spawnSync("sh", ["-lc", `command -v ${shellQuote(command)}`], {
-    stdio: "ignore",
-  });
-  const available = result.status === 0;
-  commandAvailabilityCache.set(command, available);
-  return available;
-}
-
-function isInsideOrEqual(child: string, parent: string): boolean {
-  const relative = path.relative(parent, child);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 function jsTsLanguageId(filePath: string): string {
