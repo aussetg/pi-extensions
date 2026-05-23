@@ -55,6 +55,7 @@ if (args.live) {
   scenarioSpecs.push(["lsp/typescript-incremental", () => runTypeScriptIncrementalScenario(Math.max(3, Math.ceil(baseIterations / 4)))]);
   scenarioSpecs.push(["lsp/typescript-hover", () => runTypeScriptHoverScenario(Math.max(5, Math.ceil(baseIterations / 2)))]);
   scenarioSpecs.push(["lsp/typescript-cancel", () => runTypeScriptCancelScenario(Math.max(5, Math.ceil(baseIterations / 2)))]);
+  scenarioSpecs.push(["lsp/typescript-diagnostics-queue", () => runTypeScriptDiagnosticsQueueScenario(Math.max(5, Math.ceil(baseIterations / 2)))]);
 }
 
 for (const [name, run] of scenarioSpecs) {
@@ -503,6 +504,66 @@ async function runTypeScriptCancelScenario(iterations) {
     });
   } finally {
     await client.shutdown();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function runTypeScriptDiagnosticsQueueScenario(iterations) {
+  if (!fs.existsSync(tsLanguageServer)) {
+    return {
+      name: "lsp/typescript-diagnostics-queue",
+      iterations: 0,
+      skipped: true,
+      notes: `missing ${path.relative(repoRoot, tsLanguageServer)}`,
+      metrics: [],
+    };
+  }
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-perf-ts-diag-queue-"));
+  const filePath = path.join(root, "probe.ts");
+  const logPath = path.join(root, "lsp-proxy.jsonl");
+  const lineCount = 800;
+  const burstSize = 6;
+  const content = makeTsErrorContent(0, lineCount);
+  await writeFile(path.join(root, "package.json"), JSON.stringify({ type: "module", devDependencies: { typescript: "^5.9.3" } }, null, 2), "utf8");
+  await writeFile(path.join(root, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true, noEmit: true } }, null, 2), "utf8");
+  await writeFile(filePath, content, "utf8");
+  await writeFile(logPath, "", "utf8");
+
+  const lspService = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      typescript: {
+        command: process.execPath,
+        args: [lspStdioProxy, logPath, "--", tsLanguageServer, "--stdio"],
+      },
+    },
+  });
+
+  try {
+    return await runScenario({
+      name: "lsp/typescript-diagnostics-queue",
+      iterations,
+      warmup: 1,
+      notes: `real typescript-language-server behind a stdio proxy; ${burstSize} concurrent diagnostics refreshes for one ${lineCount}-line file per iteration; protocol counters exclude warmup`,
+      beforeMeasure: () => fs.writeFileSync(logPath, "", "utf8"),
+      counters: () => summarizeLspProxyCounters(logPath),
+      resources: () => lspRootPids(lspService),
+      operation: async () => {
+        const refresh = await timed("diagnostics_burst", async () => {
+          const results = await Promise.all(Array.from({ length: burstSize }, () => lspService.diagnosticsForFileDetailed(filePath, content, {
+            timeoutMs: 1200,
+            settleMs: 0,
+          })));
+          if (results.some((result) => !result)) throw new Error("benchmark sanity check failed: expected diagnostics refresh results for the burst");
+          return results;
+        });
+        return withTotal([refresh]);
+      },
+    });
+  } finally {
+    await lspService.shutdownAll();
     await rm(root, { recursive: true, force: true });
   }
 }

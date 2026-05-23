@@ -18,11 +18,29 @@ export interface DiagnosticsForFileOptions {
 }
 
 const CODE_ACTION_DIAGNOSTIC_TIMEOUT_MS = 1200;
+const DIAGNOSTIC_REFRESH_CONCURRENCY = 1;
 
 interface ClientRequestResult {
   client: LspClient;
   result?: unknown;
   error?: string;
+}
+
+interface DiagnosticRefreshJob {
+  key: string;
+  filePath: string;
+  content: string;
+  clients: LspClient[];
+  options: DiagnosticsForFileOptions;
+  waiters: Set<DiagnosticRefreshWaiter>;
+}
+
+interface DiagnosticRefreshWaiter {
+  requestedAt: number;
+  options: DiagnosticsForFileOptions;
+  resolve: (result: DiagnosticRefreshResult | undefined) => void;
+  settled: boolean;
+  timeout?: NodeJS.Timeout;
 }
 
 export class LspService {
@@ -32,6 +50,11 @@ export class LspService {
   private clients = new Map<string, LspClient>();
   private unavailableServers = new Map<string, LspUnavailableServer>();
   private idleTimer?: NodeJS.Timeout;
+  private diagnosticQueue: DiagnosticRefreshJob[] = [];
+  private queuedDiagnosticRefreshes = new Map<string, DiagnosticRefreshJob>();
+  private runningDiagnosticRefreshes = new Map<string, DiagnosticRefreshJob>();
+  private activeDiagnosticRefreshes = 0;
+  private diagnosticPumpScheduled = false;
 
   constructor(options: LspServiceOptions) {
     this.projectRoot = path.resolve(options.projectRoot);
@@ -67,26 +90,7 @@ export class LspService {
       };
     }
 
-    const results = await Promise.all(clients.map(async (client) => {
-      try {
-        return await client.touchDocumentDetailed(resolved, finalContent, options);
-      } catch (error) {
-        this.markClientInstanceError(resolved, client, error);
-        return undefined;
-      }
-    }));
-
-    const successful = results.filter((result): result is DiagnosticRefreshResult => result !== undefined);
-    if (successful.length === 0) return undefined;
-
-    this.armIdleTimer();
-    return {
-      snapshot: mergeSnapshots(successful.map((result) => result.snapshot)),
-      fresh: successful.every((result) => result.fresh),
-      timedOut: successful.some((result) => result.timedOut),
-      requestedAt: Math.min(...successful.map((result) => result.requestedAt)),
-      completedAt: Math.max(...successful.map((result) => result.completedAt)),
-    };
+    return this.enqueueDiagnosticRefresh(resolved, finalContent, clients, options);
   }
 
   cachedDiagnostics(pathOrAll?: string): DiagnosticSnapshot {
@@ -248,6 +252,7 @@ export class LspService {
     const clients = [...this.clients.values()];
     this.clients.clear();
     this.unavailableServers.clear();
+    this.finishDiagnosticRefreshWaiters(undefined);
     for (const client of clients) {
       await client.shutdown().catch(() => undefined);
     }
@@ -258,6 +263,7 @@ export class LspService {
     const clients = [...this.clients.values()];
     this.clients.clear();
     this.unavailableServers.clear();
+    this.finishDiagnosticRefreshWaiters(undefined);
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = undefined;
     for (const client of clients) {
@@ -281,6 +287,157 @@ export class LspService {
     const result = await client.requestForDocument(resolved, content, method, params);
     this.armIdleTimer();
     return result;
+  }
+
+  private enqueueDiagnosticRefresh(
+    filePath: string,
+    content: string,
+    clients: LspClient[],
+    options: DiagnosticsForFileOptions,
+  ): Promise<DiagnosticRefreshResult | undefined> {
+    const key = diagnosticRefreshKey(filePath, content);
+
+    return new Promise((resolve) => {
+      const waiter: DiagnosticRefreshWaiter = {
+        requestedAt: Date.now(),
+        options,
+        resolve,
+        settled: false,
+      };
+
+      const queued = this.queuedDiagnosticRefreshes.get(key);
+      if (queued && queued.content === content) {
+        queued.options = mergeDiagnosticRefreshOptions(queued.options, options);
+        queued.waiters.add(waiter);
+        this.armDiagnosticWaiterTimeout(queued, waiter);
+        return;
+      }
+
+      const running = this.runningDiagnosticRefreshes.get(key);
+      if (running && running.content === content && canShareRunningDiagnosticJob(running, options)) {
+        running.waiters.add(waiter);
+        this.armDiagnosticWaiterTimeout(running, waiter);
+        return;
+      }
+
+      const job: DiagnosticRefreshJob = {
+        key,
+        filePath,
+        content,
+        clients,
+        options: { ...options },
+        waiters: new Set([waiter]),
+      };
+      this.queuedDiagnosticRefreshes.set(key, job);
+      this.diagnosticQueue.push(job);
+      this.armDiagnosticWaiterTimeout(job, waiter);
+      this.scheduleDiagnosticPump();
+    });
+  }
+
+  private scheduleDiagnosticPump(): void {
+    if (this.diagnosticPumpScheduled) return;
+    this.diagnosticPumpScheduled = true;
+    queueMicrotask(() => {
+      this.diagnosticPumpScheduled = false;
+      this.pumpDiagnosticQueue();
+    });
+  }
+
+  private pumpDiagnosticQueue(): void {
+    while (this.activeDiagnosticRefreshes < DIAGNOSTIC_REFRESH_CONCURRENCY && this.diagnosticQueue.length > 0) {
+      const job = this.diagnosticQueue.shift();
+      if (!job) continue;
+      if (this.queuedDiagnosticRefreshes.get(job.key) !== job) continue;
+      this.queuedDiagnosticRefreshes.delete(job.key);
+      if (job.waiters.size === 0) continue;
+
+      this.runningDiagnosticRefreshes.set(job.key, job);
+      this.activeDiagnosticRefreshes += 1;
+      void this.runDiagnosticRefreshJob(job).finally(() => {
+        this.runningDiagnosticRefreshes.delete(job.key);
+        this.activeDiagnosticRefreshes = Math.max(0, this.activeDiagnosticRefreshes - 1);
+        this.pumpDiagnosticQueue();
+      });
+    }
+  }
+
+  private async runDiagnosticRefreshJob(job: DiagnosticRefreshJob): Promise<void> {
+    let result: DiagnosticRefreshResult | undefined;
+    try {
+      result = await this.performDiagnosticRefresh(job.filePath, job.content, job.clients, job.options);
+    } catch {
+      result = undefined;
+    }
+
+    for (const waiter of [...job.waiters]) {
+      this.resolveDiagnosticWaiter(job, waiter, result ? diagnosticResultForWaiter(result, waiter) : undefined);
+    }
+  }
+
+  private async performDiagnosticRefresh(
+    filePath: string,
+    content: string,
+    clients: LspClient[],
+    options: DiagnosticsForFileOptions,
+  ): Promise<DiagnosticRefreshResult | undefined> {
+    const results = await Promise.all(clients.map(async (client) => {
+      try {
+        return await client.touchDocumentDetailed(filePath, content, options);
+      } catch (error) {
+        this.markClientInstanceError(filePath, client, error);
+        return undefined;
+      }
+    }));
+
+    const successful = results.filter((result): result is DiagnosticRefreshResult => result !== undefined);
+    if (successful.length === 0) return undefined;
+
+    this.armIdleTimer();
+    return {
+      snapshot: mergeSnapshots(successful.map((result) => result.snapshot)),
+      fresh: successful.every((result) => result.fresh),
+      timedOut: successful.some((result) => result.timedOut),
+      requestedAt: Math.min(...successful.map((result) => result.requestedAt)),
+      completedAt: Math.max(...successful.map((result) => result.completedAt)),
+    };
+  }
+
+  private armDiagnosticWaiterTimeout(job: DiagnosticRefreshJob, waiter: DiagnosticRefreshWaiter): void {
+    waiter.timeout = setTimeout(() => {
+      this.resolveDiagnosticWaiter(job, waiter, timedOutDiagnosticRefresh(job, waiter));
+    }, Math.max(0, waiter.options.timeoutMs));
+    waiter.timeout.unref?.();
+  }
+
+  private resolveDiagnosticWaiter(
+    job: DiagnosticRefreshJob,
+    waiter: DiagnosticRefreshWaiter,
+    result: DiagnosticRefreshResult | undefined,
+  ): void {
+    if (waiter.settled) return;
+    waiter.settled = true;
+    if (waiter.timeout) clearTimeout(waiter.timeout);
+    job.waiters.delete(waiter);
+    waiter.resolve(result);
+  }
+
+  private finishDiagnosticRefreshWaiters(result: DiagnosticRefreshResult | undefined): void {
+    const jobs = new Set<DiagnosticRefreshJob>([
+      ...this.diagnosticQueue,
+      ...this.queuedDiagnosticRefreshes.values(),
+      ...this.runningDiagnosticRefreshes.values(),
+    ]);
+
+    this.diagnosticQueue = [];
+    this.queuedDiagnosticRefreshes.clear();
+    this.runningDiagnosticRefreshes.clear();
+
+    for (const job of jobs) {
+      for (const waiter of [...job.waiters]) {
+        this.resolveDiagnosticWaiter(job, waiter, result);
+      }
+    }
   }
 
   private async documentRequests(filePath: string, method: string, extraParams: Record<string, unknown>): Promise<ClientRequestResult[]> {
@@ -443,6 +600,47 @@ export class LspService {
 function mergeSnapshots(snapshots: DiagnosticSnapshot[]): DiagnosticSnapshot {
   const diagnostics = snapshots.flatMap((snapshot) => [...snapshot.byUri.values()].flat());
   return createDiagnosticSnapshot(diagnostics);
+}
+
+function mergeDiagnosticRefreshOptions(left: DiagnosticsForFileOptions, right: DiagnosticsForFileOptions): DiagnosticsForFileOptions {
+  return {
+    timeoutMs: Math.max(left.timeoutMs, right.timeoutMs),
+    settleMs: Math.max(left.settleMs, right.settleMs),
+  };
+}
+
+function canShareRunningDiagnosticJob(job: DiagnosticRefreshJob, options: DiagnosticsForFileOptions): boolean {
+  return options.timeoutMs <= job.options.timeoutMs && options.settleMs <= job.options.settleMs;
+}
+
+function timedOutDiagnosticRefresh(job: DiagnosticRefreshJob, waiter: DiagnosticRefreshWaiter): DiagnosticRefreshResult {
+  const now = Date.now();
+  return {
+    snapshot: mergeSnapshots(job.clients.map((client) => client.snapshot())),
+    fresh: false,
+    timedOut: true,
+    requestedAt: waiter.requestedAt,
+    completedAt: now,
+  };
+}
+
+function diagnosticResultForWaiter(result: DiagnosticRefreshResult, waiter: DiagnosticRefreshWaiter): DiagnosticRefreshResult {
+  return {
+    ...result,
+    requestedAt: waiter.requestedAt,
+  };
+}
+
+function diagnosticRefreshKey(filePath: string, content: string): string {
+  return `${path.resolve(filePath)}\0${content.length}\0${hashString(content)}`;
+}
+
+function hashString(value: string): string {
+  let hash = 5381;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = ((hash << 5) + hash + value.charCodeAt(index)) | 0;
+  }
+  return (hash >>> 0).toString(36);
 }
 
 function mergeArrayResults(results: ClientRequestResult[]): unknown[] {

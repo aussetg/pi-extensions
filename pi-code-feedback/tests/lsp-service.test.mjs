@@ -149,6 +149,47 @@ test("document requests sync the file without forcing a save or diagnostic refre
   }
 });
 
+test("concurrent diagnostics refreshes for the same file are coalesced", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-diagnostic-queue-"));
+  const filePath = path.join(root, "probe.py");
+  const logPath = path.join(root, "lsp.jsonl");
+  const content = "value = 1\n";
+  await writeFile(filePath, content, "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "sync-log", logPath],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    const refreshes = await Promise.all(Array.from({ length: 5 }, () => service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 1000,
+      settleMs: 0,
+    })));
+
+    assert.equal(refreshes.length, 5);
+    assert.equal(refreshes.every((refresh) => refresh?.fresh), true);
+
+    const entries = (await readFile(logPath, "utf8"))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+
+    assert.deepEqual(entries.map((entry) => entry.method), ["textDocument/didOpen", "textDocument/didSave"]);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("timed out LSP requests send a cancel notification", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-cancel-"));
   const filePath = path.join(root, "probe.py");
