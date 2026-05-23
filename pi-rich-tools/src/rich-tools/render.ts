@@ -84,8 +84,21 @@ export function renderReadResult(
   if (text === undefined) return renderText(theme.fg("muted", "(no content)"), theme, context);
   if (isToolError(result, context)) return renderText(theme.fg("error", firstLine(text)), theme, context);
 
-  if (!options.expanded && compactReadClassification(context?.args, context?.cwd)) {
+  const plainOutput = shouldRenderReadAsPlainOutput(result, text, context?.args);
+  if (!options.expanded && !plainOutput && compactReadClassification(context?.args, context?.cwd)) {
     return renderTextParts([], theme, context);
+  }
+
+  if (plainOutput) {
+    const display = collapseTextForDisplay(text, options.expanded, false);
+    const footer = footerParts([
+      display.collapsed ? collapseNotice(display.collapsed, theme, false) : undefined,
+      readFooter(result.details, theme),
+    ]);
+    return renderTextParts(footerParts([
+      display.text ? theme.fg("toolOutput", display.text) : undefined,
+      ...footer,
+    ]), theme, context);
   }
 
   const renderPath = renderStringArg(context?.args, "file_path", "path");
@@ -509,6 +522,34 @@ function readDisplayText(result: ToolResultLike, showImages: boolean): string | 
 
   const output = parts.join("\n");
   return output.length > 0 ? output : "";
+}
+
+function shouldRenderReadAsPlainOutput(
+  result: ToolResultLike,
+  text: string,
+  args: unknown,
+): boolean {
+  // Image reads return a small status text plus an image attachment. Pierre's
+  // gutter is useful for real file content, but turns that status line into the
+  // `1    Read image file ...` row. Keep image-read status text in the
+  // default/plain read style; ToolExecutionComponent renders the image block.
+  if (hasImageBlock(result)) return true;
+
+  const path = renderStringArg(args, "file_path", "path");
+  return (
+    path !== null &&
+    looksLikeSupportedImagePath(path) &&
+    /^Read image file \[image\/[\w.+-]+\]/i.test(firstLine(text, ""))
+  );
+}
+
+function hasImageBlock(result: ToolResultLike): boolean {
+  const content = result.content;
+  return Array.isArray(content) && content.some((item) => isRecord(item) && item.type === "image");
+}
+
+function looksLikeSupportedImagePath(rawPath: string): boolean {
+  return /\.(?:png|jpe?g|gif|webp)$/i.test(rawPath);
 }
 
 function stripAnsi(text: string): string {
