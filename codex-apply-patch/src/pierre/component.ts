@@ -316,19 +316,27 @@ export class PierreInlineDiffComponent implements Component {
       this.config.syntaxHighlight.maxLineLength,
     ].join("\u0000");
     let piHighlighted = this.piHighlightedByKey.get(piKey);
+    if (piHighlighted && !hasHighlightedLines(piHighlighted)) {
+      this.piHighlightedByKey.delete(piKey);
+      piHighlighted = undefined;
+    }
+
     if (!piHighlighted) {
-      piHighlighted = buildPiHighlightedDiff(
+      const directHighlighted = buildPiHighlightedDiff(
         payload.metadata,
         this.config,
         this.theme,
       );
-      this.piHighlightedByKey.set(piKey, piHighlighted);
-      if (this.piHighlightedByKey.size > PI_HIGHLIGHT_CACHE_LIMIT) {
-        const oldestKey = this.piHighlightedByKey.keys().next().value;
-        if (typeof oldestKey === "string") this.piHighlightedByKey.delete(oldestKey);
+      if (hasHighlightedLines(directHighlighted)) {
+        piHighlighted = directHighlighted;
+        this.piHighlightedByKey.set(piKey, piHighlighted);
+        if (this.piHighlightedByKey.size > PI_HIGHLIGHT_CACHE_LIMIT) {
+          const oldestKey = this.piHighlightedByKey.keys().next().value;
+          if (typeof oldestKey === "string") this.piHighlightedByKey.delete(oldestKey);
+        }
       }
     }
-    if (hasHighlightedLines(piHighlighted)) return piHighlighted;
+    if (piHighlighted && hasHighlightedLines(piHighlighted)) return piHighlighted;
 
     this.scheduleAsyncHighlightFallback(piKey, payload);
 

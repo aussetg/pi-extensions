@@ -325,6 +325,23 @@ async function buildTreeSitterHighlightedDiffAsync(
     addition = workerResults.get("addition") ?? addition;
   }
 
+  if (!deletion.styled) {
+    deletion = highlightFallbackSyntaxLines(
+      languageKey,
+      metadata.deletionLines,
+      indexes.deletion,
+      config,
+    );
+  }
+  if (!addition.styled) {
+    addition = highlightFallbackSyntaxLines(
+      languageKey,
+      metadata.additionLines,
+      indexes.addition,
+      config,
+    );
+  }
+
   if (!deletion.styled && !addition.styled) return undefined;
   return {
     deletionLines: deletion.lines,
@@ -367,6 +384,23 @@ function highlightTreeSitterLines(
   }
 
   paintCaptures(cleanLines, lineStyles, captures);
+  return highlightedLinesFromStyles(cleanLines, lineStyles);
+}
+
+function highlightFallbackSyntaxLines(
+  languageKey: string,
+  lines: string[],
+  indexes: number[],
+  config: PierreRendererConfig,
+): HighlightLineResult {
+  if (lines.length === 0 || indexes.length === 0) {
+    return { lines: [], styled: false };
+  }
+
+  const prepared = prepareTreeSitterLines(lines, indexes, config);
+  if (!prepared) return { lines: [], styled: false };
+  const { cleanLines, lineStyles } = prepared;
+  paintFallbackSyntax(languageKey, cleanLines, lineStyles);
   return highlightedLinesFromStyles(cleanLines, lineStyles);
 }
 
@@ -542,6 +576,77 @@ function paintCaptures(
   }
 }
 
+function paintFallbackSyntax(
+  languageKey: string,
+  lines: string[],
+  lineStyles: Map<number, Array<SyntaxCategory | undefined>>,
+): void {
+  if (!fallbackSyntaxLanguages.has(languageKey)) return;
+
+  for (const [row, styles] of lineStyles) {
+    const line = lines[row] ?? "";
+    if (line.length === 0) continue;
+
+    paintFallbackRegex(line, styles, /\b[A-Za-z_$][\w$]*\b/g, "variable");
+    paintFallbackRegex(line, styles, /[{}()[\],.;:]/g, "punctuation");
+    paintFallbackRegex(line, styles, /=>|===|!==|==|!=|<=|>=|&&|\|\||[+\-*/%=<>!&|?]/g, "operator");
+    paintFallbackRegex(line, styles, /\b\d+(?:\.\d+)?\b/g, "number");
+    paintFallbackFunctionNames(line, styles);
+    paintFallbackRegex(line, styles, fallbackTypeRegex, "type");
+    paintFallbackRegex(line, styles, fallbackKeywordRegex, "keyword");
+    paintFallbackRegex(line, styles, /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g, "string");
+    paintFallbackRegex(line, styles, /\/\/.*$/g, "comment");
+  }
+}
+
+const fallbackSyntaxLanguages = new Set([
+  "javascript",
+  "typescript",
+  "tsx",
+  "json",
+  "yaml",
+  "toml",
+]);
+const fallbackKeywordRegex = new RegExp(
+  String.raw`\b(?:as|async|await|break|case|catch|class|const|continue|default|else|export|extends|false|finally|for|from|function|if|implements|import|in|interface|let|new|null|of|private|protected|public|readonly|return|static|switch|throw|true|try|type|undefined|var|while)\b`,
+  "g",
+);
+const fallbackTypeRegex = /\b(?:Array|Promise|Record|Map|Set|WeakMap|WeakSet|Date|Error|RegExp|URL|Buffer|string|number|boolean|unknown|never|void|object|[A-Z][A-Za-z0-9_$]*)\b/g;
+
+function paintFallbackFunctionNames(
+  line: string,
+  styles: Array<SyntaxCategory | undefined>,
+): void {
+  const regex = /\b[A-Za-z_$][\w$]*\b(?=\s*\()/g;
+  for (const match of line.matchAll(regex)) {
+    paintFallbackRange(styles, match.index ?? 0, (match.index ?? 0) + match[0].length, "function");
+  }
+}
+
+function paintFallbackRegex(
+  line: string,
+  styles: Array<SyntaxCategory | undefined>,
+  regex: RegExp,
+  category: SyntaxCategory,
+): void {
+  for (const match of line.matchAll(regex)) {
+    paintFallbackRange(styles, match.index ?? 0, (match.index ?? 0) + match[0].length, category);
+  }
+}
+
+function paintFallbackRange(
+  styles: Array<SyntaxCategory | undefined>,
+  start: number,
+  end: number,
+  category: SyntaxCategory,
+): void {
+  const safeStart = Math.max(0, Math.min(start, styles.length));
+  const safeEnd = Math.max(safeStart, Math.min(end, styles.length));
+  for (let index = safeStart; index < safeEnd; index += 1) {
+    styles[index] = category;
+  }
+}
+
 function captureOverlapsStyledLine(
   node: TreeSitterNode,
   lineStyles: Map<number, Array<SyntaxCategory | undefined>>,
@@ -704,7 +809,7 @@ function maybeUnrefTreeSitterWorker(client: TreeSitterWorkerClient): void {
 }
 
 function treeSitterWorkerNodePath(): string | undefined {
-  return envValue("PI_TREE_SITTER_NODE");
+  return envValue("PI_TREE_SITTER_NODE") ?? "node";
 }
 
 function treeSitterWorkerTimeoutMs(): number {
