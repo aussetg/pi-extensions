@@ -9,6 +9,18 @@ export {
   normalizeHighlightedDiffSet,
 } from "./highlight.ts";
 export {
+  querySharedSyntaxCaptures,
+  resetSharedSyntaxServiceForTests,
+  sharedSyntaxServiceStats,
+  treeSitterLanguageKey,
+  type SharedSyntaxCaptureRequest,
+  type SharedSyntaxServiceStats,
+  type TreeSitterCapture,
+  type TreeSitterNode,
+  type TreeSitterPoint,
+  type TreeSitterRange,
+} from "./syntax-service.ts";
+export {
   MAX_DIFF_INPUT_BYTES,
   buildPierreCreatePayload,
   buildPierreDeletePayload,

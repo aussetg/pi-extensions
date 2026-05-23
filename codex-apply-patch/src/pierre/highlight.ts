@@ -1,6 +1,4 @@
 import type { FileDiffMetadata } from "../../node_modules/@pierre/diffs/dist/types.js";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fork, type ChildProcess } from "node:child_process";
@@ -15,6 +13,13 @@ import type {
   SyntaxCategory,
 } from "./types.ts";
 import { emptyHighlightedDiffSet } from "./types.ts";
+import {
+  querySharedSyntaxCaptures,
+  treeSitterLanguageKey,
+  type TreeSitterCapture,
+  type TreeSitterNode,
+  type TreeSitterRange,
+} from "./syntax-service.ts";
 
 export async function loadHighlightedDiff(
   metadata: FileDiffMetadata,
@@ -160,44 +165,6 @@ export function flattenHighlightedLine(
       : [];
 }
 
-type TreeSitterLanguage = unknown;
-type TreeSitterNode = {
-  text: string;
-  startPosition: { row: number; column: number };
-  endPosition: { row: number; column: number };
-};
-type TreeSitterCapture = { name: string; node: TreeSitterNode };
-type TreeSitterPoint = { row: number; column: number };
-type TreeSitterQueryOptions = {
-  startPosition?: TreeSitterPoint;
-  endPosition?: TreeSitterPoint;
-};
-type TreeSitterQuery = {
-  captures: (
-    node: unknown,
-    options?: TreeSitterQueryOptions,
-  ) => TreeSitterCapture[];
-};
-type TreeSitterParser = {
-  setLanguage: (language: TreeSitterLanguage) => void;
-  parse: (code: string) => { rootNode: unknown };
-};
-type TreeSitterParserConstructor = {
-  new (): TreeSitterParser;
-  Query: new (language: TreeSitterLanguage, source: string) => TreeSitterQuery;
-};
-type TreeSitterRuntime = {
-  Parser: TreeSitterParserConstructor;
-  languages: Map<string, TreeSitterLanguage>;
-  queries: Map<string, string>;
-  parsers: Map<string, TreeSitterParser>;
-};
-type TreeSitterLanguageSpec = {
-  key: string;
-  packageName: string;
-  exportName?: string;
-  queryPaths: string[];
-};
 type HighlightLineResult = {
   lines: Array<HastNode | undefined>;
   styled: boolean;
@@ -205,6 +172,7 @@ type HighlightLineResult = {
 type TreeSitterDiffSide = "deletion" | "addition";
 type TreeSitterWorkerHighlightJob = {
   side: TreeSitterDiffSide;
+  documentId: string;
   lines: string[];
   indexes: number[];
 };
@@ -233,11 +201,11 @@ type PreparedTreeSitterLines = {
 };
 type PreparedTreeSitterWorkerJob = PreparedTreeSitterLines & {
   side: TreeSitterDiffSide;
+  documentId: string;
 };
 type LineRange = { start: number; end: number };
 type CaptureStyle = { category: SyntaxCategory; priority: number };
 
-const nodeRequire = createRequire(import.meta.url);
 const treeSitterWorkerPath = join(
   dirname(fileURLToPath(import.meta.url)),
   "tree-sitter-worker.cjs",
@@ -248,70 +216,11 @@ const TREE_SITTER_QUERY_FULL_COVERAGE_NUMERATOR = 3;
 const TREE_SITTER_QUERY_FULL_COVERAGE_DENOMINATOR = 4;
 const TREE_SITTER_WORKER_IDLE_MS = 10_000;
 const DEFAULT_TREE_SITTER_WORKER_TIMEOUT_MS = 5_000;
-let treeSitterRuntime: TreeSitterRuntime | null | undefined;
-const treeSitterQueryCache = new Map<string, TreeSitterQuery>();
 const syntaxStyleByCaptureName = Object.create(null) as Record<
   string,
   CaptureStyle | null | undefined
 >;
 let treeSitterWorkerClient: TreeSitterWorkerClient | undefined;
-
-const TREE_SITTER_LANGUAGE_SPECS: TreeSitterLanguageSpec[] = [
-  {
-    key: "javascript",
-    packageName: "tree-sitter-javascript",
-    queryPaths: ["tree-sitter-javascript/queries/highlights.scm"],
-  },
-  {
-    key: "typescript",
-    packageName: "tree-sitter-typescript",
-    exportName: "typescript",
-    queryPaths: [
-      "tree-sitter-javascript/queries/highlights.scm",
-      "tree-sitter-typescript/queries/highlights.scm",
-    ],
-  },
-  {
-    key: "tsx",
-    packageName: "tree-sitter-typescript",
-    exportName: "tsx",
-    queryPaths: [
-      "tree-sitter-javascript/queries/highlights.scm",
-      "tree-sitter-typescript/queries/highlights.scm",
-    ],
-  },
-  languageSpec("python", "tree-sitter-python"),
-  languageSpec("rust", "tree-sitter-rust"),
-  languageSpec("c", "tree-sitter-c"),
-  languageSpec("cpp", "tree-sitter-cpp"),
-  languageSpec("zig", "@tree-sitter-grammars/tree-sitter-zig"),
-  languageSpec("json", "tree-sitter-json"),
-  languageSpec("yaml", "@tree-sitter-grammars/tree-sitter-yaml"),
-  languageSpec("toml", "@tree-sitter-grammars/tree-sitter-toml"),
-  languageSpec("julia", "tree-sitter-julia"),
-  languageSpec("haskell", "tree-sitter-haskell"),
-  languageSpec("bash", "tree-sitter-bash"),
-  languageSpec("go", "tree-sitter-go"),
-  languageSpec("java", "tree-sitter-java"),
-  languageSpec("ruby", "tree-sitter-ruby"),
-  languageSpec("php", "tree-sitter-php", "php"),
-  languageSpec("css", "tree-sitter-css"),
-  languageSpec("html", "tree-sitter-html"),
-  languageSpec("regex", "tree-sitter-regex"),
-];
-
-function languageSpec(
-  key: string,
-  packageName: string,
-  exportName?: string,
-): TreeSitterLanguageSpec {
-  return {
-    key,
-    packageName,
-    exportName,
-    queryPaths: [`${packageName}/queries/highlights.scm`],
-  };
-}
 
 function buildTreeSitterHighlightedDiff(
   metadata: FileDiffMetadata,
@@ -328,25 +237,16 @@ function buildTreeSitterHighlightedDiff(
   const languageKey = treeSitterLanguageKey(lang);
   if (!languageKey) return undefined;
 
-  const runtime = getTreeSitterRuntime();
-  const language = runtime?.languages.get(languageKey);
-  const querySource = runtime?.queries.get(languageKey);
-  if (!runtime || !language || !querySource) return undefined;
-
   const deletion = highlightTreeSitterLines(
-    runtime,
     languageKey,
-    language,
-    querySource,
+    treeSitterDocumentId(metadata, "deletion"),
     metadata.deletionLines,
     indexes.deletion,
     config,
   );
   const addition = highlightTreeSitterLines(
-    runtime,
     languageKey,
-    language,
-    querySource,
+    treeSitterDocumentId(metadata, "addition"),
     metadata.additionLines,
     indexes.addition,
     config,
@@ -382,35 +282,26 @@ async function buildTreeSitterHighlightedDiffAsync(
   const forceWorker = envValue("PI_TREE_SITTER_FORCE_WORKER") === "1";
 
   if (!forceWorker) {
-    const runtime = getTreeSitterRuntime();
-    const language = runtime?.languages.get(languageKey);
-    const querySource = runtime?.queries.get(languageKey);
-
-    if (runtime && language && querySource) {
-      deletion = highlightTreeSitterLines(
-        runtime,
-        languageKey,
-        language,
-        querySource,
-        metadata.deletionLines,
-        indexes.deletion,
-        config,
-      );
-      addition = highlightTreeSitterLines(
-        runtime,
-        languageKey,
-        language,
-        querySource,
-        metadata.additionLines,
-        indexes.addition,
-        config,
-      );
-    }
+    deletion = highlightTreeSitterLines(
+      languageKey,
+      treeSitterDocumentId(metadata, "deletion"),
+      metadata.deletionLines,
+      indexes.deletion,
+      config,
+    );
+    addition = highlightTreeSitterLines(
+      languageKey,
+      treeSitterDocumentId(metadata, "addition"),
+      metadata.additionLines,
+      indexes.addition,
+      config,
+    );
   }
 
   if (!deletion.styled) {
     workerJobs.push({
       side: "deletion",
+      documentId: treeSitterDocumentId(metadata, "deletion"),
       lines: metadata.deletionLines,
       indexes: indexes.deletion,
     });
@@ -418,6 +309,7 @@ async function buildTreeSitterHighlightedDiffAsync(
   if (!addition.styled) {
     workerJobs.push({
       side: "addition",
+      documentId: treeSitterDocumentId(metadata, "addition"),
       lines: metadata.additionLines,
       indexes: indexes.addition,
     });
@@ -441,125 +333,17 @@ async function buildTreeSitterHighlightedDiffAsync(
   };
 }
 
-function getTreeSitterRuntime(): TreeSitterRuntime | undefined {
-  if (treeSitterRuntime !== undefined) return treeSitterRuntime ?? undefined;
-
-  try {
-    const Parser = nodeRequire("tree-sitter") as TreeSitterParserConstructor;
-    const languages = new Map<string, TreeSitterLanguage>();
-    const queries = new Map<string, string>();
-
-    for (const spec of TREE_SITTER_LANGUAGE_SPECS) {
-      languages.set(spec.key, loadTreeSitterLanguage(spec));
-      queries.set(spec.key, loadTreeSitterQuerySource(spec));
-    }
-
-    treeSitterRuntime = {
-      Parser,
-      languages,
-      queries,
-      parsers: new Map<string, TreeSitterParser>(),
-    };
-  } catch {
-    treeSitterRuntime = null;
-  }
-
-  return treeSitterRuntime ?? undefined;
-}
-
-function loadTreeSitterLanguage(spec: TreeSitterLanguageSpec): TreeSitterLanguage {
-  const module = nodeRequire(spec.packageName) as Record<string, unknown>;
-  const language = spec.exportName ? module[spec.exportName] : module;
-  if (!language) throw new Error(`missing tree-sitter grammar: ${spec.key}`);
-  return language as TreeSitterLanguage;
-}
-
-function loadTreeSitterQuerySource(spec: TreeSitterLanguageSpec): string {
-  return spec.queryPaths.map(readTreeSitterQuerySource).join("\n");
-}
-
-function readTreeSitterQuerySource(queryPath: string): string {
-  return sanitizeTreeSitterQuerySource(
-    readFileSync(nodeRequire.resolve(queryPath), "utf8"),
-  );
-}
-
-function sanitizeTreeSitterQuerySource(source: string): string {
-  return source
-    .replaceAll("#lua-match?", "#match?")
-    .split("\n")
-    .map((line) => {
-      if (!line.includes("#has-ancestor?")) return line;
-      const balance = parenBalance(line);
-      return balance < 0 ? ")".repeat(-balance) : "";
-    })
-    .join("\n");
-}
-
-function parenBalance(line: string): number {
-  let balance = 0;
-  for (const char of line) {
-    if (char === "(") balance += 1;
-    else if (char === ")") balance -= 1;
-  }
-  return balance;
-}
-
-function treeSitterLanguageKey(lang: string): string | undefined {
-  const normalized = lang.toLowerCase();
-  if (normalized === "typescript" || normalized === "ts") return "typescript";
-  if (normalized === "tsx") return "tsx";
-  if (
-    normalized === "javascript" ||
-    normalized === "js" ||
-    normalized === "jsx" ||
-    normalized === "mjs" ||
-    normalized === "cjs"
-  ) {
-    return "javascript";
-  }
-  if (normalized === "python" || normalized === "py") return "python";
-  if (normalized === "rust" || normalized === "rs") return "rust";
-  if (normalized === "c" || normalized === "objective-c") return "c";
-  if (
-    normalized === "cpp" ||
-    normalized === "c++" ||
-    normalized === "cc" ||
-    normalized === "cxx" ||
-    normalized === "hpp" ||
-    normalized === "objective-cpp"
-  ) {
-    return "cpp";
-  }
-  if (normalized === "zig") return "zig";
-  if (normalized === "json" || normalized === "jsonc") return "json";
-  if (normalized === "yaml" || normalized === "yml") return "yaml";
-  if (normalized === "toml") return "toml";
-  if (normalized === "julia" || normalized === "jl") return "julia";
-  if (normalized === "haskell" || normalized === "hs") return "haskell";
-  if (
-    normalized === "bash" ||
-    normalized === "sh" ||
-    normalized === "shell" ||
-    normalized === "zsh"
-  ) {
-    return "bash";
-  }
-  if (normalized === "go" || normalized === "golang") return "go";
-  if (normalized === "java") return "java";
-  if (normalized === "ruby" || normalized === "rb") return "ruby";
-  if (normalized === "php") return "php";
-  if (normalized === "css") return "css";
-  if (normalized === "html") return "html";
-  if (normalized === "regex" || normalized === "regexp") return "regex";
-  return undefined;
+function treeSitterDocumentId(
+  metadata: FileDiffMetadata,
+  side: TreeSitterDiffSide,
+): string {
+  const path = side === "deletion" ? metadata.prevName ?? metadata.name : metadata.name;
+  return `${side}:${path}`;
 }
 
 function highlightTreeSitterLines(
-  runtime: TreeSitterRuntime,
   languageKey: string,
-  language: TreeSitterLanguage,
-  querySource: string,
+  documentId: string,
   lines: string[],
   indexes: number[],
   config: PierreRendererConfig,
@@ -572,25 +356,17 @@ function highlightTreeSitterLines(
   if (!prepared) return { lines: [], styled: false };
   const { cleanLines, lineStyles } = prepared;
 
-  try {
-    const parser = treeSitterParser(runtime, languageKey, language);
-    const tree = parser.parse(cleanLines.join("\n"));
-    const query = treeSitterQuery(runtime, languageKey, language, querySource);
-    paintCaptures(
-      cleanLines,
-      lineStyles,
-      treeSitterCapturesForStyledRanges(
-        query,
-        tree.rootNode,
-        lineStyles,
-        cleanLines.length,
-      ),
-    );
-  } catch {
-    runtime.parsers.delete(languageKey);
+  const captures = querySharedSyntaxCaptures({
+    documentId,
+    languageKey,
+    text: cleanLines.join("\n"),
+    ranges: treeSitterQueryRangesForStyledRanges(lineStyles, cleanLines.length),
+  });
+  if (!captures) {
     return { lines: [], styled: false };
   }
 
+  paintCaptures(cleanLines, lineStyles, captures);
   return highlightedLinesFromStyles(cleanLines, lineStyles);
 }
 
@@ -614,7 +390,7 @@ async function highlightTreeSitterLinesWithWorkerBatch(
       continue;
     }
 
-    preparedJobs.push({ side: job.side, ...prepared });
+    preparedJobs.push({ side: job.side, documentId: job.documentId, ...prepared });
   }
 
   if (preparedJobs.length === 0) return results;
@@ -622,6 +398,7 @@ async function highlightTreeSitterLinesWithWorkerBatch(
   const captureSets = await treeSitterWorkerCapturesBatch(
     languageKey,
     preparedJobs.map((job) => ({
+      documentId: job.documentId,
       lines: job.cleanLines,
       indexes: [...job.lineStyles.keys()],
     })),
@@ -677,35 +454,23 @@ function prepareTreeSitterLines(
   return lineStyles.size === 0 ? undefined : { cleanLines, lineStyles };
 }
 
-function treeSitterCapturesForStyledRanges(
-  query: TreeSitterQuery,
-  rootNode: unknown,
+function treeSitterQueryRangesForStyledRanges(
   lineStyles: Map<number, Array<SyntaxCategory | undefined>>,
   lineCount: number,
-): TreeSitterCapture[] {
+): TreeSitterRange[] | undefined {
   const ranges = styledLineRanges(lineStyles, lineCount);
   if (ranges.length === 0) return [];
   if (shouldQueryFullTree(ranges, lineCount)) {
-    return query.captures(rootNode);
+    return undefined;
   }
 
-  try {
-    const captures: TreeSitterCapture[] = [];
-    for (const range of ranges) {
-      captures.push(
-        ...query.captures(rootNode, {
-          startPosition: { row: range.start, column: 0 },
-          endPosition: {
-            row: range.end,
-            column: TREE_SITTER_QUERY_RANGE_END_COLUMN,
-          },
-        }),
-      );
-    }
-    return captures;
-  } catch {
-    return query.captures(rootNode);
-  }
+  return ranges.map((range) => ({
+    startPosition: { row: range.start, column: 0 },
+    endPosition: {
+      row: range.end,
+      column: TREE_SITTER_QUERY_RANGE_END_COLUMN,
+    },
+  }));
 }
 
 function styledLineRanges(
@@ -789,7 +554,7 @@ function captureOverlapsStyledLine(
 
 async function treeSitterWorkerCapturesBatch(
   languageKey: string,
-  jobs: Array<{ lines: string[]; indexes: number[] }>,
+  jobs: Array<{ documentId: string; lines: string[]; indexes: number[] }>,
 ): Promise<Array<TreeSitterCapture[] | undefined> | undefined> {
   if (jobs.length === 0) return [];
 
@@ -818,7 +583,7 @@ function normalizeTreeSitterWorkerJobs(
 
 function treeSitterWorkerRequest(
   languageKey: string,
-  jobs: Array<{ lines: string[]; indexes: number[] }>,
+  jobs: Array<{ documentId: string; lines: string[]; indexes: number[] }>,
 ): Promise<TreeSitterWorkerResponse | undefined> {
   const client = getTreeSitterWorkerClient();
   const child = client.child;
@@ -983,34 +748,6 @@ function normalizeWorkerCapture(value: unknown): TreeSitterCapture | undefined {
       endPosition: { row: capture.endRow, column: capture.endColumn },
     },
   };
-}
-
-function treeSitterQuery(
-  runtime: TreeSitterRuntime,
-  languageKey: string,
-  language: TreeSitterLanguage,
-  querySource: string,
-): TreeSitterQuery {
-  const cached = treeSitterQueryCache.get(languageKey);
-  if (cached) return cached;
-
-  const query = new runtime.Parser.Query(language, querySource);
-  treeSitterQueryCache.set(languageKey, query);
-  return query;
-}
-
-function treeSitterParser(
-  runtime: TreeSitterRuntime,
-  languageKey: string,
-  language: TreeSitterLanguage,
-): TreeSitterParser {
-  const cached = runtime.parsers.get(languageKey);
-  if (cached) return cached;
-
-  const parser = new runtime.Parser();
-  parser.setLanguage(language);
-  runtime.parsers.set(languageKey, parser);
-  return parser;
 }
 
 function syntaxCategoryForCapture(name: string): SyntaxCategory | undefined {

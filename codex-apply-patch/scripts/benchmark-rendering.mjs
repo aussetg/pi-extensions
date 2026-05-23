@@ -6,7 +6,12 @@ import {
   buildPiHighlightedDiff,
   loadHighlightedDiff,
 } from "../src/pierre/highlight.ts";
+import {
+  resetSharedSyntaxServiceForTests,
+  sharedSyntaxServiceStats,
+} from "../src/pierre/syntax-service.ts";
 import { DEFAULT_PIERRE_RENDERER_CONFIG } from "../src/pierre/config.ts";
+import { buildPierreUpdatePayload } from "../src/pierre/metadata.ts";
 import { buildCachedDiffRows, buildDiffRows } from "../src/pierre/rows.ts";
 import { getPierrePalette } from "../src/pierre/theme.ts";
 import {
@@ -51,6 +56,12 @@ const workerIterations = Number(
   process.env.PI_RENDER_WORKER_BENCH_ITERATIONS ?? Math.min(8, iterations),
 );
 const ansiIterations = Number(process.env.PI_RENDER_ANSI_BENCH_ITERATIONS ?? 5000);
+const incrementalIterations = Number(
+  process.env.PI_RENDER_INCREMENTAL_BENCH_ITERATIONS ?? 5,
+);
+const incrementalRevisionCount = Number(
+  process.env.PI_RENDER_INCREMENTAL_REVISIONS ?? 28,
+);
 
 for (const fixture of fixtures) {
   const { metadata } = fixture;
@@ -103,6 +114,55 @@ for (const fixture of fixtures) {
     },
   ]);
 }
+
+const incrementalDiffs = makeIncrementalDiffs(
+  900,
+  incrementalRevisionCount,
+);
+const fullParseSequence = measure(
+  "full parse sequence",
+  () => {
+    resetSharedSyntaxServiceForTests();
+    withEnv("PI_TREE_SITTER_DISABLE_INCREMENTAL", "1", () => {
+      for (const metadata of incrementalDiffs) buildPiHighlightedDiff(metadata, config);
+    });
+  },
+  incrementalIterations,
+);
+const fullParseStats = syntaxStatsFor(() => {
+  withEnv("PI_TREE_SITTER_DISABLE_INCREMENTAL", "1", () => {
+    for (const metadata of incrementalDiffs) buildPiHighlightedDiff(metadata, config);
+  });
+});
+const incrementalSequence = measure(
+  "shared incremental sequence",
+  () => {
+    resetSharedSyntaxServiceForTests();
+    for (const metadata of incrementalDiffs) buildPiHighlightedDiff(metadata, config);
+  },
+  incrementalIterations,
+);
+const incrementalStats = syntaxStatsFor(() => {
+  for (const metadata of incrementalDiffs) buildPiHighlightedDiff(metadata, config);
+});
+
+console.log(
+  `fixture: shared syntax service, ${incrementalDiffs[0].additionLines.length} TypeScript lines, ${incrementalRevisionCount} small revisions, ${incrementalIterations} iterations`,
+);
+console.table([
+  formatSyntaxResult(fullParseSequence, fullParseStats),
+  formatSyntaxResult(incrementalSequence, incrementalStats),
+  {
+    name: "delta",
+    "wall ms": (incrementalSequence.wallMs - fullParseSequence.wallMs).toFixed(1),
+    "cpu ms": (incrementalSequence.cpuMs - fullParseSequence.cpuMs).toFixed(1),
+    "heap MiB": (incrementalSequence.heapMiB - fullParseSequence.heapMiB).toFixed(2),
+    "full parses": incrementalStats.fullParses - fullParseStats.fullParses,
+    "incremental parses": incrementalStats.incrementalParses - fullParseStats.incrementalParses,
+    "reused parses": incrementalStats.reusedParses - fullParseStats.reusedParses,
+    speedup: `${(fullParseSequence.wallMs / incrementalSequence.wallMs).toFixed(2)}×`,
+  },
+]);
 
 const workerMetadata = sparseMetadata();
 const workerIndexes = renderedLineIndexes(workerMetadata);
@@ -249,6 +309,75 @@ function formatResult(result) {
     "heap MiB": result.heapMiB.toFixed(2),
     speedup: "",
   };
+}
+
+function formatSyntaxResult(result, stats) {
+  return {
+    ...formatResult(result),
+    "full parses": stats.fullParses,
+    "incremental parses": stats.incrementalParses,
+    "reused parses": stats.reusedParses,
+  };
+}
+
+function syntaxStatsFor(fn) {
+  resetSharedSyntaxServiceForTests();
+  fn();
+  return sharedSyntaxServiceStats();
+}
+
+function withEnv(name, value, fn) {
+  const previous = process.env[name];
+  process.env[name] = value;
+  try {
+    return fn();
+  } finally {
+    if (previous === undefined) delete process.env[name];
+    else process.env[name] = previous;
+  }
+}
+
+function makeIncrementalDiffs(itemCount, revisionCount) {
+  const revisions = [];
+  for (let revision = 0; revision <= revisionCount; revision++) {
+    revisions.push(makeIncrementalFile(itemCount, revision));
+  }
+
+  const diffs = [];
+  for (let revision = 0; revision < revisionCount; revision++) {
+    const payload = buildPierreUpdatePayload({
+      oldPath: "src/shared-syntax-service-fixture.ts",
+      newPath: "src/shared-syntax-service-fixture.ts",
+      oldContent: `${revisions[revision].join("\n")}\n`,
+      newContent: `${revisions[revision + 1].join("\n")}\n`,
+      contextLines: 6,
+    });
+    if (payload) diffs.push(payload.metadata);
+  }
+  if (diffs.length === 0) throw new Error("incremental benchmark produced no diffs");
+  return diffs;
+}
+
+function makeIncrementalFile(count, revision) {
+  const lines = [];
+  lines.push("type Item = { id: number; label: string; enabled: boolean };");
+  lines.push("export class Registry {");
+  lines.push("  private items = new Map<number, Item>();");
+  const changedIndex = revision % count;
+  for (let i = 0; i < count; i++) {
+    const value = i === changedIndex ? i + revision + 1000 : i;
+    const enabled = i === changedIndex && revision % 2 === 1 ? "false" : "true";
+    lines.push(`  item${i}(): Item {`);
+    lines.push(
+      `    const item: Item = { id: ${value}, label: "item-${i}", enabled: ${enabled} };`,
+    );
+    lines.push("    this.items.set(item.id, item);");
+    lines.push("    return item;");
+    lines.push("  }");
+  }
+  lines.push("}");
+  lines.push("export const registry = new Registry();");
+  return lines;
 }
 
 function makeFile(count, changed) {

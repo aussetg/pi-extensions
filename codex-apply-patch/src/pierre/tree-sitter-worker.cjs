@@ -4,6 +4,7 @@ const TREE_SITTER_QUERY_RANGE_END_COLUMN = 0x7fffffff;
 const TREE_SITTER_QUERY_FULL_COVERAGE_NUMERATOR = 3;
 const TREE_SITTER_QUERY_FULL_COVERAGE_DENOMINATOR = 4;
 const runtimes = new Map();
+const documents = new Map();
 
 const LANGUAGE_SPECS = [
   spec("javascript", "tree-sitter-javascript"),
@@ -197,14 +198,44 @@ function queryCapturesForIndexes(query, rootNode, indexes, lineCount) {
 
 function normalizeJob(input) {
   return {
+    documentId: typeof input?.documentId === "string" ? input.documentId : undefined,
     lines: Array.isArray(input?.lines) ? input.lines : [],
     indexes: Array.isArray(input?.indexes) ? input.indexes : [],
   };
 }
 
-function capturesForJob(runtime, job) {
+function parseJob(runtime, languageKey, job) {
+  const text = job.lines.join("\n");
+  const documentKey = job.documentId ? `${languageKey}\0${job.documentId}` : undefined;
+  const cached = documentKey ? documents.get(documentKey) : undefined;
+
+  if (cached?.text === text) return cached.tree;
+
+  let tree;
+  if (cached) {
+    cached.tree.edit(treeSitterEditForTextChange(cached.text, text));
+    runtime.parser.reset?.();
+    tree = runtime.parser.parse(text, cached.tree);
+  } else {
+    runtime.parser.reset?.();
+    tree = runtime.parser.parse(text);
+  }
+
+  if (documentKey && tree) {
+    documents.delete(documentKey);
+    documents.set(documentKey, { text, tree });
+    while (documents.size > syntaxDocumentCacheLimit()) {
+      const oldestKey = documents.keys().next().value;
+      if (typeof oldestKey !== "string") break;
+      documents.delete(oldestKey);
+    }
+  }
+  return tree;
+}
+
+function capturesForJob(runtime, languageKey, job) {
   const visible = new Set(job.indexes.filter((index) => Number.isInteger(index)));
-  const tree = runtime.parser.parse(job.lines.join("\n"));
+  const tree = parseJob(runtime, languageKey, job);
   return queryCapturesForIndexes(
     runtime.query,
     tree.rootNode,
@@ -228,15 +259,93 @@ function handleInput(input) {
 
   const runtime = loadLanguage(languageKey);
   const results = jobs.map((job) => {
-    if (!isBatch) return { captures: capturesForJob(runtime, job) };
+    if (!isBatch) return { captures: capturesForJob(runtime, languageKey, job) };
     try {
-      return { captures: capturesForJob(runtime, job) };
+      return { captures: capturesForJob(runtime, languageKey, job) };
     } catch {
       return { captures: [] };
     }
   });
 
   return isBatch ? { jobs: results } : { captures: results[0].captures };
+}
+
+function syntaxDocumentCacheLimit() {
+  const parsed = Number.parseInt(process.env.PI_TREE_SITTER_DOCUMENT_CACHE_LIMIT ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 64;
+}
+
+function treeSitterEditForTextChange(oldText, newText) {
+  const [start, oldEnd, newEnd] = changedTextRange(oldText, newText);
+  const startExtent = textExtent(oldText, start);
+  const oldEndExtent = textExtent(oldText, oldEnd);
+  const newEndExtent = textExtent(newText, newEnd);
+  return {
+    startIndex: startExtent.index,
+    oldEndIndex: oldEndExtent.index,
+    newEndIndex: newEndExtent.index,
+    startPosition: startExtent.position,
+    oldEndPosition: oldEndExtent.position,
+    newEndPosition: newEndExtent.position,
+  };
+}
+
+function changedTextRange(oldText, newText) {
+  const minLength = Math.min(oldText.length, newText.length);
+  let start = 0;
+  while (start < minLength && oldText.charCodeAt(start) === newText.charCodeAt(start)) {
+    start++;
+  }
+  start = avoidSplitSurrogate(oldText, start);
+  start = avoidSplitSurrogate(newText, start);
+
+  let oldEnd = oldText.length;
+  let newEnd = newText.length;
+  while (
+    oldEnd > start &&
+    newEnd > start &&
+    oldText.charCodeAt(oldEnd - 1) === newText.charCodeAt(newEnd - 1)
+  ) {
+    oldEnd--;
+    newEnd--;
+  }
+
+  oldEnd = avoidSplitSurrogate(oldText, oldEnd);
+  newEnd = avoidSplitSurrogate(newText, newEnd);
+  return [start, oldEnd, newEnd];
+}
+
+function avoidSplitSurrogate(text, index) {
+  if (index <= 0 || index >= text.length) return index;
+  const previous = text.charCodeAt(index - 1);
+  const current = text.charCodeAt(index);
+  return previous >= 0xd800 &&
+    previous <= 0xdbff &&
+    current >= 0xdc00 &&
+    current <= 0xdfff
+    ? index - 1
+    : index;
+}
+
+function textExtent(text, end) {
+  let index = 0;
+  let row = 0;
+  let column = 0;
+  for (let offset = 0; offset < end;) {
+    const codePoint = text.codePointAt(offset);
+    if (codePoint === undefined) break;
+    const width = codePoint > 0xffff ? 2 : 1;
+    const bytes = Buffer.byteLength(text.slice(offset, offset + width), "utf8");
+    index += bytes;
+    if (codePoint === 0x0a) {
+      row += 1;
+      column = 0;
+    } else {
+      column += bytes;
+    }
+    offset += width;
+  }
+  return { index, position: { row, column } };
 }
 
 function main() {

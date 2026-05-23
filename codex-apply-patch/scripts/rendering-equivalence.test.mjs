@@ -11,6 +11,10 @@ import {
   hasHighlightedLines,
   loadHighlightedDiff,
 } from "../src/pierre/highlight.ts";
+import {
+  resetSharedSyntaxServiceForTests,
+  sharedSyntaxServiceStats,
+} from "../src/pierre/syntax-service.ts";
 import { DEFAULT_PIERRE_RENDERER_CONFIG } from "../src/pierre/config.ts";
 import { buildCachedDiffRows, buildDiffRows } from "../src/pierre/rows.ts";
 import { getPierrePalette } from "../src/pierre/theme.ts";
@@ -285,6 +289,38 @@ test("tree-sitter highlighting supports common coding languages", () => {
   }
 });
 
+test("tree-sitter highlighting reuses shared incremental syntax snapshots", () => {
+  resetSharedSyntaxServiceForTests();
+  const revisions = [
+    makeIncrementalTypeScriptFile(1),
+    makeIncrementalTypeScriptFile(2),
+    makeIncrementalTypeScriptFile(3),
+  ];
+
+  const first = changedFileMetadata({
+    name: "shared-syntax.ts",
+    lang: "typescript",
+    before: revisions[0],
+    after: revisions[1],
+  });
+  const second = changedFileMetadata({
+    name: "shared-syntax.ts",
+    lang: "typescript",
+    before: revisions[1],
+    after: revisions[2],
+  });
+
+  assert.deepEqual(buildPiHighlightedDiff(first, config), baselineHighlightedDiff(first, config));
+  const firstStats = sharedSyntaxServiceStats();
+  assert.equal(firstStats.fullParses, 2);
+  assert.equal(firstStats.incrementalParses, 0);
+
+  assert.deepEqual(buildPiHighlightedDiff(second, config), baselineHighlightedDiff(second, config));
+  const secondStats = sharedSyntaxServiceStats();
+  assert.equal(secondStats.fullParses, 2);
+  assert.equal(secondStats.incrementalParses, 2);
+});
+
 test("best-effort preview builders do not throw for unpreviewable diffs", () => {
   assert.equal(
     buildCreateFilePreview({ path: "empty.txt", newContent: "" }),
@@ -551,6 +587,27 @@ test("wrapped line continuation prefixes keep the row gutter bar", () => {
   assert.equal(deletionBeforeNumber[1].text, config.gutter.deletionBar);
   assert.equal(additionAfterNumber[2].text, config.gutter.additionBar);
 });
+
+function makeIncrementalTypeScriptFile(revision) {
+  const lines = [
+    "type Item = { id: number; label: string; enabled: boolean };",
+    "export class Registry {",
+    "  private items = new Map<number, Item>();",
+  ];
+  for (let i = 0; i < 80; i++) {
+    const value = i === 37 ? revision : i;
+    lines.push(`  item${i}(): Item {`);
+    lines.push(
+      `    const item: Item = { id: ${value}, label: "item-${i}", enabled: true };`,
+    );
+    lines.push("    this.items.set(item.id, item);");
+    lines.push("    return item;");
+    lines.push("  }");
+  }
+  lines.push("}");
+  lines.push("export const registry = new Registry();");
+  return lines;
+}
 
 function workerCaptures(languageKey, lines, indexes) {
   const result = spawnSync(process.execPath, [workerPath], {
