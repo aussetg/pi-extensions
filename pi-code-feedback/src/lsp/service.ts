@@ -2,7 +2,7 @@ import * as path from "node:path";
 import { createDiagnosticSnapshot } from "../diagnostics/snapshots.ts";
 import { readUtf8IfExists } from "../fs.ts";
 import { LSP_RESULT_SERVER_ID_KEY, type DiagnosticRefreshResult, type DiagnosticSnapshot, type LspDiagnostic, type LspServiceStatus, type LspUnavailableServer } from "../types.ts";
-import { LspClient } from "./client.ts";
+import { LspClient, type SemanticTokensOverlayOptions } from "./client.ts";
 import { externalPositionToLsp, filePathToUri, oneLineLspRange, type LspPosition } from "./positions.ts";
 import { resolveLanguageServer, resolveLanguageServers, type LanguageServerDefinition } from "./servers.ts";
 
@@ -194,6 +194,34 @@ export class LspService {
     const clients = filePath ? this.getOrCreateClients(path.resolve(this.projectRoot, filePath)) : this.readyOrAnyClients();
     if (clients.length === 0) throw new Error("No active LSP client. Open a file with lsp diagnostics first, or pass path to choose a language server.");
     return mergeArrayResults(await this.clientRequests(clients, "workspace/symbol", { query }));
+  }
+
+  async semanticTokens(filePath: string, options: SemanticTokensOverlayOptions = {}): Promise<unknown> {
+    const resolved = path.resolve(this.projectRoot, filePath);
+    const content = readUtf8IfExists(resolved);
+    if (content === undefined) throw new Error(`Cannot read file for LSP request: ${resolved}`);
+
+    const clients = this.getOrCreateClients(resolved);
+    if (clients.length === 0) throw new Error(`No language server configured for ${resolved}`);
+
+    const results = await Promise.all(clients.map(async (client) => {
+      try {
+        return await client.semanticTokensOverlay(resolved, content, options);
+      } catch (error) {
+        return {
+          serverId: client.id,
+          uri: filePathToUri(resolved),
+          version: 0,
+          state: "error",
+          stale: false,
+          tokens: [],
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }));
+
+    this.armIdleTimer();
+    return results.length === 1 ? results[0] : { servers: results };
   }
 
   async codeActions(filePath: string, line: unknown, character: unknown): Promise<unknown> {

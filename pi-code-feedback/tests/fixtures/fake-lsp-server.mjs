@@ -56,6 +56,14 @@ function handleMessage(message) {
           diagnosticProvider: { interFileDependencies: false, workspaceDiagnostics: false },
           codeActionProvider: true,
           hoverProvider: true,
+          semanticTokensProvider: semanticTokensEnabled(mode) ? {
+            legend: {
+              tokenTypes: ["variable", "class", "function"],
+              tokenModifiers: ["declaration", "readonly"],
+            },
+            full: true,
+            range: false,
+          } : undefined,
         },
       },
     });
@@ -92,6 +100,30 @@ function handleMessage(message) {
     const delayMs = hoverDelayMs(mode);
     if (delayMs > 0) setTimeout(() => send(response), delayMs);
     else send(response);
+    return;
+  }
+
+  if (message.id !== undefined && message.method === "textDocument/semanticTokens/full") {
+    if (semanticTokensEnabled(mode)) {
+      if (shouldLogSemanticTokens(mode)) log({ method: message.method, params: message.params });
+      const response = {
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          resultId: "fake-semantic-1",
+          data: [
+            0, 0, 5, 0, 1,
+            0, 8, 3, 1, 0,
+            1, 2, 4, 2, 0,
+          ],
+        },
+      };
+      const delayMs = semanticTokensDelayMs(mode);
+      if (delayMs > 0) setTimeout(() => send(response), delayMs);
+      else send(response);
+      return;
+    }
+    send({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "semantic tokens disabled" } });
     return;
   }
 
@@ -202,6 +234,19 @@ function diagnosticDelayMs(value) {
 function hoverDelayMs(value) {
   const match = /^hover-delay-(\d+)$/.exec(value);
   return match ? Number.parseInt(match[1], 10) : 0;
+}
+
+function semanticTokensDelayMs(value) {
+  const match = /^semantic-delay-(\d+)$/.exec(value);
+  return match ? Number.parseInt(match[1], 10) : 0;
+}
+
+function semanticTokensEnabled(value) {
+  return value === "semantic-log" || /^semantic-delay-\d+$/.test(value);
+}
+
+function shouldLogSemanticTokens(value) {
+  return semanticTokensEnabled(value);
 }
 
 function shouldLogCancel(value) {

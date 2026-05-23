@@ -13,6 +13,7 @@ if (!logPath || !command) {
 }
 
 const child = spawn(command, commandArgs, { stdio: ["pipe", "pipe", "pipe"] });
+const pendingMethods = new Map();
 
 observeAndForward(process.stdin, child.stdin, "client-to-server");
 observeAndForward(child.stdout, process.stdout, "server-to-client");
@@ -81,16 +82,25 @@ function summarizeMessage(direction, bodyBytes, message) {
   const textDocument = isRecord(params?.textDocument) ? params.textDocument : undefined;
   const contentChanges = Array.isArray(params?.contentChanges) ? params.contentChanges : [];
   const error = isRecord(message.error) ? message.error : undefined;
+  const result = isRecord(message.result) ? message.result : undefined;
+  const id = typeof message.id === "number" || typeof message.id === "string" ? message.id : undefined;
+  const method = typeof message.method === "string" ? message.method : undefined;
+  const requestMethod = direction === "server-to-client" && id !== undefined ? pendingMethods.get(id) : undefined;
+  if (direction === "client-to-server" && id !== undefined && method) pendingMethods.set(id, method);
+  if (direction === "server-to-client" && id !== undefined) pendingMethods.delete(id);
 
   return pruneUndefined({
     at: Date.now(),
     direction,
     bodyBytes,
-    id: typeof message.id === "number" || typeof message.id === "string" ? message.id : undefined,
-    method: typeof message.method === "string" ? message.method : undefined,
+    id,
+    method,
+    requestMethod,
     cancelRequestId: message.method === "$/cancelRequest" && (typeof params?.id === "number" || typeof params?.id === "string") ? params.id : undefined,
     errorCode: typeof error?.code === "number" ? error.code : undefined,
     errorMessage: typeof error?.message === "string" ? error.message : undefined,
+    resultDataCount: Array.isArray(result?.data) ? result.data.length : undefined,
+    resultId: typeof result?.resultId === "string" ? result.resultId : undefined,
     uri: typeof textDocument?.uri === "string" ? textDocument.uri : undefined,
     version: typeof textDocument?.version === "number" ? textDocument.version : undefined,
     paramsTextBytes: textBytes(params?.text),

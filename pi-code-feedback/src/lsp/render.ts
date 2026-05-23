@@ -15,6 +15,8 @@ export function renderLspActionResult(action: LspAction, result: unknown, projec
     case "symbols":
     case "workspace_symbols":
       return renderSymbols(result, projectRoot);
+    case "semantic_tokens":
+      return renderSemanticTokens(result);
     case "code_actions":
       return renderCodeActions(result);
     case "rename":
@@ -138,6 +140,46 @@ function renderCodeActions(result: unknown): string {
   }
   if (actions.length > 40) lines.push(`  ... ${actions.length - 40} more`);
   return lines.join("\n");
+}
+
+function renderSemanticTokens(result: unknown): string {
+  const overlays = semanticTokenOverlays(result);
+  if (overlays.length === 0) return "No semantic token overlay.";
+
+  const lines = [
+    `${overlays.length} semantic token overlay${overlays.length === 1 ? "" : "s"}:`,
+  ];
+  for (const overlay of overlays) {
+    const server = typeof overlay.serverId === "string" ? overlay.serverId : "server";
+    const state = typeof overlay.state === "string" ? overlay.state : "unknown";
+    const tokenCount = Array.isArray(overlay.tokens) ? overlay.tokens.length : 0;
+    const version = typeof overlay.version === "number" ? ` version=${overlay.version}` : "";
+    const stale = overlay.stale === true ? " stale" : "";
+    const error = typeof overlay.error === "string" ? ` error=${overlay.error}` : "";
+    lines.push(`  ${server}: ${state}${stale}${version} tokens=${tokenCount}${error}`);
+    if (Array.isArray(overlay.tokens) && overlay.tokens.length > 0) {
+      const sample = overlay.tokens.slice(0, 8).map(formatSemanticToken).join(", ");
+      lines.push(`    ${sample}${overlay.tokens.length > 8 ? ", ..." : ""}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function semanticTokenOverlays(result: unknown): Record<string, unknown>[] {
+  if (isRecord(result) && Array.isArray(result.servers)) return result.servers.filter(isRecord);
+  return isRecord(result) ? [result] : [];
+}
+
+function formatSemanticToken(value: unknown): string {
+  if (!isRecord(value)) return "token";
+  const line = typeof value.line === "number" ? value.line + 1 : "?";
+  const character = typeof value.character === "number" ? value.character + 1 : "?";
+  const type = typeof value.type === "string" ? value.type : "token";
+  const modifiers = Array.isArray(value.modifiers) && value.modifiers.length > 0
+    ? `.${value.modifiers.filter((entry) => typeof entry === "string").join(".")}`
+    : "";
+  return `${line}:${character} ${type}${modifiers}`;
 }
 
 function renderWorkspaceEditPreview(result: unknown, _projectRoot: string, label: string): string {

@@ -8,6 +8,7 @@ export const LSP_ACTIONS = [
   "type_definition",
   "symbols",
   "workspace_symbols",
+  "semantic_tokens",
   "code_actions",
   "rename",
   "capabilities",
@@ -123,6 +124,35 @@ export interface LspServiceStatus {
   activeClients: number;
   clients: LspClientStatus[];
   unavailableServers: LspUnavailableServer[];
+}
+
+export type SemanticTokenOverlayState = "ready" | "refreshing" | "unsupported" | "error";
+
+export interface SemanticTokenLegend {
+  tokenTypes: string[];
+  tokenModifiers: string[];
+}
+
+export interface SemanticToken {
+  line: number;      // 0-based, matching LSP semantic-token coordinates
+  character: number; // 0-based UTF-16 character offset
+  length: number;
+  type: string;
+  modifiers: string[];
+}
+
+export interface SemanticTokenOverlay {
+  serverId: string;
+  uri: string;
+  version: number;
+  state: SemanticTokenOverlayState;
+  stale: boolean;
+  tokens: SemanticToken[];
+  legend?: SemanticTokenLegend;
+  resultId?: string;
+  requestedAt?: number;
+  receivedAt?: number;
+  error?: string;
 }
 
 export interface LinkedDiagnostic {

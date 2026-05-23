@@ -149,6 +149,63 @@ test("document requests sync the file without forcing a save or diagnostic refre
   }
 });
 
+test("semantic tokens are exposed as a lazy cached overlay", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-semantic-overlay-"));
+  const filePath = path.join(root, "probe.py");
+  const logPath = path.join(root, "lsp.jsonl");
+  await writeFile(filePath, "value = 1\nprint(value)\n", "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "semantic-delay-80", logPath],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    const first = await service.semanticTokens(filePath, { waitMs: 0, timeoutMs: 1000 });
+    assert.equal(first.state, "refreshing");
+    assert.equal(first.stale, false);
+    assert.deepEqual(first.tokens, []);
+
+    await waitForJsonLog(logPath, (entries) => entries.some((entry) => entry.method === "textDocument/semanticTokens/full"));
+    await sleep(110);
+
+    const second = await service.semanticTokens(filePath, { waitMs: 20, timeoutMs: 1000 });
+    assert.equal(second.state, "ready");
+    assert.equal(second.stale, false);
+    assert.equal(second.tokens.length, 3);
+    assert.deepEqual(second.tokens[0], {
+      line: 0,
+      character: 0,
+      length: 5,
+      type: "variable",
+      modifiers: ["declaration"],
+    });
+
+    const countAfterFill = (await readJsonLog(logPath)).filter((entry) => entry.method === "textDocument/semanticTokens/full").length;
+    const third = await service.semanticTokens(filePath, { waitMs: 0, timeoutMs: 1000 });
+    assert.equal(third.state, "ready");
+    assert.equal(third.tokens.length, 3);
+    await sleep(30);
+    assert.equal((await readJsonLog(logPath)).filter((entry) => entry.method === "textDocument/semanticTokens/full").length, countAfterFill);
+
+    await writeFile(filePath, "value = 2\nprint(value)\n", "utf8");
+    const stale = await service.semanticTokens(filePath, { waitMs: 0, timeoutMs: 1000 });
+    assert.equal(stale.state, "refreshing");
+    assert.equal(stale.stale, true);
+    assert.equal(stale.tokens.length, 3);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("concurrent diagnostics refreshes for the same file are coalesced", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-diagnostic-queue-"));
   const filePath = path.join(root, "probe.py");

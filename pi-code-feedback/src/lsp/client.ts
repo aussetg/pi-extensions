@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import * as path from "node:path";
 import { createDiagnosticSnapshot } from "../diagnostics/snapshots.ts";
-import type { DiagnosticRefreshResult, DiagnosticSnapshot, LspClientState, LspClientStatus, LspDiagnostic, LspServerLog, LspServerLogLevel, RelatedLocation } from "../types.ts";
+import type { DiagnosticRefreshResult, DiagnosticSnapshot, LspClientState, LspClientStatus, LspDiagnostic, LspServerLog, LspServerLogLevel, RelatedLocation, SemanticToken, SemanticTokenLegend, SemanticTokenOverlay } from "../types.ts";
 import { filePathToUri, lspRangeToExternal, type LspRange } from "./positions.ts";
 import type { LanguageServerDefinition } from "./servers.ts";
 
@@ -78,6 +78,27 @@ interface PublishDiagnosticsParams {
   version?: number;
 }
 
+interface SemanticTokenCacheEntry {
+  serverId: string;
+  uri: string;
+  version: number;
+  tokens: SemanticToken[];
+  legend: SemanticTokenLegend;
+  resultId?: string;
+  requestedAt: number;
+  receivedAt: number;
+}
+
+interface RawSemanticTokensResult {
+  resultId?: string;
+  data: number[];
+}
+
+interface SemanticTokensProviderInfo {
+  legend: SemanticTokenLegend;
+  full: boolean;
+}
+
 interface TextDocumentContentChange {
   text: string;
   range?: LspRange;
@@ -95,6 +116,53 @@ export interface TouchDocumentOptions {
   settleMs: number;
 }
 
+export interface SemanticTokensOverlayOptions {
+  waitMs?: number;
+  timeoutMs?: number;
+  forceRefresh?: boolean;
+}
+
+const SEMANTIC_TOKEN_TYPES = [
+  "namespace",
+  "type",
+  "class",
+  "enum",
+  "interface",
+  "struct",
+  "typeParameter",
+  "parameter",
+  "variable",
+  "property",
+  "enumMember",
+  "event",
+  "function",
+  "method",
+  "macro",
+  "keyword",
+  "modifier",
+  "comment",
+  "string",
+  "number",
+  "regexp",
+  "operator",
+  "decorator",
+];
+const SEMANTIC_TOKEN_MODIFIERS = [
+  "declaration",
+  "definition",
+  "readonly",
+  "static",
+  "deprecated",
+  "abstract",
+  "async",
+  "modification",
+  "documentation",
+  "defaultLibrary",
+];
+
+const DEFAULT_SEMANTIC_TOKEN_WAIT_MS = 50;
+const DEFAULT_SEMANTIC_TOKEN_TIMEOUT_MS = 5_000;
+
 export class LspClient {
   readonly id: string;
   readonly root: string;
@@ -109,6 +177,8 @@ export class LspClient {
   private documents = new Map<string, OpenDocument>();
   private diagnostics = new Map<string, DiagnosticEntry>();
   private diagnosticWaiters = new Map<string, Set<DiagnosticWaiter>>();
+  private semanticTokens = new Map<string, SemanticTokenCacheEntry>();
+  private semanticTokenRequests = new Map<string, Promise<SemanticTokenOverlay>>();
   private capabilities: unknown;
   private lastDiagnosticsAt?: number;
   private lastDiagnosticDurationMs?: number;
@@ -181,6 +251,7 @@ export class LspClient {
     }
     this.documents.delete(uri);
     this.diagnostics.delete(uri);
+    this.semanticTokens.delete(uri);
   }
 
   async request(method: string, params?: unknown, timeoutMs = 10_000): Promise<unknown> {
@@ -191,6 +262,56 @@ export class LspClient {
   async requestForDocument(filePath: string, content: string, method: string, params: Record<string, unknown>, timeoutMs = 10_000): Promise<unknown> {
     await this.ensureDocument(filePath, content);
     return this.request(method, params, timeoutMs);
+  }
+
+  async semanticTokensOverlay(filePath: string, content: string, options: SemanticTokensOverlayOptions = {}): Promise<SemanticTokenOverlay> {
+    await this.ensureStarted();
+
+    const document = this.syncDocument(filePath, content);
+    const provider = semanticTokensProvider(this.capabilities);
+    if (!provider?.full) {
+      return {
+        serverId: this.id,
+        uri: document.uri,
+        version: document.version,
+        state: "unsupported",
+        stale: false,
+        tokens: [],
+      };
+    }
+
+    const cached = this.semanticTokens.get(document.uri);
+    if (!options.forceRefresh && cached?.version === document.version) {
+      return semanticTokenOverlayFromCache(cached, "ready", false);
+    }
+
+    const refresh = this.startSemanticTokensRefresh(
+      document,
+      provider,
+      options.timeoutMs ?? DEFAULT_SEMANTIC_TOKEN_TIMEOUT_MS,
+    );
+    const waitMs = Math.max(0, options.waitMs ?? DEFAULT_SEMANTIC_TOKEN_WAIT_MS);
+    if (waitMs > 0) {
+      const fresh = await Promise.race([
+        refresh,
+        sleep(waitMs).then(() => undefined),
+      ]);
+      if (fresh) return fresh;
+    }
+
+    if (cached) {
+      return semanticTokenOverlayFromCache(cached, "refreshing", cached.version !== document.version);
+    }
+
+    return {
+      serverId: this.id,
+      uri: document.uri,
+      version: document.version,
+      state: "refreshing",
+      stale: false,
+      tokens: [],
+      legend: provider.legend,
+    };
   }
 
   getCapabilities(): unknown {
@@ -238,6 +359,8 @@ export class LspClient {
     this.initializePromise = undefined;
     this.documents.clear();
     this.diagnostics.clear();
+    this.semanticTokens.clear();
+    this.semanticTokenRequests.clear();
   }
 
   private async ensureStarted(): Promise<void> {
@@ -311,6 +434,20 @@ export class LspClient {
           documentSymbol: { hierarchicalDocumentSymbolSupport: true },
           codeAction: { isPreferredSupport: true, dataSupport: true, resolveSupport: { properties: ["edit"] } },
           rename: { prepareSupport: true },
+          semanticTokens: {
+            dynamicRegistration: false,
+            requests: { range: true, full: { delta: false } },
+            tokenTypes: SEMANTIC_TOKEN_TYPES,
+            tokenModifiers: SEMANTIC_TOKEN_MODIFIERS,
+            formats: ["relative"],
+            overlappingTokenSupport: true,
+            multilineTokenSupport: true,
+            serverCancelSupport: true,
+            // We fetch semantic tokens lazily and do not let them replace the
+            // renderer's Tree-sitter pass. Ask servers for a complete token set
+            // so a semantic-only inspector does not look like syntax vanished.
+            augmentsSyntaxTokens: false,
+          },
         },
         workspace: {
           applyEdit: false,
@@ -364,6 +501,72 @@ export class LspClient {
     }
 
     return document;
+  }
+
+  private startSemanticTokensRefresh(
+    document: OpenDocument,
+    provider: SemanticTokensProviderInfo,
+    timeoutMs: number,
+  ): Promise<SemanticTokenOverlay> {
+    const existing = this.semanticTokenRequests.get(document.uri);
+    if (existing) return existing;
+
+    const request = this.fetchSemanticTokens(document, provider, timeoutMs)
+      .finally(() => {
+        if (this.semanticTokenRequests.get(document.uri) === request) {
+          this.semanticTokenRequests.delete(document.uri);
+        }
+      });
+    this.semanticTokenRequests.set(document.uri, request);
+    return request;
+  }
+
+  private async fetchSemanticTokens(
+    document: OpenDocument,
+    provider: SemanticTokensProviderInfo,
+    timeoutMs: number,
+  ): Promise<SemanticTokenOverlay> {
+    const requestedAt = Date.now();
+    const requestedVersion = document.version;
+    try {
+      const result = normalizeSemanticTokensResult(await this.sendRequest(
+        "textDocument/semanticTokens/full",
+        { textDocument: { uri: document.uri } },
+        timeoutMs,
+      ));
+      const receivedAt = Date.now();
+      if (!result) throw new Error("semantic token response did not contain token data");
+
+      const entry: SemanticTokenCacheEntry = {
+        serverId: this.id,
+        uri: document.uri,
+        version: requestedVersion,
+        tokens: decodeSemanticTokens(result.data, provider.legend),
+        legend: provider.legend,
+        resultId: result.resultId,
+        requestedAt,
+        receivedAt,
+      };
+
+      const currentVersion = this.documents.get(document.uri)?.version;
+      const stale = currentVersion !== requestedVersion;
+      if (!stale) this.semanticTokens.set(document.uri, entry);
+      return semanticTokenOverlayFromCache(entry, stale ? "refreshing" : "ready", stale);
+    } catch (error) {
+      this.lastError = error instanceof Error ? error.message : String(error);
+      return {
+        serverId: this.id,
+        uri: document.uri,
+        version: requestedVersion,
+        state: "error",
+        stale: false,
+        tokens: [],
+        legend: provider.legend,
+        requestedAt,
+        receivedAt: Date.now(),
+        error: this.lastError,
+      };
+    }
   }
 
   private sendRequest(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
@@ -654,6 +857,95 @@ function inferServerLogLevel(message: string): LspServerLogLevel {
 function readServerCapabilities(initializeResult: unknown): unknown {
   if (!initializeResult || typeof initializeResult !== "object") return undefined;
   return (initializeResult as { capabilities?: unknown }).capabilities;
+}
+
+function semanticTokensProvider(capabilities: unknown): SemanticTokensProviderInfo | undefined {
+  const provider = isRecord(capabilities) ? capabilities.semanticTokensProvider : undefined;
+  if (!isRecord(provider)) return undefined;
+
+  const legend = isRecord(provider.legend) ? provider.legend : undefined;
+  const tokenTypes = stringArray(legend?.tokenTypes);
+  if (tokenTypes.length === 0) return undefined;
+
+  return {
+    legend: {
+      tokenTypes,
+      tokenModifiers: stringArray(legend?.tokenModifiers),
+    },
+    full: provider.full === true || isRecord(provider.full),
+  };
+}
+
+function semanticTokenOverlayFromCache(
+  entry: SemanticTokenCacheEntry,
+  state: SemanticTokenOverlay["state"],
+  stale: boolean,
+): SemanticTokenOverlay {
+  return {
+    serverId: entry.serverId,
+    uri: entry.uri,
+    version: entry.version,
+    state,
+    stale,
+    tokens: entry.tokens,
+    legend: entry.legend,
+    resultId: entry.resultId,
+    requestedAt: entry.requestedAt,
+    receivedAt: entry.receivedAt,
+  };
+}
+
+function normalizeSemanticTokensResult(value: unknown): RawSemanticTokensResult | undefined {
+  if (!isRecord(value)) return undefined;
+  const data = Array.isArray(value.data)
+    ? value.data.filter((entry): entry is number => typeof entry === "number" && Number.isFinite(entry))
+    : undefined;
+  if (!data) return undefined;
+
+  return {
+    resultId: typeof value.resultId === "string" ? value.resultId : undefined,
+    data,
+  };
+}
+
+function decodeSemanticTokens(data: number[], legend: SemanticTokenLegend): SemanticToken[] {
+  const tokens: SemanticToken[] = [];
+  let line = 0;
+  let character = 0;
+
+  for (let index = 0; index + 4 < data.length; index += 5) {
+    const deltaLine = Math.max(0, Math.trunc(data[index]!));
+    const deltaStart = Math.max(0, Math.trunc(data[index + 1]!));
+    const length = Math.max(0, Math.trunc(data[index + 2]!));
+    const tokenTypeIndex = Math.max(0, Math.trunc(data[index + 3]!));
+    const modifierBits = Math.max(0, Math.trunc(data[index + 4]!));
+
+    line += deltaLine;
+    character = deltaLine === 0 ? character + deltaStart : deltaStart;
+    if (length === 0) continue;
+
+    tokens.push({
+      line,
+      character,
+      length,
+      type: legend.tokenTypes[tokenTypeIndex] ?? `token(${tokenTypeIndex})`,
+      modifiers: semanticTokenModifiers(modifierBits, legend.tokenModifiers),
+    });
+  }
+
+  return tokens;
+}
+
+function semanticTokenModifiers(bits: number, tokenModifiers: string[]): string[] {
+  const modifiers: string[] = [];
+  for (let index = 0; index < tokenModifiers.length; index += 1) {
+    if ((bits & (1 << index)) !== 0) modifiers.push(tokenModifiers[index]!);
+  }
+  return modifiers;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 }
 
 function textDocumentChangeSyncKind(capabilities: unknown): TextDocumentSyncKind {

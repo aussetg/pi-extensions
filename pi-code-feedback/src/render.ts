@@ -86,7 +86,7 @@ export function renderCapabilities(runtime: CodeFeedbackRuntime, lspStatus?: Lsp
     "pi-code-feedback / LSP capabilities",
     `  lsp feedback: ${runtime.config.lsp.enabled ? "enabled" : "disabled"}`,
     `  active servers: ${lspStatus?.activeClients ?? 0}`,
-    "  implemented: diagnostics, hover, definition, references, implementation, type_definition, symbols, workspace_symbols, code_actions, rename, capabilities, reload, request",
+    "  implemented: diagnostics, hover, definition, references, implementation, type_definition, symbols, workspace_symbols, semantic_tokens, code_actions, rename, capabilities, reload, request",
   ];
 
   if (lspStatus && lspStatus.clients.length > 0) {

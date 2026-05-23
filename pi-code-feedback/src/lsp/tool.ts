@@ -97,6 +97,13 @@ export function registerLspTool(pi: PiApi, runtime: CodeFeedbackRuntime, lspServ
         case "workspace_symbols":
           return rawOrPretty(params, await lspService.workspaceSymbols(params.query, readPath(params)), runtime.projectRoot);
 
+        case "semantic_tokens":
+          return rawOrPretty(params, await lspService.semanticTokens(requirePath(params), {
+            waitMs: readNonNegativeNumber(params.waitMs),
+            timeoutMs: readNonNegativeNumber(params.timeoutMs),
+            forceRefresh: params.refresh === true,
+          }), runtime.projectRoot);
+
         case "code_actions":
           return handleCodeActions(params, runtime, lspService);
 
@@ -137,6 +144,9 @@ const LspToolParameters = {
     apply: { type: "boolean", description: "Apply safe text edits for rename or the selected code action. Resource operations are rejected." },
     all: { type: "boolean", description: "For diagnostics, include all diagnostics instead of touched/provenance-filtered diagnostics." },
     raw: { type: "boolean", description: "Return raw LSP-ish payloads when useful for debugging." },
+    waitMs: { type: "number", description: "Milliseconds to wait for lazy semantic tokens before returning cached/stale overlay state." },
+    timeoutMs: { type: "number", description: "Request timeout in milliseconds for semantic token refreshes." },
+    refresh: { type: "boolean", description: "Force a semantic token refresh even when cached tokens match the current document version." },
     request: { type: "string", description: "Raw LSP request method for action=request." },
     params: { description: "Raw LSP request params for action=request." },
   },
@@ -206,6 +216,10 @@ function requirePath(params: Record<string, unknown>): string {
   const filePath = readPath(params);
   if (!filePath) throw new Error("lsp action requires path");
   return filePath;
+}
+
+function readNonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 function rawOrPretty(params: Record<string, unknown>, result: unknown, projectRoot: string): PiToolResult {

@@ -56,6 +56,8 @@ if (args.live) {
   scenarioSpecs.push(["lsp/typescript-hover", () => runTypeScriptHoverScenario(Math.max(5, Math.ceil(baseIterations / 2)))]);
   scenarioSpecs.push(["lsp/typescript-cancel", () => runTypeScriptCancelScenario(Math.max(5, Math.ceil(baseIterations / 2)))]);
   scenarioSpecs.push(["lsp/typescript-diagnostics-queue", () => runTypeScriptDiagnosticsQueueScenario(Math.max(5, Math.ceil(baseIterations / 2)))]);
+  scenarioSpecs.push(["lsp/typescript-semantic-blocking", () => runTypeScriptSemanticBlockingScenario(Math.max(5, Math.ceil(baseIterations / 2)))]);
+  scenarioSpecs.push(["lsp/typescript-semantic-overlay", () => runTypeScriptSemanticOverlayScenario(Math.max(5, Math.ceil(baseIterations / 2)))]);
 }
 
 for (const [name, run] of scenarioSpecs) {
@@ -568,6 +570,117 @@ async function runTypeScriptDiagnosticsQueueScenario(iterations) {
   }
 }
 
+async function runTypeScriptSemanticBlockingScenario(iterations) {
+  if (!fs.existsSync(tsLanguageServer)) {
+    return {
+      name: "lsp/typescript-semantic-blocking",
+      iterations: 0,
+      skipped: true,
+      notes: `missing ${path.relative(repoRoot, tsLanguageServer)}`,
+      metrics: [],
+    };
+  }
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-perf-ts-semantic-blocking-"));
+  const filePath = path.join(root, "probe.ts");
+  const logPath = path.join(root, "lsp-proxy.jsonl");
+  const itemCount = 250;
+  let version = 0;
+  await writeFile(path.join(root, "package.json"), JSON.stringify({ type: "module", devDependencies: { typescript: "^5.9.3" } }, null, 2), "utf8");
+  await writeFile(path.join(root, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true, noEmit: true } }, null, 2), "utf8");
+  await writeFile(filePath, makeTsSemanticContent(version, itemCount), "utf8");
+  await writeFile(logPath, "", "utf8");
+
+  const uri = pathToFileUri(filePath);
+  const client = new LspClient({
+    id: "typescript",
+    command: process.execPath,
+    args: [lspStdioProxy, logPath, "--", tsLanguageServer, "--stdio"],
+    extensions: [".ts"],
+    languageId: () => "typescript",
+  }, root);
+
+  try {
+    return await runScenario({
+      name: "lsp/typescript-semantic-blocking",
+      iterations,
+      warmup: 1,
+      notes: `real typescript-language-server; ~${itemCount * 5}-line semantic-heavy file; simulates semantic tokens as primary blocking highlighting`,
+      beforeMeasure: () => fs.writeFileSync(logPath, "", "utf8"),
+      counters: () => summarizeLspProxyCounters(logPath),
+      resources: () => lspClientRootPids(client),
+      operation: async () => {
+        version += 1;
+        const content = makeTsSemanticContent(version, itemCount);
+        await writeFile(filePath, content, "utf8");
+        const tokens = await timed("semantic_tokens", () => client.requestForDocument(filePath, content, "textDocument/semanticTokens/full", {
+          textDocument: { uri },
+        }, 5000));
+        assertSemanticTokensResult(tokens.value);
+        return withTotal([tokens]);
+      },
+    });
+  } finally {
+    await client.shutdown();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function runTypeScriptSemanticOverlayScenario(iterations) {
+  if (!fs.existsSync(tsLanguageServer)) {
+    return {
+      name: "lsp/typescript-semantic-overlay",
+      iterations: 0,
+      skipped: true,
+      notes: `missing ${path.relative(repoRoot, tsLanguageServer)}`,
+      metrics: [],
+    };
+  }
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-perf-ts-semantic-overlay-"));
+  const filePath = path.join(root, "probe.ts");
+  const logPath = path.join(root, "lsp-proxy.jsonl");
+  const itemCount = 250;
+  const content = makeTsSemanticContent(0, itemCount);
+  await writeFile(path.join(root, "package.json"), JSON.stringify({ type: "module", devDependencies: { typescript: "^5.9.3" } }, null, 2), "utf8");
+  await writeFile(path.join(root, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true, noEmit: true } }, null, 2), "utf8");
+  await writeFile(filePath, content, "utf8");
+  await writeFile(logPath, "", "utf8");
+
+  const lspService = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      typescript: {
+        command: process.execPath,
+        args: [lspStdioProxy, logPath, "--", tsLanguageServer, "--stdio"],
+      },
+    },
+  });
+
+  try {
+    const primed = await lspService.semanticTokens(filePath, { waitMs: 5000, timeoutMs: 5000, forceRefresh: true });
+    assertSemanticOverlayReady(primed);
+
+    return await runScenario({
+      name: "lsp/typescript-semantic-overlay",
+      iterations,
+      notes: `real typescript-language-server; ~${itemCount * 5}-line semantic-heavy file; foreground reads cached semantic-token overlay after async warmup`,
+      beforeMeasure: () => fs.writeFileSync(logPath, "", "utf8"),
+      counters: () => summarizeLspProxyCounters(logPath),
+      resources: () => lspRootPids(lspService),
+      operation: async () => {
+        const overlay = await timed("semantic_overlay", () => lspService.semanticTokens(filePath, { waitMs: 0, timeoutMs: 5000 }));
+        assertSemanticOverlayReady(overlay.value);
+        return withTotal([overlay]);
+      },
+    });
+  } finally {
+    await lspService.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 function makeRuntime(root, options) {
   const config = createDefaultConfig();
   config.enabled = options.enabled;
@@ -705,6 +818,20 @@ function assertHoverResult(result) {
   if (!markupHasText(result?.contents)) throw new Error("benchmark sanity check failed: expected a hover result");
 }
 
+function assertSemanticTokensResult(result) {
+  if (!result || typeof result !== "object" || !Array.isArray(result.data) || result.data.length === 0) {
+    throw new Error("benchmark sanity check failed: expected semantic token data");
+  }
+}
+
+function assertSemanticOverlayReady(result) {
+  const overlays = result && typeof result === "object" && Array.isArray(result.servers)
+    ? result.servers
+    : [result];
+  const ready = overlays.some((overlay) => overlay && typeof overlay === "object" && overlay.state === "ready" && Array.isArray(overlay.tokens) && overlay.tokens.length > 0);
+  if (!ready) throw new Error("benchmark sanity check failed: expected a ready semantic token overlay");
+}
+
 function markupHasText(value) {
   if (typeof value === "string") return value.trim().length > 0;
   if (Array.isArray(value)) return value.some(markupHasText);
@@ -788,6 +915,8 @@ function summarizeLspProxyCounters(logPath, options = {}) {
   const didSave = clientMessages.filter((event) => event.method === "textDocument/didSave");
   const hover = clientMessages.filter((event) => event.method === "textDocument/hover");
   const references = clientMessages.filter((event) => event.method === "textDocument/references");
+  const semanticTokens = clientMessages.filter((event) => typeof event.method === "string" && event.method.startsWith("textDocument/semanticTokens"));
+  const semanticTokenResponses = serverMessages.filter((event) => typeof event.requestMethod === "string" && event.requestMethod.startsWith("textDocument/semanticTokens"));
   const cancellations = clientMessages.filter((event) => event.method === "$/cancelRequest");
   const didChangeBytes = sumNumbers(didChange.map((event) => event.bodyBytes));
   const documentSyncMessages = [...didOpen, ...didChange, ...didSave];
@@ -804,6 +933,11 @@ function summarizeLspProxyCounters(logPath, options = {}) {
     lspHoverBytes: sumNumbers(hover.map((event) => event.bodyBytes)),
     lspReferencesCount: references.length,
     lspReferencesBytes: sumNumbers(references.map((event) => event.bodyBytes)),
+    lspSemanticTokensCount: semanticTokens.length,
+    lspSemanticTokensBytes: sumNumbers(semanticTokens.map((event) => event.bodyBytes)),
+    lspSemanticTokensResponseCount: semanticTokenResponses.length,
+    lspSemanticTokensResponseBytes: sumNumbers(semanticTokenResponses.map((event) => event.bodyBytes)),
+    lspSemanticTokensDataIntegers: sumNumbers(semanticTokenResponses.map((event) => event.resultDataCount)),
     lspCancelCount: cancellations.length,
     lspCancelBytes: sumNumbers(cancellations.map((event) => event.bodyBytes)),
     lspCancelledResponseCount: serverMessages.filter((event) => event.errorCode === -32800).length,
@@ -874,6 +1008,25 @@ function makeTsErrorContent(version, lineCount) {
   for (let line = 2; line <= lineCount; line += 1) {
     lines.push(`export const filler${line}: number = ${line};`);
   }
+  return `${lines.join("\n")}\n`;
+}
+
+function makeTsSemanticContent(version, lineCount) {
+  const lines = [
+    "type Payload = { id: number; label: string; enabled: boolean };",
+    "export class SemanticRegistry {",
+    "  private values = new Map<number, Payload>();",
+  ];
+  for (let index = 0; index < lineCount; index += 1) {
+    const value = index === 0 ? version : index;
+    lines.push(`  item${index}(): Payload {`);
+    lines.push(`    const payload: Payload = { id: ${value}, label: "item-${index}", enabled: ${index % 2 === 0 ? "true" : "false"} };`);
+    lines.push("    this.values.set(payload.id, payload);");
+    lines.push("    return payload;");
+    lines.push("  }");
+  }
+  lines.push("}");
+  lines.push("export const registry = new SemanticRegistry();");
   return `${lines.join("\n")}\n`;
 }
 
