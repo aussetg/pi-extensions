@@ -15,7 +15,11 @@ import {
   lineBarColors,
   lineNumberBg,
 } from "./gutter.ts";
-import { buildPiHighlightedDiff, hasHighlightedLines } from "./highlight.ts";
+import {
+  buildPiHighlightedDiff,
+  hasHighlightedLines,
+  loadHighlightedDiff,
+} from "./highlight.ts";
 import { buildCachedDiffRows, lineNumberWidthFor } from "./rows.ts";
 import {
   getPierreRendererConfig,
@@ -115,6 +119,7 @@ export class PierreInlineDiffComponent implements Component {
   private invalidateView: (() => void) | undefined;
   private highlightedByKey = new Map<string, HighlightedDiffSet>();
   private piHighlightedByKey = globalPiHighlightCache();
+  private piHighlightFallbacksByKey = new Set<string>();
   private renderedKey: string | undefined;
   private renderedLines: string[] | undefined;
 
@@ -325,7 +330,26 @@ export class PierreInlineDiffComponent implements Component {
     }
     if (hasHighlightedLines(piHighlighted)) return piHighlighted;
 
+    this.scheduleAsyncHighlightFallback(piKey, payload);
+
     return emptyHighlightedDiffSet();
+  }
+
+  private scheduleAsyncHighlightFallback(
+    piKey: string,
+    payload: PierreDiffPayload,
+  ): void {
+    if (this.piHighlightFallbacksByKey.has(piKey)) return;
+    this.piHighlightFallbacksByKey.add(piKey);
+
+    void loadHighlightedDiff(payload.metadata, this.config, this.theme)
+      .then((highlighted) => {
+        if (!hasHighlightedLines(highlighted)) return;
+        this.piHighlightedByKey.set(piKey, highlighted);
+        this.clearRenderedCache();
+        this.invalidateView?.();
+      })
+      .catch(() => undefined);
   }
 
   private ingestHighlightedPayloads(): void {

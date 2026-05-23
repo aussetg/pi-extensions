@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { fork, type ChildProcess } from "node:child_process";
 import type { PierreRendererConfig } from "./config.ts";
 import type { PiThemeLike, PierreTerminalPalette } from "./theme.ts";
 import type {
@@ -21,7 +21,7 @@ export async function loadHighlightedDiff(
   config: PierreRendererConfig,
   theme?: PiThemeLike,
 ): Promise<HighlightedDiffSet> {
-  return buildPiHighlightedDiff(metadata, config, theme);
+  return buildPiHighlightedDiffAsync(metadata, config, theme);
 }
 
 export function buildPiHighlightedDiff(
@@ -39,6 +39,37 @@ export function buildPiHighlightedDiff(
 
   const lang = metadata.lang ?? "text";
   const treeSitter = buildTreeSitterHighlightedDiff(
+    metadata,
+    indexes,
+    lang,
+    config,
+  );
+  if (treeSitter?.styled) {
+    const highlighted = {
+      deletionLines: treeSitter.deletionLines,
+      additionLines: treeSitter.additionLines,
+    };
+    return { dark: highlighted, light: highlighted };
+  }
+
+  return emptyHighlightedDiffSet();
+}
+
+async function buildPiHighlightedDiffAsync(
+  metadata: FileDiffMetadata,
+  config: PierreRendererConfig,
+  _theme?: PiThemeLike,
+): Promise<HighlightedDiffSet> {
+  if (!config.syntaxHighlight.enabled) return emptyHighlightedDiffSet();
+
+  const indexes = renderedLineIndexes(metadata);
+  const lineCount = indexes.deletion.length + indexes.addition.length;
+  if (lineCount === 0 || lineCount > config.syntaxHighlight.maxLines) {
+    return emptyHighlightedDiffSet();
+  }
+
+  const lang = metadata.lang ?? "text";
+  const treeSitter = await buildTreeSitterHighlightedDiffAsync(
     metadata,
     indexes,
     lang,
@@ -177,6 +208,25 @@ type TreeSitterWorkerHighlightJob = {
   lines: string[];
   indexes: number[];
 };
+type TreeSitterWorkerResponse = {
+  id?: number;
+  jobs?: Array<{ captures?: unknown }>;
+  error?: string;
+};
+type TimerHandle = ReturnType<typeof setTimeout> & {
+  ref?: () => void;
+  unref?: () => void;
+};
+type PendingTreeSitterWorkerRequest = {
+  resolve: (value: TreeSitterWorkerResponse | undefined) => void;
+  timeout: TimerHandle;
+};
+type TreeSitterWorkerClient = {
+  child: ChildProcess;
+  nextId: number;
+  pending: Map<number, PendingTreeSitterWorkerRequest>;
+  idleTimer?: TimerHandle;
+};
 type PreparedTreeSitterLines = {
   cleanLines: string[];
   lineStyles: Map<number, Array<SyntaxCategory | undefined>>;
@@ -196,12 +246,15 @@ const TREE_SITTER_QUERY_RANGE_GAP = 2;
 const TREE_SITTER_QUERY_RANGE_END_COLUMN = 0x7fffffff;
 const TREE_SITTER_QUERY_FULL_COVERAGE_NUMERATOR = 3;
 const TREE_SITTER_QUERY_FULL_COVERAGE_DENOMINATOR = 4;
+const TREE_SITTER_WORKER_IDLE_MS = 10_000;
+const DEFAULT_TREE_SITTER_WORKER_TIMEOUT_MS = 5_000;
 let treeSitterRuntime: TreeSitterRuntime | null | undefined;
 const treeSitterQueryCache = new Map<string, TreeSitterQuery>();
 const syntaxStyleByCaptureName = Object.create(null) as Record<
   string,
   CaptureStyle | null | undefined
 >;
+let treeSitterWorkerClient: TreeSitterWorkerClient | undefined;
 
 const TREE_SITTER_LANGUAGE_SPECS: TreeSitterLanguageSpec[] = [
   {
@@ -278,61 +331,100 @@ function buildTreeSitterHighlightedDiff(
   const runtime = getTreeSitterRuntime();
   const language = runtime?.languages.get(languageKey);
   const querySource = runtime?.queries.get(languageKey);
-  const workerJobs: TreeSitterWorkerHighlightJob[] = [];
+  if (!runtime || !language || !querySource) return undefined;
+
+  const deletion = highlightTreeSitterLines(
+    runtime,
+    languageKey,
+    language,
+    querySource,
+    metadata.deletionLines,
+    indexes.deletion,
+    config,
+  );
+  const addition = highlightTreeSitterLines(
+    runtime,
+    languageKey,
+    language,
+    querySource,
+    metadata.additionLines,
+    indexes.addition,
+    config,
+  );
+
+  if (!deletion.styled && !addition.styled) return undefined;
+  return {
+    deletionLines: deletion.lines,
+    additionLines: addition.lines,
+    styled: true,
+  };
+}
+
+async function buildTreeSitterHighlightedDiffAsync(
+  metadata: FileDiffMetadata,
+  indexes: { deletion: number[]; addition: number[] },
+  lang: string,
+  config: PierreRendererConfig,
+): Promise<
+  | {
+      deletionLines: Array<HastNode | undefined>;
+      additionLines: Array<HastNode | undefined>;
+      styled: boolean;
+    }
+  | undefined
+> {
+  const languageKey = treeSitterLanguageKey(lang);
+  if (!languageKey) return undefined;
+
   let deletion = emptyHighlightLineResult();
   let addition = emptyHighlightLineResult();
+  const workerJobs: TreeSitterWorkerHighlightJob[] = [];
+  const forceWorker = envValue("PI_TREE_SITTER_FORCE_WORKER") === "1";
 
-  if (runtime && language && querySource) {
-    deletion = highlightTreeSitterLines(
-      runtime,
-      languageKey,
-      language,
-      querySource,
-      metadata.deletionLines,
-      indexes.deletion,
-      config,
-    );
-    addition = highlightTreeSitterLines(
-      runtime,
-      languageKey,
-      language,
-      querySource,
-      metadata.additionLines,
-      indexes.addition,
-      config,
-    );
+  if (!forceWorker) {
+    const runtime = getTreeSitterRuntime();
+    const language = runtime?.languages.get(languageKey);
+    const querySource = runtime?.queries.get(languageKey);
 
-    if (!deletion.styled) {
-      workerJobs.push({
-        side: "deletion",
-        lines: metadata.deletionLines,
-        indexes: indexes.deletion,
-      });
+    if (runtime && language && querySource) {
+      deletion = highlightTreeSitterLines(
+        runtime,
+        languageKey,
+        language,
+        querySource,
+        metadata.deletionLines,
+        indexes.deletion,
+        config,
+      );
+      addition = highlightTreeSitterLines(
+        runtime,
+        languageKey,
+        language,
+        querySource,
+        metadata.additionLines,
+        indexes.addition,
+        config,
+      );
     }
-    if (!addition.styled) {
-      workerJobs.push({
-        side: "addition",
-        lines: metadata.additionLines,
-        indexes: indexes.addition,
-      });
-    }
-  } else {
-    workerJobs.push(
-      {
-        side: "deletion",
-        lines: metadata.deletionLines,
-        indexes: indexes.deletion,
-      },
-      {
-        side: "addition",
-        lines: metadata.additionLines,
-        indexes: indexes.addition,
-      },
-    );
+  }
+
+  if (!deletion.styled) {
+    workerJobs.push({
+      side: "deletion",
+      lines: metadata.deletionLines,
+      indexes: indexes.deletion,
+    });
+  }
+  if (!addition.styled) {
+    workerJobs.push({
+      side: "addition",
+      lines: metadata.additionLines,
+      indexes: indexes.addition,
+    });
   }
 
   if (workerJobs.length > 0) {
-    const workerResults = highlightTreeSitterLinesWithWorkerBatch(
+    const workerResults = await highlightTreeSitterLinesWithWorkerBatch(
       languageKey,
       workerJobs,
       config,
@@ -502,11 +594,11 @@ function highlightTreeSitterLines(
   return highlightedLinesFromStyles(cleanLines, lineStyles);
 }
 
-function highlightTreeSitterLinesWithWorkerBatch(
+async function highlightTreeSitterLinesWithWorkerBatch(
   languageKey: string,
   jobs: TreeSitterWorkerHighlightJob[],
   config: PierreRendererConfig,
-): Map<TreeSitterDiffSide, HighlightLineResult> {
+): Promise<Map<TreeSitterDiffSide, HighlightLineResult>> {
   const results = new Map<TreeSitterDiffSide, HighlightLineResult>();
   const preparedJobs: PreparedTreeSitterWorkerJob[] = [];
 
@@ -527,7 +619,7 @@ function highlightTreeSitterLinesWithWorkerBatch(
 
   if (preparedJobs.length === 0) return results;
 
-  const captureSets = treeSitterWorkerCapturesBatch(
+  const captureSets = await treeSitterWorkerCapturesBatch(
     languageKey,
     preparedJobs.map((job) => ({
       lines: job.cleanLines,
@@ -695,40 +787,173 @@ function captureOverlapsStyledLine(
   return false;
 }
 
-function treeSitterWorkerCapturesBatch(
+async function treeSitterWorkerCapturesBatch(
   languageKey: string,
   jobs: Array<{ lines: string[]; indexes: number[] }>,
-): Array<TreeSitterCapture[] | undefined> | undefined {
+): Promise<Array<TreeSitterCapture[] | undefined> | undefined> {
   if (jobs.length === 0) return [];
 
   try {
-    const result = spawnSync(
-      process.env.PI_TREE_SITTER_NODE ?? "node",
-      [treeSitterWorkerPath],
-      {
-        input: JSON.stringify({ languageKey, jobs }),
-        encoding: "utf8",
-        maxBuffer: 16 * 1024 * 1024,
-      },
+    return normalizeTreeSitterWorkerJobs(
+      await treeSitterWorkerRequest(languageKey, jobs),
     );
-    if (result.status !== 0 || !result.stdout) return undefined;
-
-    const parsed = JSON.parse(result.stdout) as unknown;
-    if (!parsed || typeof parsed !== "object") return undefined;
-    const parsedJobs = (parsed as { jobs?: unknown }).jobs;
-    if (!Array.isArray(parsedJobs)) return undefined;
-
-    return parsedJobs.map((job) => {
-      if (!job || typeof job !== "object") return undefined;
-      const captures = (job as { captures?: unknown }).captures;
-      if (!Array.isArray(captures)) return undefined;
-      return captures
-        .map(normalizeWorkerCapture)
-        .filter((capture): capture is TreeSitterCapture => Boolean(capture));
-    });
   } catch {
     return undefined;
   }
+}
+
+function normalizeTreeSitterWorkerJobs(
+  response: TreeSitterWorkerResponse | undefined,
+): Array<TreeSitterCapture[] | undefined> | undefined {
+  if (!response || !Array.isArray(response.jobs)) return undefined;
+  return response.jobs.map((job) => {
+    if (!job || typeof job !== "object") return undefined;
+    const captures = (job as { captures?: unknown }).captures;
+    if (!Array.isArray(captures)) return undefined;
+    return captures
+      .map(normalizeWorkerCapture)
+      .filter((capture): capture is TreeSitterCapture => Boolean(capture));
+  });
+}
+
+function treeSitterWorkerRequest(
+  languageKey: string,
+  jobs: Array<{ lines: string[]; indexes: number[] }>,
+): Promise<TreeSitterWorkerResponse | undefined> {
+  const client = getTreeSitterWorkerClient();
+  const child = client.child;
+  const requestId = client.nextId++;
+
+  refTreeSitterWorker(client);
+  if (client.idleTimer) clearTimeout(client.idleTimer);
+  client.idleTimer = undefined;
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      client.pending.delete(requestId);
+      resolve(undefined);
+      restartTreeSitterWorker(client);
+    }, treeSitterWorkerTimeoutMs()) as TimerHandle;
+    timeout.unref?.();
+
+    client.pending.set(requestId, { resolve, timeout });
+
+    try {
+      child.send?.({ id: requestId, languageKey, jobs }, (error: Error | null) => {
+        if (!error) return;
+        const pending = client.pending.get(requestId);
+        if (!pending) return;
+        clearTimeout(pending.timeout);
+        client.pending.delete(requestId);
+        pending.resolve(undefined);
+        maybeUnrefTreeSitterWorker(client);
+      });
+    } catch {
+      const pending = client.pending.get(requestId);
+      if (!pending) return;
+      clearTimeout(pending.timeout);
+      client.pending.delete(requestId);
+      pending.resolve(undefined);
+      maybeUnrefTreeSitterWorker(client);
+    }
+  });
+}
+
+function getTreeSitterWorkerClient(): TreeSitterWorkerClient {
+  if (treeSitterWorkerClient) return treeSitterWorkerClient;
+
+  const execPath = treeSitterWorkerNodePath();
+  const child = fork(treeSitterWorkerPath, [], {
+    ...(execPath ? { execPath } : {}),
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
+  });
+  const client: TreeSitterWorkerClient = {
+    child,
+    nextId: 1,
+    pending: new Map(),
+  };
+  treeSitterWorkerClient = client;
+
+  child.on("message", (message: unknown) => {
+    const response = normalizeTreeSitterWorkerResponse(message);
+    if (!response || typeof response.id !== "number") return;
+
+    const pending = client.pending.get(response.id);
+    if (!pending) return;
+    clearTimeout(pending.timeout);
+    client.pending.delete(response.id);
+    pending.resolve(response.error ? undefined : response);
+    maybeUnrefTreeSitterWorker(client);
+  });
+  child.on("exit", () => {
+    if (treeSitterWorkerClient === client) treeSitterWorkerClient = undefined;
+    for (const pending of client.pending.values()) {
+      clearTimeout(pending.timeout);
+      pending.resolve(undefined);
+    }
+    client.pending.clear();
+  });
+  child.on("error", () => {
+    restartTreeSitterWorker(client);
+  });
+
+  maybeUnrefTreeSitterWorker(client);
+  return client;
+}
+
+function normalizeTreeSitterWorkerResponse(
+  message: unknown,
+): TreeSitterWorkerResponse | undefined {
+  if (!message || typeof message !== "object") return undefined;
+  const response = message as TreeSitterWorkerResponse;
+  if (response.id !== undefined && typeof response.id !== "number") return undefined;
+  return response;
+}
+
+function restartTreeSitterWorker(client: TreeSitterWorkerClient): void {
+  if (treeSitterWorkerClient === client) treeSitterWorkerClient = undefined;
+  if (client.idleTimer) clearTimeout(client.idleTimer);
+  for (const pending of client.pending.values()) {
+    clearTimeout(pending.timeout);
+    pending.resolve(undefined);
+  }
+  client.pending.clear();
+  client.child.kill();
+}
+
+function refTreeSitterWorker(client: TreeSitterWorkerClient): void {
+  client.child.ref?.();
+  client.child.channel?.ref?.();
+}
+
+function maybeUnrefTreeSitterWorker(client: TreeSitterWorkerClient): void {
+  if (client.pending.size > 0) return;
+  client.child.unref?.();
+  client.child.channel?.unref?.();
+
+  if (client.idleTimer) clearTimeout(client.idleTimer);
+  client.idleTimer = setTimeout(() => {
+    if (client.pending.size === 0) restartTreeSitterWorker(client);
+  }, TREE_SITTER_WORKER_IDLE_MS) as TimerHandle;
+  client.idleTimer.unref?.();
+}
+
+function treeSitterWorkerNodePath(): string | undefined {
+  return envValue("PI_TREE_SITTER_NODE");
+}
+
+function treeSitterWorkerTimeoutMs(): number {
+  const raw = envValue("PI_TREE_SITTER_WORKER_TIMEOUT_MS");
+  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_TREE_SITTER_WORKER_TIMEOUT_MS;
+}
+
+function envValue(name: string): string | undefined {
+  return (globalThis as typeof globalThis & {
+    process?: { env?: Record<string, string | undefined> };
+  }).process?.env?.[name];
 }
 
 function normalizeWorkerCapture(value: unknown): TreeSitterCapture | undefined {

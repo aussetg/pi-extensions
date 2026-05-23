@@ -3,6 +3,7 @@ const TREE_SITTER_QUERY_RANGE_GAP = 2;
 const TREE_SITTER_QUERY_RANGE_END_COLUMN = 0x7fffffff;
 const TREE_SITTER_QUERY_FULL_COVERAGE_NUMERATOR = 3;
 const TREE_SITTER_QUERY_FULL_COVERAGE_DENOMINATOR = 4;
+const runtimes = new Map();
 
 const LANGUAGE_SPECS = [
   spec("javascript", "tree-sitter-javascript"),
@@ -58,6 +59,9 @@ function readInput() {
 }
 
 function loadLanguage(languageKey) {
+  const cached = runtimes.get(languageKey);
+  if (cached) return cached;
+
   const Parser = require("tree-sitter");
   const languageSpec = LANGUAGE_SPECS.find((spec) => spec.key === languageKey);
   if (languageSpec) {
@@ -68,7 +72,12 @@ function loadLanguage(languageKey) {
     const querySource = languageSpec.queryPaths
       .map(readQuerySource)
       .join("\n");
-    return { Parser, language, querySource };
+    const query = new Parser.Query(language, querySource);
+    const parser = new Parser();
+    parser.setLanguage(language);
+    const runtime = { Parser, language, querySource, query, parser };
+    runtimes.set(languageKey, runtime);
+    return runtime;
   }
 
   throw new Error(`Unsupported language: ${languageKey}`);
@@ -193,13 +202,11 @@ function normalizeJob(input) {
   };
 }
 
-function capturesForJob(Parser, language, query, job) {
+function capturesForJob(runtime, job) {
   const visible = new Set(job.indexes.filter((index) => Number.isInteger(index)));
-  const parser = new Parser();
-  parser.setLanguage(language);
-  const tree = parser.parse(job.lines.join("\n"));
+  const tree = runtime.parser.parse(job.lines.join("\n"));
   return queryCapturesForIndexes(
-    query,
+    runtime.query,
     tree.rootNode,
     [...visible],
     job.lines.length,
@@ -214,30 +221,48 @@ function capturesForJob(Parser, language, query, job) {
     }));
 }
 
-function main() {
-  const input = readInput();
+function handleInput(input) {
   const languageKey = input.languageKey;
   const isBatch = Array.isArray(input.jobs);
   const jobs = isBatch ? input.jobs.map(normalizeJob) : [normalizeJob(input)];
 
-  const { Parser, language, querySource } = loadLanguage(languageKey);
-  const query = new Parser.Query(language, querySource);
+  const runtime = loadLanguage(languageKey);
   const results = jobs.map((job) => {
-    if (!isBatch) return { captures: capturesForJob(Parser, language, query, job) };
+    if (!isBatch) return { captures: capturesForJob(runtime, job) };
     try {
-      return { captures: capturesForJob(Parser, language, query, job) };
+      return { captures: capturesForJob(runtime, job) };
     } catch {
       return { captures: [] };
     }
   });
 
-  process.stdout.write(
-    JSON.stringify(isBatch ? { jobs: results } : { captures: results[0].captures }),
-  );
+  return isBatch ? { jobs: results } : { captures: results[0].captures };
+}
+
+function main() {
+  const input = readInput();
+
+  process.stdout.write(JSON.stringify(handleInput(input)));
+}
+
+function mainIpc() {
+  process.on("message", (input) => {
+    const id = input && typeof input === "object" ? input.id : undefined;
+    try {
+      process.send({ id, ...handleInput(input) });
+    } catch (err) {
+      process.send({
+        id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+  process.on("disconnect", () => process.exit(0));
 }
 
 try {
-  main();
+  if (process.send) mainIpc();
+  else main();
 } catch (err) {
   process.stderr.write(`${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
   process.exit(1);

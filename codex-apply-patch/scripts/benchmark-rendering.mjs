@@ -2,7 +2,10 @@ import { spawnSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { renderAnsiSegments } from "../src/pierre/ansi.ts";
-import { buildPiHighlightedDiff } from "../src/pierre/highlight.ts";
+import {
+  buildPiHighlightedDiff,
+  loadHighlightedDiff,
+} from "../src/pierre/highlight.ts";
 import { DEFAULT_PIERRE_RENDERER_CONFIG } from "../src/pierre/config.ts";
 import { buildCachedDiffRows, buildDiffRows } from "../src/pierre/rows.ts";
 import { getPierrePalette } from "../src/pierre/theme.ts";
@@ -116,8 +119,14 @@ const singleWorker = measure(
   workerIterations,
 );
 const batchWorker = measure(
-  "one batch spawn",
+  "blocking batch spawn",
   () => workerBatchCaptures("typescript", workerJobs),
+  workerIterations,
+);
+await forceTreeSitterWorker(() => loadHighlightedDiff(workerMetadata, config));
+const persistentWorker = await measureAsync(
+  "persistent async worker",
+  () => forceTreeSitterWorker(() => loadHighlightedDiff(workerMetadata, config)),
   workerIterations,
 );
 
@@ -127,12 +136,13 @@ console.log(
 console.table([
   formatResult(singleWorker),
   formatResult(batchWorker),
+  formatResult(persistentWorker),
   {
     name: "delta",
-    "wall ms": (batchWorker.wallMs - singleWorker.wallMs).toFixed(1),
-    "cpu ms": (batchWorker.cpuMs - singleWorker.cpuMs).toFixed(1),
-    "heap MiB": (batchWorker.heapMiB - singleWorker.heapMiB).toFixed(2),
-    speedup: `${(singleWorker.wallMs / batchWorker.wallMs).toFixed(2)}×`,
+    "wall ms": (persistentWorker.wallMs - batchWorker.wallMs).toFixed(1),
+    "cpu ms": (persistentWorker.cpuMs - batchWorker.cpuMs).toFixed(1),
+    "heap MiB": (persistentWorker.heapMiB - batchWorker.heapMiB).toFixed(2),
+    speedup: `${(batchWorker.wallMs / persistentWorker.wallMs).toFixed(2)}×`,
   },
 ]);
 
@@ -181,6 +191,36 @@ function measure(name, fn, count = iterations) {
     cpuMs: (cpu.user + cpu.system) / 1000,
     heapMiB: (heapAfter - heapBefore) / 1024 / 1024,
   };
+}
+
+async function measureAsync(name, fn, count = iterations) {
+  if (global.gc) global.gc();
+  const heapBefore = process.memoryUsage().heapUsed;
+  const cpuBefore = process.cpuUsage();
+  const wallBefore = performance.now();
+
+  for (let i = 0; i < count; i++) await fn();
+
+  const wallMs = performance.now() - wallBefore;
+  const cpu = process.cpuUsage(cpuBefore);
+  const heapAfter = process.memoryUsage().heapUsed;
+  return {
+    name,
+    wallMs,
+    cpuMs: (cpu.user + cpu.system) / 1000,
+    heapMiB: (heapAfter - heapBefore) / 1024 / 1024,
+  };
+}
+
+async function forceTreeSitterWorker(fn) {
+  const previous = process.env.PI_TREE_SITTER_FORCE_WORKER;
+  process.env.PI_TREE_SITTER_FORCE_WORKER = "1";
+  try {
+    return await fn();
+  } finally {
+    if (previous === undefined) delete process.env.PI_TREE_SITTER_FORCE_WORKER;
+    else process.env.PI_TREE_SITTER_FORCE_WORKER = previous;
+  }
 }
 
 function workerCaptures(languageKey, lines, indexes) {

@@ -9,6 +9,7 @@ import { continuationPrefixSegments } from "../src/pierre/gutter.ts";
 import {
   buildPiHighlightedDiff,
   hasHighlightedLines,
+  loadHighlightedDiff,
 } from "../src/pierre/highlight.ts";
 import { DEFAULT_PIERRE_RENDERER_CONFIG } from "../src/pierre/config.ts";
 import { buildCachedDiffRows, buildDiffRows } from "../src/pierre/rows.ts";
@@ -351,6 +352,21 @@ test("tree-sitter worker batch output matches single-job output", () => {
     sortedCaptureKeys(batch[1]),
     sortedCaptureKeys(workerCaptures("typescript", additionLines, additionIndexes)),
   );
+});
+
+test("async tree-sitter worker fallback matches direct highlighting", async () => {
+  const metadata = cases[7];
+  const previous = process.env.PI_TREE_SITTER_FORCE_WORKER;
+  process.env.PI_TREE_SITTER_FORCE_WORKER = "1";
+  try {
+    assert.deepEqual(
+      await loadHighlightedDiff(metadata, config),
+      buildPiHighlightedDiff(metadata, config),
+    );
+  } finally {
+    if (previous === undefined) delete process.env.PI_TREE_SITTER_FORCE_WORKER;
+    else process.env.PI_TREE_SITTER_FORCE_WORKER = previous;
+  }
 });
 
 test("cached diff rows match uncached rows and reuse exact row arrays", () => {
