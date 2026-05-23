@@ -243,7 +243,7 @@ function formatTruncation(theme: ThemeLike, truncation: LspToolTruncation): stri
 }
 
 function collapseHint(theme: ThemeLike, prefix = "…"): string {
-  return `${fg(theme, "dim", `${prefix} (`)}${fg(theme, "accent", "ctrl+o")}${fg(theme, "dim", " to expand)")}`;
+  return fg(theme, "dim", `${prefix} (ctrl+o to expand)`);
 }
 
 function displayMethod(args: Record<string, unknown>): string {

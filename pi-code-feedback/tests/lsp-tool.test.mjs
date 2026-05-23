@@ -234,6 +234,22 @@ test("lsp error renderer handles structured JSON errors even when isError is abs
   assert.equal(rendered, "<error>broken</error>\n<dim>try again</dim>");
 });
 
+test("lsp collapsed expand hint uses the normal hint color", () => {
+  const theme = {
+    fg: (color, text) => `<${color}>${text}</${color}>`,
+    bold: (text) => text,
+  };
+  const rendered = renderLspToolResult({
+    content: [{ type: "text", text: "pi-code-feedback / LSP status\n  lsp feedback: enabled\n  clients: none yet — starts lazily when you query a source file\n" }],
+    details: { method: "server/status" },
+  }, { expanded: false }, theme, { args: { method: "server/status" } })
+    .render(500)
+    .join("\n");
+
+  assert.match(rendered, /<dim>… \(ctrl\+o to expand\)<\/dim>/);
+  assert.doesNotMatch(rendered, /<accent>ctrl\+o<\/accent>/);
+});
+
 test("lsp hover renderer strips a single markdown code fence and renders raw text", () => {
   const line = "interface DirectRawHover { value: number }";
   const theme = {
