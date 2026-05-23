@@ -16,6 +16,7 @@ export interface ResolvedLanguageServer {
 }
 
 const TYPESCRIPT_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"];
+const CLANGD_EXTENSIONS = [".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"];
 
 const DEFAULT_SERVERS: LanguageServerDefinition[] = [
   {
@@ -52,6 +53,13 @@ const DEFAULT_SERVERS: LanguageServerDefinition[] = [
     args: [],
     extensions: [".go"],
     languageId: () => "go",
+  },
+  {
+    id: "clangd",
+    command: "clangd",
+    args: [],
+    extensions: CLANGD_EXTENSIONS,
+    languageId: clangdLanguageId,
   },
   {
     id: "json",
@@ -168,5 +176,10 @@ function cssLanguageId(filePath: string): string {
     default:
       return "css";
   }
+}
+
+function clangdLanguageId(filePath: string): string {
+  const extension = path.extname(filePath).toLowerCase();
+  return extension === ".c" || extension === ".h" ? "c" : "cpp";
 }
 

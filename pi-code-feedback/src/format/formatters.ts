@@ -34,6 +34,7 @@ interface FormatterCandidate {
 
 const JS_TS_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"];
 const WEB_FORMAT_EXTENSIONS = [...JS_TS_EXTENSIONS, ".json", ".jsonc", ".css", ".scss", ".sass", ".less", ".html", ".htm"];
+const CLANG_FORMAT_EXTENSIONS = [".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"];
 const LOCK_OR_GENERATED_BASENAMES = new Set([
   "package-lock.json",
   "pnpm-lock.yaml",
@@ -72,6 +73,14 @@ const FORMATTERS: FormatterCandidate[] = [
     extensions: [".zig", ".zon"],
     args: (filePath) => ["fmt", filePath],
     configured: () => true,
+  },
+  {
+    id: "clang-format",
+    label: "clang-format",
+    command: "clang-format",
+    extensions: CLANG_FORMAT_EXTENSIONS,
+    args: (filePath) => ["-i", filePath],
+    configured: clangFormatConfigured,
   },
   {
     id: "biome",
@@ -230,6 +239,10 @@ function ruffConfigured(filePath: string, projectRoot: string, overrides: Record
 
 function blackConfigured(filePath: string, projectRoot: string, overrides: Record<string, unknown>): string | undefined | true {
   return pyprojectHas(path.dirname(filePath), projectRoot, "[tool.black]") ?? forced(overrides, "black");
+}
+
+function clangFormatConfigured(filePath: string, projectRoot: string, overrides: Record<string, unknown>): string | undefined | true {
+  return findUp(path.dirname(filePath), projectRoot, [".clang-format", "_clang-format"]) ?? forced(overrides, "clang-format");
 }
 
 function forced(overrides: Record<string, unknown>, id: string): true | undefined {
