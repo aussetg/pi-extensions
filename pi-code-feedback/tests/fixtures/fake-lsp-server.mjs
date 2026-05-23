@@ -52,7 +52,7 @@ function handleMessage(message) {
       id: message.id,
       result: {
         capabilities: {
-          textDocumentSync: mode === "incremental-log" ? 2 : 1,
+          textDocumentSync: mode === "incremental-log" || mode === "sync-log" ? 2 : 1,
           diagnosticProvider: { interFileDependencies: false, workspaceDiagnostics: false },
           codeActionProvider: true,
           hoverProvider: true,
@@ -103,16 +103,22 @@ function handleMessage(message) {
 
   if (message.method === "textDocument/didOpen") {
     const document = message.params?.textDocument;
+    if (mode === "sync-log") log({ method: message.method, params: message.params });
     publishDiagnostics(document?.uri, document?.version);
     return;
   }
 
   if (message.method === "textDocument/didChange") {
     const document = message.params?.textDocument;
-    if (mode === "incremental-log") {
+    if (mode === "incremental-log" || mode === "sync-log") {
       log({ method: message.method, params: message.params });
     }
     publishDiagnostics(document?.uri, document?.version);
+    return;
+  }
+
+  if (message.method === "textDocument/didSave") {
+    if (mode === "sync-log") log({ method: message.method, params: message.params });
   }
 }
 

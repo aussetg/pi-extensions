@@ -148,7 +148,8 @@ export class LspClient {
   }
 
   async ensureDocument(filePath: string, content: string): Promise<void> {
-    await this.touchDocument(filePath, content, { timeoutMs: 1, settleMs: 0 });
+    await this.ensureStarted();
+    this.syncDocument(filePath, content);
   }
 
   async start(): Promise<void> {

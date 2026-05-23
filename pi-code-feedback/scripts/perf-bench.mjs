@@ -52,6 +52,7 @@ const scenarioSpecs = [
 if (args.live) {
   scenarioSpecs.push(["lsp/typescript-live", () => runTypeScriptLiveScenario(Math.max(3, Math.ceil(baseIterations / 4)))]);
   scenarioSpecs.push(["lsp/typescript-incremental", () => runTypeScriptIncrementalScenario(Math.max(3, Math.ceil(baseIterations / 4)))]);
+  scenarioSpecs.push(["lsp/typescript-hover", () => runTypeScriptHoverScenario(Math.max(5, Math.ceil(baseIterations / 2)))]);
 }
 
 for (const [name, run] of scenarioSpecs) {
@@ -383,6 +384,59 @@ async function runTypeScriptIncrementalScenario(iterations) {
   }
 }
 
+async function runTypeScriptHoverScenario(iterations) {
+  if (!fs.existsSync(tsLanguageServer)) {
+    return {
+      name: "lsp/typescript-hover",
+      iterations: 0,
+      skipped: true,
+      notes: `missing ${path.relative(repoRoot, tsLanguageServer)}`,
+      metrics: [],
+    };
+  }
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-perf-ts-hover-"));
+  const filePath = path.join(root, "probe.ts");
+  const logPath = path.join(root, "lsp-proxy.jsonl");
+  const lineCount = 1000;
+  const warmup = 2;
+  await writeFile(path.join(root, "package.json"), JSON.stringify({ type: "module", devDependencies: { typescript: "^5.9.3" } }, null, 2), "utf8");
+  await writeFile(path.join(root, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true, noEmit: true } }, null, 2), "utf8");
+  await writeFile(filePath, makeTsContent(0, lineCount), "utf8");
+  await writeFile(logPath, "", "utf8");
+
+  const lspService = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      typescript: {
+        command: process.execPath,
+        args: [lspStdioProxy, logPath, "--", tsLanguageServer, "--stdio"],
+      },
+    },
+  });
+
+  try {
+    return await runScenario({
+      name: "lsp/typescript-hover",
+      iterations,
+      warmup,
+      notes: `real typescript-language-server hover requests behind a stdio proxy; ${lineCount}-line file; protocol counters exclude warmup`,
+      beforeMeasure: () => fs.writeFileSync(logPath, "", "utf8"),
+      counters: () => summarizeLspProxyCounters(logPath),
+      resources: () => lspRootPids(lspService),
+      operation: async () => {
+        const hover = await timed("hover", () => lspService.hover(filePath, 1, 15));
+        assertHoverResult(hover.value);
+        return withTotal([hover]);
+      },
+    });
+  } finally {
+    await lspService.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 function makeRuntime(root, options) {
   const config = createDefaultConfig();
   config.enabled = options.enabled;
@@ -516,6 +570,18 @@ function assertPiFeedback(result) {
   if (!found) throw new Error("benchmark sanity check failed: expected inline pi-code-feedback diagnostics");
 }
 
+function assertHoverResult(result) {
+  if (!markupHasText(result?.contents)) throw new Error("benchmark sanity check failed: expected a hover result");
+}
+
+function markupHasText(value) {
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.some(markupHasText);
+  if (!value || typeof value !== "object") return false;
+  if (typeof value.value === "string") return value.value.trim().length > 0;
+  return false;
+}
+
 async function assertFormatted(filePath) {
   const content = await readFile(filePath, "utf8");
   if (!content.startsWith("// formatted\n")) throw new Error("benchmark sanity check failed: fake formatter did not rewrite the file");
@@ -588,7 +654,9 @@ function summarizeLspProxyCounters(logPath, options = {}) {
   const didOpen = clientMessages.filter((event) => event.method === "textDocument/didOpen");
   const didChange = clientMessages.filter((event) => event.method === "textDocument/didChange");
   const didSave = clientMessages.filter((event) => event.method === "textDocument/didSave");
+  const hover = clientMessages.filter((event) => event.method === "textDocument/hover");
   const didChangeBytes = sumNumbers(didChange.map((event) => event.bodyBytes));
+  const documentSyncMessages = [...didOpen, ...didChange, ...didSave];
   const fullEquivalentBytes = options.fullTextForDidChange
     ? sumNumbers(didChange.map((event, index) => estimatedFullDidChangeBytes(event, options.fullTextForDidChange(index))))
     : undefined;
@@ -596,6 +664,10 @@ function summarizeLspProxyCounters(logPath, options = {}) {
   return {
     lspMessagesClientToServer: clientMessages.length,
     lspBytesClientToServer: sumNumbers(clientMessages.map((event) => event.bodyBytes)),
+    lspDocumentSyncCount: documentSyncMessages.length,
+    lspDocumentSyncBytes: sumNumbers(documentSyncMessages.map((event) => event.bodyBytes)),
+    lspHoverCount: hover.length,
+    lspHoverBytes: sumNumbers(hover.map((event) => event.bodyBytes)),
     lspDidOpenCount: didOpen.length,
     lspDidOpenTextBytes: sumNumbers(didOpen.map((event) => event.textDocumentTextBytes)),
     lspDidSaveCount: didSave.length,

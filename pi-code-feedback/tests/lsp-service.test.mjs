@@ -112,6 +112,41 @@ test("LSP document changes use incremental sync when the server supports it", as
   }
 });
 
+test("document requests sync the file without forcing a save or diagnostic refresh", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-document-request-"));
+  const filePath = path.join(root, "probe.py");
+  const logPath = path.join(root, "lsp.jsonl");
+  await writeFile(filePath, "value = 1\n", "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "sync-log", logPath],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    assert.deepEqual(await service.hover(filePath, 1, 1), { contents: { kind: "plaintext", value: "py hover" } });
+    assert.deepEqual(await service.hover(filePath, 1, 1), { contents: { kind: "plaintext", value: "py hover" } });
+
+    const entries = (await readFile(logPath, "utf8"))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+
+    assert.deepEqual(entries.map((entry) => entry.method), ["textDocument/didOpen"]);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("code actions for a Python file are merged from ty and Ruff clients", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-actions-"));
   const filePath = path.join(root, "probe.py");
