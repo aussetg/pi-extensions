@@ -80,6 +80,16 @@ type SyntaxDocumentSnapshot = {
   text: string;
   tree: TreeSitterTree;
 };
+type SharedSyntaxServiceState = {
+  runtime: TreeSitterRuntime | null | undefined;
+  documents: Map<string, SyntaxDocumentSnapshot>;
+  stats: {
+    fullParses: number;
+    incrementalParses: number;
+    reusedParses: number;
+    evictions: number;
+  };
+};
 type TextExtent = {
   index: number;
   position: TreeSitterPoint;
@@ -88,14 +98,24 @@ type TextExtent = {
 const nodeRequire = createRequire(import.meta.url);
 const QUERY_MATCH_LIMIT = 64;
 const SYNTAX_DOCUMENT_CACHE_LIMIT = 64;
-let treeSitterRuntime: TreeSitterRuntime | null | undefined;
-const syntaxDocuments = new Map<string, SyntaxDocumentSnapshot>();
-const syntaxStats = {
-  fullParses: 0,
-  incrementalParses: 0,
-  reusedParses: 0,
-  evictions: 0,
-};
+const GLOBAL_SHARED_SYNTAX_SERVICE_STATE_KEY = "__codexApplyPatchSharedSyntaxServiceState";
+
+function sharedSyntaxServiceState(): SharedSyntaxServiceState {
+  const scope = globalThis as typeof globalThis & {
+    [GLOBAL_SHARED_SYNTAX_SERVICE_STATE_KEY]?: SharedSyntaxServiceState;
+  };
+  scope[GLOBAL_SHARED_SYNTAX_SERVICE_STATE_KEY] ??= {
+    runtime: undefined,
+    documents: new Map<string, SyntaxDocumentSnapshot>(),
+    stats: {
+      fullParses: 0,
+      incrementalParses: 0,
+      reusedParses: 0,
+      evictions: 0,
+    },
+  };
+  return scope[GLOBAL_SHARED_SYNTAX_SERVICE_STATE_KEY];
+}
 
 const TREE_SITTER_LANGUAGE_SPECS: TreeSitterLanguageSpec[] = [
   {
@@ -146,11 +166,13 @@ export function querySharedSyntaxCaptures(
 ): TreeSitterCapture[] | undefined {
   if (request.text.length === 0) return [];
 
-  const runtime = getTreeSitterRuntime();
+  const state = sharedSyntaxServiceState();
+  const runtime = getTreeSitterRuntime(state);
   const language = runtime ? getTreeSitterLanguage(runtime, request.languageKey) : undefined;
   if (!runtime || !language) return undefined;
 
   const tree = parseSyntaxDocument(
+    state,
     runtime,
     request.languageKey,
     language,
@@ -216,21 +238,28 @@ export function treeSitterLanguageKey(lang: string): string | undefined {
 }
 
 export function sharedSyntaxServiceStats(): SharedSyntaxServiceStats {
+  const state = sharedSyntaxServiceState();
   return {
-    documents: syntaxDocuments.size,
-    fullParses: syntaxStats.fullParses,
-    incrementalParses: syntaxStats.incrementalParses,
-    reusedParses: syntaxStats.reusedParses,
-    evictions: syntaxStats.evictions,
+    documents: state.documents.size,
+    fullParses: state.stats.fullParses,
+    incrementalParses: state.stats.incrementalParses,
+    reusedParses: state.stats.reusedParses,
+    evictions: state.stats.evictions,
   };
 }
 
+export function resetSharedSyntaxService(): void {
+  const state = sharedSyntaxServiceState();
+  state.documents.clear();
+  state.stats.fullParses = 0;
+  state.stats.incrementalParses = 0;
+  state.stats.reusedParses = 0;
+  state.stats.evictions = 0;
+  state.runtime = undefined;
+}
+
 export function resetSharedSyntaxServiceForTests(): void {
-  syntaxDocuments.clear();
-  syntaxStats.fullParses = 0;
-  syntaxStats.incrementalParses = 0;
-  syntaxStats.reusedParses = 0;
-  syntaxStats.evictions = 0;
+  resetSharedSyntaxService();
 }
 
 function languageSpec(
@@ -246,11 +275,13 @@ function languageSpec(
   };
 }
 
-function getTreeSitterRuntime(): TreeSitterRuntime | undefined {
-  if (treeSitterRuntime !== undefined) return treeSitterRuntime ?? undefined;
+function getTreeSitterRuntime(
+  state: SharedSyntaxServiceState,
+): TreeSitterRuntime | undefined {
+  if (state.runtime !== undefined) return state.runtime ?? undefined;
 
   try {
-    treeSitterRuntime = {
+    state.runtime = {
       Parser: nodeRequire("tree-sitter") as TreeSitterParserConstructor,
       languages: new Map(),
       querySources: new Map(),
@@ -259,10 +290,10 @@ function getTreeSitterRuntime(): TreeSitterRuntime | undefined {
       failedLanguages: new Set(),
     };
   } catch {
-    treeSitterRuntime = null;
+    state.runtime = null;
   }
 
-  return treeSitterRuntime ?? undefined;
+  return state.runtime ?? undefined;
 }
 
 function getTreeSitterLanguage(
@@ -322,6 +353,7 @@ function parenBalance(line: string): number {
 }
 
 function parseSyntaxDocument(
+  state: SharedSyntaxServiceState,
   runtime: TreeSitterRuntime,
   languageKey: string,
   language: TreeSitterLanguage,
@@ -331,11 +363,11 @@ function parseSyntaxDocument(
   const parser = treeSitterParser(runtime, languageKey, language);
   const cacheKey = documentId ? `${languageKey}\0${documentId}` : undefined;
   const canReuse = Boolean(cacheKey) && envValue("PI_TREE_SITTER_DISABLE_INCREMENTAL") !== "1";
-  const cached = canReuse && cacheKey ? syntaxDocuments.get(cacheKey) : undefined;
+  const cached = canReuse && cacheKey ? state.documents.get(cacheKey) : undefined;
 
   if (cached && cached.text === text) {
-    syntaxStats.reusedParses += 1;
-    touchSyntaxDocument(cacheKey!, cached);
+    state.stats.reusedParses += 1;
+    touchSyntaxDocument(state, cacheKey!, cached);
     return cached.tree;
   }
 
@@ -345,39 +377,46 @@ function parseSyntaxDocument(
       cached.tree.edit?.(treeSitterEditForTextChange(cached.text, text));
       parser.reset?.();
       tree = parser.parse(text, cached.tree);
-      syntaxStats.incrementalParses += 1;
+      state.stats.incrementalParses += 1;
     } else {
       parser.reset?.();
       tree = parser.parse(text);
-      syntaxStats.fullParses += 1;
+      state.stats.fullParses += 1;
     }
 
     if (!tree) throw new Error("tree-sitter parse returned null");
     if (canReuse && cacheKey) {
-      rememberSyntaxDocument({ cacheKey, languageKey, text, tree });
+      rememberSyntaxDocument(state, { cacheKey, languageKey, text, tree });
     }
     return tree;
   } catch {
     runtime.parsers.delete(languageKey);
-    if (cacheKey) syntaxDocuments.delete(cacheKey);
+    if (cacheKey) state.documents.delete(cacheKey);
     return undefined;
   }
 }
 
-function touchSyntaxDocument(cacheKey: string, snapshot: SyntaxDocumentSnapshot): void {
-  syntaxDocuments.delete(cacheKey);
-  syntaxDocuments.set(cacheKey, snapshot);
+function touchSyntaxDocument(
+  state: SharedSyntaxServiceState,
+  cacheKey: string,
+  snapshot: SyntaxDocumentSnapshot,
+): void {
+  state.documents.delete(cacheKey);
+  state.documents.set(cacheKey, snapshot);
 }
 
-function rememberSyntaxDocument(snapshot: SyntaxDocumentSnapshot): void {
-  syntaxDocuments.delete(snapshot.cacheKey);
-  syntaxDocuments.set(snapshot.cacheKey, snapshot);
+function rememberSyntaxDocument(
+  state: SharedSyntaxServiceState,
+  snapshot: SyntaxDocumentSnapshot,
+): void {
+  state.documents.delete(snapshot.cacheKey);
+  state.documents.set(snapshot.cacheKey, snapshot);
 
-  while (syntaxDocuments.size > syntaxDocumentCacheLimit()) {
-    const oldestKey = syntaxDocuments.keys().next().value;
+  while (state.documents.size > syntaxDocumentCacheLimit()) {
+    const oldestKey = state.documents.keys().next().value;
     if (typeof oldestKey !== "string") break;
-    syntaxDocuments.delete(oldestKey);
-    syntaxStats.evictions += 1;
+    state.documents.delete(oldestKey);
+    state.stats.evictions += 1;
   }
 }
 

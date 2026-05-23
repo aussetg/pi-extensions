@@ -1,9 +1,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createApplyPatchToolPolicy, isCodexModel } from "./policy.ts";
 import { reloadPierreRendererConfig } from "./pierre/config.ts";
+import { resetPierreRendererState } from "./pierre/reset.ts";
 import { registerApplyPatchTool } from "./tool.ts";
 
 export function registerApplyPatchExtension(pi: ExtensionAPI): void {
+  resetPierreRendererState();
   reloadPierreRendererConfig();
 
   const policy = createApplyPatchToolPolicy(pi);
@@ -11,9 +13,14 @@ export function registerApplyPatchExtension(pi: ExtensionAPI): void {
   registerApplyPatchTool(pi);
 
   pi.on("session_start", async (_event, ctx) => {
+    resetPierreRendererState();
     reloadPierreRendererConfig();
     policy.captureBaseline();
     policy.apply(ctx);
+  });
+
+  pi.on("session_shutdown", async () => {
+    resetPierreRendererState();
   });
 
   pi.on("model_select", async (_event, ctx) => {

@@ -16,6 +16,7 @@ import {
   sharedSyntaxServiceStats,
 } from "../src/pierre/syntax-service.ts";
 import { DEFAULT_PIERRE_RENDERER_CONFIG } from "../src/pierre/config.ts";
+import { resetPierreRendererState } from "../src/pierre/reset.ts";
 import { buildCachedDiffRows, buildDiffRows } from "../src/pierre/rows.ts";
 import { getPierrePalette } from "../src/pierre/theme.ts";
 import {
@@ -499,6 +500,54 @@ test("cached diff rows keep palette, word-diff config, and expansion separate", 
   assert.notStrictEqual(lightRows, darkRows);
   assert.notStrictEqual(noWordRows, darkRows);
   assert.notStrictEqual(expandedRows, darkRows);
+});
+
+test("Pierre renderer reset clears syntax and row caches", () => {
+  resetPierreRendererState();
+
+  const metadata = cases[0];
+  const highlightedSet = buildPiHighlightedDiff(metadata, config);
+  const highlighted = highlightedSet.dark;
+  const palette = getPierrePalette({ name: "dark" }, config);
+  const cacheKey = "renderer-reset";
+
+  const firstRows = buildCachedDiffRows(
+    metadata,
+    highlighted,
+    palette,
+    config,
+    { expandCollapsed: false },
+    cacheKey,
+  );
+  const cachedRows = buildCachedDiffRows(
+    metadata,
+    highlighted,
+    palette,
+    config,
+    { expandCollapsed: false },
+    cacheKey,
+  );
+  assert.strictEqual(cachedRows, firstRows);
+  assert.equal(sharedSyntaxServiceStats().documents > 0, true);
+
+  resetPierreRendererState();
+
+  assert.deepEqual(sharedSyntaxServiceStats(), {
+    documents: 0,
+    fullParses: 0,
+    incrementalParses: 0,
+    reusedParses: 0,
+    evictions: 0,
+  });
+  const rowsAfterReset = buildCachedDiffRows(
+    metadata,
+    highlighted,
+    palette,
+    config,
+    { expandCollapsed: false },
+    cacheKey,
+  );
+  assert.notStrictEqual(rowsAfterReset, firstRows);
 });
 
 test("cached ANSI style rendering matches the previous uncached behavior", () => {

@@ -20,6 +20,10 @@ import {
   hasHighlightedLines,
   loadHighlightedDiff,
 } from "./highlight.ts";
+import {
+  globalPiHighlightCache,
+  globalPiHighlightGeneration,
+} from "./highlight-cache.ts";
 import { buildCachedDiffRows, lineNumberWidthFor } from "./rows.ts";
 import {
   getPierreRendererConfig,
@@ -37,17 +41,8 @@ import type {
 } from "./types.ts";
 import { emptyHighlightedDiffSet } from "./types.ts";
 
-const GLOBAL_PI_HIGHLIGHT_CACHE_KEY = "__codexApplyPatchPiHighlightCache";
 const PI_HIGHLIGHT_CACHE_LIMIT = 512;
 const payloadCacheKeys = new WeakMap<object, { path: string; key: string }>();
-
-function globalPiHighlightCache(): Map<string, HighlightedDiffSet> {
-  const scope = globalThis as typeof globalThis & {
-    [GLOBAL_PI_HIGHLIGHT_CACHE_KEY]?: Map<string, HighlightedDiffSet>;
-  };
-  scope[GLOBAL_PI_HIGHLIGHT_CACHE_KEY] ??= new Map<string, HighlightedDiffSet>();
-  return scope[GLOBAL_PI_HIGHLIGHT_CACHE_KEY];
-}
 
 interface RenderSegment {
   text: string;
@@ -120,6 +115,7 @@ export class PierreInlineDiffComponent implements Component {
   private highlightedByKey = new Map<string, HighlightedDiffSet>();
   private piHighlightedByKey = globalPiHighlightCache();
   private piHighlightFallbacksByKey = new Set<string>();
+  private piHighlightGeneration = globalPiHighlightGeneration();
   private renderedKey: string | undefined;
   private renderedLines: string[] | undefined;
 
@@ -167,6 +163,7 @@ export class PierreInlineDiffComponent implements Component {
   }
 
   render(width: number): string[] {
+    this.resetLocalCachesAfterPierreReset();
     this.config = getPierreRendererConfig();
     this.palette = getPierrePalette(this.theme, this.config);
     this.showFileHeaders = resolveShowFileHeaders(
@@ -229,6 +226,18 @@ export class PierreInlineDiffComponent implements Component {
   private clearRenderedCache(): void {
     this.renderedKey = undefined;
     this.renderedLines = undefined;
+  }
+
+  private resetLocalCachesAfterPierreReset(): void {
+    const generation = globalPiHighlightGeneration();
+    if (this.piHighlightGeneration === generation) return;
+
+    this.piHighlightGeneration = generation;
+    this.piHighlightedByKey = globalPiHighlightCache();
+    this.highlightedByKey.clear();
+    this.piHighlightFallbacksByKey.clear();
+    this.clearRenderedCache();
+    this.ingestHighlightedPayloads();
   }
 
   private renderCacheKey(width: number): string {

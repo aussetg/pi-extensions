@@ -3,13 +3,17 @@ export {
   PierreStatusComponent,
   type PierreInlineDiffOptions,
 } from "./component.ts";
+export { resetPierreHighlightCache } from "./highlight-cache.ts";
 export {
   hasHighlightedLines,
   loadHighlightedDiff,
   normalizeHighlightedDiffSet,
+  resetPierreHighlighter,
 } from "./highlight.ts";
+export { resetPierreRendererState } from "./reset.ts";
 export {
   querySharedSyntaxCaptures,
+  resetSharedSyntaxService,
   resetSharedSyntaxServiceForTests,
   sharedSyntaxServiceStats,
   treeSitterLanguageKey,

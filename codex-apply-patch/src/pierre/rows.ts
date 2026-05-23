@@ -6,9 +6,32 @@ import type { PierreTerminalPalette } from "./theme.ts";
 import type { PierreRendererConfig } from "./config.ts";
 
 const ROW_CACHE_LIMIT = 512;
-const rowCache = new Map<string, DiffRow[]>();
-const highlightedCodeIds = new WeakMap<object, number>();
-let nextHighlightedCodeId = 1;
+const GLOBAL_PIERRE_ROW_CACHE_KEY = "__codexApplyPatchPierreRowCache";
+
+type PierreRowCacheState = {
+  rows: Map<string, DiffRow[]>;
+  highlightedCodeIds: WeakMap<object, number>;
+  nextHighlightedCodeId: number;
+};
+
+function rowCacheState(): PierreRowCacheState {
+  const scope = globalThis as typeof globalThis & {
+    [GLOBAL_PIERRE_ROW_CACHE_KEY]?: PierreRowCacheState;
+  };
+  scope[GLOBAL_PIERRE_ROW_CACHE_KEY] ??= {
+    rows: new Map<string, DiffRow[]>(),
+    highlightedCodeIds: new WeakMap<object, number>(),
+    nextHighlightedCodeId: 1,
+  };
+  return scope[GLOBAL_PIERRE_ROW_CACHE_KEY];
+}
+
+export function resetPierreRowCache(): void {
+  const state = rowCacheState();
+  state.rows.clear();
+  state.highlightedCodeIds = new WeakMap<object, number>();
+  state.nextHighlightedCodeId = 1;
+}
 
 export function buildDiffRows(
   metadata: FileDiffMetadata,
@@ -198,6 +221,7 @@ export function buildCachedDiffRows(
     options,
     cacheKey,
   );
+  const rowCache = rowCacheState().rows;
   const cached = rowCache.get(key);
   if (cached) return cached;
 
@@ -277,6 +301,8 @@ function metadataHunksKey(metadata: FileDiffMetadata): string {
 }
 
 function highlightedCodeKey(highlighted: HighlightedDiffCode): string {
+  const state = rowCacheState();
+  const { highlightedCodeIds } = state;
   const cached = highlightedCodeIds.get(highlighted);
   if (cached !== undefined) return String(cached);
 
@@ -287,7 +313,7 @@ function highlightedCodeKey(highlighted: HighlightedDiffCode): string {
     return "empty";
   }
 
-  const id = nextHighlightedCodeId++;
+  const id = state.nextHighlightedCodeId++;
   highlightedCodeIds.set(highlighted, id);
   return String(id);
 }

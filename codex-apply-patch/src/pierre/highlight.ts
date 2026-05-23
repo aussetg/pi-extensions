@@ -216,11 +216,29 @@ const TREE_SITTER_QUERY_FULL_COVERAGE_NUMERATOR = 3;
 const TREE_SITTER_QUERY_FULL_COVERAGE_DENOMINATOR = 4;
 const TREE_SITTER_WORKER_IDLE_MS = 10_000;
 const DEFAULT_TREE_SITTER_WORKER_TIMEOUT_MS = 5_000;
+const GLOBAL_TREE_SITTER_WORKER_STATE_KEY = "__codexApplyPatchTreeSitterWorkerState";
 const syntaxStyleByCaptureName = Object.create(null) as Record<
   string,
   CaptureStyle | null | undefined
 >;
-let treeSitterWorkerClient: TreeSitterWorkerClient | undefined;
+
+type TreeSitterWorkerState = {
+  client?: TreeSitterWorkerClient;
+};
+
+function treeSitterWorkerState(): TreeSitterWorkerState {
+  const scope = globalThis as typeof globalThis & {
+    [GLOBAL_TREE_SITTER_WORKER_STATE_KEY]?: TreeSitterWorkerState;
+  };
+  scope[GLOBAL_TREE_SITTER_WORKER_STATE_KEY] ??= {};
+  return scope[GLOBAL_TREE_SITTER_WORKER_STATE_KEY];
+}
+
+export function resetPierreHighlighter(): void {
+  const client = treeSitterWorkerState().client;
+  if (!client) return;
+  restartTreeSitterWorker(client);
+}
 
 function buildTreeSitterHighlightedDiff(
   metadata: FileDiffMetadata,
@@ -730,7 +748,8 @@ function treeSitterWorkerRequest(
 }
 
 function getTreeSitterWorkerClient(): TreeSitterWorkerClient {
-  if (treeSitterWorkerClient) return treeSitterWorkerClient;
+  const state = treeSitterWorkerState();
+  if (state.client) return state.client;
 
   const execPath = treeSitterWorkerNodePath();
   const child = fork(treeSitterWorkerPath, [], {
@@ -742,7 +761,7 @@ function getTreeSitterWorkerClient(): TreeSitterWorkerClient {
     nextId: 1,
     pending: new Map(),
   };
-  treeSitterWorkerClient = client;
+  state.client = client;
 
   child.on("message", (message: unknown) => {
     const response = normalizeTreeSitterWorkerResponse(message);
@@ -756,7 +775,9 @@ function getTreeSitterWorkerClient(): TreeSitterWorkerClient {
     maybeUnrefTreeSitterWorker(client);
   });
   child.on("exit", () => {
-    if (treeSitterWorkerClient === client) treeSitterWorkerClient = undefined;
+    if (treeSitterWorkerState().client === client) {
+      treeSitterWorkerState().client = undefined;
+    }
     for (const pending of client.pending.values()) {
       clearTimeout(pending.timeout);
       pending.resolve(undefined);
@@ -781,7 +802,9 @@ function normalizeTreeSitterWorkerResponse(
 }
 
 function restartTreeSitterWorker(client: TreeSitterWorkerClient): void {
-  if (treeSitterWorkerClient === client) treeSitterWorkerClient = undefined;
+  if (treeSitterWorkerState().client === client) {
+    treeSitterWorkerState().client = undefined;
+  }
   if (client.idleTimer) clearTimeout(client.idleTimer);
   for (const pending of client.pending.values()) {
     clearTimeout(pending.timeout);
