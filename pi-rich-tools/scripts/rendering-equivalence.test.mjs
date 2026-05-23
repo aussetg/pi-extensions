@@ -11,6 +11,7 @@ import {
   flattenHighlightedLine,
   hasHighlightedLines,
   loadHighlightedDiff,
+  needsHighlightedDiffSupplement,
 } from "../src/pierre/highlight.ts";
 import {
   resetSharedSyntaxServiceForTests,
@@ -287,6 +288,43 @@ test("async TextMate fallback highlights languages outside the tree-sitter bundl
     assert.equal(hasHighlightedLines(buildPiHighlightedDiff(metadata, config)), false, lang);
     assert.equal(hasHighlightedLines(await loadHighlightedDiff(metadata, config)), true, lang);
   }
+});
+
+test("async TextMate fallback supplements sparse tree-sitter Rust snippets", async () => {
+  const lines = [
+    "        assert_eq!(",
+    "            is_execution_provider_compiled(ExecutionProvider::MIGraphX),",
+    "            cfg!(feature = \"migraphx\")",
+    "        );",
+    "    }",
+    "",
+    "    #[test]",
+    "    fn test_compiled_gpu_execution_provider_order() {",
+    "        let expected = GPU_PROVIDER_ORDER",
+    "            .iter()",
+  ];
+  const metadata = makeMetadata({
+    name: "fragment.rs",
+    lang: "rust",
+    deletionLines: lines,
+    additionLines: lines,
+    hunkContent: [
+      {
+        type: "context",
+        lines: lines.length,
+        deletionLineIndex: 0,
+        additionLineIndex: 0,
+      },
+    ],
+  });
+
+  const direct = buildPiHighlightedDiff(metadata, config);
+  const directLine = direct.dark.additionLines[7];
+  const supplementedLine = (await loadHighlightedDiff(metadata, config)).dark.additionLines[7];
+
+  assert.equal(needsHighlightedDiffSupplement(metadata, direct, config), true);
+  assert.equal(hasSyntaxSpan(directLine, "function", "test_compiled_gpu_execution_provider_order"), false);
+  assert.equal(hasSyntaxSpan(supplementedLine, "function", "test_compiled_gpu_execution_provider_order"), true);
 });
 
 test("tree-sitter highlighting supports common coding languages", () => {
@@ -695,6 +733,21 @@ test("wrapped line continuation prefixes keep the row gutter bar", () => {
   assert.equal(deletionBeforeNumber[1].text, config.gutter.deletionBar);
   assert.equal(additionAfterNumber[2].text, config.gutter.additionBar);
 });
+
+function hasSyntaxSpan(node, category, text) {
+  let found = false;
+  const visit = (current, inherited) => {
+    if (!current || found) return;
+    if (current.type === "text") {
+      if (inherited === category && current.value === text) found = true;
+      return;
+    }
+    const next = current.properties?.["data-pi-syntax"] ?? inherited;
+    for (const child of current.children ?? []) visit(child, next);
+  };
+  visit(node);
+  return found;
+}
 
 function makeIncrementalTypeScriptFile(revision) {
   const lines = [

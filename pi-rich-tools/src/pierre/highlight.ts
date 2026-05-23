@@ -89,25 +89,39 @@ async function buildPiHighlightedDiffAsync(
   let additionLines = treeSitter?.additionLines ?? [];
   let deletionStyled = treeSitter?.deletionStyled ?? false;
   let additionStyled = treeSitter?.additionStyled ?? false;
+  const supplementDeletion = deletionStyled && shouldSupplementTreeSitterHighlight(
+    metadata.deletionLines,
+    indexes.deletion,
+    deletionLines,
+  );
+  const supplementAddition = additionStyled && shouldSupplementTreeSitterHighlight(
+    metadata.additionLines,
+    indexes.addition,
+    additionLines,
+  );
 
-  if (!deletionStyled || !additionStyled) {
+  if (!deletionStyled || !additionStyled || supplementDeletion || supplementAddition) {
     const textMate = await buildTextMateHighlightedDiffAsync(
       metadata,
       indexes,
       lang,
       config,
       {
-        deletion: !deletionStyled,
-        addition: !additionStyled,
+        deletion: !deletionStyled || supplementDeletion,
+        addition: !additionStyled || supplementAddition,
       },
     );
     if (!deletionStyled && textMate?.deletionStyled) {
       deletionLines = textMate.deletionLines;
       deletionStyled = true;
+    } else if (supplementDeletion && textMate?.deletionStyled) {
+      deletionLines = supplementHighlightedLines(deletionLines, textMate.deletionLines);
     }
     if (!additionStyled && textMate?.additionStyled) {
       additionLines = textMate.additionLines;
       additionStyled = true;
+    } else if (supplementAddition && textMate?.additionStyled) {
+      additionLines = supplementHighlightedLines(additionLines, textMate.additionLines);
     }
   }
 
@@ -136,6 +150,36 @@ export function hasHighlightedLines(highlighted: HighlightedDiffSet): boolean {
     highlighted.dark.additionLines.length > 0 ||
     highlighted.light.deletionLines.length > 0 ||
     highlighted.light.additionLines.length > 0
+  );
+}
+
+export function needsHighlightedDiffSupplement(
+  metadata: FileDiffMetadata,
+  highlighted: HighlightedDiffSet,
+  config: PierreRendererConfig,
+): boolean {
+  if (!config.syntaxHighlight.enabled || !hasHighlightedLines(highlighted)) {
+    return false;
+  }
+
+  const indexes = renderedLineIndexes(metadata);
+  const lineCount = indexes.deletion.length + indexes.addition.length;
+  if (lineCount === 0 || lineCount > config.syntaxHighlight.maxLines) {
+    return false;
+  }
+
+  const code = highlighted.dark;
+  return (
+    shouldSupplementTreeSitterHighlight(
+      metadata.deletionLines,
+      indexes.deletion,
+      code.deletionLines,
+    ) ||
+    shouldSupplementTreeSitterHighlight(
+      metadata.additionLines,
+      indexes.addition,
+      code.additionLines,
+    )
   );
 }
 
@@ -259,6 +303,8 @@ const TREE_SITTER_QUERY_FULL_COVERAGE_NUMERATOR = 3;
 const TREE_SITTER_QUERY_FULL_COVERAGE_DENOMINATOR = 4;
 const TREE_SITTER_WORKER_IDLE_MS = 10_000;
 const DEFAULT_TREE_SITTER_WORKER_TIMEOUT_MS = 5_000;
+const TEXTMATE_SUPPLEMENT_MIN_LINE_CHARS = 12;
+const TEXTMATE_SUPPLEMENT_LOW_COVERAGE_RATIO = 0.24;
 const GLOBAL_TREE_SITTER_WORKER_STATE_KEY = "__codexApplyPatchTreeSitterWorkerState";
 const syntaxStyleByCaptureName = Object.create(null) as Record<
   string,
@@ -537,6 +583,107 @@ function highlightedLinesFromStyles(
   }
 
   return { lines: out, styled };
+}
+
+function shouldSupplementTreeSitterHighlight(
+  lines: string[],
+  indexes: number[],
+  highlightedLines: Array<HastNode | undefined>,
+): boolean {
+  for (const index of indexes) {
+    const line = cleanDiffLine(lines[index]);
+    const total = countNonWhitespace(line);
+    if (total < TEXTMATE_SUPPLEMENT_MIN_LINE_CHARS) continue;
+
+    const node = highlightedLines[index];
+    const styled = node ? syntaxLineStyleInfo(node).styledNonWhitespace : 0;
+    if (styled / total < TEXTMATE_SUPPLEMENT_LOW_COVERAGE_RATIO) return true;
+  }
+
+  return false;
+}
+
+function supplementHighlightedLines(
+  primaryLines: Array<HastNode | undefined>,
+  supplementLines: Array<HastNode | undefined>,
+): Array<HastNode | undefined> {
+  const length = Math.max(primaryLines.length, supplementLines.length);
+  const out = primaryLines.slice();
+
+  for (let index = 0; index < length; index++) {
+    const primary = primaryLines[index];
+    const supplement = supplementLines[index];
+    if (!supplement) continue;
+    if (!primary) {
+      out[index] = supplement;
+      continue;
+    }
+
+    const primaryInfo = syntaxLineStyleInfo(primary);
+    const supplementInfo = syntaxLineStyleInfo(supplement);
+    if (primaryInfo.text !== supplementInfo.text) continue;
+
+    const styles = primaryInfo.styles.slice();
+    let changed = false;
+    for (let offset = 0; offset < styles.length; offset++) {
+      if (styles[offset] || !supplementInfo.styles[offset]) continue;
+      styles[offset] = supplementInfo.styles[offset];
+      changed = true;
+    }
+
+    if (changed) {
+      out[index] = syntaxSpansNode(spansFromLineStyles(primaryInfo.text, styles));
+    }
+  }
+
+  return out;
+}
+
+function syntaxLineStyleInfo(node: HastNode): {
+  text: string;
+  styles: Array<SyntaxCategory | undefined>;
+  styledNonWhitespace: number;
+} {
+  let text = "";
+  const styles: Array<SyntaxCategory | undefined> = [];
+  let styledNonWhitespace = 0;
+
+  const visit = (current: HastNode | undefined, inherited?: SyntaxCategory) => {
+    if (!current) return;
+
+    if (current.type === "text") {
+      text += current.value;
+      for (let offset = 0; offset < current.value.length;) {
+        const codePoint = current.value.codePointAt(offset);
+        const width = codePoint !== undefined && codePoint > 0xffff ? 2 : 1;
+        const char = current.value.slice(offset, offset + width);
+        for (let index = 0; index < width; index++) styles.push(inherited);
+        if (inherited && !isWhitespace(char)) styledNonWhitespace += 1;
+        offset += width;
+      }
+      return;
+    }
+
+    const category = normalizeSyntaxCategory(
+      current.properties?.["data-pi-syntax"],
+    ) ?? inherited;
+    for (const child of current.children ?? []) visit(child, category);
+  };
+
+  visit(node);
+  return { text, styles, styledNonWhitespace };
+}
+
+function countNonWhitespace(text: string): number {
+  let count = 0;
+  for (const char of text) {
+    if (!isWhitespace(char)) count += 1;
+  }
+  return count;
+}
+
+function isWhitespace(char: string): boolean {
+  return /\s/u.test(char);
 }
 
 function emptyHighlightLineResult(): HighlightLineResult {

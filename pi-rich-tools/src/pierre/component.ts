@@ -19,6 +19,7 @@ import {
   buildPiHighlightedDiff,
   hasHighlightedLines,
   loadHighlightedDiff,
+  needsHighlightedDiffSupplement,
 } from "./highlight.ts";
 import {
   globalPiHighlightCache,
@@ -345,7 +346,12 @@ export class PierreInlineDiffComponent implements Component {
         }
       }
     }
-    if (piHighlighted && hasHighlightedLines(piHighlighted)) return piHighlighted;
+    if (piHighlighted && hasHighlightedLines(piHighlighted)) {
+      if (needsHighlightedDiffSupplement(payload.metadata, piHighlighted, this.config)) {
+        this.scheduleAsyncHighlightFallback(piKey, payload);
+      }
+      return piHighlighted;
+    }
 
     this.scheduleAsyncHighlightFallback(piKey, payload);
 
