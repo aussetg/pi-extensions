@@ -8,6 +8,7 @@ import { openAnsi, renderAnsiSegments } from "../src/pierre/ansi.ts";
 import { continuationPrefixSegments } from "../src/pierre/gutter.ts";
 import {
   buildPiHighlightedDiff,
+  flattenHighlightedLine,
   hasHighlightedLines,
   loadHighlightedDiff,
 } from "../src/pierre/highlight.ts";
@@ -462,6 +463,35 @@ test("cached diff rows match uncached rows and reuse exact row arrays", () => {
 
   assert.deepEqual(cached, uncached);
   assert.strictEqual(cachedAgain, cached);
+});
+
+test("plain spans inside highlighted lines use syntax text foreground", () => {
+  const palette = getPierrePalette({ name: "dark" }, config);
+  const spans = flattenHighlightedLine(
+    {
+      type: "element",
+      tagName: "span",
+      properties: {},
+      children: [
+        { type: "text", value: "    " },
+        {
+          type: "element",
+          tagName: "span",
+          properties: { "data-pi-syntax": "keyword" },
+          children: [{ type: "text", value: "fn" }],
+        },
+        { type: "text", value: " test_name()" },
+      ],
+    },
+    "dark",
+    palette,
+    palette.contextRowBg,
+    "    fn test_name()",
+  );
+
+  assert.equal(spans[0].fg, palette.syntaxText);
+  assert.equal(spans[1].fg, palette.syntaxKeyword);
+  assert.equal(spans[2].fg, palette.syntaxText);
 });
 
 test("cached diff rows keep palette, word-diff config, and expansion separate", () => {

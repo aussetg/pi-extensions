@@ -181,7 +181,13 @@ export function flattenHighlightedLine(
     for (const child of current.children ?? []) visit(child, nextStyle);
   };
 
-  visit(node, {});
+  // A highlighted line is represented as a mixture of captured syntax spans
+  // and plain text spans.  The plain spans are still code, not diff metadata,
+  // so they should use the normal syntax foreground instead of inheriting the
+  // row foreground (`toolDiffContext` for read/context rows).  Otherwise Rust
+  // in particular looks mostly muted because tree-sitter intentionally leaves
+  // many ordinary identifiers uncaptured.
+  visit(node, { fg: palette.syntaxText });
 
   return spans.length > 0
     ? spans
