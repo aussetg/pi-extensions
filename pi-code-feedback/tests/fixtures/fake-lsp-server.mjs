@@ -1,8 +1,11 @@
+import fs from "node:fs";
+
 const source = process.argv[2] ?? "fake";
 const code = process.argv[3] ?? "FAKE";
 const severity = Number.parseInt(process.argv[4] ?? "1", 10);
 const stderrMode = process.argv[5] ?? "";
 const mode = process.argv[6] ?? "diagnostics";
+const logPath = process.argv[7];
 
 // Keep deterministic benchmark servers alive until the client sends `exit`.
 // Some Node versions do not keep a child process alive on a quiet stdin pipe.
@@ -49,7 +52,7 @@ function handleMessage(message) {
       id: message.id,
       result: {
         capabilities: {
-          textDocumentSync: 1,
+          textDocumentSync: mode === "incremental-log" ? 2 : 1,
           diagnosticProvider: { interFileDependencies: false, workspaceDiagnostics: false },
           codeActionProvider: true,
           hoverProvider: true,
@@ -106,8 +109,16 @@ function handleMessage(message) {
 
   if (message.method === "textDocument/didChange") {
     const document = message.params?.textDocument;
+    if (mode === "incremental-log") {
+      log({ method: message.method, params: message.params });
+    }
     publishDiagnostics(document?.uri, document?.version);
   }
+}
+
+function log(entry) {
+  if (typeof logPath !== "string" || logPath.length === 0) return;
+  fs.appendFileSync(logPath, `${JSON.stringify(entry)}\n`, "utf8");
 }
 
 function codeAction(uri, options = {}) {

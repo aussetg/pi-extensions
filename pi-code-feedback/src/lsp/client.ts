@@ -78,6 +78,18 @@ interface PublishDiagnosticsParams {
   version?: number;
 }
 
+interface TextDocumentContentChange {
+  text: string;
+  range?: LspRange;
+  rangeLength?: number;
+}
+
+const TEXT_DOCUMENT_SYNC_NONE = 0;
+const TEXT_DOCUMENT_SYNC_FULL = 1;
+const TEXT_DOCUMENT_SYNC_INCREMENTAL = 2;
+
+type TextDocumentSyncKind = typeof TEXT_DOCUMENT_SYNC_NONE | typeof TEXT_DOCUMENT_SYNC_FULL | typeof TEXT_DOCUMENT_SYNC_INCREMENTAL;
+
 export interface TouchDocumentOptions {
   timeoutMs: number;
   settleMs: number;
@@ -117,38 +129,12 @@ export class LspClient {
   async touchDocumentDetailed(filePath: string, content: string, options: TouchDocumentOptions): Promise<DiagnosticRefreshResult> {
     await this.ensureStarted();
 
-    const uri = filePathToUri(filePath);
     const touchedAt = Date.now();
-    const document = this.documents.get(uri);
-    const languageId = this.definition.languageId(filePath);
-    const version = (document?.version ?? 0) + 1;
+    const document = this.syncDocument(filePath, content);
 
-    if (!document) {
-      this.documents.set(uri, { uri, filePath, languageId, version, content });
-      this.notify("textDocument/didOpen", {
-        textDocument: {
-          uri,
-          languageId,
-          version,
-          text: content,
-        },
-      });
-    } else {
-      document.version = version;
-      document.content = content;
-      document.languageId = languageId;
-      this.notify("textDocument/didChange", {
-        textDocument: { uri, version },
-        contentChanges: [{ text: content }],
-      });
-    }
+    this.notify("textDocument/didSave", textDocumentDidSaveParams(document.uri, content, this.capabilities));
 
-    this.notify("textDocument/didSave", {
-      textDocument: { uri },
-      text: content,
-    });
-
-    const fresh = await this.waitForDiagnostics(uri, version, touchedAt, options.timeoutMs, options.settleMs);
+    const fresh = await this.waitForDiagnostics(document.uri, document.version, touchedAt, options.timeoutMs, options.settleMs);
     const completedAt = Date.now();
     this.lastDiagnosticDurationMs = completedAt - touchedAt;
     this.lastDiagnosticTimedOut = !fresh;
@@ -336,6 +322,47 @@ export class LspClient {
       },
       initializationOptions: {},
     };
+  }
+
+  private syncDocument(filePath: string, content: string): OpenDocument {
+    const uri = filePathToUri(filePath);
+    const languageId = this.definition.languageId(filePath);
+    const document = this.documents.get(uri);
+
+    if (!document) {
+      const opened: OpenDocument = { uri, filePath, languageId, version: 1, content };
+      this.documents.set(uri, opened);
+      this.notify("textDocument/didOpen", {
+        textDocument: {
+          uri,
+          languageId,
+          version: opened.version,
+          text: content,
+        },
+      });
+      return opened;
+    }
+
+    document.filePath = filePath;
+    document.languageId = languageId;
+    if (document.content === content) return document;
+
+    const oldContent = document.content;
+    document.version += 1;
+    document.content = content;
+
+    const syncKind = textDocumentChangeSyncKind(this.capabilities);
+    if (syncKind !== TEXT_DOCUMENT_SYNC_NONE) {
+      const contentChanges = syncKind === TEXT_DOCUMENT_SYNC_INCREMENTAL
+        ? [incrementalContentChange(oldContent, content)]
+        : [{ text: content }];
+      this.notify("textDocument/didChange", {
+        textDocument: { uri, version: document.version },
+        contentChanges,
+      });
+    }
+
+    return document;
   }
 
   private sendRequest(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
@@ -617,6 +644,102 @@ function inferServerLogLevel(message: string): LspServerLogLevel {
 function readServerCapabilities(initializeResult: unknown): unknown {
   if (!initializeResult || typeof initializeResult !== "object") return undefined;
   return (initializeResult as { capabilities?: unknown }).capabilities;
+}
+
+function textDocumentChangeSyncKind(capabilities: unknown): TextDocumentSyncKind {
+  const sync = isRecord(capabilities) ? capabilities.textDocumentSync : undefined;
+  if (typeof sync === "number") return normalizeTextDocumentSyncKind(sync);
+  if (isRecord(sync) && typeof sync.change === "number") return normalizeTextDocumentSyncKind(sync.change);
+  return TEXT_DOCUMENT_SYNC_FULL;
+}
+
+function textDocumentDidSaveParams(uri: string, content: string, capabilities: unknown): Record<string, unknown> {
+  const params: Record<string, unknown> = { textDocument: { uri } };
+  if (textDocumentSaveIncludesText(capabilities)) params.text = content;
+  return params;
+}
+
+function textDocumentSaveIncludesText(capabilities: unknown): boolean {
+  const sync = isRecord(capabilities) ? capabilities.textDocumentSync : undefined;
+  if (!isRecord(sync)) return false;
+  return isRecord(sync.save) && sync.save.includeText === true;
+}
+
+function normalizeTextDocumentSyncKind(value: number): TextDocumentSyncKind {
+  switch (value) {
+    case TEXT_DOCUMENT_SYNC_NONE:
+      return TEXT_DOCUMENT_SYNC_NONE;
+    case TEXT_DOCUMENT_SYNC_INCREMENTAL:
+      return TEXT_DOCUMENT_SYNC_INCREMENTAL;
+    default:
+      return TEXT_DOCUMENT_SYNC_FULL;
+  }
+}
+
+function incrementalContentChange(oldText: string, newText: string): TextDocumentContentChange {
+  const prefixLength = commonPrefixLength(oldText, newText);
+  const suffixLength = commonSuffixLength(oldText, newText, prefixLength);
+  const oldEnd = oldText.length - suffixLength;
+  const newEnd = newText.length - suffixLength;
+  return {
+    range: {
+      start: positionAt(oldText, prefixLength),
+      end: positionAt(oldText, oldEnd),
+    },
+    rangeLength: oldEnd - prefixLength,
+    text: newText.slice(prefixLength, newEnd),
+  };
+}
+
+function commonPrefixLength(left: string, right: string): number {
+  const max = Math.min(left.length, right.length);
+  let index = 0;
+  while (index < max && left.charCodeAt(index) === right.charCodeAt(index)) index += 1;
+  return avoidsTrailingHighSurrogate(left, right, index) ? index : index - 1;
+}
+
+function commonSuffixLength(left: string, right: string, prefixLength: number): number {
+  const max = Math.min(left.length, right.length) - prefixLength;
+  let length = 0;
+  while (
+    length < max &&
+    left.charCodeAt(left.length - length - 1) === right.charCodeAt(right.length - length - 1)
+  ) {
+    length += 1;
+  }
+  return length;
+}
+
+function avoidsTrailingHighSurrogate(left: string, right: string, index: number): boolean {
+  if (index <= 0) return true;
+  const previous = left.charCodeAt(index - 1);
+  if (!isHighSurrogate(previous)) return true;
+  return !isLowSurrogate(left.charCodeAt(index)) && !isLowSurrogate(right.charCodeAt(index));
+}
+
+function positionAt(text: string, offset: number): { line: number; character: number } {
+  const clamped = Math.max(0, Math.min(offset, text.length));
+  let line = 0;
+  let lineStart = 0;
+  for (let index = 0; index < clamped; index++) {
+    if (text.charCodeAt(index) === 10) {
+      line += 1;
+      lineStart = index + 1;
+    }
+  }
+  return { line, character: clamped - lineStart };
+}
+
+function isHighSurrogate(value: number): boolean {
+  return value >= 0xd800 && value <= 0xdbff;
+}
+
+function isLowSurrogate(value: number): boolean {
+  return value >= 0xdc00 && value <= 0xdfff;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function sleep(ms: number): Promise<void> {

@@ -59,6 +59,59 @@ test("diagnostics for a Python file are merged from ty and Ruff clients", async 
   }
 });
 
+test("LSP document changes use incremental sync when the server supports it", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-incremental-"));
+  const filePath = path.join(root, "probe.py");
+  const logPath = path.join(root, "lsp.jsonl");
+  await writeFile(filePath, "one\nthree\n", "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "incremental-log", logPath],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    await service.diagnosticsForFileDetailed(filePath, await readFile(filePath, "utf8"), {
+      timeoutMs: 1000,
+      settleMs: 0,
+    });
+
+    const nextContent = "one\nabc\nthree\n";
+    await writeFile(filePath, nextContent, "utf8");
+    const refresh = await service.diagnosticsForFileDetailed(filePath, nextContent, {
+      timeoutMs: 1000,
+      settleMs: 0,
+    });
+
+    assert.equal(refresh?.fresh, true);
+
+    const entries = (await readFile(logPath, "utf8"))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    assert.equal(entries.length, 1);
+
+    const change = entries[0].params.contentChanges[0];
+    assert.deepEqual(change.range, {
+      start: { line: 1, character: 0 },
+      end: { line: 1, character: 0 },
+    });
+    assert.equal(change.rangeLength, 0);
+    assert.equal(change.text, "abc\n");
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("code actions for a Python file are merged from ty and Ruff clients", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-actions-"));
   const filePath = path.join(root, "probe.py");
