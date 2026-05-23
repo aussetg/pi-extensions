@@ -89,6 +89,12 @@ interface SemanticTokenCacheEntry {
   receivedAt: number;
 }
 
+interface SemanticTokenPendingRequest {
+  version: number;
+  timeoutMs: number;
+  request: Promise<SemanticTokenOverlay>;
+}
+
 interface RawSemanticTokensResult {
   resultId?: string;
   data: number[];
@@ -178,7 +184,7 @@ export class LspClient {
   private diagnostics = new Map<string, DiagnosticEntry>();
   private diagnosticWaiters = new Map<string, Set<DiagnosticWaiter>>();
   private semanticTokens = new Map<string, SemanticTokenCacheEntry>();
-  private semanticTokenRequests = new Map<string, Promise<SemanticTokenOverlay>>();
+  private semanticTokenRequests = new Map<string, SemanticTokenPendingRequest>();
   private capabilities: unknown;
   private lastDiagnosticsAt?: number;
   private lastDiagnosticDurationMs?: number;
@@ -509,15 +515,19 @@ export class LspClient {
     timeoutMs: number,
   ): Promise<SemanticTokenOverlay> {
     const existing = this.semanticTokenRequests.get(document.uri);
-    if (existing) return existing;
+    if (existing && existing.version === document.version && existing.timeoutMs === timeoutMs) {
+      return existing.request;
+    }
 
+    let pending: SemanticTokenPendingRequest;
     const request = this.fetchSemanticTokens(document, provider, timeoutMs)
       .finally(() => {
-        if (this.semanticTokenRequests.get(document.uri) === request) {
+        if (this.semanticTokenRequests.get(document.uri) === pending) {
           this.semanticTokenRequests.delete(document.uri);
         }
       });
-    this.semanticTokenRequests.set(document.uri, request);
+    pending = { version: document.version, timeoutMs, request };
+    this.semanticTokenRequests.set(document.uri, pending);
     return request;
   }
 

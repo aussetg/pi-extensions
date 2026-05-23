@@ -206,6 +206,53 @@ test("semantic tokens are exposed as a lazy cached overlay", async () => {
   }
 });
 
+test("semantic token refresh restarts when the document changes while a request is in flight", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-semantic-restart-"));
+  const filePath = path.join(root, "probe.py");
+  const logPath = path.join(root, "lsp.jsonl");
+  await writeFile(filePath, "value = 1\nprint(value)\n", "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "semantic-delay-80", logPath],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    const first = await service.semanticTokens(filePath, { waitMs: 0, timeoutMs: 1000 });
+    assert.equal(first.state, "refreshing");
+    assert.equal(first.version, 1);
+
+    await sleep(10);
+    await writeFile(filePath, "value = 2\nprint(value)\n", "utf8");
+
+    const second = await service.semanticTokens(filePath, { waitMs: 0, timeoutMs: 1000 });
+    assert.equal(second.state, "refreshing");
+    assert.equal(second.version, 2);
+
+    const entries = await waitForJsonLog(logPath, (items) => semanticTokenRequestCount(items) >= 2);
+    assert.equal(semanticTokenRequestCount(entries), 2);
+
+    await sleep(110);
+
+    const ready = await service.semanticTokens(filePath, { waitMs: 20, timeoutMs: 1000 });
+    assert.equal(ready.state, "ready");
+    assert.equal(ready.stale, false);
+    assert.equal(ready.version, 2);
+    assert.equal(ready.tokens.length, 3);
+    assert.equal(semanticTokenRequestCount(await readJsonLog(logPath)), 2);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("concurrent diagnostics refreshes for the same file are coalesced", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-diagnostic-queue-"));
   const filePath = path.join(root, "probe.py");
@@ -336,4 +383,8 @@ async function readJsonLog(filePath) {
   } catch {
     return [];
   }
+}
+
+function semanticTokenRequestCount(entries) {
+  return entries.filter((entry) => entry.method === "textDocument/semanticTokens/full").length;
 }
