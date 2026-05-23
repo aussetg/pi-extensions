@@ -19,6 +19,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.dirname(here);
 const fakeLspServer = path.join(repoRoot, "tests", "fixtures", "fake-lsp-server.mjs");
 const fakeFormatter = path.join(repoRoot, "scripts", "fixtures", "fake-formatter.mjs");
+const lspStdioProxy = path.join(repoRoot, "scripts", "fixtures", "lsp-stdio-proxy.mjs");
 const tsLanguageServer = path.join(repoRoot, "node_modules", ".bin", "typescript-language-server");
 
 const args = parseArgs(process.argv.slice(2));
@@ -50,6 +51,7 @@ const scenarioSpecs = [
 
 if (args.live) {
   scenarioSpecs.push(["lsp/typescript-live", () => runTypeScriptLiveScenario(Math.max(3, Math.ceil(baseIterations / 4)))]);
+  scenarioSpecs.push(["lsp/typescript-incremental", () => runTypeScriptIncrementalScenario(Math.max(3, Math.ceil(baseIterations / 4)))]);
 }
 
 for (const [name, run] of scenarioSpecs) {
@@ -98,7 +100,7 @@ function splitFilters(value) {
 }
 
 function printUsage() {
-  console.log(`Usage: node --expose-gc scripts/perf-bench.mjs [options]\n\nOptions:\n  -n, --iterations N   Base iteration count for edit scenarios (default: 30)\n  -s, --scenario NAME  Run scenarios whose name contains NAME; comma-separated is ok\n      --live           Include the real TypeScript language-server scenario\n      --json           Emit machine-readable JSON\n      --help           Show this help\n`);
+  console.log(`Usage: node --expose-gc scripts/perf-bench.mjs [options]\n\nOptions:\n  -n, --iterations N   Base iteration count for edit scenarios (default: 30)\n  -s, --scenario NAME  Run scenarios whose name contains NAME; comma-separated is ok\n      --live           Include real TypeScript language-server scenarios\n      --json           Emit machine-readable JSON\n      --help           Show this help\n`);
 }
 
 function shouldRun(name, requested) {
@@ -318,6 +320,69 @@ async function runTypeScriptLiveScenario(iterations) {
   }
 }
 
+async function runTypeScriptIncrementalScenario(iterations) {
+  if (!fs.existsSync(tsLanguageServer)) {
+    return {
+      name: "lsp/typescript-incremental",
+      iterations: 0,
+      skipped: true,
+      notes: `missing ${path.relative(repoRoot, tsLanguageServer)}`,
+      metrics: [],
+    };
+  }
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-perf-ts-incremental-"));
+  const filePath = path.join(root, "probe.ts");
+  const logPath = path.join(root, "lsp-proxy.jsonl");
+  const lineCount = 1000;
+  const warmup = 1;
+  await writeFile(path.join(root, "package.json"), JSON.stringify({ type: "module", devDependencies: { typescript: "^5.9.3" } }, null, 2), "utf8");
+  await writeFile(path.join(root, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true, noEmit: true } }, null, 2), "utf8");
+  await writeFile(filePath, makeTsErrorContent(0, lineCount), "utf8");
+  await writeFile(logPath, "", "utf8");
+
+  const runtime = makeRuntime(root, { enabled: true, lsp: true, format: false });
+  runtime.config.diagnostics.timeoutMs = 5000;
+  runtime.config.diagnostics.inlineTimeoutMs = 1500;
+  runtime.config.diagnostics.settleMs = 0;
+  const lspService = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      typescript: {
+        command: process.execPath,
+        args: [lspStdioProxy, logPath, "--", tsLanguageServer, "--stdio"],
+      },
+    },
+  });
+  const operation = makeEditOperation({
+    root,
+    runtime,
+    lspService,
+    filePath,
+    content: (version) => makeTsErrorContent(version, lineCount),
+    expectCompletedEdit: true,
+  });
+
+  try {
+    return await runScenario({
+      name: "lsp/typescript-incremental",
+      iterations,
+      warmup,
+      notes: `real typescript-language-server behind a stdio proxy; ${lineCount}-line file with one edited string literal; protocol counters exclude warmup`,
+      beforeMeasure: () => fs.writeFileSync(logPath, "", "utf8"),
+      counters: () => summarizeLspProxyCounters(logPath, {
+        fullTextForDidChange: (index) => makeTsErrorContent(warmup + index + 1, lineCount),
+      }),
+      resources: () => lspRootPids(lspService),
+      operation,
+    });
+  } finally {
+    await lspService.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 function makeRuntime(root, options) {
   const config = createDefaultConfig();
   config.enabled = options.enabled;
@@ -371,10 +436,12 @@ function makeEditOperation({ root, runtime, filePath, lspService, formatService,
   };
 }
 
-async function runScenario({ name, iterations, operation, warmup = 0, resources, notes }) {
+async function runScenario({ name, iterations, operation, warmup = 0, beforeMeasure, counters, resources, notes }) {
   for (let index = 0; index < warmup; index += 1) {
     await operation(index, true);
   }
+
+  if (beforeMeasure) await beforeMeasure();
 
   collectGarbageIfAvailable();
   const metricValues = new Map();
@@ -400,6 +467,8 @@ async function runScenario({ name, iterations, operation, warmup = 0, resources,
   const childRootPidExists = childRootPidsEnd.filter((pid) => fs.existsSync(`/proc/${pid}`));
   const childEnd = resources ? collectProcessTree(childRootPidsEnd) : emptyProcessSnapshot();
 
+  const counterValues = counters ? await counters() : undefined;
+
   return {
     name,
     iterations,
@@ -422,6 +491,7 @@ async function runScenario({ name, iterations, operation, warmup = 0, resources,
       childRootPidExists,
       childPids: childEnd.pids,
     },
+    counters: counterValues,
   };
 }
 
@@ -501,9 +571,73 @@ function printHuman(output) {
       console.log(`  ${metric.label.padEnd(12)} wall p50=${fmtMs(metric.wallMs.p50)} p95=${fmtMs(metric.wallMs.p95)} max=${fmtMs(metric.wallMs.max)} | cpu p50=${fmtMs(metric.cpuMs.p50)} p95=${fmtMs(metric.cpuMs.p95)}`);
     }
     const resources = result.resources;
+    if (result.counters) {
+      const entries = Object.entries(result.counters).filter(([, value]) => value !== undefined);
+      if (entries.length > 0) {
+        console.log(`  counters ${entries.map(([key, value]) => `${key}=${fmtCounter(key, value)}`).join(" ")}`);
+      }
+    }
     console.log(`  rss main ${fmtMiB(resources.mainRssStartMb)} → ${fmtMiB(resources.mainRssEndMb)} peak ${fmtMiB(resources.mainRssPeakMb)} | child peak ${fmtMiB(resources.childRssPeakMb)} roots=${resources.childRootPids.join(",") || "-"} liveRoots=${resources.childRootPidExists.join(",") || "-"} pids=${resources.childPids.join(",") || "-"}`);
     console.log(`  cpu process=${fmtMs(resources.processCpuMs)} child=${fmtMs(resources.childCpuMs)}`);
   }
+}
+
+function summarizeLspProxyCounters(logPath, options = {}) {
+  const events = readJsonLines(logPath);
+  const clientMessages = events.filter((event) => event.direction === "client-to-server");
+  const didOpen = clientMessages.filter((event) => event.method === "textDocument/didOpen");
+  const didChange = clientMessages.filter((event) => event.method === "textDocument/didChange");
+  const didSave = clientMessages.filter((event) => event.method === "textDocument/didSave");
+  const didChangeBytes = sumNumbers(didChange.map((event) => event.bodyBytes));
+  const fullEquivalentBytes = options.fullTextForDidChange
+    ? sumNumbers(didChange.map((event, index) => estimatedFullDidChangeBytes(event, options.fullTextForDidChange(index))))
+    : undefined;
+
+  return {
+    lspMessagesClientToServer: clientMessages.length,
+    lspBytesClientToServer: sumNumbers(clientMessages.map((event) => event.bodyBytes)),
+    lspDidOpenCount: didOpen.length,
+    lspDidOpenTextBytes: sumNumbers(didOpen.map((event) => event.textDocumentTextBytes)),
+    lspDidSaveCount: didSave.length,
+    lspDidSaveBytes: sumNumbers(didSave.map((event) => event.bodyBytes)),
+    lspDidSaveTextBytes: sumNumbers(didSave.map((event) => event.paramsTextBytes)),
+    lspDidChangeCount: didChange.length,
+    lspDidChangeBytes: didChangeBytes,
+    lspDidChangeMeanBytes: didChange.length > 0 ? didChangeBytes / didChange.length : undefined,
+    lspDidChangeTextBytes: sumNumbers(didChange.map((event) => event.contentChangeTextBytes)),
+    lspDidChangeRangedCount: sumNumbers(didChange.map((event) => event.contentChangeRangeCount)),
+    lspDidChangeFullTextCount: sumNumbers(didChange.map((event) => event.contentChangeFullTextCount)),
+    lspDidChangeFullEquivalentBytes: fullEquivalentBytes,
+    lspDidChangeReductionRatio: fullEquivalentBytes && didChangeBytes > 0 ? fullEquivalentBytes / didChangeBytes : undefined,
+  };
+}
+
+function readJsonLines(filePath) {
+  try {
+    return fs.readFileSync(filePath, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  } catch {
+    return [];
+  }
+}
+
+function estimatedFullDidChangeBytes(event, text) {
+  if (typeof event.uri !== "string" || typeof event.version !== "number") return 0;
+  return Buffer.byteLength(JSON.stringify({
+    jsonrpc: "2.0",
+    method: "textDocument/didChange",
+    params: {
+      textDocument: { uri: event.uri, version: event.version },
+      contentChanges: [{ text }],
+    },
+  }), "utf8");
+}
+
+function sumNumbers(values) {
+  return values.reduce((total, value) => total + (typeof value === "number" && Number.isFinite(value) ? value : 0), 0);
 }
 
 function editScenarioNotes(options) {
@@ -703,6 +837,19 @@ function fmtMs(value) {
   if (value < 10) return `${value.toFixed(3)}ms`;
   if (value < 100) return `${value.toFixed(2)}ms`;
   return `${value.toFixed(1)}ms`;
+}
+
+function fmtCounter(key, value) {
+  if (typeof value !== "number") return String(value);
+  if (key.toLowerCase().includes("bytes")) return fmtBytes(value);
+  if (key.toLowerCase().includes("ratio")) return `${value.toFixed(1)}x`;
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function fmtBytes(value) {
+  if (value < 1024) return `${Math.round(value)}B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)}KiB`;
+  return `${(value / 1024 / 1024).toFixed(2)}MiB`;
 }
 
 function fmtMiB(value) {
