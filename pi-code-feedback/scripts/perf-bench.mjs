@@ -5,13 +5,14 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createDefaultConfig } from "../src/config.ts";
 import { handleToolCall } from "../src/events/tool-call.ts";
 import { handleToolResult } from "../src/events/tool-result.ts";
 import { handleContext } from "../src/events/context.ts";
 import { createFormatService } from "../src/format/service.ts";
+import { LspClient } from "../src/lsp/client.ts";
 import { createLspService } from "../src/lsp/service.ts";
 import { beginTurn, createRuntime, setProjectRoot } from "../src/runtime.ts";
 
@@ -53,6 +54,7 @@ if (args.live) {
   scenarioSpecs.push(["lsp/typescript-live", () => runTypeScriptLiveScenario(Math.max(3, Math.ceil(baseIterations / 4)))]);
   scenarioSpecs.push(["lsp/typescript-incremental", () => runTypeScriptIncrementalScenario(Math.max(3, Math.ceil(baseIterations / 4)))]);
   scenarioSpecs.push(["lsp/typescript-hover", () => runTypeScriptHoverScenario(Math.max(5, Math.ceil(baseIterations / 2)))]);
+  scenarioSpecs.push(["lsp/typescript-cancel", () => runTypeScriptCancelScenario(Math.max(5, Math.ceil(baseIterations / 2)))]);
 }
 
 for (const [name, run] of scenarioSpecs) {
@@ -437,6 +439,74 @@ async function runTypeScriptHoverScenario(iterations) {
   }
 }
 
+async function runTypeScriptCancelScenario(iterations) {
+  if (!fs.existsSync(tsLanguageServer)) {
+    return {
+      name: "lsp/typescript-cancel",
+      iterations: 0,
+      skipped: true,
+      notes: `missing ${path.relative(repoRoot, tsLanguageServer)}`,
+      metrics: [],
+    };
+  }
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-perf-ts-cancel-"));
+  const filePath = path.join(root, "probe.ts");
+  const logPath = path.join(root, "lsp-proxy.jsonl");
+  const referenceCount = 3000;
+  const requestTimeoutMs = 1;
+  const content = makeTsReferencesContent(referenceCount);
+  await writeFile(path.join(root, "package.json"), JSON.stringify({ type: "module", devDependencies: { typescript: "^5.9.3" } }, null, 2), "utf8");
+  await writeFile(path.join(root, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true, noEmit: true } }, null, 2), "utf8");
+  await writeFile(filePath, content, "utf8");
+  await writeFile(logPath, "", "utf8");
+
+  const uri = pathToFileUri(filePath);
+  const referenceParams = {
+    textDocument: { uri },
+    position: { line: 0, character: 14 },
+    context: { includeDeclaration: true },
+  };
+  const client = new LspClient({
+    id: "typescript",
+    command: process.execPath,
+    args: [lspStdioProxy, logPath, "--", tsLanguageServer, "--stdio"],
+    extensions: [".ts"],
+    languageId: () => "typescript",
+  }, root);
+
+  try {
+    await client.requestForDocument(filePath, content, "textDocument/hover", {
+      textDocument: { uri },
+      position: { line: 0, character: 14 },
+    }, 5000);
+
+    return await runScenario({
+      name: "lsp/typescript-cancel",
+      iterations,
+      notes: `real typescript-language-server references requests behind a stdio proxy; ${referenceCount} references; client timeout ${requestTimeoutMs}ms; protocol counters exclude initialization`,
+      beforeMeasure: () => fs.writeFileSync(logPath, "", "utf8"),
+      counters: () => summarizeLspProxyCounters(logPath),
+      resources: () => lspClientRootPids(client),
+      operation: async () => {
+        const request = await timed("references_timeout", async () => {
+          try {
+            await client.requestForDocument(filePath, content, "textDocument/references", referenceParams, requestTimeoutMs);
+          } catch (error) {
+            if (error instanceof Error && error.message.includes("timed out")) return true;
+            throw error;
+          }
+          throw new Error("benchmark sanity check failed: references request completed before the timeout");
+        });
+        return withTotal([request]);
+      },
+    });
+  } finally {
+    await client.shutdown();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 function makeRuntime(root, options) {
   const config = createDefaultConfig();
   config.enabled = options.enabled;
@@ -651,10 +721,13 @@ function printHuman(output) {
 function summarizeLspProxyCounters(logPath, options = {}) {
   const events = readJsonLines(logPath);
   const clientMessages = events.filter((event) => event.direction === "client-to-server");
+  const serverMessages = events.filter((event) => event.direction === "server-to-client");
   const didOpen = clientMessages.filter((event) => event.method === "textDocument/didOpen");
   const didChange = clientMessages.filter((event) => event.method === "textDocument/didChange");
   const didSave = clientMessages.filter((event) => event.method === "textDocument/didSave");
   const hover = clientMessages.filter((event) => event.method === "textDocument/hover");
+  const references = clientMessages.filter((event) => event.method === "textDocument/references");
+  const cancellations = clientMessages.filter((event) => event.method === "$/cancelRequest");
   const didChangeBytes = sumNumbers(didChange.map((event) => event.bodyBytes));
   const documentSyncMessages = [...didOpen, ...didChange, ...didSave];
   const fullEquivalentBytes = options.fullTextForDidChange
@@ -668,6 +741,11 @@ function summarizeLspProxyCounters(logPath, options = {}) {
     lspDocumentSyncBytes: sumNumbers(documentSyncMessages.map((event) => event.bodyBytes)),
     lspHoverCount: hover.length,
     lspHoverBytes: sumNumbers(hover.map((event) => event.bodyBytes)),
+    lspReferencesCount: references.length,
+    lspReferencesBytes: sumNumbers(references.map((event) => event.bodyBytes)),
+    lspCancelCount: cancellations.length,
+    lspCancelBytes: sumNumbers(cancellations.map((event) => event.bodyBytes)),
+    lspCancelledResponseCount: serverMessages.filter((event) => event.errorCode === -32800).length,
     lspDidOpenCount: didOpen.length,
     lspDidOpenTextBytes: sumNumbers(didOpen.map((event) => event.textDocumentTextBytes)),
     lspDidSaveCount: didSave.length,
@@ -738,12 +816,33 @@ function makeTsErrorContent(version, lineCount) {
   return `${lines.join("\n")}\n`;
 }
 
+function makeTsReferencesContent(referenceCount) {
+  const lines = [
+    "export const target = 1;",
+    "export function readTarget(): number {",
+  ];
+  for (let index = 0; index < referenceCount; index += 1) {
+    lines.push(`  const use${index} = target + ${index};`);
+  }
+  lines.push("  return target;", "}");
+  return `${lines.join("\n")}\n`;
+}
+
+function pathToFileUri(filePath) {
+  return pathToFileURL(filePath).href;
+}
+
 function firstLineDiff(before, after) {
   return `@@ -1,1 +1,1 @@\n-${before.split("\n")[0]}\n+${after.split("\n")[0]}\n`;
 }
 
 function lspRootPids(lspService) {
   return lspService.getStatus().clients.map((client) => client.pid).filter((pid) => typeof pid === "number");
+}
+
+function lspClientRootPids(client) {
+  const pid = client.getStatus().pid;
+  return typeof pid === "number" ? [pid] : [];
 }
 
 const clockTicksPerSecond = readClockTicksPerSecond();

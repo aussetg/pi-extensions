@@ -84,11 +84,14 @@ function handleMessage(message) {
   }
 
   if (message.id !== undefined && message.method === "textDocument/hover") {
-    send({
+    const response = {
       jsonrpc: "2.0",
       id: message.id,
       result: mode === "empty" ? null : { contents: { kind: "plaintext", value: `${source} hover` } },
-    });
+    };
+    const delayMs = hoverDelayMs(mode);
+    if (delayMs > 0) setTimeout(() => send(response), delayMs);
+    else send(response);
     return;
   }
 
@@ -99,6 +102,11 @@ function handleMessage(message) {
 
   if (message.method === "exit") {
     process.exit(0);
+  }
+
+  if (message.method === "$/cancelRequest") {
+    if (shouldLogCancel(mode)) log({ method: message.method, params: message.params });
+    return;
   }
 
   if (message.method === "textDocument/didOpen") {
@@ -189,6 +197,15 @@ function publishDiagnostics(uri, version) {
 function diagnosticDelayMs(value) {
   const match = /^diagnostics-delay-(\d+)$/.exec(value);
   return match ? Number.parseInt(match[1], 10) : 0;
+}
+
+function hoverDelayMs(value) {
+  const match = /^hover-delay-(\d+)$/.exec(value);
+  return match ? Number.parseInt(match[1], 10) : 0;
+}
+
+function shouldLogCancel(value) {
+  return value === "cancel-log" || /^hover-delay-\d+$/.test(value);
 }
 
 function send(message) {

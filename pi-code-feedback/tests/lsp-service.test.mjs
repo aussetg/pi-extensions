@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { setTimeout as sleep } from "node:timers/promises";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
+import { LspClient } from "../src/lsp/client.ts";
 import { createLspService } from "../src/lsp/service.ts";
 import { selectCodeActionForApply } from "../src/lsp/workspace-edit.ts";
 import { LSP_RESULT_SERVER_ID_KEY } from "../src/types.ts";
@@ -147,6 +149,39 @@ test("document requests sync the file without forcing a save or diagnostic refre
   }
 });
 
+test("timed out LSP requests send a cancel notification", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-cancel-"));
+  const filePath = path.join(root, "probe.py");
+  const logPath = path.join(root, "lsp.jsonl");
+  await writeFile(filePath, "value = 1\n", "utf8");
+
+  const client = new LspClient({
+    id: "python",
+    command: process.execPath,
+    args: [fakeServer, "py", "T100", "1", "", "hover-delay-200", logPath],
+    extensions: [".py"],
+    languageId: () => "python",
+  }, root);
+
+  try {
+    await assert.rejects(
+      () => client.request("textDocument/hover", {
+        textDocument: { uri: pathToFileURL(filePath).href },
+        position: { line: 0, character: 0 },
+      }, 20),
+      /LSP request timed out: textDocument\/hover/,
+    );
+
+    const entries = await waitForJsonLog(logPath, (entries) => entries.some((entry) => entry.method === "$/cancelRequest"));
+    const cancellations = entries.filter((entry) => entry.method === "$/cancelRequest");
+    assert.equal(cancellations.length, 1);
+    assert.deepEqual(cancellations[0].params, { id: 2 });
+  } finally {
+    await client.shutdown();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("code actions for a Python file are merged from ty and Ruff clients", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-actions-"));
   const filePath = path.join(root, "probe.py");
@@ -182,3 +217,25 @@ test("code actions for a Python file are merged from ty and Ruff clients", async
     await rm(root, { recursive: true, force: true });
   }
 });
+
+async function waitForJsonLog(filePath, predicate) {
+  let entries = [];
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    entries = await readJsonLog(filePath);
+    if (predicate(entries)) return entries;
+    await sleep(10);
+  }
+  return entries;
+}
+
+async function readJsonLog(filePath) {
+  try {
+    return (await readFile(filePath, "utf8"))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  } catch {
+    return [];
+  }
+}

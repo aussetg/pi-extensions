@@ -80,6 +80,7 @@ function summarizeMessage(direction, bodyBytes, message) {
   const params = isRecord(message.params) ? message.params : undefined;
   const textDocument = isRecord(params?.textDocument) ? params.textDocument : undefined;
   const contentChanges = Array.isArray(params?.contentChanges) ? params.contentChanges : [];
+  const error = isRecord(message.error) ? message.error : undefined;
 
   return pruneUndefined({
     at: Date.now(),
@@ -87,6 +88,9 @@ function summarizeMessage(direction, bodyBytes, message) {
     bodyBytes,
     id: typeof message.id === "number" || typeof message.id === "string" ? message.id : undefined,
     method: typeof message.method === "string" ? message.method : undefined,
+    cancelRequestId: message.method === "$/cancelRequest" && (typeof params?.id === "number" || typeof params?.id === "string") ? params.id : undefined,
+    errorCode: typeof error?.code === "number" ? error.code : undefined,
+    errorMessage: typeof error?.message === "string" ? error.message : undefined,
     uri: typeof textDocument?.uri === "string" ? textDocument.uri : undefined,
     version: typeof textDocument?.version === "number" ? textDocument.version : undefined,
     paramsTextBytes: textBytes(params?.text),

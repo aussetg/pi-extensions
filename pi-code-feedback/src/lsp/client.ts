@@ -372,7 +372,8 @@ export class LspClient {
 
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        this.pending.delete(id);
+        if (!this.pending.delete(id)) return;
+        this.cancelRequest(id);
         reject(new Error(`LSP request timed out: ${method}`));
       }, timeoutMs);
       timeout.unref?.();
@@ -390,6 +391,14 @@ export class LspClient {
   private notify(method: string, params?: unknown): void {
     const message: JsonRpcNotification = params === undefined ? { jsonrpc: "2.0", method } : { jsonrpc: "2.0", method, params };
     this.send(message);
+  }
+
+  private cancelRequest(id: number | string): void {
+    try {
+      this.notify("$/cancelRequest", { id });
+    } catch (error) {
+      this.lastError = error instanceof Error ? error.message : String(error);
+    }
   }
 
   private send(message: JsonRpcMessage): void {
