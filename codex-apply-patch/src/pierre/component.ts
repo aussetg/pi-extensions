@@ -115,6 +115,8 @@ export class PierreInlineDiffComponent implements Component {
   private invalidateView: (() => void) | undefined;
   private highlightedByKey = new Map<string, HighlightedDiffSet>();
   private piHighlightedByKey = globalPiHighlightCache();
+  private renderedKey: string | undefined;
+  private renderedLines: string[] | undefined;
 
   constructor(
     payloads: PierreDiffPayload | PierreDiffPayload[],
@@ -156,6 +158,7 @@ export class PierreInlineDiffComponent implements Component {
       this.payloads.length,
     );
     this.ingestHighlightedPayloads();
+    this.clearRenderedCache();
   }
 
   render(width: number): string[] {
@@ -167,6 +170,11 @@ export class PierreInlineDiffComponent implements Component {
       this.payloads.length,
     );
     const safeWidth = Math.max(20, width);
+    const renderedKey = this.renderCacheKey(safeWidth);
+    if (this.renderedKey === renderedKey && this.renderedLines) {
+      return this.renderedLines;
+    }
+
     const lines: string[] = [];
 
     const beforeDiff = this.suppressLeadingSpacing
@@ -204,10 +212,31 @@ export class PierreInlineDiffComponent implements Component {
       lines.push(renderBlankLine(safeWidth, this.palette.editorBg));
     }
 
+    this.renderedKey = renderedKey;
+    this.renderedLines = lines;
     return lines;
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    this.clearRenderedCache();
+  }
+
+  private clearRenderedCache(): void {
+    this.renderedKey = undefined;
+    this.renderedLines = undefined;
+  }
+
+  private renderCacheKey(width: number): string {
+    return [
+      width,
+      this.showFileHeaders ? "headers" : "no-headers",
+      this.expandCollapsedHunks ? "expanded" : "collapsed",
+      this.suppressLeadingSpacing ? "tight" : "spaced",
+      this.palette.appearance,
+      JSON.stringify(this.config),
+      ...this.payloads.map(payloadKey),
+    ].join("\u0000");
+  }
 
   private renderRow(
     row: DiffRow,

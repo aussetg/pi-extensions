@@ -1,4 +1,10 @@
-import { Text, type Component } from "@earendil-works/pi-tui";
+import {
+  Text,
+  truncateToWidth,
+  visibleWidth,
+  wrapTextWithAnsi,
+  type Component,
+} from "@earendil-works/pi-tui";
 import type {
   ApplyPatchDetails,
   ApplyPatchOperation,
@@ -195,25 +201,24 @@ function toolBackground(
 }
 
 class ApplyPatchTextResultComponent implements Component {
-  private text: string;
+  private parts: ResultPart[];
   private background: ((text: string) => string) | undefined;
   private footerLines: number;
 
   constructor(
-    text: string,
+    parts: ResultPart[] | string,
     theme: ThemeLike,
     context?: ShellContextLike,
   ) {
-    this.text = text;
+    this.parts = typeof parts === "string" ? [parts] : parts;
     this.background = toolBackground(theme, context);
     this.footerLines = getPierreRendererConfig().spacing.afterDiff;
   }
 
   render(width: number): string[] {
-    const lines = new Text(this.text, 1, 0, this.background).render(width);
+    const lines = renderResultParts(this.parts, width, this.background);
     for (let i = 0; i < this.footerLines; i += 1) {
-      const blank = persistentBlankLine(width);
-      lines.push(this.background ? this.background(blank) : blank);
+      lines.push(backgroundBlankLine(width, this.background));
     }
     return lines;
   }
@@ -257,14 +262,14 @@ function getPierrePreviewPayload(
 
 class ApplyPatchPierreResultComponent implements Component {
   private diff: PierreInlineDiffComponent;
-  private footerText = "";
+  private footerParts: ResultPart[] = [];
   private footerBg: ((text: string) => string) | undefined;
 
   constructor(
     payloads: PierreDiffPayload[],
     theme: ThemeLike,
     options: {
-      footerText: string;
+      footerParts: ResultPart[];
       expanded: boolean;
       invalidate?: () => void;
     },
@@ -282,7 +287,7 @@ class ApplyPatchPierreResultComponent implements Component {
     payloads: PierreDiffPayload[],
     theme: ThemeLike,
     options: {
-      footerText: string;
+      footerParts: ResultPart[];
       expanded: boolean;
       invalidate?: () => void;
     },
@@ -293,16 +298,20 @@ class ApplyPatchPierreResultComponent implements Component {
       suppressLeadingSpacing: true,
       onInvalidate: options.invalidate,
     });
-    this.footerText = options.footerText;
+    this.footerParts = options.footerParts;
     this.footerBg = toolBackground(theme, { isPartial: false, isError: false });
   }
 
   render(width: number): string[] {
     const lines = this.diff.render(width);
-    if (!this.footerText) return lines;
+    if (this.footerParts.length === 0) return lines;
 
-    const footer = new Text(`${this.footerText}\n`, 1, 0, this.footerBg);
-    return [...lines, ...footer.render(width)];
+    return [
+      ...lines,
+      ...renderResultParts(this.footerParts, width, this.footerBg, {
+        trailingBlank: true,
+      }),
+    ];
   }
 
   invalidate(): void {
@@ -312,7 +321,7 @@ class ApplyPatchPierreResultComponent implements Component {
 
 function renderPierrePreviews(
   previews: ApplyPatchPreview[],
-  footerText: string,
+  footerParts: ResultPart[],
   expanded: boolean,
   theme: ThemeLike,
   context?: ShellContextLike,
@@ -321,7 +330,7 @@ function renderPierrePreviews(
   if (payloads.length === 0 || payloads.length !== previews.length) return undefined;
 
   const options = {
-    footerText,
+    footerParts,
     expanded,
     invalidate: context?.invalidate,
   };
@@ -368,8 +377,56 @@ function hasResultPreview(
   return isPierreDiffPayload(entry.pierre) || hasNumberedDiffPreview(entry);
 }
 
-function footerText(parts: string[]): string {
-  return parts.filter(Boolean).join("\n\n");
+function resultParts(parts: Array<ResultPart | undefined>): ResultPart[] {
+  return parts.filter((part): part is ResultPart =>
+    typeof part === "string" ? part.length > 0 : part !== undefined,
+  );
+}
+
+function renderResultParts(
+  parts: ResultPart[],
+  width: number,
+  background: ((text: string) => string) | undefined,
+  options: { trailingBlank?: boolean } = {},
+): string[] {
+  const safeWidth = Math.max(1, Math.trunc(width));
+  const lines: string[] = [];
+  let emitted = false;
+
+  for (const part of parts) {
+    const rendered = renderResultPart(part, safeWidth, background);
+    if (rendered.length === 0) continue;
+    if (emitted) lines.push(backgroundBlankLine(safeWidth, background));
+    lines.push(...rendered);
+    emitted = true;
+  }
+
+  if (emitted && options.trailingBlank) {
+    lines.push(backgroundBlankLine(safeWidth, background));
+  }
+
+  return lines;
+}
+
+function renderResultPart(
+  part: ResultPart,
+  width: number,
+  background: ((text: string) => string) | undefined,
+): string[] {
+  if (typeof part === "string") return new Text(part, 1, 0, background).render(width);
+
+  const contentWidth = Math.max(1, width - 2);
+  const content = part.renderContent(contentWidth);
+  if (content.length === 0) return [];
+  return new Text(content.join("\n"), 1, 0, background).render(width);
+}
+
+function backgroundBlankLine(
+  width: number,
+  background: ((text: string) => string) | undefined,
+): string {
+  const blank = persistentBlankLine(width);
+  return background ? background(blank) : blank;
 }
 
 const CODE_FEEDBACK_DETAILS_KEY = "piCodeFeedback";
@@ -397,6 +454,13 @@ interface CodeFeedbackDiagnosticEntry {
   message: string;
   linkReason?: string;
 }
+
+interface CodeFeedbackBlock {
+  renderContent(width: number): string[];
+}
+
+type CodeFeedbackRender = string | CodeFeedbackBlock;
+type ResultPart = CodeFeedbackRender;
 
 function readCodeFeedback(
   details: unknown,
@@ -489,16 +553,53 @@ function renderCodeFeedbackFromDetails(
   details: unknown,
   theme: ThemeLike,
   options: { expanded: boolean; cwd?: string },
-): string {
+): CodeFeedbackRender | undefined {
   const feedback = readCodeFeedback(details);
-  if (!feedback) return "";
+  if (!feedback) return undefined;
 
   const lines = renderStructuredCodeFeedback(feedback, theme, options);
-  if (lines.length > 0) return lines.join("\n");
+  if (lines.length > 0) return new CodeFeedbackPanel(lines, theme);
 
   return feedback.inlineText
     ? theme.fg("toolOutput", feedback.inlineText)
-    : "";
+    : undefined;
+}
+
+class CodeFeedbackPanel implements CodeFeedbackBlock {
+  private readonly content: string[];
+
+  constructor(lines: string[], private readonly theme: ThemeLike) {
+    this.content = [
+      lines[0]!,
+      ...lines.slice(1).map((line) => line.replace(/^  /, "")),
+    ];
+  }
+
+  renderContent(width: number): string[] {
+    const safeWidth = Math.max(1, Math.trunc(width));
+    if (safeWidth < 6) return wrapContentLines(this.content, safeWidth);
+
+    const naturalWidth = Math.max(
+      1,
+      ...this.content.map((line) => visibleWidth(line)),
+    );
+    const innerWidth = Math.max(1, Math.min(naturalWidth, safeWidth - 4));
+    const border = (text: string) => this.theme.fg("muted", text);
+    const horizontal = "─".repeat(innerWidth + 2);
+    const out = [border(`╭${horizontal}╮`)];
+
+    for (const line of this.content) {
+      for (const segment of wrapAnsiLine(line, innerWidth)) {
+        const padding = " ".repeat(
+          Math.max(0, innerWidth - visibleWidth(segment)),
+        );
+        out.push(`${border("│")} ${segment}${padding} ${border("│")}`);
+      }
+    }
+
+    out.push(border(`╰${horizontal}╯`));
+    return out;
+  }
 }
 
 function renderStructuredCodeFeedback(
@@ -537,40 +638,7 @@ function renderStructuredCodeFeedback(
   for (const diagnostic of diagnostics) {
     lines.push(...renderCodeFeedbackDiagnostic(diagnostic, theme, options));
   }
-  return renderCodeFeedbackPanel(lines, theme);
-}
-
-function renderCodeFeedbackPanel(
-  lines: string[],
-  theme: ThemeLike,
-): string[] {
-  if (lines.length === 0) return [];
-  const border = (text: string) => theme.fg("muted", text);
-  const content = [
-    lines[0]!,
-    ...lines.slice(1).map((line) => line.replace(/^  /, "")),
-  ];
-  const contentWidth = Math.max(
-    1,
-    ...content.map((line) => visibleAnsiWidth(line)),
-  );
-  const horizontal = "─".repeat(contentWidth + 2);
-  return [
-    border(`╭${horizontal}╮`),
-    ...content.map((line) => {
-      const padding = " ".repeat(
-        Math.max(0, contentWidth - visibleAnsiWidth(line)),
-      );
-      return `${border("│")} ${line}${padding} ${border("│")}`;
-    }),
-    border(`╰${horizontal}╯`),
-  ];
-}
-
-function visibleAnsiWidth(text: string): number {
-  // Good enough for our mostly-ASCII diagnostic text; keeps ANSI styling from
-  // throwing off the box padding.
-  return [...text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")].length;
+  return lines;
 }
 
 function collectCodeFeedbackDiagnostics(
@@ -831,6 +899,21 @@ function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
+function wrapContentLines(lines: string[], width: number): string[] {
+  return lines.flatMap((line) => wrapAnsiLine(line, width));
+}
+
+function wrapAnsiLine(line: string, width: number): string[] {
+  const safeWidth = Math.max(1, Math.trunc(width));
+  const wrapped = wrapTextWithAnsi(line, safeWidth);
+  const lines = wrapped.length > 0 ? wrapped : [""];
+  return lines.map((segment: string) => fitAnsiLine(segment, safeWidth));
+}
+
+function fitAnsiLine(line: string, width: number): string {
+  return visibleWidth(line) > width ? truncateToWidth(line, width, "") : line;
+}
+
 function summarizeUnpreviewedResults(
   results: Array<{
     type: ApplyPatchOpType;
@@ -884,8 +967,8 @@ export function renderApplyPatchResult(
   theme: ThemeLike,
   context?: ShellContextLike,
 ) {
-  const renderText = (text: string) =>
-    new ApplyPatchTextResultComponent(text, theme, {
+  const renderText = (parts: ResultPart[] | string) =>
+    new ApplyPatchTextResultComponent(parts, theme, {
       ...context,
       isPartial,
     });
@@ -902,7 +985,7 @@ export function renderApplyPatchResult(
   }
 
   if (details?.stage === "done") {
-    const codeFeedbackText = renderCodeFeedbackFromDetails(details, theme, {
+    const codeFeedback = renderCodeFeedbackFromDetails(details, theme, {
       expanded,
       cwd: context?.cwd,
     });
@@ -911,8 +994,8 @@ export function renderApplyPatchResult(
       warnings.length > 0
         ? warnings.map((w) => theme.fg("warning", w)).join("\n")
         : "";
-    const withFeedback = (text: string): string =>
-      footerText([text, warningsText, codeFeedbackText]);
+    const withFeedback = (text: string): ResultPart[] =>
+      resultParts([text, warningsText, codeFeedback]);
 
     const failed = details.results.filter((r) => r.status === "failed");
     if (failed.length === 0) {
@@ -927,24 +1010,24 @@ export function renderApplyPatchResult(
           const out = completed
             .map((r) => renderOperationLine(r, theme))
             .join("\n");
-          return renderText(withResultSpacing(withFeedback(out)));
+          return renderText(withFeedback(out));
         }
 
         const output = textFromContent(result.content);
         if (!output) {
           const feedback = withFeedback("");
-          if (!feedback) return renderText(withResultSpacing(theme.fg("muted", "(no output)")));
-          return renderText(withResultSpacing(feedback));
+          if (feedback.length === 0) return renderText(withResultSpacing(theme.fg("muted", "(no output)")));
+          return renderText(feedback);
         }
-        return renderText(withResultSpacing(withFeedback(theme.fg("toolOutput", output))));
+        return renderText(withFeedback(theme.fg("toolOutput", output)));
       }
 
       const pierre = renderPierrePreviews(
         previews,
-        footerText([
+        resultParts([
           summarizeUnpreviewedResults(details.results, theme),
           warningsText,
-          codeFeedbackText,
+          codeFeedback,
         ]),
         expanded,
         theme,
@@ -958,7 +1041,7 @@ export function renderApplyPatchResult(
       const out = completed
         .map((r) => renderOperationLine(r, theme))
         .join("\n");
-      return renderText(withResultSpacing(withFeedback(out)));
+      return renderText(withFeedback(out));
     }
 
     const out = failed
@@ -966,7 +1049,7 @@ export function renderApplyPatchResult(
         return theme.fg("error", r.output ?? "Operation failed");
       })
       .join("\n\n");
-    return renderText(withResultSpacing(withFeedback(out)));
+    return renderText(withFeedback(out));
   }
 
   // Fallback
