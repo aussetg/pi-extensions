@@ -3,8 +3,15 @@ import {
   DEFAULT_MAX_LINES,
   formatSize,
   keyHint,
+  keyText,
 } from "@earendil-works/pi-coding-agent";
-import { Image, Text, type Component } from "@earendil-works/pi-tui";
+import {
+  getCapabilities,
+  getImageDimensions,
+  imageFallback,
+  Text,
+  type Component,
+} from "@earendil-works/pi-tui";
 import { PierreInlineDiffComponent } from "../../codex-apply-patch/src/pierre/index.ts";
 import { getPierreRendererConfig } from "../../codex-apply-patch/src/pierre/config.ts";
 import type { PierreDiffPayload } from "../../codex-apply-patch/src/pierre/types.ts";
@@ -18,9 +25,9 @@ import {
   writePreviewPayload,
 } from "./payloads.ts";
 import {
+  compactReadClassification,
   countLines,
   firstLine,
-  imageContent,
   isRecord,
   isToolError,
   plural,
@@ -34,19 +41,15 @@ import {
 type RenderOptions = { expanded: boolean; isPartial: boolean };
 type FooterPart = CodeFeedbackRender;
 const COLLAPSED_MAX_LINES = 10;
+const ANSI_ESCAPE_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 
 export function renderReadCall(args: unknown, theme: ThemeLike, context?: ShellContextLike): Component {
-  const path = stringArg(args, "path") ?? "";
-  const offset = numberArg(args, "offset");
-  const limit = numberArg(args, "limit");
+  const classification = !context?.expanded ? compactReadClassification(args, context?.cwd) : undefined;
+  if (classification) {
+    return new Text(formatCompactReadCall(classification, args, theme), 1, 1, toolBackground(theme, context));
+  }
 
-  let out = theme.fg("toolTitle", theme.bold("read"));
-  if (path) out += " " + theme.fg("accent", shortenPathForDisplay(path));
-  const opts: string[] = [];
-  if (offset !== undefined) opts.push(`offset=${offset}`);
-  if (limit !== undefined) opts.push(`limit=${limit}`);
-  if (opts.length > 0) out += " " + theme.fg("muted", `(${opts.join(", ")})`);
-  return new Text(out, 1, 1, toolBackground(theme, context));
+  return new Text(formatReadCall(args, theme), 1, 1, toolBackground(theme, context));
 }
 
 export function renderWriteCall(args: unknown, theme: ThemeLike, context?: ShellContextLike): Component {
@@ -77,14 +80,16 @@ export function renderReadResult(
 ): Component {
   if (options.isPartial) return renderText("Reading...", theme, { ...context, isPartial: true }, "pending");
 
-  const image = imageContent(result);
-  if (image) return renderImageResult(image, theme, context);
-
-  const text = readDisplayText(result);
+  const text = readDisplayText(result, context?.showImages ?? true);
   if (text === undefined) return renderText(theme.fg("muted", "(no content)"), theme, context);
   if (isToolError(result, context)) return renderText(theme.fg("error", firstLine(text)), theme, context);
 
-  const path = stringArg(context?.args, "path") ?? "file";
+  if (!options.expanded && compactReadClassification(context?.args, context?.cwd)) {
+    return renderTextParts([], theme, context);
+  }
+
+  const renderPath = renderStringArg(context?.args, "file_path", "path");
+  const path = renderPath && renderPath !== null ? renderPath : "file";
   const startLine = Math.max(1, Math.trunc(numberArg(context?.args, "offset") ?? 1));
   const display = collapseTextForDisplay(text, options.expanded, false);
   const payload = readPreviewPayload({ path, content: display.text, startLine });
@@ -137,7 +142,7 @@ export function renderWriteResult(
 
   const summary = preview.skippedReason
     ? theme.fg("warning", `Preview skipped: ${preview.skippedReason}`)
-    : theme.fg("success", preview.existed ? "Written" : "Created");
+    : theme.fg("success", preview.existed === false ? "Created" : "Written");
   return renderTextParts(footerParts([summary, ...footers]), theme, context);
 }
 
@@ -189,6 +194,7 @@ class RichTextResultComponent implements Component {
 
   render(width: number): string[] {
     const lines = renderFooterParts(this.parts, width, this.background);
+    if (lines.length === 0) return lines;
     for (let i = 0; i < this.footerLines; i += 1) {
       lines.push(backgroundBlankLine(width, this.background));
     }
@@ -386,20 +392,6 @@ function backgroundBlankLine(
   return background ? background(blank) : blank;
 }
 
-function renderImageResult(
-  image: { data: string; mimeType?: string; mime?: string },
-  theme: ThemeLike,
-  context?: ShellContextLike,
-): Component {
-  if (context?.showImages === false) {
-    return renderText(theme.fg("success", "Image loaded"), theme, context);
-  }
-  return new Image(image.data, image.mimeType ?? image.mime ?? "image/png", theme, {
-    maxWidthCells: 80,
-    maxHeightCells: 24,
-  });
-}
-
 function toolBackground(theme: ThemeLike, context?: ShellContextLike): ((text: string) => string) | undefined {
   if (!theme.bg) return undefined;
   const color = (context?.isPartial ?? true)
@@ -414,10 +406,6 @@ function persistentBlankLine(width: number): string {
   return `\u200b${" ".repeat(Math.max(0, width))}`;
 }
 
-function footerText(parts: string[]): string {
-  return parts.filter(Boolean).join("\n\n");
-}
-
 function stringArg(args: unknown, key: string): string | undefined {
   if (!isRecord(args)) return undefined;
   const value = args[key];
@@ -430,14 +418,101 @@ function numberArg(args: unknown, key: string): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function renderStringArg(args: unknown, ...keys: string[]): string | null {
+  if (!isRecord(args)) return "";
+  for (const key of keys) {
+    const value = args[key];
+    if (typeof value === "string") return value;
+    if (value !== undefined && value !== null) return null;
+  }
+  return "";
+}
+
+function formatReadLineRange(args: unknown, theme: ThemeLike): string {
+  const offset = numberArg(args, "offset");
+  const limit = numberArg(args, "limit");
+  if (offset === undefined && limit === undefined) return "";
+
+  const startLine = offset ?? 1;
+  const endLine = limit !== undefined ? startLine + limit - 1 : "";
+  return theme.fg("warning", `:${startLine}${endLine ? `-${endLine}` : ""}`);
+}
+
+function formatReadCall(args: unknown, theme: ThemeLike): string {
+  const rawPath = renderStringArg(args, "file_path", "path");
+  const path = rawPath !== null ? shortenPathForDisplay(rawPath) : null;
+  const pathDisplay = path === null
+    ? theme.fg("error", "[invalid arg]")
+    : path
+      ? theme.fg("accent", path)
+      : theme.fg("toolOutput", "...");
+  return `${theme.fg("toolTitle", theme.bold("read"))} ${pathDisplay}${formatReadLineRange(args, theme)}`;
+}
+
+function formatCompactReadCall(
+  classification: { kind: "docs" | "resource" | "skill"; label: string },
+  args: unknown,
+  theme: ThemeLike,
+): string {
+  const expandHint = theme.fg("dim", ` (${keyText("app.tools.expand")} to expand)`);
+  if (classification.kind === "skill") {
+    return (
+      theme.fg("customMessageLabel", `\x1b[1m[skill]\x1b[22m `) +
+      theme.fg("customMessageText", classification.label) +
+      formatReadLineRange(args, theme) +
+      expandHint
+    );
+  }
+
+  return (
+    theme.fg("toolTitle", theme.bold(`read ${classification.kind}`)) +
+    " " +
+    theme.fg("accent", classification.label) +
+    formatReadLineRange(args, theme) +
+    expandHint
+  );
+}
+
 function detailsDiff(details: unknown): string | undefined {
   if (!isRecord(details)) return undefined;
   const diff = details.diff;
   return typeof diff === "string" && diff.length > 0 ? diff : undefined;
 }
 
-function readDisplayText(result: ToolResultLike): string | undefined {
-  return textContent(result);
+function readDisplayText(result: ToolResultLike, showImages: boolean): string | undefined {
+  const content = result.content;
+  if (!Array.isArray(content)) return undefined;
+
+  const textBlocks: string[] = [];
+  const imageBlocks: Array<{ data?: string; mimeType?: string; mime?: string }> = [];
+  for (const item of content) {
+    if (!isRecord(item)) continue;
+    if (item.type === "text" && typeof item.text === "string") {
+      textBlocks.push(stripAnsi(item.text).replace(/\r/g, ""));
+    } else if (item.type === "image") {
+      imageBlocks.push(item);
+    }
+  }
+
+  const parts = [...textBlocks];
+  const capabilities = getCapabilities();
+  if (imageBlocks.length > 0 && (!capabilities.images || !showImages)) {
+    // ToolExecutionComponent owns actual image rendering. Keep the text stream
+    // aligned with the default read renderer when inline images are disabled or
+    // unavailable in the current terminal.
+    parts.push(...imageBlocks.map((image) => {
+      const mimeType = image.mimeType ?? image.mime ?? "image/unknown";
+      const dimensions = image.data ? getImageDimensions(image.data, mimeType) ?? undefined : undefined;
+      return imageFallback(mimeType, dimensions);
+    }));
+  }
+
+  const output = parts.join("\n");
+  return output.length > 0 ? output : "";
+}
+
+function stripAnsi(text: string): string {
+  return text.replace(ANSI_ESCAPE_REGEX, "");
 }
 
 function readFooter(details: unknown, theme: ThemeLike): string {

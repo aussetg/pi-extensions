@@ -1,8 +1,8 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
-  createEditTool,
-  createReadTool,
-  createWriteTool,
+  createEditToolDefinition,
+  createReadToolDefinition,
+  createWriteToolDefinition,
+  type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { reloadPierreRendererConfig } from "../../codex-apply-patch/src/pierre/config.ts";
 import { captureWriteSnapshot } from "./payloads.ts";
@@ -14,80 +14,112 @@ import {
   renderWriteCall,
   renderWriteResult,
 } from "./render.ts";
-import { isRecord } from "./util.ts";
+import { isRecord, type ShellContextLike, type ThemeLike, type ToolResultLike } from "./util.ts";
+
+type RenderOptions = { expanded: boolean; isPartial: boolean };
 
 export function registerRichToolRenderers(pi: ExtensionAPI): void {
   reloadPierreRendererConfig();
-
-  const cwd = process.cwd();
-  registerReadRenderer(pi, cwd);
-  registerWriteRenderer(pi, cwd);
-  registerEditRenderer(pi, cwd);
+  registerDelegatingBuiltInToolOverrides(pi);
+  registerWriteSnapshotCapture(pi);
 
   pi.on?.("session_start", async () => {
     reloadPierreRendererConfig();
   });
 }
 
-function registerReadRenderer(pi: ExtensionAPI, cwd: string): void {
-  const original = createReadTool(cwd);
+function registerDelegatingBuiltInToolOverrides(pi: ExtensionAPI): void {
+  const cwd = process.cwd();
+
+  // Spread Pi's own definitions first. We intentionally replace only the
+  // rendering slots below; execute(), prepareArguments(), prompt metadata, and
+  // executionMode stay exactly as Pi defines them.
+
+  const read = createReadToolDefinition(cwd) as DelegatingToolDefinition;
   pi.registerTool({
-    ...original,
+    ...read,
     renderShell: "self",
-    renderCall(args, theme, context) {
+    renderCall(args: unknown, theme: ThemeLike, context?: ShellContextLike) {
       return renderReadCall(args, theme, context);
     },
-    renderResult(result, options, theme, context) {
+    renderResult(result: ToolResultLike, options: RenderOptions, theme: ThemeLike, context?: ShellContextLike) {
       return renderReadResult(result, options, theme, context);
     },
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return original.execute(toolCallId, params, signal, onUpdate, ctx);
-    },
   });
-}
 
-function registerWriteRenderer(pi: ExtensionAPI, cwd: string): void {
-  const original = createWriteTool(cwd);
+  const write = createWriteToolDefinition(cwd) as DelegatingToolDefinition;
   pi.registerTool({
-    ...original,
+    ...write,
     renderShell: "self",
-    renderCall(args, theme, context) {
+    renderCall(args: unknown, theme: ThemeLike, context?: ShellContextLike) {
       return renderWriteCall(args, theme, context);
     },
-    renderResult(result, options, theme, context) {
+    renderResult(result: ToolResultLike, options: RenderOptions, theme: ThemeLike, context?: ShellContextLike) {
       return renderWriteResult(result, options, theme, context);
     },
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      if (isWriteParams(params)) {
-        await captureWriteSnapshot({
-          toolCallId,
-          cwd: ctx.cwd,
-          path: params.path,
-          nextContent: params.content,
-        });
-      }
-      return original.execute(toolCallId, params, signal, onUpdate, ctx);
+  });
+
+  const edit = createEditToolDefinition(cwd) as DelegatingToolDefinition;
+  pi.registerTool({
+    ...edit,
+    renderShell: "self",
+    renderCall(args: unknown, theme: ThemeLike, context?: ShellContextLike) {
+      return renderEditCall(args, theme, context);
+    },
+    renderResult(result: ToolResultLike, options: RenderOptions, theme: ThemeLike, context?: ShellContextLike) {
+      return renderEditResult(result, options, theme, context);
     },
   });
 }
 
-function registerEditRenderer(pi: ExtensionAPI, cwd: string): void {
-  const original = createEditTool(cwd);
-  pi.registerTool({
-    ...original,
-    renderShell: "self",
-    renderCall(args, theme, context) {
-      return renderEditCall(args, theme, context);
-    },
-    renderResult(result, options, theme, context) {
-      return renderEditResult(result, options, theme, context);
-    },
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return original.execute(toolCallId, params, signal, onUpdate, ctx);
-    },
+function registerWriteSnapshotCapture(pi: ExtensionAPI): void {
+  pi.on?.("tool_call", async (event: unknown, ctx: { cwd?: string } = {}) => {
+    if (!isToolCallEvent(event, "write")) return;
+    if (!isWriteParams(event.input)) return;
+
+    await captureWriteSnapshot({
+      toolCallId: event.toolCallId,
+      cwd: ctx.cwd,
+      path: event.input.path,
+      nextContent: event.input.content,
+    });
   });
 }
+
+type ToolRendererRegistration = {
+  renderShell?: "default" | "self";
+  renderCall?: (args: unknown, theme: ThemeLike, context?: ShellContextLike) => unknown;
+  renderResult?: (
+    result: ToolResultLike,
+    options: RenderOptions,
+    theme: ThemeLike,
+    context?: ShellContextLike,
+  ) => unknown;
+};
+
+type DelegatingToolDefinition = {
+  name: string;
+  label: string;
+  description: string;
+  parameters: unknown;
+  renderShell?: "default" | "self";
+  renderCall?: ToolRendererRegistration["renderCall"];
+  renderResult?: ToolRendererRegistration["renderResult"];
+  [key: string]: unknown;
+};
 
 function isWriteParams(value: unknown): value is { path: string; content: string } {
   return isRecord(value) && typeof value.path === "string" && typeof value.content === "string";
+}
+
+function isToolCallEvent(
+  value: unknown,
+  toolName: string,
+): value is { toolName: string; toolCallId: string; input: unknown } {
+  return (
+    isRecord(value) &&
+    value.toolName === toolName &&
+    typeof value.toolCallId === "string" &&
+    "input" in value
+  );
 }

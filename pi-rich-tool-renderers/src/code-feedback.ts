@@ -246,7 +246,7 @@ function renderCodeFeedbackFormatterLines(
 
 function summarizeCodeFeedbackFormatters(
   edits: CodeFeedbackEditInput[],
-): { text: string; color: string } | undefined {
+): { text: string; color: string; hasErrors: boolean } | undefined {
   let changed = 0;
   let errors = 0;
   for (const edit of edits) {
@@ -262,6 +262,7 @@ function summarizeCodeFeedbackFormatters(
   return {
     text: parts.join(", "),
     color: errors > 0 ? "error" : "success",
+    hasErrors: errors > 0,
   };
 }
 

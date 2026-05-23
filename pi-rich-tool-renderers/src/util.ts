@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { existsSync, realpathSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -34,6 +35,10 @@ export type ToolResultLike = {
   details?: unknown;
   isError?: boolean;
 };
+
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+const NARROW_NO_BREAK_SPACE = "\u202F";
+const COMPACT_RESOURCE_FILE_NAMES = new Set(["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"]);
 
 export class ByteLruCache<V> {
   private readonly maxEntries: number;
@@ -108,9 +113,7 @@ export function imageContent(result: ToolResultLike): ImageContentLike | undefin
 }
 
 export function isToolError(result: ToolResultLike, context?: ShellContextLike): boolean {
-  if (result.isError || context?.isError) return true;
-  const text = textContent(result)?.trimStart();
-  return Boolean(text && /^(error|failed|access denied)\b/i.test(text));
+  return Boolean(result.isError || context?.isError);
 }
 
 export function firstLine(text: string, fallback = text): string {
@@ -140,7 +143,7 @@ export function hashText(text: string): string {
 }
 
 export function toFsPath(cwd: string | undefined, rawPath: string): string {
-  let expanded = rawPath;
+  let expanded = normalizeToolPath(rawPath);
   if (expanded === "~") expanded = os.homedir();
   else if (expanded.startsWith("~/")) {
     expanded = path.join(os.homedir(), expanded.slice(2));
@@ -151,6 +154,62 @@ export function toFsPath(cwd: string | undefined, rawPath: string): string {
   }
 
   return path.resolve(cwd || process.cwd(), expanded);
+}
+
+export function normalizeToolPath(rawPath: string): string {
+  const withoutAt = rawPath.startsWith("@") ? rawPath.slice(1) : rawPath;
+  return withoutAt.replace(UNICODE_SPACES, " ");
+}
+
+export type CompactReadClassification = {
+  kind: "docs" | "resource" | "skill";
+  label: string;
+};
+
+export function compactReadClassification(
+  args: unknown,
+  cwd?: string,
+): CompactReadClassification | undefined {
+  if (!cwd || !isRecord(args)) return undefined;
+  const rawPath = stringField(args, "file_path") ?? stringField(args, "path");
+  if (!rawPath) return undefined;
+
+  const absolutePath = resolveReadPath(cwd, rawPath);
+  const fileName = path.basename(absolutePath);
+  if (fileName === "SKILL.md") {
+    return { kind: "skill", label: path.basename(path.dirname(absolutePath)) || fileName };
+  }
+
+  const docsClassification = piDocsClassification(absolutePath);
+  if (docsClassification) return docsClassification;
+
+  if (COMPACT_RESOURCE_FILE_NAMES.has(fileName)) {
+    return {
+      kind: "resource",
+      label: relativePathFromCwd(absolutePath, cwd) ?? shortenPathForDisplay(absolutePath),
+    };
+  }
+
+  return undefined;
+}
+
+export function resolveReadPath(cwd: string | undefined, rawPath: string): string {
+  const resolved = toFsPath(cwd, rawPath);
+  if (existsSync(resolved)) return resolved;
+
+  const amPmVariant = tryMacOSScreenshotPath(resolved);
+  if (amPmVariant !== resolved && existsSync(amPmVariant)) return amPmVariant;
+
+  const nfdVariant = resolved.normalize("NFD");
+  if (nfdVariant !== resolved && existsSync(nfdVariant)) return nfdVariant;
+
+  const curlyVariant = tryCurlyQuoteVariant(resolved);
+  if (curlyVariant !== resolved && existsSync(curlyVariant)) return curlyVariant;
+
+  const nfdCurlyVariant = tryCurlyQuoteVariant(nfdVariant);
+  if (nfdCurlyVariant !== resolved && existsSync(nfdCurlyVariant)) return nfdCurlyVariant;
+
+  return resolved;
 }
 
 export function shortenPathForDisplay(p: string): string {
@@ -173,6 +232,55 @@ export function relativePathFromCwd(filePath: string, cwd?: string): string | un
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function stringField(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function piDocsClassification(absolutePath: string): CompactReadClassification | undefined {
+  const root = piPackageRoot();
+  if (!root) return undefined;
+
+  const relative = path.relative(root, path.resolve(absolutePath));
+  if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    return undefined;
+  }
+
+  const label = relative.split(path.sep).join("/");
+  if (label === "README.md" || label.startsWith("docs/") || label.startsWith("examples/")) {
+    return { kind: "docs", label };
+  }
+  return undefined;
+}
+
+function piPackageRoot(): string | undefined {
+  const roots = [
+    "/opt/pi-coding-agent",
+    realPiBinaryDir(),
+  ].filter((value): value is string => typeof value === "string" && value.length > 0);
+
+  for (const root of roots) {
+    if (existsSync(path.join(root, "README.md"))) return root;
+  }
+  return undefined;
+}
+
+function realPiBinaryDir(): string | undefined {
+  try {
+    return path.dirname(realpathSync("/usr/bin/pi"));
+  } catch {
+    return undefined;
+  }
+}
+
+function tryMacOSScreenshotPath(filePath: string): string {
+  return filePath.replace(/ (AM|PM)\./gi, `${NARROW_NO_BREAK_SPACE}$1.`);
+}
+
+function tryCurlyQuoteVariant(filePath: string): string {
+  return filePath.replace(/'/g, "’");
 }
 
 function normalizeAbsolutePath(value: string): string | undefined {

@@ -1,5 +1,8 @@
 declare module "@earendil-works/pi-coding-agent" {
   export type ExtensionAPI = any;
+  export const createReadToolDefinition: any;
+  export const createWriteToolDefinition: any;
+  export const createEditToolDefinition: any;
   export const createReadTool: any;
   export const createWriteTool: any;
   export const createEditTool: any;
@@ -7,9 +10,20 @@ declare module "@earendil-works/pi-coding-agent" {
   export const DEFAULT_MAX_LINES: number;
   export function formatSize(bytes: number): string;
   export function keyHint(keybinding: string, description: string): string;
+  export function keyText(keybinding: string): string;
 }
 
 declare module "@earendil-works/pi-tui" {
+  export function getCapabilities(): { images: "kitty" | "iterm2" | null };
+  export function getImageDimensions(
+    base64Data: string,
+    mimeType: string,
+  ): { widthPx: number; heightPx: number } | null;
+  export function imageFallback(
+    mimeType: string,
+    dimensions?: { widthPx: number; heightPx: number },
+    filename?: string,
+  ): string;
   export function truncateToWidth(text: string, width: number, suffix?: string): string;
   export function visibleWidth(text: string): number;
   export function wrapTextWithAnsi(text: string, width: number): string[];
