@@ -1,6 +1,6 @@
 import { existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import type { FileDiffMetadata } from "../../codex-apply-patch/node_modules/@pierre/diffs/dist/types.js";
+import type { FileDiffMetadata } from "@pierre/diffs";
 import {
   MAX_DIFF_INPUT_BYTES,
   buildPierreCreatePayload,
@@ -8,7 +8,7 @@ import {
   buildPierreUpdatePayload,
   normalizeDiffMetadataLanguage,
   type PierreDiffPayload,
-} from "../../codex-apply-patch/src/pierre/index.ts";
+} from "../pierre/index.ts";
 import {
   ByteLruCache,
   byteLength,
@@ -64,6 +64,13 @@ function state(): PayloadState {
     }),
   };
   return scope[GLOBAL_STATE_KEY];
+}
+
+export function resetRichToolPayloadState(): void {
+  const scope = globalThis as typeof globalThis & {
+    [GLOBAL_STATE_KEY]?: PayloadState;
+  };
+  delete scope[GLOBAL_STATE_KEY];
 }
 
 export async function captureWriteSnapshot(options: {

@@ -1,5 +1,10 @@
 declare module "@earendil-works/pi-coding-agent" {
   export type ExtensionAPI = any;
+  export type ExtensionContext = any;
+  export type AgentToolUpdateCallback<T = unknown> = (update: {
+    content?: unknown;
+    details?: T;
+  }) => void;
   export const createReadToolDefinition: any;
   export const createWriteToolDefinition: any;
   export const createEditToolDefinition: any;
@@ -55,4 +60,12 @@ declare module "@earendil-works/pi-tui" {
     render(width: number): string[];
     invalidate(): void;
   }
+}
+
+declare module "@earendil-works/pi-ai" {
+  export const StringEnum: any;
+}
+
+declare module "typebox" {
+  export const Type: any;
 }

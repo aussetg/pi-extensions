@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -96,6 +96,13 @@ export interface PierreRendererConfig {
 }
 
 export const PIERRE_CONFIG_PATH = join(
+  homedir(),
+  ".pi",
+  "agent",
+  "pi-rich-tools-pierre.json",
+);
+
+const LEGACY_PIERRE_CONFIG_PATH = join(
   homedir(),
   ".pi",
   "agent",
@@ -200,7 +207,10 @@ export function reloadPierreRendererConfig(): void {
 
 function loadConfigFile(): PierreRendererConfig {
   try {
-    const raw = readFileSync(PIERRE_CONFIG_PATH, "utf8");
+    const path = existsSync(PIERRE_CONFIG_PATH)
+      ? PIERRE_CONFIG_PATH
+      : LEGACY_PIERRE_CONFIG_PATH;
+    const raw = readFileSync(path, "utf8");
     const parsed = JSON.parse(raw) as unknown;
     return sanitizeConfig(mergeConfig(DEFAULT_PIERRE_RENDERER_CONFIG, parsed));
   } catch {

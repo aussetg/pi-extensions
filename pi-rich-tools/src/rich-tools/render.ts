@@ -12,9 +12,9 @@ import {
   Text,
   type Component,
 } from "@earendil-works/pi-tui";
-import { PierreInlineDiffComponent } from "../../codex-apply-patch/src/pierre/index.ts";
-import { getPierreRendererConfig } from "../../codex-apply-patch/src/pierre/config.ts";
-import type { PierreDiffPayload } from "../../codex-apply-patch/src/pierre/types.ts";
+import { PierreInlineDiffComponent } from "../pierre/index.ts";
+import { getPierreRendererConfig } from "../pierre/config.ts";
+import type { PierreDiffPayload } from "../pierre/types.ts";
 import {
   renderCodeFeedbackFromDetails,
   type CodeFeedbackRender,

@@ -4,8 +4,6 @@ import {
   createWriteToolDefinition,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
-import { reloadPierreRendererConfig } from "../../codex-apply-patch/src/pierre/config.ts";
-import { resetPierreRendererState } from "../../codex-apply-patch/src/pierre/reset.ts";
 import { captureWriteSnapshot } from "./payloads.ts";
 import {
   renderEditCall,
@@ -20,19 +18,8 @@ import { isRecord, type ShellContextLike, type ThemeLike, type ToolResultLike } 
 type RenderOptions = { expanded: boolean; isPartial: boolean };
 
 export function registerRichToolRenderers(pi: ExtensionAPI): void {
-  resetPierreRendererState();
-  reloadPierreRendererConfig();
   registerDelegatingBuiltInToolOverrides(pi);
   registerWriteSnapshotCapture(pi);
-
-  pi.on?.("session_start", async () => {
-    resetPierreRendererState();
-    reloadPierreRendererConfig();
-  });
-
-  pi.on?.("session_shutdown", async () => {
-    resetPierreRendererState();
-  });
 }
 
 function registerDelegatingBuiltInToolOverrides(pi: ExtensionAPI): void {
