@@ -8,8 +8,10 @@ import {
 import {
   getCapabilities,
   getImageDimensions,
+  Image,
   imageFallback,
   Text,
+  visibleWidth,
   type Component,
 } from "@earendil-works/pi-tui";
 import { PierreInlineDiffComponent } from "../pierre/index.ts";
@@ -30,6 +32,7 @@ import {
   firstLine,
   isRecord,
   isToolError,
+  type ImageContentLike,
   plural,
   shortenPathForDisplay,
   textContent,
@@ -40,8 +43,10 @@ import {
 
 type RenderOptions = { expanded: boolean; isPartial: boolean };
 type FooterPart = CodeFeedbackRender;
+type InlineReadImage = { data: string; mimeType: string };
 const COLLAPSED_MAX_LINES = 10;
 const ANSI_ESCAPE_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+const suppressedDefaultReadImageArrays = new WeakMap<unknown[], unknown[]>();
 
 export function renderReadCall(args: unknown, theme: ThemeLike, context?: ShellContextLike): Component {
   const classification = !context?.expanded ? compactReadClassification(args, context?.cwd) : undefined;
@@ -95,10 +100,16 @@ export function renderReadResult(
       display.collapsed ? collapseNotice(display.collapsed, theme, false) : undefined,
       readFooter(result.details, theme),
     ]);
-    return renderTextParts(footerParts([
+    const parts = footerParts([
       display.text ? theme.fg("toolOutput", display.text) : undefined,
       ...footer,
-    ]), theme, context);
+    ]);
+    const inlineImages = readInlineImages(result, context?.showImages ?? true);
+    if (inlineImages.length > 0) {
+      suppressDefaultReadImageRendering(result.content);
+      return renderReadImageParts(parts, inlineImages, theme, context);
+    }
+    return renderTextParts(parts, theme, context);
   }
 
   const renderPath = renderStringArg(context?.args, "file_path", "path");
@@ -217,6 +228,71 @@ class RichTextResultComponent implements Component {
   invalidate(): void {}
 }
 
+class RichReadImageResultComponent implements Component {
+  private parts: FooterPart[] = [];
+  private imageComponents: Image[] = [];
+  private background: ((text: string) => string) | undefined;
+  private footerLines = getPierreRendererConfig().spacing.afterDiff;
+
+  constructor(
+    parts: FooterPart[],
+    images: InlineReadImage[],
+    theme: ThemeLike,
+    context?: ShellContextLike,
+  ) {
+    this.update(parts, images, theme, context);
+  }
+
+  update(
+    parts: FooterPart[],
+    images: InlineReadImage[],
+    theme: ThemeLike,
+    context?: ShellContextLike,
+  ): void {
+    this.parts = parts;
+    this.background = toolBackground(theme, context);
+    this.footerLines = getPierreRendererConfig().spacing.afterDiff;
+    this.imageComponents = images.map((image) =>
+      new Image(
+        image.data,
+        image.mimeType,
+        { fallbackColor: (text: string) => theme.fg("toolOutput", text) },
+        { maxWidthCells: 60 },
+      ),
+    );
+  }
+
+  render(width: number): string[] {
+    const safeWidth = Math.max(1, Math.trunc(width));
+    const lines = renderFooterParts(this.parts, safeWidth, this.background);
+    if (this.imageComponents.length === 0) return lines;
+
+    if (lines.length > 0) {
+      lines.push(backgroundBlankLine(safeWidth, this.background));
+    }
+
+    const imageWidth = Math.max(1, safeWidth - 2);
+    for (let i = 0; i < this.imageComponents.length; i += 1) {
+      const imageLines = this.imageComponents[i]!.render(imageWidth);
+      for (const line of imageLines) {
+        lines.push(paintInlineImageLine(line, safeWidth, this.background));
+      }
+      if (i < this.imageComponents.length - 1) {
+        lines.push(backgroundBlankLine(safeWidth, this.background));
+      }
+    }
+
+    for (let i = 0; i < this.footerLines; i += 1) {
+      lines.push(backgroundBlankLine(safeWidth, this.background));
+    }
+    return lines;
+  }
+
+  invalidate(): void {
+    for (const image of this.imageComponents) image.invalidate();
+  }
+}
+
 class RichPierreResultComponent implements Component {
   private diff: PierreInlineDiffComponent;
   private footerParts: FooterPart[] = [];
@@ -311,6 +387,20 @@ function renderTextParts(
       ? context.lastComponent
       : new RichTextResultComponent(parts, theme, context);
   component.update(parts, theme, context);
+  return component;
+}
+
+function renderReadImageParts(
+  parts: FooterPart[],
+  images: InlineReadImage[],
+  theme: ThemeLike,
+  context?: ShellContextLike,
+): Component {
+  const component =
+    context?.lastComponent instanceof RichReadImageResultComponent
+      ? context.lastComponent
+      : new RichReadImageResultComponent(parts, images, theme, context);
+  component.update(parts, images, theme, context);
   return component;
 }
 
@@ -543,13 +633,86 @@ function shouldRenderReadAsPlainOutput(
   );
 }
 
-function hasImageBlock(result: ToolResultLike): boolean {
+function readInlineImages(result: ToolResultLike, showImages: boolean): InlineReadImage[] {
+  if (!showImages) return [];
+
+  const capabilities = getCapabilities();
+  if (!capabilities.images) return [];
+
+  return imageBlocks(result).flatMap((image) => {
+    const mimeType = image.mimeType ?? image.mime;
+    if (!mimeType) return [];
+
+    // Pi's default ToolExecutionComponent converts non-PNGs for Kitty. We do
+    // not have that internal converter here, so only take over images this
+    // renderer can hand to Image directly. Non-PNG Kitty images stay on Pi's
+    // default path rather than disappearing.
+    if (capabilities.images === "kitty" && mimeType !== "image/png") return [];
+
+    return [{ data: image.data, mimeType }];
+  });
+}
+
+function imageBlocks(result: ToolResultLike): ImageContentLike[] {
   const content = result.content;
-  return Array.isArray(content) && content.some((item) => isRecord(item) && item.type === "image");
+  if (!Array.isArray(content)) return [];
+
+  return content.filter((item): item is ImageContentLike =>
+    isRecord(item) && item.type === "image" && typeof item.data === "string"
+  );
+}
+
+function hasImageBlock(result: ToolResultLike): boolean {
+  return imageBlocks(result).length > 0;
 }
 
 function looksLikeSupportedImagePath(rawPath: string): boolean {
   return /\.(?:png|jpe?g|gif|webp)$/i.test(rawPath);
+}
+
+function suppressDefaultReadImageRendering(content: unknown): void {
+  if (!Array.isArray(content)) return;
+  if (suppressedDefaultReadImageArrays.has(content)) return;
+  if (!content.some((item) => isRecord(item) && item.type === "image")) return;
+
+  // ToolExecutionComponent appends image blocks after renderResult(), outside
+  // the custom tool shell. When we render the image inside the read result,
+  // hide those blocks for that one synchronous UI pass, then restore them so
+  // the stored/tool-result content still carries the model attachment.
+  const original = [...content];
+  const withoutImages = content.filter((item) => !(isRecord(item) && item.type === "image"));
+  suppressedDefaultReadImageArrays.set(content, original);
+  content.splice(0, content.length, ...withoutImages);
+
+  queueMicrotask(() => {
+    const saved = suppressedDefaultReadImageArrays.get(content);
+    if (!saved) return;
+    suppressedDefaultReadImageArrays.delete(content);
+
+    const unchanged = content.length === withoutImages.length &&
+      content.every((item, index) => item === withoutImages[index]);
+    if (unchanged) content.splice(0, content.length, ...saved);
+  });
+}
+
+function paintInlineImageLine(
+  line: string,
+  width: number,
+  background: ((text: string) => string) | undefined,
+): string {
+  if (!background) return line;
+
+  const padded = ` ${line}`;
+  const pad = Math.max(0, width - safeVisibleWidth(padded));
+  return background(`${padded}${" ".repeat(pad)}`);
+}
+
+function safeVisibleWidth(text: string): number {
+  try {
+    return visibleWidth(text);
+  } catch {
+    return text.length;
+  }
 }
 
 function stripAnsi(text: string): string {
