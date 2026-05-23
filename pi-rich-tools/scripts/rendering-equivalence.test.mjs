@@ -259,6 +259,35 @@ test("unsupported languages keep the same empty-highlight behavior", () => {
   );
 });
 
+test("async TextMate fallback highlights languages outside the tree-sitter bundle", async () => {
+  const samples = [
+    [
+      "md",
+      "README.md",
+      ["# Before", "", "- `old` value"],
+      ["# After", "", "- `new` value"],
+    ],
+    [
+      "dockerfile",
+      "Dockerfile",
+      ["FROM alpine:3.20", "RUN echo \"old\""],
+      ["FROM alpine:3.20", "RUN echo \"new\""],
+    ],
+    [
+      "nix",
+      "flake.nix",
+      ["{ pkgs }: pkgs.writeText \"name\" \"old\""],
+      ["{ pkgs }: pkgs.writeText \"name\" \"new\""],
+    ],
+  ];
+
+  for (const [lang, name, before, after] of samples) {
+    const metadata = changedFileMetadata({ name, lang, before, after });
+    assert.equal(hasHighlightedLines(buildPiHighlightedDiff(metadata, config)), false, lang);
+    assert.equal(hasHighlightedLines(await loadHighlightedDiff(metadata, config)), true, lang);
+  }
+});
+
 test("tree-sitter highlighting supports common coding languages", () => {
   const samples = [
     ["python", "sample.py", ["def f(x):", "    return x + 1"], ["def f(x):", "    return x + 2"]],

@@ -3,7 +3,7 @@
 One Pi extension for the rich file-tool experience:
 
 - `apply_patch`: Codex-compatible file edits with Pierre diff previews.
-- `read`: Pierre line-numbered code view with tree-sitter highlighting.
+- `read`: Pierre line-numbered code view with tree-sitter/TextMate highlighting.
 - `write`: Pierre create/update diff preview.
 - `edit`: Pierre diff preview from the built-in numbered diff.
 - `write` / `edit` / `apply_patch`: renders `pi-code-feedback` details in the same panel style.
@@ -20,3 +20,4 @@ Performance notes:
 - Pierre's own highlight/row caches are reused across all rendered default-tool diffs.
 - Collapsed `read` and new-file `write` previews only build/highlight the first 10 lines.
 - Large write diffs are skipped instead of reading or diffing huge files.
+- Syntax highlighting uses tree-sitter first, then an async TextMate/Shiki fallback for languages outside the tree-sitter bundle.

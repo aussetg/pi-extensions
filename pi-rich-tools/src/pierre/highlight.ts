@@ -20,6 +20,10 @@ import {
   type TreeSitterNode,
   type TreeSitterRange,
 } from "./syntax-service.ts";
+import {
+  queryTextMateSyntaxSpans,
+  type TextMateSyntaxSpan,
+} from "./textmate-service.ts";
 
 export async function loadHighlightedDiff(
   metadata: FileDiffMetadata,
@@ -80,15 +84,36 @@ async function buildPiHighlightedDiffAsync(
     lang,
     config,
   );
-  if (treeSitter?.styled) {
-    const highlighted = {
-      deletionLines: treeSitter.deletionLines,
-      additionLines: treeSitter.additionLines,
-    };
-    return { dark: highlighted, light: highlighted };
+
+  let deletionLines = treeSitter?.deletionLines ?? [];
+  let additionLines = treeSitter?.additionLines ?? [];
+  let deletionStyled = treeSitter?.deletionStyled ?? false;
+  let additionStyled = treeSitter?.additionStyled ?? false;
+
+  if (!deletionStyled || !additionStyled) {
+    const textMate = await buildTextMateHighlightedDiffAsync(
+      metadata,
+      indexes,
+      lang,
+      config,
+      {
+        deletion: !deletionStyled,
+        addition: !additionStyled,
+      },
+    );
+    if (!deletionStyled && textMate?.deletionStyled) {
+      deletionLines = textMate.deletionLines;
+      deletionStyled = true;
+    }
+    if (!additionStyled && textMate?.additionStyled) {
+      additionLines = textMate.additionLines;
+      additionStyled = true;
+    }
   }
 
-  return emptyHighlightedDiffSet();
+  if (!deletionStyled && !additionStyled) return emptyHighlightedDiffSet();
+  const highlighted = { deletionLines, additionLines };
+  return { dark: highlighted, light: highlighted };
 }
 
 export function normalizeHighlightedDiffSet(
@@ -199,9 +224,21 @@ type PreparedTreeSitterLines = {
   cleanLines: string[];
   lineStyles: Map<number, Array<SyntaxCategory | undefined>>;
 };
+type PreparedTextMateLines = {
+  rawLines: string[];
+  displayLines: string[];
+  lineStyles: Map<number, Array<SyntaxCategory | undefined>>;
+};
 type PreparedTreeSitterWorkerJob = PreparedTreeSitterLines & {
   side: TreeSitterDiffSide;
   documentId: string;
+};
+type HighlightedDiffResult = {
+  deletionLines: Array<HastNode | undefined>;
+  additionLines: Array<HastNode | undefined>;
+  styled: boolean;
+  deletionStyled: boolean;
+  additionStyled: boolean;
 };
 type LineRange = { start: number; end: number };
 type CaptureStyle = { category: SyntaxCategory; priority: number };
@@ -245,13 +282,7 @@ function buildTreeSitterHighlightedDiff(
   indexes: { deletion: number[]; addition: number[] },
   lang: string,
   config: PierreRendererConfig,
-):
-  | {
-      deletionLines: Array<HastNode | undefined>;
-      additionLines: Array<HastNode | undefined>;
-      styled: boolean;
-    }
-  | undefined {
+): HighlightedDiffResult | undefined {
   const languageKey = treeSitterLanguageKey(lang);
   if (!languageKey) return undefined;
 
@@ -275,6 +306,8 @@ function buildTreeSitterHighlightedDiff(
     deletionLines: deletion.lines,
     additionLines: addition.lines,
     styled: true,
+    deletionStyled: deletion.styled,
+    additionStyled: addition.styled,
   };
 }
 
@@ -283,14 +316,7 @@ async function buildTreeSitterHighlightedDiffAsync(
   indexes: { deletion: number[]; addition: number[] },
   lang: string,
   config: PierreRendererConfig,
-): Promise<
-  | {
-      deletionLines: Array<HastNode | undefined>;
-      additionLines: Array<HastNode | undefined>;
-      styled: boolean;
-    }
-  | undefined
-> {
+): Promise<HighlightedDiffResult | undefined> {
   const languageKey = treeSitterLanguageKey(lang);
   if (!languageKey) return undefined;
 
@@ -343,28 +369,39 @@ async function buildTreeSitterHighlightedDiffAsync(
     addition = workerResults.get("addition") ?? addition;
   }
 
-  if (!deletion.styled) {
-    deletion = highlightFallbackSyntaxLines(
-      languageKey,
-      metadata.deletionLines,
-      indexes.deletion,
-      config,
-    );
-  }
-  if (!addition.styled) {
-    addition = highlightFallbackSyntaxLines(
-      languageKey,
-      metadata.additionLines,
-      indexes.addition,
-      config,
-    );
-  }
+  if (!deletion.styled && !addition.styled) return undefined;
+  return {
+    deletionLines: deletion.lines,
+    additionLines: addition.lines,
+    styled: true,
+    deletionStyled: deletion.styled,
+    additionStyled: addition.styled,
+  };
+}
+
+async function buildTextMateHighlightedDiffAsync(
+  metadata: FileDiffMetadata,
+  indexes: { deletion: number[]; addition: number[] },
+  lang: string,
+  config: PierreRendererConfig,
+  sides: { deletion: boolean; addition: boolean },
+): Promise<HighlightedDiffResult | undefined> {
+  const [deletion, addition] = await Promise.all([
+    sides.deletion
+      ? highlightTextMateLines(lang, metadata.deletionLines, indexes.deletion, config)
+      : Promise.resolve(emptyHighlightLineResult()),
+    sides.addition
+      ? highlightTextMateLines(lang, metadata.additionLines, indexes.addition, config)
+      : Promise.resolve(emptyHighlightLineResult()),
+  ]);
 
   if (!deletion.styled && !addition.styled) return undefined;
   return {
     deletionLines: deletion.lines,
     additionLines: addition.lines,
     styled: true,
+    deletionStyled: deletion.styled,
+    additionStyled: addition.styled,
   };
 }
 
@@ -405,21 +442,30 @@ function highlightTreeSitterLines(
   return highlightedLinesFromStyles(cleanLines, lineStyles);
 }
 
-function highlightFallbackSyntaxLines(
-  languageKey: string,
+async function highlightTextMateLines(
+  lang: string,
   lines: string[],
   indexes: number[],
   config: PierreRendererConfig,
-): HighlightLineResult {
+): Promise<HighlightLineResult> {
   if (lines.length === 0 || indexes.length === 0) {
     return { lines: [], styled: false };
   }
 
-  const prepared = prepareTreeSitterLines(lines, indexes, config);
+  const prepared = prepareTextMateLines(lines, indexes, config);
   if (!prepared) return { lines: [], styled: false };
-  const { cleanLines, lineStyles } = prepared;
-  paintFallbackSyntax(languageKey, cleanLines, lineStyles);
-  return highlightedLinesFromStyles(cleanLines, lineStyles);
+  const { rawLines, displayLines, lineStyles } = prepared;
+  const lastStyledLine = Math.max(...lineStyles.keys());
+
+  const spans = await queryTextMateSyntaxSpans({
+    lang,
+    lines: rawLines.slice(0, lastStyledLine + 1),
+    maxLineLength: config.syntaxHighlight.maxLineLength,
+  });
+  if (!spans) return { lines: [], styled: false };
+
+  paintTextMateSpans(rawLines, lineStyles, spans);
+  return highlightedLinesFromStyles(displayLines, lineStyles);
 }
 
 async function highlightTreeSitterLinesWithWorkerBatch(
@@ -504,6 +550,24 @@ function prepareTreeSitterLines(
     lineStyles.set(index, new Array<SyntaxCategory | undefined>(line.length));
   }
   return lineStyles.size === 0 ? undefined : { cleanLines, lineStyles };
+}
+
+function prepareTextMateLines(
+  lines: string[],
+  indexes: number[],
+  config: PierreRendererConfig,
+): PreparedTextMateLines | undefined {
+  const rawLines = lines.map(cleanRawDiffLine);
+  const displayLines = rawLines.map(tabify);
+  const lineStyles = new Map<number, Array<SyntaxCategory | undefined>>();
+  for (const index of indexes) {
+    const line = displayLines[index] ?? "";
+    if (line.length > config.syntaxHighlight.maxLineLength) continue;
+    lineStyles.set(index, new Array<SyntaxCategory | undefined>(line.length));
+  }
+  return lineStyles.size === 0
+    ? undefined
+    : { rawLines, displayLines, lineStyles };
 }
 
 function treeSitterQueryRangesForStyledRanges(
@@ -594,74 +658,21 @@ function paintCaptures(
   }
 }
 
-function paintFallbackSyntax(
-  languageKey: string,
-  lines: string[],
+function paintTextMateSpans(
+  rawLines: string[],
   lineStyles: Map<number, Array<SyntaxCategory | undefined>>,
+  spans: TextMateSyntaxSpan[],
 ): void {
-  if (!fallbackSyntaxLanguages.has(languageKey)) return;
+  for (const span of spans) {
+    const styles = lineStyles.get(span.row);
+    if (!styles) continue;
 
-  for (const [row, styles] of lineStyles) {
-    const line = lines[row] ?? "";
-    if (line.length === 0) continue;
-
-    paintFallbackRegex(line, styles, /\b[A-Za-z_$][\w$]*\b/g, "variable");
-    paintFallbackRegex(line, styles, /[{}()[\],.;:]/g, "punctuation");
-    paintFallbackRegex(line, styles, /=>|===|!==|==|!=|<=|>=|&&|\|\||[+\-*/%=<>!&|?]/g, "operator");
-    paintFallbackRegex(line, styles, /\b\d+(?:\.\d+)?\b/g, "number");
-    paintFallbackFunctionNames(line, styles);
-    paintFallbackRegex(line, styles, fallbackTypeRegex, "type");
-    paintFallbackRegex(line, styles, fallbackKeywordRegex, "keyword");
-    paintFallbackRegex(line, styles, /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g, "string");
-    paintFallbackRegex(line, styles, /\/\/.*$/g, "comment");
-  }
-}
-
-const fallbackSyntaxLanguages = new Set([
-  "javascript",
-  "typescript",
-  "tsx",
-  "json",
-  "yaml",
-  "toml",
-]);
-const fallbackKeywordRegex = new RegExp(
-  String.raw`\b(?:as|async|await|break|case|catch|class|const|continue|default|else|export|extends|false|finally|for|from|function|if|implements|import|in|interface|let|new|null|of|private|protected|public|readonly|return|static|switch|throw|true|try|type|undefined|var|while)\b`,
-  "g",
-);
-const fallbackTypeRegex = /\b(?:Array|Promise|Record|Map|Set|WeakMap|WeakSet|Date|Error|RegExp|URL|Buffer|string|number|boolean|unknown|never|void|object|[A-Z][A-Za-z0-9_$]*)\b/g;
-
-function paintFallbackFunctionNames(
-  line: string,
-  styles: Array<SyntaxCategory | undefined>,
-): void {
-  const regex = /\b[A-Za-z_$][\w$]*\b(?=\s*\()/g;
-  for (const match of line.matchAll(regex)) {
-    paintFallbackRange(styles, match.index ?? 0, (match.index ?? 0) + match[0].length, "function");
-  }
-}
-
-function paintFallbackRegex(
-  line: string,
-  styles: Array<SyntaxCategory | undefined>,
-  regex: RegExp,
-  category: SyntaxCategory,
-): void {
-  for (const match of line.matchAll(regex)) {
-    paintFallbackRange(styles, match.index ?? 0, (match.index ?? 0) + match[0].length, category);
-  }
-}
-
-function paintFallbackRange(
-  styles: Array<SyntaxCategory | undefined>,
-  start: number,
-  end: number,
-  category: SyntaxCategory,
-): void {
-  const safeStart = Math.max(0, Math.min(start, styles.length));
-  const safeEnd = Math.max(safeStart, Math.min(end, styles.length));
-  for (let index = safeStart; index < safeEnd; index += 1) {
-    styles[index] = category;
+    const line = rawLines[span.row] ?? "";
+    const start = rawColumnToDisplayIndex(line, span.startColumn);
+    const end = rawColumnToDisplayIndex(line, span.endColumn);
+    for (let index = start; index < end && index < styles.length; index++) {
+      styles[index] = span.category;
+    }
   }
 }
 
@@ -1117,6 +1128,29 @@ function normalizeAnsiSpans(value: unknown): DiffSpan[] | undefined {
 
 export function cleanDiffLine(line: string | undefined): string {
   return tabify(cleanLastNewline(line ?? "").replace(/\r$/, ""));
+}
+
+function cleanRawDiffLine(line: string | undefined): string {
+  return cleanLastNewline(line ?? "").replace(/\r$/, "");
+}
+
+function rawColumnToDisplayIndex(line: string, column: number): number {
+  const end = Math.max(0, Math.min(column, line.length));
+  let displayIndex = 0;
+  for (let index = 0; index < end;) {
+    const codePoint = line.codePointAt(index);
+    if (codePoint === undefined) break;
+    if (codePoint === 0x09) {
+      displayIndex += 4;
+      index += 1;
+      continue;
+    }
+
+    const width = codePoint > 0xffff ? 2 : 1;
+    displayIndex += width;
+    index += width;
+  }
+  return displayIndex;
 }
 
 function normalizeHighlightedDiffCode(code: unknown): HighlightedDiffCode {
