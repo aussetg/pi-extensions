@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { createDiagnosticSnapshot, flattenDiagnosticSnapshot } from "../diagnostics/snapshots.ts";
 import { readUtf8IfExists } from "../fs.ts";
+import { resolveWorkspaceRootForPath } from "../language-environments.ts";
 import { LSP_RESULT_SERVER_ID_KEY, type DiagnosticRefreshResult, type DiagnosticSnapshot, type LspDiagnostic, type LspServiceStatus, type LspUnavailableServer } from "../types.ts";
 import { LspClient, type SemanticTokensOverlayOptions } from "./client.ts";
 import { externalPositionToLsp, filePathToUri, oneLineLspRange, type LspPosition } from "./positions.ts";
@@ -9,6 +10,7 @@ import { resolveLanguageServer, resolveLanguageServers, type LanguageServerDefin
 export interface LspServiceOptions {
   projectRoot: string;
   serverOverrides?: Record<string, unknown>;
+  trustedEnvironmentRoots?: string[];
   idleTimeoutMs: number;
 }
 
@@ -46,6 +48,7 @@ interface DiagnosticRefreshWaiter {
 export class LspService {
   private projectRoot: string;
   private serverOverrides: Record<string, unknown>;
+  private trustedEnvironmentRoots: string[];
   private idleTimeoutMs: number;
   private clients = new Map<string, LspClient>();
   private unavailableServers = new Map<string, LspUnavailableServer>();
@@ -59,12 +62,14 @@ export class LspService {
   constructor(options: LspServiceOptions) {
     this.projectRoot = path.resolve(options.projectRoot);
     this.serverOverrides = options.serverOverrides ?? {};
+    this.trustedEnvironmentRoots = options.trustedEnvironmentRoots?.map((root) => path.resolve(root)) ?? [];
     this.idleTimeoutMs = options.idleTimeoutMs;
   }
 
   configure(options: LspServiceOptions): void {
     this.projectRoot = path.resolve(options.projectRoot);
     this.serverOverrides = options.serverOverrides ?? {};
+    this.trustedEnvironmentRoots = options.trustedEnvironmentRoots?.map((root) => path.resolve(root)) ?? [];
     this.idleTimeoutMs = options.idleTimeoutMs;
     this.armIdleTimer();
   }
@@ -529,7 +534,8 @@ export class LspService {
 
   private getOrCreateClient(filePath: string): LspClient | undefined {
     const resolved = path.resolve(filePath);
-    const resolvedServer = resolveLanguageServer(resolved, this.serverOverrides, this.projectRoot);
+    const root = this.workspaceRootForFile(resolved);
+    const resolvedServer = resolveLanguageServer(resolved, this.serverOverrides, root, this.trustedEnvironmentRoots);
     if (!resolvedServer) return undefined;
 
     if (!resolvedServer.available) {
@@ -542,7 +548,6 @@ export class LspService {
       return undefined;
     }
 
-    const root = this.projectRoot;
     const key = clientKey(root, resolvedServer.definition);
     let client = this.clients.get(key);
     if (!client) {
@@ -554,9 +559,10 @@ export class LspService {
 
   private getOrCreateClients(filePath: string): LspClient[] {
     const resolved = path.resolve(filePath);
+    const root = this.workspaceRootForFile(resolved);
     const clients: LspClient[] = [];
 
-    for (const resolvedServer of resolveLanguageServers(resolved, this.serverOverrides, this.projectRoot)) {
+    for (const resolvedServer of resolveLanguageServers(resolved, this.serverOverrides, root, this.trustedEnvironmentRoots)) {
       if (!resolvedServer.available) {
         this.unavailableServers.set(resolvedServer.definition.id, {
           id: resolvedServer.definition.id,
@@ -567,7 +573,6 @@ export class LspService {
         continue;
       }
 
-      const root = this.projectRoot;
       const key = clientKey(root, resolvedServer.definition);
       let client = this.clients.get(key);
       if (!client) {
@@ -582,18 +587,23 @@ export class LspService {
 
   private cachedClientsForFile(filePath: string): LspClient[] | undefined {
     const resolved = path.resolve(filePath);
+    const root = this.workspaceRootForFile(resolved);
     const uri = filePathToUri(resolved);
     const clients: LspClient[] = [];
 
-    for (const resolvedServer of resolveLanguageServers(resolved, this.serverOverrides, this.projectRoot)) {
+    for (const resolvedServer of resolveLanguageServers(resolved, this.serverOverrides, root, this.trustedEnvironmentRoots)) {
       if (!resolvedServer.available) continue;
-      const key = clientKey(this.projectRoot, resolvedServer.definition);
+      const key = clientKey(root, resolvedServer.definition);
       const client = this.clients.get(key);
       if (!client || !client.hasDiagnosticsForUri(uri)) return undefined;
       clients.push(client);
     }
 
     return clients.length > 0 ? clients : undefined;
+  }
+
+  private workspaceRootForFile(filePath: string): string {
+    return resolveWorkspaceRootForPath(filePath, this.projectRoot, this.trustedEnvironmentRoots);
   }
 
   private firstReadyOrAnyClient(): LspClient | undefined {
@@ -774,7 +784,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function clientKey(root: string, definition: LanguageServerDefinition): string {
-  return `${path.resolve(root)}\0${definition.id}\0${definition.command}\0${definition.args.join("\0")}`;
+  return `${path.resolve(root)}\0${definition.id}\0${definition.command}\0${definition.args.join("\0")}\0${definition.environment?.key ?? ""}`;
 }
 
 export function createLspService(options: LspServiceOptions): LspService {

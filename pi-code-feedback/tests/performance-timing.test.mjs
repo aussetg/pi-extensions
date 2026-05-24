@@ -91,3 +91,31 @@ test("edit phase timings are recorded and mirrored into feedback details", async
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("diagnostic rendering keeps external paths absolute instead of parent-relative", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-render-root-"));
+  const external = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-render-external-"));
+  const filePath = path.join(external, "probe.ts");
+  const runtime = createRuntime(createDefaultConfig());
+  setProjectRoot(runtime, root);
+
+  const diagnostic = {
+    uri: pathToFileURL(filePath).href,
+    range: {
+      start: { line: 1, character: 1 },
+      end: { line: 1, character: 2 },
+    },
+    severity: "error",
+    message: "external diagnostic",
+    source: "typescript",
+  };
+
+  try {
+    const rendered = renderDiagnosticsStatus(runtime, filePath, createDiagnosticSnapshot([diagnostic]));
+    assert.match(rendered, new RegExp(filePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.doesNotMatch(rendered, /\.\.\/.*probe\.ts/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(external, { recursive: true, force: true });
+  }
+});

@@ -46,6 +46,11 @@ function drainMessages() {
 }
 
 function handleMessage(message) {
+  if (message.id === "configuration-log-1" && ("result" in message || "error" in message)) {
+    log({ method: "workspace/configuration/response", result: message.result, error: message.error });
+    return;
+  }
+
   if (message.id !== undefined && message.method === "initialize") {
     send({
       jsonrpc: "2.0",
@@ -68,6 +73,9 @@ function handleMessage(message) {
         },
       },
     });
+    if (mode === "configuration-log") {
+      setImmediate(() => sendWorkspaceConfigurationRequest());
+    }
     return;
   }
 
@@ -181,6 +189,22 @@ function hoverContents() {
 function log(entry) {
   if (typeof logPath !== "string" || logPath.length === 0) return;
   fs.appendFileSync(logPath, `${JSON.stringify(entry)}\n`, "utf8");
+}
+
+function sendWorkspaceConfigurationRequest() {
+  send({
+    jsonrpc: "2.0",
+    id: "configuration-log-1",
+    method: "workspace/configuration",
+    params: {
+      items: [
+        { section: "ty" },
+        { section: "pythonExtension" },
+        { section: "ty.pythonExtension.activeEnvironment" },
+        { section: "missing.section" },
+      ],
+    },
+  });
 }
 
 function codeAction(uri, options = {}) {

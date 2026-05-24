@@ -132,6 +132,7 @@ export interface LspClientStatus {
   lastDiagnosticTimedOut?: boolean;
   lastError?: string;
   lastServerLog?: LspServerLog;
+  environment?: string;
 }
 
 export interface LspUnavailableServer {

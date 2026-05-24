@@ -17,6 +17,7 @@ export interface PiUi {
 export interface PiCommandContext {
   cwd?: string;
   ui: PiUi;
+  sessionManager?: PiSessionManager;
   reload?: () => Promise<void>;
 }
 
@@ -58,9 +59,16 @@ export interface PiToolDefinition {
 export interface PiApi {
   registerFlag?: (name: string, definition: PiFlagDefinition) => void;
   getFlag?: (name: string) => boolean | string | undefined;
+  appendEntry?: (customType: string, data?: unknown) => void;
   registerCommand: (name: string, definition: PiCommandDefinition) => void;
   registerTool: (definition: PiToolDefinition) => void;
   on?: (eventName: string, handler: (event: unknown, ctx: PiCommandContext) => unknown) => void;
+}
+
+export interface PiSessionManager {
+  getEntries?: () => unknown[];
+  getBranch?: () => unknown[];
+  getSessionFile?: () => string | undefined;
 }
 
 export function asPiApi(value: unknown): PiApi {

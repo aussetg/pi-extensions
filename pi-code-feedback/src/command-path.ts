@@ -4,10 +4,17 @@ import * as path from "node:path";
 
 const commandAvailabilityCache = new Map<string, boolean>();
 
-export function resolveCommand(command: string, startDir: string, projectRoot: string): string | undefined {
+export interface CommandResolutionOptions {
+  extraBinDirs?: string[];
+}
+
+export function resolveCommand(command: string, startDir: string, projectRoot: string, options: CommandResolutionOptions = {}): string | undefined {
   if (path.isAbsolute(command) || command.includes(path.sep)) {
     return fs.existsSync(command) ? command : undefined;
   }
+
+  const extra = findInBinDirs(command, options.extraBinDirs ?? []);
+  if (extra) return extra;
 
   const local = findLocalBin(command, startDir, projectRoot);
   if (local) return local;
@@ -27,6 +34,14 @@ export function walkUpInsideProject(startDir: string, projectRoot: string): stri
   }
 
   return dirs;
+}
+
+function findInBinDirs(command: string, binDirs: string[]): string | undefined {
+  for (const dir of binDirs) {
+    const candidate = path.join(dir, command);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return undefined;
 }
 
 function findLocalBin(command: string, startDir: string, projectRoot: string): string | undefined {

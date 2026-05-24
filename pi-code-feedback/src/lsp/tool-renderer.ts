@@ -49,6 +49,7 @@ export function renderLspToolResult(result: ToolResultLike, options: RenderOptio
   const truncation = details?.truncation as LspToolTruncation | undefined;
 
   if (result.isError || details?.ok === false || parseJson(text)?.ok === false) return renderError(text, theme, options.expanded === true, details);
+  if (details?.raw === true) return renderRawPayload(method, text, theme, options.expanded === true, truncation);
 
   switch (method) {
     case "server/status":
@@ -178,6 +179,10 @@ function renderSemanticTokens(text: string, theme: ThemeLike, expanded: boolean,
 }
 
 function renderRawRequest(text: string, theme: ThemeLike, expanded: boolean, truncation?: LspToolTruncation): ComponentLike {
+  return renderRawPayload("raw/request", text, theme, expanded, truncation);
+}
+
+function renderRawPayload(method: string, text: string, theme: ThemeLike, expanded: boolean, truncation?: LspToolTruncation): ComponentLike {
   const value = parseJsonValue(text);
   const objectValue = objectDetails(value);
   const lines = text.split("\n");
@@ -186,7 +191,7 @@ function renderRawRequest(text: string, theme: ThemeLike, expanded: boolean, tru
     : objectValue
     ? `${Object.keys(objectValue).length} field${Object.keys(objectValue).length === 1 ? "" : "s"}`
     : `${lines.length} line${lines.length === 1 ? "" : "s"}`;
-  const out = [statusLine(theme, "Raw request", label, "success")];
+  const out = [statusLine(theme, "Raw LSP", `${method} · ${label}`, "success")];
   if (expanded) out.push(...styleContentLines(text, theme, truncation, EXPANDED_MAX_LINES));
   else out.push(collapseHint(theme, `${lines.length} line${lines.length === 1 ? "" : "s"}`));
   return linesComponent(out);

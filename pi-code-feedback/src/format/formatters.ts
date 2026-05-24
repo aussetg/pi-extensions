@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { resolveCommand, walkUpInsideProject } from "../command-path.ts";
+import { resolveLanguageEnvironment, type LanguageEnvironment } from "../language-environments.ts";
 import type { FormatterCommandStatus } from "../types.ts";
 
 export interface SelectedFormatter {
@@ -9,6 +10,8 @@ export interface SelectedFormatter {
   command: string;
   args: string[];
   configPath?: string;
+  env?: NodeJS.ProcessEnv;
+  environment?: LanguageEnvironment;
 }
 
 export type FormatterSelection =
@@ -35,6 +38,7 @@ interface FormatterCandidate {
 const JS_TS_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"];
 const WEB_FORMAT_EXTENSIONS = [...JS_TS_EXTENSIONS, ".json", ".jsonc", ".css", ".scss", ".sass", ".less", ".html", ".htm"];
 const CLANG_FORMAT_EXTENSIONS = [".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"];
+const PYTHON_EXTENSIONS = [".py", ".pyi"];
 const LOCK_OR_GENERATED_BASENAMES = new Set([
   "package-lock.json",
   "pnpm-lock.yaml",
@@ -132,7 +136,7 @@ const FORMATTERS: FormatterCandidate[] = [
   },
 ];
 
-export function selectFormatter(filePath: string, projectRoot: string, overrides: Record<string, unknown> = {}): FormatterSelection {
+export function selectFormatter(filePath: string, projectRoot: string, overrides: Record<string, unknown> = {}, trustedEnvironmentRoots: string[] = []): FormatterSelection {
   if (shouldSkipFormatting(filePath)) return { kind: "none", reason: "generated or lock file" };
 
   const extension = path.extname(filePath).toLowerCase();
@@ -147,7 +151,8 @@ export function selectFormatter(filePath: string, projectRoot: string, overrides
     if (!configPath) continue;
 
     const command = typeof override?.command === "string" && override.command.length > 0 ? override.command : candidate.command;
-    const resolvedCommand = resolveCommand(command, path.dirname(filePath), projectRoot);
+    const environment = languageEnvironmentForFormatter(candidate, filePath, projectRoot, trustedEnvironmentRoots);
+    const resolvedCommand = resolveCommand(command, path.dirname(filePath), projectRoot, { extraBinDirs: environment?.binDirs });
     if (!resolvedCommand) {
       return {
         kind: "unavailable",
@@ -166,6 +171,8 @@ export function selectFormatter(filePath: string, projectRoot: string, overrides
         command: resolvedCommand,
         args: formatterArgs(candidate, override, filePath),
         configPath: typeof configPath === "string" ? configPath : undefined,
+        env: environment?.env,
+        environment,
       },
     };
   }
@@ -178,20 +185,27 @@ function shouldSkipFormatting(filePath: string): boolean {
   return LOCK_OR_GENERATED_BASENAMES.has(base) || base.endsWith(".min.js") || base.endsWith(".min.css");
 }
 
-export function listFormatterCommandStatus(projectRoot: string): FormatterCommandStatus[] {
+export function listFormatterCommandStatus(projectRoot: string, overrides: Record<string, unknown> = {}, trustedEnvironmentRoots: string[] = []): FormatterCommandStatus[] {
   const seen = new Set<string>();
   const statuses: FormatterCommandStatus[] = [];
+  const workspaceRoots = uniqueResolved([projectRoot, ...trustedEnvironmentRoots]);
 
   for (const formatter of FORMATTERS) {
     if (seen.has(formatter.id)) continue;
     seen.add(formatter.id);
-    const available = resolveCommand(formatter.command, projectRoot, projectRoot) !== undefined;
+    const override = readOverride(overrides, formatter.id);
+    const command = typeof override?.command === "string" && override.command.length > 0 ? override.command : formatter.command;
+    const disabled = override?.disabled === true || overrides[formatter.id] === false;
+    const available = !disabled && workspaceRoots.some((root) => {
+      const environment = languageEnvironmentForFormatter(formatter, path.join(root, "probe.py"), root, trustedEnvironmentRoots);
+      return resolveCommand(command, root, root, { extraBinDirs: environment?.binDirs }) !== undefined;
+    });
     statuses.push({
       id: formatter.id,
       label: formatter.label,
-      command: formatter.command,
+      command,
       available,
-      reason: available ? undefined : "not found",
+      reason: available ? undefined : disabled ? "disabled" : "not found",
     });
   }
 
@@ -203,6 +217,19 @@ function formatterArgs(candidate: FormatterCandidate, override: FormatterOverrid
     return override.args.map((arg) => arg.replaceAll("{file}", filePath));
   }
   return candidate.args(filePath);
+}
+
+export function isPythonFormatterFile(filePath: string): boolean {
+  return PYTHON_EXTENSIONS.includes(path.extname(filePath).toLowerCase());
+}
+
+function languageEnvironmentForFormatter(candidate: FormatterCandidate, filePath: string, projectRoot: string, trustedEnvironmentRoots: string[] = []): LanguageEnvironment | undefined {
+  if (!candidate.extensions.some((extension) => PYTHON_EXTENSIONS.includes(extension))) return undefined;
+  return resolveLanguageEnvironment("python", filePath, projectRoot, trustedEnvironmentRoots);
+}
+
+function uniqueResolved(values: string[]): string[] {
+  return [...new Set(values.map((value) => path.resolve(value)))];
 }
 
 function prettierConfigured(filePath: string, projectRoot: string, overrides: Record<string, unknown>): string | undefined | true {

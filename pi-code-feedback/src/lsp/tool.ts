@@ -4,7 +4,7 @@ import { renderCapabilities, renderDiagnosticsStatus, renderStatus } from "../re
 import type { FormatService } from "../format/service.ts";
 import { readUtf8IfExists } from "../fs.ts";
 import type { LspService } from "./service.ts";
-import { normalizeToolPath } from "../paths.ts";
+import { displayPathFromRoot, normalizeToolPath } from "../paths.ts";
 import { restartLsp, setProjectRoot, type CodeFeedbackRuntime } from "../runtime.ts";
 import { LSP_ACTIONS, LSP_METHODS, LSP_RESULT_SERVER_ID_KEY, type LspAction, type LspMethod } from "../types.ts";
 import type { PiApi, PiToolResult } from "../pi.ts";
@@ -82,11 +82,13 @@ export function registerLspTool(pi: PiApi, runtime: CodeFeedbackRuntime, lspServ
       lspService.configure({
         projectRoot: runtime.projectRoot,
         serverOverrides: runtime.config.lsp.servers,
+        trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
         idleTimeoutMs: runtime.config.lsp.idleTimeoutMs,
       });
       formatService?.configure({
         projectRoot: runtime.projectRoot,
         formatterOverrides: runtime.config.formatters,
+        trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
       });
       const parsed = parseToolMethod(params);
       const method = parsed.method;
@@ -385,11 +387,12 @@ function readNonNegativeNumber(value: unknown): number | undefined {
 
 function rawOrPretty(method: LspMethod, params: Record<string, unknown>, result: unknown, projectRoot: string): PiToolResult {
   const action = methodToRenderAction(method);
-  const text = params.raw === true ? (JSON.stringify(result, null, 2) ?? "undefined") : renderLspResult(action, result, projectRoot);
+  const raw = params.raw === true;
+  const text = raw ? (JSON.stringify(result, null, 2) ?? "undefined") : renderLspResult(action, result, projectRoot);
   const limited = limitLspToolText(text);
   return {
     content: [{ type: "text", text: limited.text }],
-    details: withTruncationDetails({ ok: true, method, result }, limited.truncation),
+    details: withTruncationDetails({ ok: true, method, raw, result }, limited.truncation),
   };
 }
 
@@ -685,7 +688,7 @@ function displayFileState(projectRoot: string, state: CachedFileState): Record<s
 }
 
 function relativePath(projectRoot: string, filePath: string): string {
-  return path.relative(projectRoot, filePath) || filePath;
+  return displayPathFromRoot(filePath, projectRoot);
 }
 
 function rejectApplyDuringPendingEdits(runtime: CodeFeedbackRuntime, label: string): PiToolResult | undefined {

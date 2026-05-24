@@ -2,12 +2,14 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { readUtf8IfExists } from "../fs.ts";
+import { mergeProcessEnv, resolveWorkspaceRootForPath } from "../language-environments.ts";
 import type { FormatterResult, FormatterRunRecord, FormatServiceStatus } from "../types.ts";
-import { listFormatterCommandStatus, selectFormatter, type FormatterSelection, type SelectedFormatter } from "./formatters.ts";
+import { isPythonFormatterFile, listFormatterCommandStatus, selectFormatter, type FormatterSelection, type SelectedFormatter } from "./formatters.ts";
 
 export interface FormatServiceOptions {
   projectRoot: string;
   formatterOverrides?: Record<string, unknown>;
+  trustedEnvironmentRoots?: string[];
   timeoutMs?: number;
 }
 
@@ -31,6 +33,7 @@ const MAX_OUTPUT_CHARS = 8_000;
 export class FormatService {
   private projectRoot: string;
   private formatterOverrides: Record<string, unknown>;
+  private trustedEnvironmentRoots: string[];
   private timeoutMs: number;
   private recentRuns: FormatterRunRecord[] = [];
   private selectionCache = new Map<string, CachedFormatterSelection>();
@@ -38,12 +41,14 @@ export class FormatService {
   constructor(options: FormatServiceOptions) {
     this.projectRoot = path.resolve(options.projectRoot);
     this.formatterOverrides = options.formatterOverrides ?? {};
+    this.trustedEnvironmentRoots = options.trustedEnvironmentRoots?.map((root) => path.resolve(root)) ?? [];
     this.timeoutMs = options.timeoutMs ?? DEFAULT_FORMAT_TIMEOUT_MS;
   }
 
   configure(options: FormatServiceOptions): void {
     this.projectRoot = path.resolve(options.projectRoot);
     this.formatterOverrides = options.formatterOverrides ?? {};
+    this.trustedEnvironmentRoots = options.trustedEnvironmentRoots?.map((root) => path.resolve(root)) ?? [];
     this.timeoutMs = options.timeoutMs ?? this.timeoutMs;
     this.selectionCache.clear();
   }
@@ -51,7 +56,8 @@ export class FormatService {
   async formatFile(filePath: string, beforeContent: string): Promise<FormatterResult> {
     const startedAt = Date.now();
     const resolved = path.resolve(this.projectRoot, filePath);
-    const selection = this.selectFormatter(resolved);
+    const workspaceRoot = resolveWorkspaceRootForPath(resolved, this.projectRoot, this.trustedEnvironmentRoots);
+    const selection = this.selectFormatter(resolved, workspaceRoot);
 
     if (selection.kind === "none") {
       return this.record(resolved, {
@@ -76,7 +82,7 @@ export class FormatService {
     }
 
     const formatter = selection.formatter;
-    const run = await runFormatterProcess(formatter, this.projectRoot, this.timeoutMs);
+    const run = await runFormatterProcess(formatter, workspaceRoot, this.timeoutMs);
     const finalContent = readUtf8IfExists(resolved) ?? beforeContent;
     const errors = formatterErrors(formatter, run);
 
@@ -93,7 +99,7 @@ export class FormatService {
   getStatus(): FormatServiceStatus {
     return {
       recentRuns: [...this.recentRuns].reverse(),
-      commands: listFormatterCommandStatus(this.projectRoot),
+      commands: listFormatterCommandStatus(this.projectRoot, this.formatterOverrides, this.trustedEnvironmentRoots),
     };
   }
 
@@ -114,12 +120,12 @@ export class FormatService {
     return result;
   }
 
-  private selectFormatter(filePath: string): FormatterSelection {
+  private selectFormatter(filePath: string, workspaceRoot: string): FormatterSelection {
     const cached = this.selectionCache.get(filePath);
     if (cached && cachedSelectionIsValid(cached)) return cached.selection;
 
-    const selection = selectFormatter(filePath, this.projectRoot, this.formatterOverrides);
-    if (selection.kind !== "none") {
+    const selection = selectFormatter(filePath, workspaceRoot, this.formatterOverrides, this.trustedEnvironmentRoots);
+    if (selection.kind !== "none" && !isPythonFormatterFile(filePath)) {
       this.selectionCache.set(filePath, {
         selection,
         ...(selection.kind === "selected" && selection.formatter.configPath
@@ -142,6 +148,7 @@ function runFormatterProcess(formatter: SelectedFormatter, cwd: string, timeoutM
   return new Promise((resolve) => {
     const child = spawn(formatter.command, formatter.args, {
       cwd,
+      env: mergeProcessEnv(formatter.env),
       stdio: ["ignore", "pipe", "pipe"],
     });
 

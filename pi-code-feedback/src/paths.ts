@@ -22,6 +22,14 @@ export function normalizeToolPath(raw: string): string {
   return raw.startsWith("@") ? raw.slice(1) : raw;
 }
 
+export function displayPathFromRoot(filePath: string, projectRoot: string): string {
+  const resolved = path.resolve(filePath);
+  const root = path.resolve(projectRoot);
+  const relative = path.relative(root, resolved);
+  if (relative === "") return ".";
+  return relative.startsWith("..") || path.isAbsolute(relative) ? resolved : relative;
+}
+
 export function shouldTrackFile(filePath: string, projectRoot: string): boolean {
   const resolved = path.resolve(filePath);
   const root = path.resolve(projectRoot);

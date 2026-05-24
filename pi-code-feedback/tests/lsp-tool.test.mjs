@@ -29,6 +29,40 @@ test("lsp status explains lazy clients instead of exposing an ambiguous active-c
   }
 });
 
+test("lsp tool preserves trusted roots when reconfiguring services", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-trust-"));
+  const trusted = path.join(root, "trusted");
+  const runtime = createRuntime(createDefaultConfig());
+  setProjectRoot(runtime, root);
+  runtime.trustedEnvironmentRoots = [trusted];
+
+  const lspConfigureCalls = [];
+  const formatConfigureCalls = [];
+  const lspService = {
+    configure(options) { lspConfigureCalls.push(options); },
+    getStatus() { return { activeClients: 0, clients: [], unavailableServers: [] }; },
+  };
+  const formatService = {
+    configure(options) { formatConfigureCalls.push(options); },
+    getStatus() { return { recentRuns: [], commands: [] }; },
+  };
+
+  let tool;
+  registerLspTool({
+    registerTool(definition) { tool = definition; },
+    registerCommand() {},
+  }, runtime, lspService, formatService);
+
+  try {
+    await tool.execute("lsp-1", { method: "server/status" }, undefined, undefined, { cwd: root });
+
+    assert.deepEqual(lspConfigureCalls[0].trustedEnvironmentRoots, [trusted]);
+    assert.deepEqual(formatConfigureCalls[0].trustedEnvironmentRoots, [trusted]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("lsp code actions return stable ids and apply by id", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-actions-"));
   const filePath = path.join(root, "probe.py");
@@ -264,6 +298,23 @@ test("lsp hover renderer strips a single markdown code fence and renders raw tex
 
   assert.equal(rendered, `<toolOutput>${line}</toolOutput>`);
   assert.doesNotMatch(rendered, /```|textmate|syntax|code ·/);
+});
+
+test("lsp raw payload renderer does not masquerade as method-specific pretty output", () => {
+  const theme = {
+    fg: (color, text) => `<${color}>${text}</${color}>`,
+    bold: (text) => text,
+  };
+  const text = JSON.stringify({ contents: { kind: "plaintext", value: "hover" }, range: { start: { line: 1 } } }, null, 2);
+  const rendered = renderLspToolResult({
+    content: [{ type: "text", text }],
+    details: { ok: true, method: "textDocument/hover", raw: true },
+  }, { expanded: false }, theme, { args: { method: "textDocument/hover", raw: true } })
+    .render(500)
+    .join("\n");
+
+  assert.match(rendered, /<success>Raw LSP<\/success> <muted>textDocument\/hover · 2 fields<\/muted>/);
+  assert.doesNotMatch(rendered, /^\{/m);
 });
 
 test("lsp hover execution returns raw unfenced hover text", async () => {

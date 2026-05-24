@@ -4,7 +4,9 @@ Pi extension for touched-line LSP diagnostics and formatter feedback.
 
 The package currently registers `/lsp`, the `lsp` tool, footer status, touched-range capture for `write`, `edit`, and `apply_patch`, real stdio LSP clients, LSP diagnostics/navigation requests, touched-range-filtered inline diagnostic feedback, pretty LSP result rendering, safe text-edit application for `rename` / selected code actions, immediate automatic formatting with touched-range remapping before diagnostics, and delayed context injection for slow LSP diagnostics.
 
-The intended agent-facing tool is `lsp`; the human interface is `/lsp status`, `/lsp enable`, `/lsp disable`, and `/lsp restart`. Formatting stays in the automatic feedback pipeline, not under LSP.
+The intended agent-facing tool is `lsp`; the human interface is `/lsp status`, `/lsp enable`, `/lsp disable`, `/lsp restart`, and `/lsp trust ...` for session-persisted external language-environment roots. Formatting stays in the automatic feedback pipeline, not under LSP.
+
+The inherited pi process `PATH` is treated as trusted baseline; `/lsp trust` extends filesystem roots searched for language environments such as Python `.venv` / uv / conda envs, and those roots act as LSP/formatter workspaces for files inside them.
 
 The `lsp` tool now uses an LSP-lite API: pass `method` with names such as `server/status`, `textDocument/hover`, `textDocument/diagnostic`, `workspace/symbol`, `textDocument/codeAction`, and `codeAction/apply`. Position-scoped methods require positive 1-based integers (`line`, `column`) to match file reads. The old `action` field remains as a compatibility alias.
 

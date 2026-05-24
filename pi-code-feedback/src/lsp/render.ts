@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { displayPathFromRoot } from "../paths.ts";
 import { lspRangeToExternal, uriToFilePath, type LspRange } from "./positions.ts";
 import { workspaceEditSummary, type WorkspaceEditApplyResult } from "./workspace-edit.ts";
 import { LSP_RESULT_SERVER_ID_KEY, type LspAction } from "../types.ts";
@@ -33,7 +34,7 @@ export function renderWorkspaceEditApplyResult(result: WorkspaceEditApplyResult,
 
   const lines = [`${label} applied: ${result.editCount} edit${result.editCount === 1 ? "" : "s"}, ${result.changedFiles.length} changed file${result.changedFiles.length === 1 ? "" : "s"}.`];
   for (const file of result.files) {
-    const relative = path.relative(projectRoot, file.filePath) || file.filePath;
+    const relative = displayPathFromRoot(file.filePath, projectRoot);
     const marker = file.changed ? "changed" : "unchanged";
     lines.push(`  ${relative}: ${file.editCount} edit${file.editCount === 1 ? "" : "s"}, ${marker}`);
   }
@@ -197,7 +198,7 @@ function renderWorkspaceEditPreview(result: unknown, _projectRoot: string, label
 
 function formatUriRange(projectRoot: string, uri: string, range: LspRange): string {
   const filePath = uriToFilePath(uri);
-  const displayPath = filePath ? path.relative(projectRoot, filePath) || filePath : uri;
+  const displayPath = filePath ? displayPathFromRoot(filePath, projectRoot) : uri;
   return `${displayPath}:${formatRange(range)}`;
 }
 

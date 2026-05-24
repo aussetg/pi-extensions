@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { formatTouchedRange } from "./diagnostics/ranges.ts";
 import { countDiagnosticSnapshotDiagnostics, flattenDiagnosticSnapshot } from "./diagnostics/snapshots.ts";
+import { displayPathFromRoot } from "./paths.ts";
 import type { CodeFeedbackRuntime } from "./runtime.ts";
 import { LSP_METHODS, type CompletedEdit, type DelayedDiagnosticFeedback, type DiagnosticFilterResult, type DiagnosticSeverity, type DiagnosticSnapshot, type FormatServiceStatus, type FormatterSummary, type LinkedDiagnostic, type LspDiagnostic, type LspServiceStatus } from "./types.ts";
 
@@ -18,6 +19,7 @@ export function renderStatus(runtime: CodeFeedbackRuntime, lspStatus?: LspServic
     `  auto format: ${config.autoFormat ? config.formatMode : "disabled"}`,
     `  strict: ${config.strict ? "enabled" : "disabled"}`,
     `  project root: ${runtime.projectRoot}`,
+    `  trusted external roots: ${formatTrustedEnvironmentRoots(runtime)}`,
     `  clients: ${formatClientSummary(lspStatus)}`,
     `  lsp restarts: ${runtime.lspRestartCount}`,
     `  captured edits: ${runtime.completedEdits.length}`,
@@ -38,7 +40,8 @@ export function renderStatus(runtime: CodeFeedbackRuntime, lspStatus?: LspServic
       const pid = client.pid ? ` pid=${client.pid}` : "";
       const last = client.lastDiagnosticsAt ? ` last_diag=${formatTimestamp(client.lastDiagnosticsAt)}` : "";
       const latency = formatClientDiagnosticLatency(client);
-      lines.push(`    ${client.id}: ${client.state}${pid} docs=${client.openDocuments} diag_files=${client.diagnosticFiles}${last}${latency ? ` diag_latency=${latency}` : ""}`);
+      const environment = client.environment ? ` env=${client.environment}` : "";
+      lines.push(`    ${client.id}: ${client.state}${pid} docs=${client.openDocuments} diag_files=${client.diagnosticFiles}${environment}${last}${latency ? ` diag_latency=${latency}` : ""}`);
       if (client.lastError) lines.push(`      error: ${client.lastError}`);
       if (client.lastServerLog) lines.push(`      server ${client.lastServerLog.level}: ${client.lastServerLog.message}`);
     }
@@ -47,7 +50,7 @@ export function renderStatus(runtime: CodeFeedbackRuntime, lspStatus?: LspServic
   if (lspStatus && lspStatus.unavailableServers.length > 0) {
     lines.push("", "  unavailable:");
     for (const unavailable of lspStatus.unavailableServers) {
-      const relative = path.relative(runtime.projectRoot, unavailable.filePath) || unavailable.filePath;
+      const relative = displayPathFromRoot(unavailable.filePath, runtime.projectRoot);
       lines.push(`    ${unavailable.id}: ${unavailable.reason} (${relative})`);
     }
   }
@@ -61,7 +64,7 @@ export function renderStatus(runtime: CodeFeedbackRuntime, lspStatus?: LspServic
     if (recentRuns.length > 0) {
       lines.push("    recent changes/errors:");
       for (const run of recentRuns) {
-        const relative = path.relative(runtime.projectRoot, run.filePath) || run.filePath;
+        const relative = displayPathFromRoot(run.filePath, runtime.projectRoot);
         const formatter = run.formatterName ?? "formatter";
         const outcome = run.errors.length > 0 ? "failed" : run.changed ? "changed" : "unchanged";
         lines.push(`      ${relative}: ${formatter} ${outcome}${run.durationMs === undefined ? "" : ` (${run.durationMs}ms)`}`);
@@ -70,6 +73,16 @@ export function renderStatus(runtime: CodeFeedbackRuntime, lspStatus?: LspServic
   }
 
   return lines.join("\n");
+}
+
+function formatTrustedEnvironmentRoots(runtime: CodeFeedbackRuntime): string {
+  if (runtime.trustedEnvironmentRoots.length === 0) return "none";
+  return runtime.trustedEnvironmentRoots
+    .map((root) => {
+      const relative = path.relative(runtime.projectRoot, root);
+      return relative === "" || relative.startsWith("..") || path.isAbsolute(relative) ? root : relative;
+    })
+    .join(", ");
 }
 
 export function renderCapabilities(runtime: CodeFeedbackRuntime, lspStatus?: LspServiceStatus, capabilities?: unknown): string {
@@ -83,7 +96,8 @@ export function renderCapabilities(runtime: CodeFeedbackRuntime, lspStatus?: Lsp
   if (lspStatus && lspStatus.clients.length > 0) {
     lines.push("", "  clients:");
     for (const client of lspStatus.clients) {
-      lines.push(`    ${client.id}: ${client.state} ${client.command} ${client.args.join(" ")}`.trimEnd());
+      const environment = client.environment ? ` [${client.environment}]` : "";
+      lines.push(`    ${client.id}: ${client.state} ${client.command} ${client.args.join(" ")}${environment}`.trimEnd());
     }
   }
 
@@ -122,7 +136,7 @@ export function renderDiagnosticsStatus(runtime: CodeFeedbackRuntime, target?: s
 
   lines.push("", "  recent touched ranges:");
   for (const edit of recent) {
-    const relative = path.relative(runtime.projectRoot, edit.filePath) || edit.filePath;
+    const relative = displayPathFromRoot(edit.filePath, runtime.projectRoot);
     const ranges = edit.skippedReason
       ? edit.skippedReason
       : edit.touchedRanges.length > 0
@@ -175,7 +189,7 @@ export function renderDelayedDiagnosticFeedback(runtime: CodeFeedbackRuntime, ed
   const filter = edit.diagnosticFilter;
   if (!filter || filter.linked.length === 0) return undefined;
 
-  const relative = path.relative(runtime.projectRoot, edit.filePath) || edit.filePath;
+  const relative = displayPathFromRoot(edit.filePath, runtime.projectRoot);
   const severityCounts = countSeverities(filter.linked);
   const scope = runtime.config.diagnostics.inline === "all" ? "all files" : relative;
   const lines = [
@@ -207,16 +221,24 @@ export function renderFooterStatus(runtime: CodeFeedbackRuntime, theme?: FooterT
 }
 
 function footerStatusText(runtime: CodeFeedbackRuntime, lspStatus?: LspServiceStatus): string {
-  if (!runtime.config.enabled || !runtime.config.lsp.enabled) return "lsp: off";
+  const trusted = formatFooterTrustedRoots(runtime);
+  if (!runtime.config.enabled || !runtime.config.lsp.enabled) return `lsp: off${trusted}`;
 
   const clients = (lspStatus?.clients ?? [])
     .filter((client) => client.state === "ready" || client.state === "starting")
     .sort(compareFooterClients);
-  if (clients.length === 0) return "lsp: idle";
+  if (clients.length === 0) return `lsp: idle${trusted}`;
 
   const shown = clients.slice(0, 4).map(formatFooterClient);
   const hidden = clients.length - shown.length;
-  return `lsp: ${shown.join(" ")}${hidden > 0 ? ` +${hidden}` : ""}`;
+  return `lsp: ${shown.join(" ")}${hidden > 0 ? ` +${hidden}` : ""}${trusted}`;
+}
+
+function formatFooterTrustedRoots(runtime: CodeFeedbackRuntime): string {
+  if (runtime.trustedEnvironmentRoots.length === 0) return "";
+  const shown = runtime.trustedEnvironmentRoots.slice(0, 3);
+  const hidden = runtime.trustedEnvironmentRoots.length - shown.length;
+  return ` trusted: ${shown.join(", ")}${hidden > 0 ? `, +${hidden} more` : ""}`;
 }
 
 function formatClientSummary(lspStatus?: LspServiceStatus): string {
@@ -266,7 +288,7 @@ function formatTimestamp(ms: number): string {
 
 function formatDiagnostic(projectRoot: string, diagnostic: LspDiagnostic, indentColumns: number): string[] {
   const filePath = filePathFromUri(diagnostic.uri);
-  const displayPath = filePath ? path.relative(projectRoot, filePath) || filePath : diagnostic.uri;
+  const displayPath = filePath ? displayPathFromRoot(filePath, projectRoot) : diagnostic.uri;
   const sourceCode = [diagnostic.source, diagnostic.code].filter((part) => part !== undefined && part !== "").join("/");
   const suffix = sourceCode ? ` ${sourceCode}` : "";
   const prefix = " ".repeat(indentColumns);
@@ -289,7 +311,7 @@ function indent(text: string, spaces: number): string {
 function formatLinkedDiagnostic(projectRoot: string, linked: LinkedDiagnostic): string[] {
   const diagnostic = linked.diagnostic;
   const filePath = filePathFromUri(diagnostic.uri);
-  const displayPath = filePath ? path.relative(projectRoot, filePath) || filePath : diagnostic.uri;
+  const displayPath = filePath ? displayPathFromRoot(filePath, projectRoot) : diagnostic.uri;
   const sourceCode = [diagnostic.source, diagnostic.code].filter((part) => part !== undefined && part !== "").join("/");
   const location = `${displayPath}:${diagnostic.range.start.line}:${diagnostic.range.start.character}`;
   const reason = linked.linkReason === "overlap" ? "" : ` [${linked.linkReason}]`;
@@ -316,7 +338,7 @@ function formatFormatterSummary(formatter: FormatterSummary, projectRoot?: strin
   const name = formatter.formatterName ?? "formatter";
   const parts: string[] = [];
   if (formatter.changed) {
-    const target = projectRoot && filePath ? ` ${path.relative(projectRoot, filePath) || filePath}` : " file";
+    const target = projectRoot && filePath ? ` ${displayPathFromRoot(filePath, projectRoot)}` : " file";
     parts.push(`formatted:${target} with ${name}`);
   }
   if (formatter.errors.length > 0) {

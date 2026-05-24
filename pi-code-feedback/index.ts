@@ -1,5 +1,6 @@
 import { createDefaultConfig, registerFlags, resolveConfig } from "./src/config.ts";
 import { registerLspCommand } from "./src/commands/lsp.ts";
+import { reconfigureTrustedEnvironmentServices, restoreTrustedEnvironmentRoots } from "./src/commands/trust.ts";
 import { handleContext } from "./src/events/context.ts";
 import { handleToolCall } from "./src/events/tool-call.ts";
 import { handleToolResult } from "./src/events/tool-result.ts";
@@ -18,11 +19,13 @@ export default function (piValue: unknown) {
   const lspService = createLspService({
     projectRoot: runtime.projectRoot,
     serverOverrides: runtime.config.lsp.servers,
+    trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
     idleTimeoutMs: runtime.config.lsp.idleTimeoutMs,
   });
   const formatService = createFormatService({
     projectRoot: runtime.projectRoot,
     formatterOverrides: runtime.config.formatters,
+    trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
   });
 
   registerLspCommand(pi, runtime, lspService, formatService);
@@ -31,15 +34,25 @@ export default function (piValue: unknown) {
   pi.on?.("session_start", async (_event, ctx) => {
     refreshRuntimeConfig(runtime, resolveConfig(pi));
     setProjectRoot(runtime, ctx.cwd);
+    restoreTrustedEnvironmentRoots(runtime, ctx);
     lspService.configure({
       projectRoot: runtime.projectRoot,
       serverOverrides: runtime.config.lsp.servers,
+      trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
       idleTimeoutMs: runtime.config.lsp.idleTimeoutMs,
     });
     formatService.configure({
       projectRoot: runtime.projectRoot,
       formatterOverrides: runtime.config.formatters,
+      trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
     });
+    ctx.ui?.setStatus?.("pi-code-feedback-lsp", renderFooterStatus(runtime, ctx.ui?.theme, lspService.getStatus()));
+  });
+
+  pi.on?.("session_tree", async (_event, ctx) => {
+    setProjectRoot(runtime, ctx.cwd);
+    const changed = restoreTrustedEnvironmentRoots(runtime, ctx);
+    await reconfigureTrustedEnvironmentServices(runtime, lspService, formatService, changed ? "trusted external roots restored from branch" : undefined);
     ctx.ui?.setStatus?.("pi-code-feedback-lsp", renderFooterStatus(runtime, ctx.ui?.theme, lspService.getStatus()));
   });
 

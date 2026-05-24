@@ -10,6 +10,7 @@ export interface CodeFeedbackRuntime {
   lastLspRestartAt?: number;
   lastReloadReason?: string;
   lastError?: string;
+  trustedEnvironmentRoots: string[];
   pendingEdits: Map<string, PendingEdit>;
   completedEdits: CompletedEdit[];
   delayedFeedback: DelayedDiagnosticFeedback[];
@@ -22,6 +23,7 @@ export function createRuntime(config: FeedbackConfig): CodeFeedbackRuntime {
     turnIndex: 0,
     writeIndex: 0,
     lspRestartCount: 0,
+    trustedEnvironmentRoots: [],
     pendingEdits: new Map(),
     completedEdits: [],
     delayedFeedback: [],
@@ -147,6 +149,27 @@ export function restartLsp(runtime: CodeFeedbackRuntime, reason: string): void {
   runtime.lspRestartCount += 1;
   runtime.lastLspRestartAt = Date.now();
   runtime.lastReloadReason = reason;
+}
+
+export function addTrustedEnvironmentRoot(runtime: CodeFeedbackRuntime, root: string): boolean {
+  const resolved = path.resolve(root);
+  if (runtime.trustedEnvironmentRoots.some((existing) => path.resolve(existing) === resolved)) return false;
+  runtime.trustedEnvironmentRoots.push(resolved);
+  runtime.trustedEnvironmentRoots.sort((left, right) => left.localeCompare(right));
+  return true;
+}
+
+export function removeTrustedEnvironmentRoot(runtime: CodeFeedbackRuntime, root: string): boolean {
+  const resolved = path.resolve(root);
+  const before = runtime.trustedEnvironmentRoots.length;
+  runtime.trustedEnvironmentRoots = runtime.trustedEnvironmentRoots.filter((existing) => path.resolve(existing) !== resolved);
+  return runtime.trustedEnvironmentRoots.length !== before;
+}
+
+export function clearTrustedEnvironmentRoots(runtime: CodeFeedbackRuntime): number {
+  const count = runtime.trustedEnvironmentRoots.length;
+  runtime.trustedEnvironmentRoots = [];
+  return count;
 }
 
 function fallbackCwd(): string {

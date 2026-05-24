@@ -53,3 +53,22 @@ test("footer marks diagnostic timeouts", () => {
 
   assert.equal(renderFooterStatus(rt, undefined, status), "lsp: typescript (timeout 98 ms)");
 });
+
+test("footer includes trusted external roots after LSP status", () => {
+  const rt = runtime();
+  rt.trustedEnvironmentRoots = ["/tmp/external-a", "/tmp/external-b"];
+  const status = {
+    activeClients: 1,
+    clients: [client({ id: "typescript", lastDiagnosticDurationMs: 1228, lastDiagnosticTimedOut: true })],
+    unavailableServers: [],
+  };
+
+  assert.equal(renderFooterStatus(rt, undefined, status), "lsp: typescript (timeout 1228 ms) trusted: /tmp/external-a, /tmp/external-b");
+});
+
+test("footer caps trusted external roots", () => {
+  const rt = runtime();
+  rt.trustedEnvironmentRoots = ["/tmp/a", "/tmp/b", "/tmp/c", "/tmp/d", "/tmp/e"];
+
+  assert.equal(renderFooterStatus(rt), "lsp: idle trusted: /tmp/a, /tmp/b, /tmp/c, +2 more");
+});

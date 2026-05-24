@@ -6,7 +6,7 @@ import { mapTouchedRangesThroughFormatting } from "../format/mapping.ts";
 import type { FormatService } from "../format/service.ts";
 import { readUtf8IfExists } from "../fs.ts";
 import type { LspService } from "../lsp/service.ts";
-import { resolveInputPath, shouldTrackFile } from "../paths.ts";
+import { displayPathFromRoot, resolveInputPath, shouldTrackFile } from "../paths.ts";
 import { addTimingPhase, createTimingRecorder, type TimingRecorder } from "../perf.ts";
 import type { PiToolResult } from "../pi.ts";
 import { renderDelayedDiagnosticFeedback, renderInlineDiagnosticFeedback } from "../render.ts";
@@ -493,7 +493,7 @@ function isObjectDetails(value: unknown): value is Record<string, unknown> {
 }
 
 function toCodeFeedbackEditDetails(runtime: CodeFeedbackRuntime, edit: CompletedEdit): CodeFeedbackEditDetails {
-  const displayPath = path.relative(runtime.projectRoot, edit.filePath) || edit.filePath;
+  const displayPath = displayPathFromRoot(edit.filePath, runtime.projectRoot);
   const filter = edit.diagnosticFilter;
   return {
     id: edit.id,

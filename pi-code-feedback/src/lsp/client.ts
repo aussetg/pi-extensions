@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import * as path from "node:path";
 import { createDiagnosticSnapshot } from "../diagnostics/snapshots.ts";
+import { mergeProcessEnv } from "../language-environments.ts";
 import type { DiagnosticRefreshResult, DiagnosticSnapshot, LspClientState, LspClientStatus, LspDiagnostic, LspServerLog, LspServerLogLevel, RelatedLocation, SemanticToken, SemanticTokenLegend, SemanticTokenOverlay } from "../types.ts";
 import { filePathToUri, lspRangeToExternal, type LspRange } from "./positions.ts";
 import type { LanguageServerDefinition } from "./servers.ts";
@@ -335,6 +336,7 @@ export class LspClient {
       lastDiagnosticTimedOut: this.lastDiagnosticTimedOut,
       lastError: this.lastError,
       lastServerLog: this.lastServerLog,
+      environment: this.definition.environment?.description,
     };
   }
 
@@ -378,6 +380,7 @@ export class LspClient {
     try {
       const child = spawn(this.definition.command, this.definition.args, {
         cwd: this.root,
+        env: mergeProcessEnv(this.definition.env),
         stdio: "pipe",
       });
       this.process = child;
@@ -455,12 +458,12 @@ export class LspClient {
           applyEdit: false,
           workspaceEdit: { documentChanges: true, resourceOperations: ["create", "rename", "delete"] },
           symbol: { resolveSupport: { properties: ["location.range"] } },
-          configuration: false,
+          configuration: true,
           workspaceFolders: true,
         },
         window: { workDoneProgress: false },
       },
-      initializationOptions: {},
+      initializationOptions: this.definition.initializationOptions ?? {},
     };
   }
 
@@ -678,7 +681,7 @@ export class LspClient {
     let result: unknown = null;
     switch (message.method) {
       case "workspace/configuration":
-        result = [];
+        result = this.workspaceConfiguration(message.params);
         break;
       case "workspace/workspaceFolders":
         result = [{ uri: filePathToUri(this.root), name: path.basename(this.root) || this.root }];
@@ -699,6 +702,12 @@ export class LspClient {
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : String(error);
     }
+  }
+
+  private workspaceConfiguration(params: unknown): unknown[] {
+    const items = isRecord(params) && Array.isArray(params.items) ? params.items : [];
+    const config = this.definition.workspaceConfiguration;
+    return items.map((item) => configurationForItem(config, item));
   }
 
   private handlePublishDiagnostics(params: unknown): void {
@@ -1044,6 +1053,20 @@ function isHighSurrogate(value: number): boolean {
 
 function isLowSurrogate(value: number): boolean {
   return value >= 0xdc00 && value <= 0xdfff;
+}
+
+function configurationForItem(config: Record<string, unknown> | undefined, item: unknown): unknown {
+  if (!config) return {};
+  if (!isRecord(item) || typeof item.section !== "string" || item.section.length === 0) return config;
+
+  const exact = config[item.section];
+  if (exact !== undefined) return exact;
+
+  const nested = item.section.split(".").reduce<unknown>((current, part) => {
+    if (!isRecord(current)) return undefined;
+    return current[part];
+  }, config);
+  return nested ?? {};
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
