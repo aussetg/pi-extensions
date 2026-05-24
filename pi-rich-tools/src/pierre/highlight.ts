@@ -200,7 +200,7 @@ export function flattenHighlightedLine(
 
     if (current.type === "text") {
       mergeSpan(spans, {
-        text: tabify(current.value),
+        text: displaySafeText(current.value),
         fg: inherited.fg,
         bg: inherited.bg,
       });
@@ -711,7 +711,7 @@ function prepareTextMateLines(
   config: PierreRendererConfig,
 ): PreparedTextMateLines | undefined {
   const rawLines = lines.map(cleanRawDiffLine);
-  const displayLines = rawLines.map(tabify);
+  const displayLines = rawLines.map(displaySafeText);
   const lineStyles = new Map<number, Array<SyntaxCategory | undefined>>();
   for (const index of indexes) {
     const line = displayLines[index] ?? "";
@@ -1280,7 +1280,7 @@ function normalizeAnsiSpans(value: unknown): DiffSpan[] | undefined {
 }
 
 export function cleanDiffLine(line: string | undefined): string {
-  return tabify(cleanLastNewline(line ?? "").replace(/\r$/, ""));
+  return displaySafeText(cleanLastNewline(line ?? "").replace(/\r$/, ""));
 }
 
 function cleanRawDiffLine(line: string | undefined): string {
@@ -1324,6 +1324,21 @@ function normalizeHighlightedDiffCode(code: unknown): HighlightedDiffCode {
 
 function tabify(text: string): string {
   return text.replace(/\t/g, "    ");
+}
+
+function displaySafeText(text: string): string {
+  return visualizeControlCharacters(tabify(text));
+}
+
+// Raw C0 controls can move the terminal cursor while the TUI still accounts
+// for one rendered row. Show them as Unicode Control Pictures instead.
+function visualizeControlCharacters(text: string): string {
+  return text.replace(/[\x00-\x1f\x7f]/g, (char) => {
+    const code = char.charCodeAt(0);
+    return code === 0x7f
+      ? "\u2421"
+      : String.fromCharCode(0x2400 + code);
+  });
 }
 
 function cleanLastNewline(text: string): string {

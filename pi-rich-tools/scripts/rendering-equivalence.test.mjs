@@ -8,6 +8,7 @@ import { openAnsi, renderAnsiSegments } from "../src/pierre/ansi.ts";
 import { continuationPrefixSegments } from "../src/pierre/gutter.ts";
 import {
   buildPiHighlightedDiff,
+  cleanDiffLine,
   flattenHighlightedLine,
   hasHighlightedLines,
   loadHighlightedDiff,
@@ -530,6 +531,28 @@ test("plain spans inside highlighted lines use syntax text foreground", () => {
   assert.equal(spans[0].fg, palette.syntaxText);
   assert.equal(spans[1].fg, palette.syntaxKeyword);
   assert.equal(spans[2].fg, palette.syntaxText);
+});
+
+test("diff rendering visualizes terminal control characters", () => {
+  assert.equal(cleanDiffLine('\x00a\x0cb\x1bc\x7f'), "␀a␌b␛c␡");
+  assert.equal(cleanDiffLine('\tpage\ffooter\r'), "    page␌footer");
+  assert.equal(cleanDiffLine('left\rright'), "left␍right");
+});
+
+test("highlighted spans visualize terminal control characters", () => {
+  const palette = getPierrePalette({ name: "dark" }, config);
+  const spans = flattenHighlightedLine(
+    { type: "text", value: 'before\fafter\x1b' },
+    "dark",
+    palette,
+    palette.contextRowBg,
+    "before␌after␛",
+  );
+
+  assert.deepEqual(
+    spans.map((span) => span.text),
+    ["before␌after␛"],
+  );
 });
 
 test("cached diff rows keep palette, word-diff config, and expansion separate", () => {
