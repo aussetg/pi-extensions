@@ -1117,33 +1117,29 @@ function paintCapture(
     if (!styles) continue;
 
     const line = lines[row] ?? "";
-    const start = row === startRow ? byteColumnToStringIndex(line, node.startPosition.column) : 0;
-    const end = row === endRow ? byteColumnToStringIndex(line, node.endPosition.column) : line.length;
+    const start = row === startRow ? treeSitterColumnToStringIndex(line, node.startPosition.column) : 0;
+    const end = row === endRow ? treeSitterColumnToStringIndex(line, node.endPosition.column) : line.length;
     for (let i = start; i < end; i++) styles[i] = category;
   }
 }
 
-function byteColumnToStringIndex(line: string, column: number): number {
+function treeSitterColumnToStringIndex(line: string, column: number): number {
+  // node-tree-sitter parses JavaScript strings as UTF-16, so Point.column is
+  // already a JS string index, not a UTF-8 byte offset.
   if (column <= 0) return 0;
+  return avoidSplitSurrogateColumn(line, Math.min(column, line.length));
+}
 
-  let bytes = 0;
-  for (let i = 0; i < line.length;) {
-    const codePoint = line.codePointAt(i);
-    if (codePoint === undefined) break;
-    if (codePoint < 0x80) {
-      if (bytes + 1 > column) return i;
-      bytes += 1;
-      i += 1;
-      continue;
-    }
-    const nextBytes =
-      codePoint < 0x800 ? 2 : codePoint < 0x10000 ? 3 : 4;
-    if (bytes + nextBytes > column) return i;
-    bytes += nextBytes;
-    i += codePoint > 0xffff ? 2 : 1;
-  }
-
-  return line.length;
+function avoidSplitSurrogateColumn(line: string, index: number): number {
+  if (index <= 0 || index >= line.length) return index;
+  const previous = line.charCodeAt(index - 1);
+  const current = line.charCodeAt(index);
+  return previous >= 0xd800 &&
+    previous <= 0xdbff &&
+    current >= 0xdc00 &&
+    current <= 0xdfff
+    ? index - 1
+    : index;
 }
 
 function spansFromLineStyles(

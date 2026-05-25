@@ -328,6 +328,8 @@ function avoidSplitSurrogate(text, index) {
 }
 
 function textExtent(text, end) {
+  // node-tree-sitter's JS-string input uses UTF-16 code-unit offsets for both
+  // edit indexes and Point.column values.
   let index = 0;
   let row = 0;
   let column = 0;
@@ -335,13 +337,12 @@ function textExtent(text, end) {
     const codePoint = text.codePointAt(offset);
     if (codePoint === undefined) break;
     const width = codePoint > 0xffff ? 2 : 1;
-    const bytes = Buffer.byteLength(text.slice(offset, offset + width), "utf8");
-    index += bytes;
+    index += width;
     if (codePoint === 0x0a) {
       row += 1;
       column = 0;
     } else {
-      column += bytes;
+      column += width;
     }
     offset += width;
   }

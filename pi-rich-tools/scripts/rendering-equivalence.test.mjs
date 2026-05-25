@@ -237,6 +237,37 @@ for (const [index, metadata] of cases.entries()) {
   });
 }
 
+test("tree-sitter highlighting keeps Unicode columns aligned", () => {
+  const lines = [
+    '        return "hybrid→MIGraphX query"',
+    '    print(f"• repos:     {len(repos)}", flush=True)',
+  ];
+  const metadata = makeMetadata({
+    name: "unicode-columns.py",
+    lang: "python",
+    deletionLines: lines,
+    additionLines: lines,
+    hunkContent: [
+      {
+        type: "context",
+        lines: lines.length,
+        deletionLineIndex: 0,
+        additionLineIndex: 0,
+      },
+    ],
+  });
+  const highlighted = buildPiHighlightedDiff(metadata, config).dark;
+
+  assert.equal(
+    hasSyntaxSpan(highlighted.additionLines[0], "string", '"hybrid→MIGraphX query"'),
+    true,
+  );
+  assert.equal(
+    hasSyntaxSpan(highlighted.additionLines[1], "string", 'f"• repos:     {len(repos)}"'),
+    true,
+  );
+});
+
 test("line limits keep the same empty-highlight behavior", () => {
   const metadata = cases[0];
   const limited = {
@@ -389,6 +420,39 @@ test("tree-sitter highlighting reuses shared incremental syntax snapshots", () =
   const secondStats = sharedSyntaxServiceStats();
   assert.equal(secondStats.fullParses, 2);
   assert.equal(secondStats.incrementalParses, 2);
+});
+
+test("shared incremental syntax snapshots use UTF-16 tree-sitter edit positions", () => {
+  resetSharedSyntaxServiceForTests();
+  const revisions = [
+    ['const café = "one";', 'const emoji = "😀";', 'const value = 1;'],
+    ['const café = "two";', 'const emoji = "😀";', 'const value = 2;'],
+    ['const café = "three";', 'const emoji = "😀";', 'const value = 3;'],
+  ];
+
+  const first = changedFileMetadata({
+    name: "unicode-incremental.ts",
+    lang: "typescript",
+    before: revisions[0],
+    after: revisions[1],
+  });
+  const second = changedFileMetadata({
+    name: "unicode-incremental.ts",
+    lang: "typescript",
+    before: revisions[1],
+    after: revisions[2],
+  });
+
+  buildPiHighlightedDiff(first, config);
+  const incremental = buildPiHighlightedDiff(second, config);
+  const incrementalStats = sharedSyntaxServiceStats();
+
+  resetSharedSyntaxServiceForTests();
+  const full = buildPiHighlightedDiff(second, config);
+
+  assert.equal(incrementalStats.fullParses, 2);
+  assert.equal(incrementalStats.incrementalParses, 2);
+  assert.deepEqual(incremental, full);
 });
 
 test("best-effort preview builders do not throw for unpreviewable diffs", () => {
