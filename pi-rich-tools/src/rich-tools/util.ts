@@ -7,6 +7,8 @@ export type ThemeLike = {
   name?: string;
   fg: (color: string, text: string) => string;
   bg?: (color: string, text: string) => string;
+  getFgAnsi?: (color: string) => string;
+  getBgAnsi?: (color: string) => string;
   bold: (text: string) => string;
 };
 
@@ -14,7 +16,9 @@ export type ShellContextLike = {
   args?: unknown;
   cwd?: string;
   expanded?: boolean;
+  executionStarted?: boolean;
   invalidate?: () => void;
+  argsComplete?: boolean;
   isError?: boolean;
   isPartial?: boolean;
   lastComponent?: unknown;

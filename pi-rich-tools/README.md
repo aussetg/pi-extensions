@@ -8,10 +8,14 @@ One Pi extension for rich model-facing tools and richer built-in tool rendering:
 - `write`: Pierre create/update diff preview.
 - `edit`: Pierre diff preview from the built-in numbered diff.
 - `write` / `edit` / `apply_patch`: renders `pi-code-feedback` details in the same panel style.
+- `bash`: classifies read/list/search shell commands and renders them as `Exploring` / `Explored` instead of generic runs.
+- `bash`: visually coalesces adjacent exploratory bash calls into one UI block, including resumed session history, without changing stored tool history or model context.
+- `bash`: captures TTY colors for the live UI through a PTY, then strips ANSI/PTY artifacts from tool results and full-output logs before they can reach model context.
+- `bash`: runs tool commands through `/bin/bash -c`, regardless of the user's login shell.
 
 - Collapsed views follow Pi's built-in 10-line preview behavior; `read` counts rendered terminal lines, and expanding the tool row shows the full rendered content.
 
-Pi currently customizes built-in tool rendering by re-registering the tool name. This extension does that with delegating overrides: it starts from Pi's own `createReadToolDefinition`, `createWriteToolDefinition`, and `createEditToolDefinition`, preserves their execution/argument/prompt metadata, and only replaces `renderCall` / `renderResult` / `renderShell`.
+Pi currently customizes built-in tool rendering by re-registering the tool name. This extension does that with delegating overrides: it starts from Pi's own `createBashTool`, `createReadToolDefinition`, `createWriteToolDefinition`, and `createEditToolDefinition`, preserves their execution/argument/prompt metadata, and only replaces rendering plus a small bash spawn hook for PTY color capture.
 
 `write` previews are snapshotted from the `tool_call` event before Pi's original `write` implementation runs; the snapshot is only used for rendering the diff preview.
 

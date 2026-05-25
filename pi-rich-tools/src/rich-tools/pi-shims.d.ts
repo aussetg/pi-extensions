@@ -9,6 +9,7 @@ declare module "@earendil-works/pi-coding-agent" {
   export const createWriteToolDefinition: any;
   export const createEditToolDefinition: any;
   export const createReadTool: any;
+  export const createBashTool: any;
   export const createWriteTool: any;
   export const createEditTool: any;
   export const DEFAULT_MAX_BYTES: number;
