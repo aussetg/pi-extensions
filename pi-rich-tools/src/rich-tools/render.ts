@@ -115,17 +115,18 @@ export function renderReadResult(
   const renderPath = renderStringArg(context?.args, "file_path", "path");
   const path = renderPath && renderPath !== null ? renderPath : "file";
   const startLine = Math.max(1, Math.trunc(numberArg(context?.args, "offset") ?? 1));
-  const display = collapseTextForDisplay(text, options.expanded, false);
-  const payload = readPreviewPayload({ path, content: display.text, startLine });
-  const footer = footerParts([
-    display.collapsed ? collapseNotice(display.collapsed, theme, false) : undefined,
-    readFooter(result.details, theme),
-  ]);
+  const payload = readPreviewPayload({ path, content: text, startLine });
+  const footer = footerParts([readFooter(result.details, theme)]);
   if (!payload) {
-    return renderTextParts(footerParts([theme.fg("toolOutput", display.text), ...footer]), theme, context);
+    const display = collapseTextForDisplay(text, options.expanded, false);
+    return renderTextParts(footerParts([
+      theme.fg("toolOutput", display.text),
+      display.collapsed ? collapseNotice(display.collapsed, theme, false) : undefined,
+      ...footer,
+    ]), theme, context);
   }
 
-  return renderPierre([payload], footer, false, theme, context, {
+  return renderReadPierre([payload], footer, options.expanded, theme, context, {
     showFileHeaders: false,
   });
 }
@@ -329,6 +330,51 @@ class RichPierreResultComponent implements Component {
   }
 }
 
+class RichReadPierreResultComponent implements Component {
+  private diff: PierreInlineDiffComponent;
+  private footerParts: FooterPart[] = [];
+  private footerBg: ((text: string) => string) | undefined;
+  private expanded = false;
+  private theme: ThemeLike;
+
+  constructor(
+    payloads: PierreDiffPayload[],
+    theme: ThemeLike,
+    options: PierreRenderOptions,
+  ) {
+    this.theme = theme;
+    this.diff = new PierreInlineDiffComponent(payloads, theme, pierreOptions(options));
+    this.update(payloads, theme, options);
+  }
+
+  update(payloads: PierreDiffPayload[], theme: ThemeLike, options: PierreRenderOptions): void {
+    this.theme = theme;
+    this.expanded = options.expanded;
+    this.diff.update(payloads, theme, pierreOptions(options));
+    this.footerParts = options.footerParts;
+    this.footerBg = toolBackground(theme, { isPartial: false, isError: false });
+  }
+
+  render(width: number): string[] {
+    const rendered = collapseRenderedReadLines(this.diff.render(width), this.expanded);
+    const footerPartsValue = footerParts([
+      rendered.collapsed ? collapseNotice(rendered.collapsed, this.theme, false) : undefined,
+      ...this.footerParts,
+    ]);
+    if (footerPartsValue.length === 0) return rendered.lines;
+    return [
+      ...rendered.lines,
+      ...renderFooterParts(footerPartsValue, width, this.footerBg, {
+        trailingBlank: true,
+      }),
+    ];
+  }
+
+  invalidate(): void {
+    this.diff.invalidate();
+  }
+}
+
 interface PierreRenderOptions {
   expanded: boolean;
   footerParts: FooterPart[];
@@ -354,6 +400,28 @@ function renderPierre(
     context?.lastComponent instanceof RichPierreResultComponent
       ? context.lastComponent
       : new RichPierreResultComponent(payloads, theme, renderOptions);
+  component.update(payloads, theme, renderOptions);
+  return component;
+}
+
+function renderReadPierre(
+  payloads: PierreDiffPayload[],
+  footerPartsValue: FooterPart[],
+  expanded: boolean,
+  theme: ThemeLike,
+  context: ShellContextLike | undefined,
+  options: { showFileHeaders?: boolean } = {},
+): Component {
+  const renderOptions: PierreRenderOptions = {
+    expanded,
+    footerParts: footerPartsValue,
+    invalidate: context?.invalidate,
+    showFileHeaders: options.showFileHeaders ?? payloads.length > 1,
+  };
+  const component =
+    context?.lastComponent instanceof RichReadPierreResultComponent
+      ? context.lastComponent
+      : new RichReadPierreResultComponent(payloads, theme, renderOptions);
   component.update(payloads, theme, renderOptions);
   return component;
 }
@@ -464,6 +532,29 @@ function collapseTextForDisplay(
       remaining: lines.length - COLLAPSED_MAX_LINES,
       totalLines: includeTotal ? lines.length : undefined,
     },
+  };
+}
+
+function collapseRenderedReadLines(
+  lines: string[],
+  expanded: boolean,
+): { lines: string[]; collapsed?: { remaining: number } } {
+  if (expanded) return { lines };
+
+  const trailingBlankCount = Math.min(
+    Math.max(0, getPierreRendererConfig().spacing.afterDiff),
+    lines.length,
+  );
+  const contentEnd = lines.length - trailingBlankCount;
+  const contentLines = lines.slice(0, contentEnd);
+  if (contentLines.length <= COLLAPSED_MAX_LINES) return { lines };
+
+  return {
+    lines: [
+      ...contentLines.slice(0, COLLAPSED_MAX_LINES),
+      ...lines.slice(contentEnd),
+    ],
+    collapsed: { remaining: contentLines.length - COLLAPSED_MAX_LINES },
   };
 }
 

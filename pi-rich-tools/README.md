@@ -8,7 +8,7 @@ One Pi extension for the rich file-tool experience:
 - `edit`: Pierre diff preview from the built-in numbered diff.
 - `write` / `edit` / `apply_patch`: renders `pi-code-feedback` details in the same panel style.
 
-- Collapsed views follow Pi's built-in 10-line preview behavior; expand the tool row to show the full rendered content.
+- Collapsed views follow Pi's built-in 10-line preview behavior; `read` counts rendered terminal lines, and expanding the tool row shows the full rendered content.
 
 Pi currently customizes built-in tool rendering by re-registering the tool name. This extension does that with delegating overrides: it starts from Pi's own `createReadToolDefinition`, `createWriteToolDefinition`, and `createEditToolDefinition`, preserves their execution/argument/prompt metadata, and only replaces `renderCall` / `renderResult` / `renderShell`.
 
@@ -18,6 +18,6 @@ Performance notes:
 
 - Payloads and write snapshots use one shared bounded LRU cache for all three tools.
 - Pierre's own highlight/row caches are reused across all rendered default-tool diffs.
-- Collapsed `read` and new-file `write` previews only build/highlight the first 10 lines.
+- Collapsed `read` previews collapse after 10 rendered terminal lines; collapsed new-file `write` previews only build/highlight the first 10 content lines.
 - Large write diffs are skipped instead of reading or diffing huge files.
 - Syntax highlighting uses tree-sitter first, then an async TextMate/Shiki fallback for languages outside the tree-sitter bundle.
