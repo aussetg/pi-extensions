@@ -188,7 +188,7 @@ export function findLineFrom(lines: string[], start: number, target: string): nu
   return -1;
 }
 
-// Parse a single Codex update hunk section into context + chunks, returning the next index.
+// Parse a single update hunk section into context + chunks, returning the next index.
 export function peekNextSection(
   lines: string[],
   startIndex: number,

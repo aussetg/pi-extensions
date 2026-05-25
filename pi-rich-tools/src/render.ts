@@ -12,7 +12,7 @@ import type {
   ApplyPatchPreview,
 } from "./types.ts";
 import type { ApplyOperationResult } from "./apply.ts";
-import { prepareApplyPatchArguments } from "./codex-envelope.ts";
+import { prepareApplyPatchArguments } from "./patch-envelope.ts";
 import { firstChangedLineFromDiff } from "./diff-lines.ts";
 import { PierreInlineDiffComponent } from "./pierre/component.ts";
 import { getPierreRendererConfig } from "./pierre/config.ts";

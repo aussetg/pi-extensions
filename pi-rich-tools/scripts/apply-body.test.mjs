@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyCodexUpdateBody } from "../src/apply-body.ts";
+import { applyPatchUpdateBody } from "../src/apply-body.ts";
 
 test("update body reports trailing-whitespace fuzzy context matches", () => {
-  const result = applyCodexUpdateBody(
+  const result = applyPatchUpdateBody(
     "a  \nb\n",
     "@@\n a\n-b\n+B\n",
   );
@@ -14,7 +14,7 @@ test("update body reports trailing-whitespace fuzzy context matches", () => {
 });
 
 test("update body reports Unicode-normalized fuzzy matches", () => {
-  const result = applyCodexUpdateBody(
+  const result = applyPatchUpdateBody(
     'const x = "—";\n',
     '@@\n-const x = "-";\n+const x = "dash";\n',
   );
@@ -25,7 +25,7 @@ test("update body reports Unicode-normalized fuzzy matches", () => {
 });
 
 test("update body reports EOF fallback fuzzy matches", () => {
-  const result = applyCodexUpdateBody(
+  const result = applyPatchUpdateBody(
     "a\nb\nc\n",
     "@@\n a\n-b\n+B\n*** End of File\n",
   );

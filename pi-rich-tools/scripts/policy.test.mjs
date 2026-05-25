@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  createApplyPatchToolPolicy,
+  createToolProfilePolicy,
   resolveModelToolFamily,
   toolsForProfile,
 } from "../src/policy.ts";
 
-const GLOBAL_POLICY_STATE_KEY = "__codexApplyPatchToolPolicyState";
+const GLOBAL_POLICY_STATE_KEY = "__piRichToolsToolProfilePolicyState";
 
 function resetPolicyState() {
   delete globalThis[GLOBAL_POLICY_STATE_KEY];
@@ -27,21 +27,21 @@ function fakePi(initialTools) {
   };
 }
 
-const codexCtx = { model: { id: "gpt-5.2-codex" } };
+const openaiCtx = { model: { id: "gpt-5.2" } };
 const normalCtx = { model: { id: "claude-sonnet-4-5" } };
 
 test("openai profile restores pre-profile baseline after extension reload", () => {
   resetPolicyState();
 
   const beforeReloadPi = fakePi(["read", "edit", "write", "bash"]);
-  const beforeReloadPolicy = createApplyPatchToolPolicy(beforeReloadPi);
+  const beforeReloadPolicy = createToolProfilePolicy(beforeReloadPi);
   beforeReloadPolicy.captureBaseline();
-  beforeReloadPolicy.apply(codexCtx);
+  beforeReloadPolicy.apply(openaiCtx);
 
   assert.deepEqual(beforeReloadPi.activeTools, ["bash", "view_image", "apply_patch"]);
 
   const afterReloadPi = fakePi(beforeReloadPi.activeTools);
-  const afterReloadPolicy = createApplyPatchToolPolicy(afterReloadPi);
+  const afterReloadPolicy = createToolProfilePolicy(afterReloadPi);
   afterReloadPolicy.captureBaseline();
   afterReloadPolicy.apply(normalCtx);
 
@@ -52,14 +52,14 @@ test("openai profile captures a fresh baseline when active tools are not the pre
   resetPolicyState();
 
   const firstPi = fakePi(["read", "edit", "write", "bash"]);
-  const firstPolicy = createApplyPatchToolPolicy(firstPi);
+  const firstPolicy = createToolProfilePolicy(firstPi);
   firstPolicy.captureBaseline();
-  firstPolicy.apply(codexCtx);
+  firstPolicy.apply(openaiCtx);
 
   const nextPi = fakePi(["read", "grep", "edit"]);
-  const nextPolicy = createApplyPatchToolPolicy(nextPi);
+  const nextPolicy = createToolProfilePolicy(nextPi);
   nextPolicy.captureBaseline();
-  nextPolicy.apply(codexCtx);
+  nextPolicy.apply(openaiCtx);
 
   assert.deepEqual(nextPi.activeTools, ["view_image", "apply_patch"]);
 });
@@ -68,7 +68,7 @@ test("tool policy keeps injected tools hidden outside openai profile", () => {
   resetPolicyState();
 
   const pi = fakePi(["read", "apply_patch", "view_image", "edit"]);
-  const policy = createApplyPatchToolPolicy(pi);
+  const policy = createToolProfilePolicy(pi);
   policy.captureBaseline();
   policy.apply(normalCtx);
 

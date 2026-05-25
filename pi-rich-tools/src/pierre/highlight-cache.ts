@@ -1,7 +1,7 @@
 import type { HighlightedDiffSet } from "./types.ts";
 
-const GLOBAL_PI_HIGHLIGHT_CACHE_KEY = "__codexApplyPatchPiHighlightCache";
-const GLOBAL_PI_HIGHLIGHT_GENERATION_KEY = "__codexApplyPatchPiHighlightGeneration";
+const GLOBAL_PI_HIGHLIGHT_CACHE_KEY = "__piRichToolsPierreHighlightCache";
+const GLOBAL_PI_HIGHLIGHT_GENERATION_KEY = "__piRichToolsPierreHighlightGeneration";
 
 export function globalPiHighlightCache(): Map<string, HighlightedDiffSet> {
   const scope = globalThis as typeof globalThis & {

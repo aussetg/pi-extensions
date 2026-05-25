@@ -18,18 +18,12 @@ const preparedWarningsByOperationsKey = new Map<
 >();
 
 /*
- * Codex apply_patch reference implementation:
- * - Format instructions/grammar:
- *   https://github.com/openai/codex/blob/main/codex-rs/apply-patch/apply_patch_tool_instructions.md
- * - Parser:
- *   https://github.com/openai/codex/blob/main/codex-rs/apply-patch/src/parser.rs
- * - Applier:
- *   https://github.com/openai/codex/blob/main/codex-rs/apply-patch/src/lib.rs
+ * Patch envelope format.
  *
- * The *** Add/Update/Delete File headers are Codex apply_patch envelope file
+ * The *** Add/Update/Delete File headers are apply_patch envelope file
  * operations. *** Move to is an optional subheader of Update File, not a
  * standalone file operation. Our public JSON `operations[]` shape is Pi-specific
- * and stores each Codex section body in `diff`.
+ * and stores each file section body in `diff`.
  */
 
 export function isEnvelopeMarkerParseError(err: unknown): boolean {
@@ -54,7 +48,7 @@ export interface NormalizedEnvelopeDiff {
   markers: string[];
 }
 
-export interface ParsedCodexPatchEnvelope {
+export interface ParsedPatchEnvelope {
   operations: ApplyPatchOperation[];
   warnings: string[];
 }
@@ -324,15 +318,15 @@ export function takePreparedApplyPatchWarnings(input: unknown): string[] {
   return entry?.warnings ?? [];
 }
 
-export function parseCodexPatchEnvelope(
+export function parsePatchEnvelope(
   patch: string,
 ): ApplyPatchOperation[] | undefined {
-  return parseCodexPatchEnvelopeDetailed(patch)?.operations;
+  return parsePatchEnvelopeDetailed(patch)?.operations;
 }
 
-export function parseCodexPatchEnvelopeDetailed(
+export function parsePatchEnvelopeDetailed(
   patch: string,
-): ParsedCodexPatchEnvelope | undefined {
+): ParsedPatchEnvelope | undefined {
   const normalized = normalizeEnvelopeLines(patch);
   const lines = normalized.lines;
   const bounds = repairEnvelopeBounds(lines);
@@ -447,7 +441,7 @@ export function prepareApplyPatchArguments(
   const recordRepairs = options.recordRepairs ?? true;
 
   if (typeof input === "string") {
-    const envelope = parseCodexPatchEnvelopeDetailed(input);
+    const envelope = parsePatchEnvelopeDetailed(input);
     return envelope
       ? withPreparedRepairWarnings(
           { operations: envelope.operations },
@@ -479,10 +473,10 @@ export function prepareApplyPatchArguments(
         return { operations: (parsed as { operations: unknown[] }).operations };
       }
     } catch {
-      // Fall through to Codex envelope parsing below.
+      // Fall through to patch-envelope parsing below.
     }
 
-    const envelope = parseCodexPatchEnvelopeDetailed(args.operations);
+    const envelope = parsePatchEnvelopeDetailed(args.operations);
     if (envelope)
       return withPreparedRepairWarnings(
         { operations: envelope.operations },
@@ -503,7 +497,7 @@ export function prepareApplyPatchArguments(
             : undefined;
 
   if (patchText) {
-    const envelope = parseCodexPatchEnvelopeDetailed(patchText);
+    const envelope = parsePatchEnvelopeDetailed(patchText);
     if (envelope)
       return withPreparedRepairWarnings(
         { operations: envelope.operations },

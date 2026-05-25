@@ -7,7 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
  * implementations. This layer only changes the model-visible dialect so each
  * model family sees tools close to the harnesses it was likely tuned around.
  */
-const GLOBAL_POLICY_STATE_KEY = "__codexApplyPatchToolPolicyState";
+const GLOBAL_POLICY_STATE_KEY = "__piRichToolsToolProfilePolicyState";
 
 export type ModelToolFamily = "openai" | "anthropic" | "google" | "mistral";
 export type ToolProfileName = ModelToolFamily;
@@ -22,7 +22,7 @@ type ModelLike = {
   baseUrl?: string;
 };
 
-interface ApplyPatchToolPolicyState {
+interface ToolProfilePolicyState {
   baselineTools: string[] | null;
   policyMode: PolicyMode;
 }
@@ -30,7 +30,7 @@ interface ApplyPatchToolPolicyState {
 const PROFILE_INJECTED_TOOLS = new Set(["apply_patch", "view_image"]);
 
 const OPENAI_HIDDEN_BASELINE_TOOLS = new Set([
-  // OpenAI/Codex-style agents are best with shell for inspection and patch for edits.
+  // OpenAI-style agents are best with shell for inspection and patch for edits.
   "read",
   "grep",
   "find",
@@ -73,9 +73,9 @@ function fieldLower(model: ModelLike | null | undefined, field: keyof ModelLike)
   return typeof value === "string" ? value.toLowerCase() : "";
 }
 
-function globalPolicyState(): ApplyPatchToolPolicyState {
+function globalPolicyState(): ToolProfilePolicyState {
   const scope = globalThis as typeof globalThis & {
-    [GLOBAL_POLICY_STATE_KEY]?: ApplyPatchToolPolicyState;
+    [GLOBAL_POLICY_STATE_KEY]?: ToolProfilePolicyState;
   };
   scope[GLOBAL_POLICY_STATE_KEY] ??= {
     baselineTools: null,
@@ -131,7 +131,7 @@ export function resolveModelToolFamily(model: ModelLike | null | undefined): Mod
 
   // Unknown models get the Anthropic-like profile. It is the least surprising
   // default for our current lowercase Pi tools and avoids exposing apply_patch
-  // to models that were not selected for the OpenAI/Codex-style profile.
+  // to models that were not selected for the OpenAI profile.
   return "anthropic";
 }
 
@@ -167,13 +167,11 @@ export function toolsForProfile(profile: ToolProfileName, baselineTools: string[
   return next;
 }
 
-// Backward-compatible name for the old policy. In the new profile system this
-// means “the OpenAI/Codex-style tool dialect is active”.
-export function isCodexModel(ctx: ExtensionContext): boolean {
+export function usesOpenAIToolProfile(ctx: ExtensionContext): boolean {
   return resolveToolProfileName(ctx) === "openai";
 }
 
-export function createApplyPatchToolPolicy(pi: ExtensionAPI) {
+export function createToolProfilePolicy(pi: ExtensionAPI) {
   const state = globalPolicyState();
 
   const setActiveToolsIfChanged = (tools: string[]) => {

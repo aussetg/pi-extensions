@@ -8,14 +8,14 @@ export interface ApplyPatchOperation {
   type: ApplyPatchOpType;
   path: string;
   /**
-   * Structured JSON form only: Codex apply_patch section body, not a full
+   * Structured JSON form only: apply_patch section body, not a full
    * *** Begin/End Patch envelope. Full envelopes belong in the tool-level
    * `patch` argument.
    * - create_file: Add File body; every content line starts with '+'
    * - update_file: Update File hunks; @@ sections with +/-/space lines
    */
   diff?: string;
-  /** Optional move target, equivalent to Codex's `*** Move to:` subheader. */
+  /** Optional move target, equivalent to the `*** Move to:` subheader. */
   move_path?: string;
 }
 

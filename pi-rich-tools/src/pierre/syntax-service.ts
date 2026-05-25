@@ -98,7 +98,7 @@ type TextExtent = {
 const nodeRequire = createRequire(import.meta.url);
 const QUERY_MATCH_LIMIT = 64;
 const SYNTAX_DOCUMENT_CACHE_LIMIT = 64;
-const GLOBAL_SHARED_SYNTAX_SERVICE_STATE_KEY = "__codexApplyPatchSharedSyntaxServiceState";
+const GLOBAL_SHARED_SYNTAX_SERVICE_STATE_KEY = "__piRichToolsSharedSyntaxServiceState";
 
 function sharedSyntaxServiceState(): SharedSyntaxServiceState {
   const scope = globalThis as typeof globalThis & {

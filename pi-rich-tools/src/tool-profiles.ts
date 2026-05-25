@@ -1,10 +1,10 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createApplyPatchToolPolicy, isCodexModel } from "./policy.ts";
+import { createToolProfilePolicy, usesOpenAIToolProfile } from "./policy.ts";
 import { registerApplyPatchTool } from "./tool.ts";
 import { registerViewImageTool } from "./view-image-tool.ts";
 
-export function registerApplyPatchExtension(pi: ExtensionAPI): void {
-  const policy = createApplyPatchToolPolicy(pi);
+export function registerToolProfileTools(pi: ExtensionAPI): void {
+  const policy = createToolProfilePolicy(pi);
 
   registerApplyPatchTool(pi);
   registerViewImageTool(pi);
@@ -20,11 +20,11 @@ export function registerApplyPatchExtension(pi: ExtensionAPI): void {
 
   pi.on("before_agent_start", async (event, ctx) => {
     policy.apply(ctx);
-    if (!isCodexModel(ctx)) return;
+    if (!usesOpenAIToolProfile(ctx)) return;
 
     const activeTools = new Set(pi.getActiveTools());
     const lines = [
-      "\n\n# OpenAI/Codex tool profile",
+      "\n\n# OpenAI tool profile",
       "- The file convenience tools read/edit/write/grep/find/ls are intentionally hidden for this model family.",
     ];
 
@@ -40,9 +40,9 @@ export function registerApplyPatchExtension(pi: ExtensionAPI): void {
       lines.push(
         "- Use apply_patch for file edits.",
         "- Use exactly one of these two forms for file edits.",
-        "- Codex envelope form: set patch to a complete patch string with *** Begin Patch, one or more *** Add/Update/Delete File sections, and *** End Patch.",
+        "- Patch envelope form: set patch to a complete patch string with *** Begin Patch, one or more *** Add/Update/Delete File sections, and *** End Patch.",
         "- Structured JSON form: set operations to an array of create_file | update_file | delete_file objects.",
-        "- In structured JSON form, diff contains only the Codex section body, not the full envelope.",
+        "- In structured JSON form, diff contains only the file section body, not the full envelope.",
         "- Structured create_file diff: Add File body; every content line starts with '+'.",
         "- Structured update_file diff: Update File hunks; each non-empty diff line starts with @@, space, +, or -.",
         "- Do not include *** Begin Patch, *** End Patch, or *** Add/Update/Delete File lines inside operations[].diff; if you want those markers, use patch instead.",

@@ -5,7 +5,7 @@ import { applyOperations, prepareApplyTasks, withMutationQueues } from "./apply.
 import {
   prepareApplyPatchArguments,
   takePreparedApplyPatchWarnings,
-} from "./codex-envelope.ts";
+} from "./patch-envelope.ts";
 import { createThrottledProgressEmitter } from "./progress.ts";
 import { collectProgressPreview, collectSuccessPreviews, renderApplyPatchCall, renderApplyPatchResult } from "./render.ts";
 import type { ApplyPatchDetails, ApplyPatchOperation } from "./types.ts";
@@ -30,20 +30,20 @@ export function registerApplyPatchTool(pi: ExtensionAPI): void {
     name: "apply_patch",
     label: "apply_patch",
     description:
-      "Apply file edits. Accept either operations[] with Codex apply_patch section bodies, or patch with a full Codex apply_patch envelope (*** Begin Patch ... *** End Patch). Use exactly one form.",
+      "Apply file edits. Accept either operations[] with apply_patch section bodies, or patch with a full apply_patch envelope (*** Begin Patch ... *** End Patch). Use exactly one form.",
     parameters: Type.Object(
       {
         operations: Type.Optional(
           Type.Array(operationSchema, {
             minItems: 1,
             description:
-              "Pi JSON form: one operation per file. diff is the Codex section body only, without *** Begin/End Patch or file headers.",
+              "Pi JSON form: one operation per file. diff is the file section body only, without *** Begin/End Patch or file headers.",
           }),
         ),
         patch: Type.Optional(
           Type.String({
             description:
-              "Codex envelope form: a complete patch beginning with *** Begin Patch and ending with *** End Patch.",
+              "Patch envelope form: a complete patch beginning with *** Begin Patch and ending with *** End Patch.",
           }),
         ),
       },
@@ -89,7 +89,7 @@ export function registerApplyPatchTool(pi: ExtensionAPI): void {
       if (!Array.isArray(ops)) {
         throw new DiffError(
           typeof preparedParams.patch === "string"
-            ? "Invalid apply_patch patch envelope. Use a full Codex envelope beginning with '*** Begin Patch' and ending with '*** End Patch', or use operations[]."
+            ? "Invalid apply_patch patch envelope. Use a full envelope beginning with '*** Begin Patch' and ending with '*** End Patch', or use operations[]."
             : "apply_patch requires either operations[] or patch.",
         );
       }

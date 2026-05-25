@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  parseCodexPatchEnvelopeDetailed,
+  parsePatchEnvelopeDetailed,
   prepareApplyPatchArguments,
   takePreparedApplyPatchWarnings,
-} from "../src/codex-envelope.ts";
+} from "../src/patch-envelope.ts";
 
 test("full envelope parser surfaces missing end marker repair", () => {
-  const parsed = parseCodexPatchEnvelopeDetailed(
+  const parsed = parsePatchEnvelopeDetailed(
     "*** Begin Patch\n*** Delete File: stale.txt\n",
   );
 
@@ -31,7 +31,7 @@ test("prepared full-envelope repair warnings are available to execute", () => {
   );
 });
 
-test("patch argument accepts a complete Codex envelope without repair warnings", () => {
+test("patch argument accepts a complete patch envelope without repair warnings", () => {
   const prepared = prepareApplyPatchArguments({
     patch: "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n",
   });
@@ -44,7 +44,7 @@ test("patch argument accepts a complete Codex envelope without repair warnings",
 
 test("full envelope parser rejects non-repairable trailing garbage", () => {
   assert.equal(
-    parseCodexPatchEnvelopeDetailed(
+    parsePatchEnvelopeDetailed(
       "*** Begin Patch\n*** Delete File: stale.txt\n*** End Patch\nnot patch\n",
     ),
     undefined,
@@ -52,7 +52,7 @@ test("full envelope parser rejects non-repairable trailing garbage", () => {
 });
 
 test("full envelope parser repairs trailing markdown fence", () => {
-  const parsed = parseCodexPatchEnvelopeDetailed(
+  const parsed = parsePatchEnvelopeDetailed(
     "*** Begin Patch\n*** Delete File: stale.txt\n*** End Patch\n```\n",
   );
 
@@ -63,7 +63,7 @@ test("full envelope parser repairs trailing markdown fence", () => {
 });
 
 test("full envelope parser repairs missing end before trailing markdown fence", () => {
-  const parsed = parseCodexPatchEnvelopeDetailed(
+  const parsed = parsePatchEnvelopeDetailed(
     "*** Begin Patch\n*** Delete File: stale.txt\n```\n",
   );
 
@@ -76,7 +76,7 @@ test("full envelope parser repairs missing end before trailing markdown fence", 
 });
 
 test("direct file sections are accepted with an envelope repair warning", () => {
-  const parsed = parseCodexPatchEnvelopeDetailed("*** Delete File: stale.txt\n");
+  const parsed = parsePatchEnvelopeDetailed("*** Delete File: stale.txt\n");
 
   assert.deepEqual(parsed?.operations, [
     { type: "delete_file", path: "stale.txt" },

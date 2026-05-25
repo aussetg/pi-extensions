@@ -183,7 +183,7 @@ function diffCacheKey(
   hash.update(oldContent);
   hash.update("\0");
   hash.update(newContent);
-  return `apply-patch-${hash.digest("hex").slice(0, 24)}`;
+  return `pi-rich-tools-diff-${hash.digest("hex").slice(0, 24)}`;
 }
 
 function numberedDiffCacheKey(path: string, diff: string): string {
@@ -191,7 +191,7 @@ function numberedDiffCacheKey(path: string, diff: string): string {
   hash.update(path);
   hash.update("\0");
   hash.update(diff);
-  return `apply-patch-numbered-${hash.digest("hex").slice(0, 24)}`;
+  return `pi-rich-tools-numbered-${hash.digest("hex").slice(0, 24)}`;
 }
 
 type NumberedDiffLine =

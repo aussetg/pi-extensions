@@ -1,9 +1,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { registerApplyPatchExtension } from "./apply-patch-extension.ts";
 import { reloadPierreRendererConfig } from "./pierre/config.ts";
 import { resetPierreRendererState } from "./pierre/reset.ts";
 import { registerRichToolRenderers } from "./rich-tools/extension.ts";
 import { resetRichToolPayloadState } from "./rich-tools/payloads.ts";
+import { registerToolProfileTools } from "./tool-profiles.ts";
 
 export function registerRichToolsExtension(pi: ExtensionAPI): void {
   resetRichToolsState();
@@ -14,7 +14,7 @@ export function registerRichToolsExtension(pi: ExtensionAPI): void {
     resetRichToolsState();
   });
 
-  registerApplyPatchExtension(pi);
+  registerToolProfileTools(pi);
   registerRichToolRenderers(pi);
 }
 

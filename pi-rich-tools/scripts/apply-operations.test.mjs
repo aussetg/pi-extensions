@@ -113,7 +113,7 @@ test("applyOperations surfaces fuzzy matching warnings", async (t) => {
   assert.match(result.warnings.join("\n"), /trailing whitespace/);
 });
 
-test("applyOperations surfaces a trailing Codex end marker in update diffs", async (t) => {
+test("applyOperations surfaces a trailing patch end marker in update diffs", async (t) => {
   const cwd = await tempDir(t);
   await writeFile(join(cwd, "marker.txt"), "old\n", "utf8");
 

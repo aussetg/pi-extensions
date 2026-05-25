@@ -6,7 +6,7 @@ import type { PierreTerminalPalette } from "./theme.ts";
 import type { PierreRendererConfig } from "./config.ts";
 
 const ROW_CACHE_LIMIT = 512;
-const GLOBAL_PIERRE_ROW_CACHE_KEY = "__codexApplyPatchPierreRowCache";
+const GLOBAL_PIERRE_ROW_CACHE_KEY = "__piRichToolsPierreRowCache";
 
 type PierreRowCacheState = {
   rows: Map<string, DiffRow[]>;

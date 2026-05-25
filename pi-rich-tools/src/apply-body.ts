@@ -14,7 +14,7 @@ import {
 import {
   isEnvelopeMarkerParseError,
   tryNormalizeUpdateDiffEnvelope,
-} from "./codex-envelope.ts";
+} from "./patch-envelope.ts";
 
 export interface ApplyUpdateResult {
   output: string;
@@ -24,13 +24,13 @@ export interface ApplyUpdateResult {
   normalizedMarkers?: string[];
 }
 
-export function applyCodexUpdateWithRecovery(
+export function applyPatchUpdateWithRecovery(
   input: string,
   diff: string,
   rel: string,
 ): ApplyUpdateResult {
   try {
-    const strict = applyCodexUpdateBody(input, diff);
+    const strict = applyPatchUpdateBody(input, diff);
     return {
       output: strict.output,
       fuzz: strict.fuzz,
@@ -43,7 +43,7 @@ export function applyCodexUpdateWithRecovery(
     const normalized = tryNormalizeUpdateDiffEnvelope(diff, rel);
     if (!normalized) throw err;
 
-    const recovered = applyCodexUpdateBody(input, normalized.diff);
+    const recovered = applyPatchUpdateBody(input, normalized.diff);
     return {
       output: recovered.output,
       fuzz: recovered.fuzz,
@@ -54,9 +54,9 @@ export function applyCodexUpdateWithRecovery(
   }
 }
 
-// Apply a Codex Update File body to existing file content.
+// Apply an Update File body to existing file content.
 // Returns updated content plus a fuzz score when context matching was inexact.
-export function applyCodexUpdateBody(
+export function applyPatchUpdateBody(
   input: string,
   diff: string,
 ): {
@@ -65,7 +65,7 @@ export function applyCodexUpdateBody(
   fuzzKinds: FuzzyMatchKind[];
   replacements: LineReplacement[];
 } {
-  // IMPORTANT: do NOT trim() here. Codex context lines start with a leading space.
+  // IMPORTANT: do NOT trim() here. Context lines start with a leading space.
   const normalizedDiff = normalizeLineEndings(diff);
   const patchLines = normalizedDiff.split("\n");
   // Drop a single trailing newline to avoid creating an extra empty diff line.
@@ -270,8 +270,8 @@ export function applyCodexUpdateBody(
   };
 }
 
-// Apply a Codex Add File body (every line starts with '+') and return file content.
-export function applyCodexCreateBody(diff: string): string {
+// Apply an Add File body (every line starts with '+') and return file content.
+export function applyPatchCreateBody(diff: string): string {
   if (diff.length === 0) return "";
 
   const lines = normalizeLineEndings(diff).split("\n");
@@ -289,7 +289,7 @@ export function applyCodexCreateBody(diff: string): string {
     out[i] = line.slice(1);
   }
 
-  // Codex Add File lines are logical text lines; each line in the envelope is
+  // Add File body lines are logical text lines; each line in the envelope is
   // newline-terminated. Keep that useful POSIX default for new files.
   return `${out.join("\n")}\n`;
 }

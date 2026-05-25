@@ -29,7 +29,7 @@ type ShikiTokenScope = {
 
 const TEXTMATE_THEME = "dark-plus";
 const DEFAULT_TEXTMATE_TOKENIZE_TIME_LIMIT_MS = 250;
-const GLOBAL_TEXTMATE_SERVICE_STATE_KEY = "__codexApplyPatchTextMateServiceState";
+const GLOBAL_TEXTMATE_SERVICE_STATE_KEY = "__piRichToolsTextMateServiceState";
 const EXTRA_LANGUAGE_ALIASES: Record<string, string> = {
   cc: "cpp",
   cxx: "cpp",

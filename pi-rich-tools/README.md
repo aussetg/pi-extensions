@@ -1,8 +1,9 @@
 # pi-rich-tools
 
-One Pi extension for the rich file-tool experience:
+One Pi extension for rich model-facing tools and richer built-in tool rendering:
 
-- `apply_patch`: Codex-compatible file edits with Pierre diff previews.
+- model-aware tool profiles: OpenAI-family models get `bash` / `apply_patch` / `view_image`, while other families keep Pi's native tools.
+- `apply_patch`: structured or envelope file edits with Pierre diff previews.
 - `read`: Pierre line-numbered code view with tree-sitter/TextMate highlighting.
 - `write`: Pierre create/update diff preview.
 - `edit`: Pierre diff preview from the built-in numbered diff.

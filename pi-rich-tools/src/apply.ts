@@ -2,7 +2,7 @@ import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ApplyPatchOperation, ApplyPatchOpType } from "./types.ts";
-import { applyCodexCreateBody, applyCodexUpdateWithRecovery } from "./apply-body.ts";
+import { applyPatchCreateBody, applyPatchUpdateWithRecovery } from "./apply-body.ts";
 import type { FuzzyMatchKind } from "./context-match.ts";
 import { generateDiffFromReplacements } from "./diff-generate.ts";
 import {
@@ -515,7 +515,7 @@ export async function applyOperations(
         const state = await getVirtualState(abs, false);
         if (state.exists) throw new DiffError(`File already exists at path '${rel}'`);
 
-        const content = applyCodexCreateBody(diff);
+        const content = applyPatchCreateBody(diff);
         planned.push({
           task,
           result: {
@@ -553,7 +553,7 @@ export async function applyOperations(
         const { bom, text: current } = stripBom(rawCurrent);
         const originalEnding = detectLineEnding(current);
         const { output, fuzz, fuzzKinds, replacements, normalizedMarkers } =
-          applyCodexUpdateWithRecovery(current, diff, rel);
+          applyPatchUpdateWithRecovery(current, diff, rel);
         if (!task.moveAbs && normalizeLineEndings(current) === output) {
           throw new DiffError(`No changes made to ${rel}.`);
         }

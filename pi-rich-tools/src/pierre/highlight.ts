@@ -305,7 +305,7 @@ const TREE_SITTER_WORKER_IDLE_MS = 10_000;
 const DEFAULT_TREE_SITTER_WORKER_TIMEOUT_MS = 5_000;
 const TEXTMATE_SUPPLEMENT_MIN_LINE_CHARS = 12;
 const TEXTMATE_SUPPLEMENT_LOW_COVERAGE_RATIO = 0.24;
-const GLOBAL_TREE_SITTER_WORKER_STATE_KEY = "__codexApplyPatchTreeSitterWorkerState";
+const GLOBAL_TREE_SITTER_WORKER_STATE_KEY = "__piRichToolsTreeSitterWorkerState";
 const syntaxStyleByCaptureName = Object.create(null) as Record<
   string,
   CaptureStyle | null | undefined
