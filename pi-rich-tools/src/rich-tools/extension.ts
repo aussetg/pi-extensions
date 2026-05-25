@@ -12,7 +12,6 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   beginBashCoalescingAssistantMessage,
-  cleanShellPtyArtifacts,
   clearBashCoalescingState,
   endBashCoalescingRun,
   hasAnsiEscapes,
@@ -36,6 +35,7 @@ import {
   renderWriteCall,
   renderWriteResult,
 } from "./render.ts";
+import { bashModelContextText, cleanShellPtyArtifacts, safeBashModelText } from "./bash-model-output.ts";
 import { isRecord, type ShellContextLike, type ThemeLike, type ToolResultLike } from "./util.ts";
 
 type RenderOptions = { expanded: boolean; isPartial: boolean };
@@ -136,7 +136,12 @@ function registerBashAnsiSanitizer(pi: ExtensionAPI): void {
     if (rawText === undefined) {
       rememberBashAnsiOutput(event.toolCallId, undefined);
       await cleanShellFullOutputFile(event.details);
-      return;
+      const modelText = bashModelContextText("", event.details);
+      if (modelText.length === 0) return;
+      return {
+        content: replaceFirstTextContent(event.content, modelText),
+        details: event.details,
+      };
     }
 
     if (hasAnsiEscapes(rawText)) rememberBashAnsiOutput(event.toolCallId, rawText);
@@ -144,7 +149,7 @@ function registerBashAnsiSanitizer(pi: ExtensionAPI): void {
 
     await cleanShellFullOutputFile(event.details);
 
-    const cleanedText = contextShellText(rawText);
+    const cleanedText = bashModelContextText(contextShellText(rawText), event.details);
     if (cleanedText === rawText) return;
 
     return {
@@ -299,15 +304,16 @@ function firstTextContent(content: unknown): string | undefined {
 }
 
 function replaceFirstTextContent(content: unknown, text: string): unknown {
-  if (!Array.isArray(content)) return content;
+  if (!Array.isArray(content)) return [{ type: "text", text }];
   let replaced = false;
-  return content.map((item) => {
+  const next = content.map((item) => {
     if (!replaced && isRecord(item) && item.type === "text" && typeof item.text === "string") {
       replaced = true;
       return { ...item, text };
     }
     return item;
   });
+  return replaced ? next : [{ type: "text", text }, ...next];
 }
 
 async function cleanShellFullOutputFile(details: unknown): Promise<void> {
@@ -356,7 +362,9 @@ async function cleanShellFullOutputFile(details: unknown): Promise<void> {
 }
 
 function contextShellText(rawText: string): string {
-  return stripAnsiEscapes(cleanShellPtyArtifacts(rawText)).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  return safeBashModelText(
+    stripAnsiEscapes(cleanShellPtyArtifacts(rawText)).replace(/\r\n/g, "\n").replace(/\r/g, "\n"),
+  );
 }
 
 function isWriteParams(value: unknown): value is { path: string; content: string } {

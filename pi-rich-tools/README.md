@@ -11,6 +11,8 @@ One Pi extension for rich model-facing tools and richer built-in tool rendering:
 - `bash`: classifies read/list/search shell commands and renders them as `Exploring` / `Explored` instead of generic runs.
 - `bash`: visually coalesces adjacent exploratory bash calls into one UI block, including resumed session history, without changing stored tool history or model context.
 - `bash`: captures TTY colors for the live UI through a PTY, then strips ANSI/PTY artifacts from tool results and full-output logs before they can reach model context.
+- `bash`: squashes binary-looking output lines and visualizes terminal control characters instead of letting them leak into the TUI/model context.
+- `bash`: appends the structured `exitCode` to model-visible output, while keeping the TUI view compact.
 - `bash`: runs tool commands through `/bin/bash -c`, regardless of the user's login shell.
 
 - Collapsed views follow Pi's built-in 10-line preview behavior; `read` counts rendered terminal lines, and expanding the tool row shows the full rendered content.

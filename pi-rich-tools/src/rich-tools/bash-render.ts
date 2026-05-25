@@ -4,6 +4,13 @@ import { Text, truncateToWidth, wrapTextWithAnsi, type Component } from "@earend
 import { querySharedSyntaxCaptures, type TreeSitterCapture } from "../pierre/syntax-service.ts";
 import { parseShellCommand, type ParsedShellCommand } from "../shell-intent.ts";
 import {
+  binaryBashLineNotice,
+  cleanShellPtyArtifacts,
+  isBinaryLikeBashLine,
+  stripBashModelExitStatusForDisplay,
+  visualizeShellControlChars,
+} from "./bash-model-output.ts";
+import {
   isRecord,
   isToolError,
   normalizeLineEndings,
@@ -96,11 +103,6 @@ export function hasAnsiEscapes(text: string): boolean {
 
 export function stripAnsiEscapes(text: string): string {
   return text.replace(ansiEscapePattern(), "");
-}
-
-export function cleanShellPtyArtifacts(text: string): string {
-  const withoutNuls = text.replace(/\x00/g, "");
-  return withoutNuls.startsWith("^@") ? withoutNuls.slice(2) : withoutNuls;
 }
 
 export function clearBashCoalescingState(): void {
@@ -274,7 +276,9 @@ class BashResultComponent implements Component {
   render(width: number): string[] {
     if (!this.theme) return [];
 
-    const output = normalizeLineEndings(rememberedBashAnsiOutput(this.context) ?? textContent(this.result) ?? "").trim();
+    const output = stripBashModelExitStatusForDisplay(
+      normalizeLineEndings(rememberedBashAnsiOutput(this.context) ?? textContent(this.result) ?? ""),
+    ).trim();
     const warning = bashTruncationNotice(this.result.details, this.theme);
     if (!output && !warning) return [];
 
@@ -476,12 +480,40 @@ function styleShellOutputLine(
   bgColor: string,
   theme: ThemeLike,
 ): string {
-  if (!hasAnsiSgr(line)) return theme.fg(color, line);
-  return theme.fg(color, rewriteAnsiResetsForToolShell(line, color, bgColor, theme));
+  const sgrOnlyLine = stripNonSgrAnsi(line);
+  const plainLine = stripAnsiEscapes(sgrOnlyLine);
+  if (isBinaryLikeBashLine(plainLine)) {
+    return theme.fg("warning", binaryBashLineNotice(plainLine));
+  }
+
+  const safeLine = visualizeShellControlCharsPreservingSgr(sgrOnlyLine);
+  if (!hasAnsiSgr(safeLine)) return theme.fg(color, safeLine);
+  return theme.fg(color, rewriteAnsiResetsForToolShell(safeLine, color, bgColor, theme));
 }
 
 function hasAnsiSgr(text: string): boolean {
   return /\x1b\[[0-9;]*m/.test(text);
+}
+
+function stripNonSgrAnsi(text: string): string {
+  return text.replace(ansiEscapePattern(), (sequence) => isSgrAnsi(sequence) ? sequence : "");
+}
+
+function isSgrAnsi(sequence: string): boolean {
+  return /^\x1b\[[0-9;]*m$/.test(sequence);
+}
+
+function visualizeShellControlCharsPreservingSgr(text: string): string {
+  let out = "";
+  let offset = 0;
+  for (const match of text.matchAll(/\x1b\[[0-9;]*m/g)) {
+    const index = match.index ?? offset;
+    out += visualizeShellControlChars(text.slice(offset, index));
+    out += match[0];
+    offset = index + match[0].length;
+  }
+  out += visualizeShellControlChars(text.slice(offset));
+  return out;
 }
 
 function ansiEscapePattern(): RegExp {
