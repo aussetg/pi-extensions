@@ -485,7 +485,7 @@ function hasAnsiSgr(text: string): boolean {
 }
 
 function ansiEscapePattern(): RegExp {
-  return /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b[@-_]/g;
+  return /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b[=>]|\x1b[@-_]/g;
 }
 
 function rememberedBashAnsiOutput(context?: ShellContextLike): string | undefined {
