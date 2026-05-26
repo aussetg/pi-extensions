@@ -9,7 +9,14 @@ import { restartLsp, setProjectRoot, type CodeFeedbackRuntime } from "../runtime
 import { LSP_ACTIONS, LSP_METHODS, LSP_RESULT_SERVER_ID_KEY, type LspAction, type LspMethod } from "../types.ts";
 import type { PiApi, PiToolResult } from "../pi.ts";
 import { renderCodeActionApplySelectionError, renderLspActionResult, renderWorkspaceEditApplyResult } from "./render.ts";
-import { limitLspToolText, type LspToolTruncation } from "./tool-output.ts";
+import {
+  formatLspToolJson,
+  limitLspToolDetails,
+  limitLspToolText,
+  type LspToolDetailsTruncation,
+  type LspToolJsonTruncation,
+  type LspToolTruncation,
+} from "./tool-output.ts";
 import { renderLspToolCall, renderLspToolResult } from "./tool-renderer.ts";
 import { applyWorkspaceEdit, canResolveCodeActionOnApply, selectCodeActionForApply, workspaceEditSummary, workspaceEditTargetFiles, type WorkspaceEditTargetFilesResult } from "./workspace-edit.ts";
 
@@ -56,6 +63,11 @@ interface CodeActionSummary {
 type PreparedCodeActionForApply =
   | { ok: true; action: Record<string, unknown>; title: string }
   | { ok: false; error: string; details: Record<string, unknown>; hint?: string };
+
+interface RenderedLspText {
+  text: string;
+  truncation?: LspToolJsonTruncation;
+}
 
 export function registerLspTool(pi: PiApi, runtime: CodeFeedbackRuntime, lspService: LspService, formatService?: FormatService): void {
   const toolState: LspToolState = {
@@ -306,23 +318,46 @@ function errorResult(method: LspMethod | undefined, error: string, details?: unk
   return {
     content: [{ type: "text", text }],
     isError: true,
-    details: details === undefined ? payload : { ...payload, details },
+    details: limitedDetails(details === undefined ? payload : { ...payload, details }),
   };
 }
 
 function structuredResult(payload: Record<string, unknown>, details?: unknown, isError = false): PiToolResult {
-  const limited = limitLspToolText(JSON.stringify(payload, null, 2));
+  const rendered = formatLspToolJson(payload);
+  const limited = limitLspToolText(rendered.text);
+  const resultDetails = withVisibleJsonTruncation(details === undefined ? payload : details, rendered.truncation);
   return {
     content: [{ type: "text", text: limited.text }],
     isError: isError || undefined,
-    details: withTruncationDetails(details === undefined ? payload : details, limited.truncation),
+    details: withTruncationDetails(resultDetails, limited.truncation),
   };
 }
 
-function withTruncationDetails(details: unknown, truncation: LspToolTruncation | undefined): unknown {
+function withVisibleJsonTruncation(details: unknown, truncation: LspToolJsonTruncation | undefined): unknown {
   if (!truncation) return details;
-  if (isRecord(details)) return { ...details, truncation };
-  return { value: details, truncation };
+  if (isRecord(details)) return { visibleJsonTruncation: truncation, ...details };
+  return { visibleJsonTruncation: truncation, value: details };
+}
+
+function withTruncationDetails(details: unknown, truncation: LspToolTruncation | undefined): unknown {
+  const withOutputTruncation = truncation
+    ? isRecord(details)
+      ? { truncation, ...details }
+      : { truncation, value: details }
+    : details;
+  return limitedDetails(withOutputTruncation);
+}
+
+function limitedDetails(details: unknown): unknown {
+  if (details === undefined) return undefined;
+  const limited = limitLspToolDetails(details);
+  if (!limited.truncation) return limited.details;
+  return attachDetailsTruncation(limited.details, limited.truncation);
+}
+
+function attachDetailsTruncation(details: unknown, truncation: LspToolDetailsTruncation): unknown {
+  if (isRecord(details)) return { ...details, detailsTruncation: truncation };
+  return { value: details, detailsTruncation: truncation };
 }
 
 async function diagnosticsSnapshot(method: LspMethod, params: Record<string, unknown>, runtime: CodeFeedbackRuntime, lspService: LspService) {
@@ -396,11 +431,17 @@ function readNonNegativeNumber(value: unknown): number | undefined {
 function rawOrPretty(method: LspMethod, params: Record<string, unknown>, result: unknown, projectRoot: string): PiToolResult {
   const action = methodToRenderAction(method);
   const raw = params.raw === true;
-  const text = raw ? (JSON.stringify(result, null, 2) ?? "undefined") : renderLspResult(action, result, projectRoot);
-  const limited = limitLspToolText(text);
+  const rendered = raw ? formatLspToolJson(result) : renderLspResult(action, result, projectRoot);
+  const limited = limitLspToolText(rendered.text);
   return {
     content: [{ type: "text", text: limited.text }],
-    details: withTruncationDetails({ ok: true, method, raw, result }, limited.truncation),
+    details: withTruncationDetails({
+      ok: true,
+      method,
+      raw,
+      ...(rendered.truncation ? { visibleJsonTruncation: rendered.truncation } : {}),
+      result,
+    }, limited.truncation),
   };
 }
 
@@ -431,11 +472,10 @@ function methodToRenderAction(method: LspMethod): LspAction | undefined {
   }
 }
 
-function renderLspResult(action: LspAction | undefined, result: unknown, projectRoot: string): string {
-  if (action) return renderLspActionResult(action, result, projectRoot || process.cwd());
-  if (result === null || result === undefined) return "No LSP result.";
-  const text = JSON.stringify(result, null, 2) ?? String(result);
-  return text.length <= 12_000 ? text : `${text.slice(0, 12_000)}\n... truncated`;
+function renderLspResult(action: LspAction | undefined, result: unknown, projectRoot: string): RenderedLspText {
+  if (action) return { text: renderLspActionResult(action, result, projectRoot || process.cwd()) };
+  if (result === null || result === undefined) return { text: "No LSP result." };
+  return formatLspToolJson(result);
 }
 
 async function handleCodeActions(method: LspMethod, params: Record<string, unknown>, runtime: CodeFeedbackRuntime, lspService: LspService, state: LspToolState): Promise<PiToolResult> {
@@ -473,8 +513,8 @@ async function handleCodeActions(method: LspMethod, params: Record<string, unkno
     }, {
       ok: true,
       method,
-      result,
       actions: summaries,
+      result,
     });
   }
 

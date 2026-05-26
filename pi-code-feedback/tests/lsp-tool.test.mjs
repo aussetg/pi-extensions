@@ -8,7 +8,7 @@ import { createDefaultConfig } from "../src/config.ts";
 import { createLspService } from "../src/lsp/service.ts";
 import { renderLspToolResult } from "../src/lsp/tool-renderer.ts";
 import { registerLspTool } from "../src/lsp/tool.ts";
-import { limitLspToolText } from "../src/lsp/tool-output.ts";
+import { LSP_TOOL_DETAILS_MAX_BYTES, formatLspToolJson, limitLspToolDetails, limitLspToolText } from "../src/lsp/tool-output.ts";
 import { createRuntime, setProjectRoot } from "../src/runtime.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -223,6 +223,134 @@ test("lsp tool text is truncated and saved to a temp file", async () => {
   assert.equal(await readFile(result.truncation.fullOutputPath, "utf8"), huge);
 
   await rm(path.dirname(result.truncation.fullOutputPath), { recursive: true, force: true });
+});
+
+test("lsp tool details are summarized under a bounded budget", () => {
+  const result = limitLspToolDetails({
+    ok: true,
+    method: "raw/request",
+    blob: "x".repeat(100_000),
+    result: {
+      items: Array.from({ length: 1000 }, (_, index) => ({
+        index,
+        label: `item ${index}`,
+        text: "y".repeat(1000),
+      })),
+    },
+  });
+
+  assert.equal(result.truncation?.truncated, true);
+  assert.equal(result.details.ok, true);
+  assert.equal(result.details.method, "raw/request");
+  assert.match(result.details.blob, /truncated string/);
+  assert.ok(result.details.result.items.length < 1000);
+  assert.equal(result.details.result.items.at(-1).__truncated, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(result.details), "utf8") <= LSP_TOOL_DETAILS_MAX_BYTES + 4096);
+});
+
+test("lsp tool details budget covers generated depth markers", () => {
+  function nestedArrays(depth, breadth) {
+    if (depth === 0) return [];
+    return Array.from({ length: breadth }, () => nestedArrays(depth - 1, breadth));
+  }
+
+  const result = limitLspToolDetails(nestedArrays(8, 3));
+
+  assert.equal(result.truncation?.truncated, true);
+  assert.ok(result.truncation.omitted.depth > 0);
+  assert.ok(Buffer.byteLength(JSON.stringify(result.details), "utf8") <= LSP_TOOL_DETAILS_MAX_BYTES + 4096);
+});
+
+test("lsp tool details reads only capped object properties and catches getters", () => {
+  const details = { ok: true };
+  let throwingReads = 0;
+  let skippedReads = 0;
+
+  Object.defineProperty(details, "bad", {
+    enumerable: true,
+    get() {
+      throwingReads += 1;
+      throw new Error("boom");
+    },
+  });
+
+  for (let index = 0; index < 78; index += 1) details[`safe${index}`] = index;
+  for (let index = 0; index < 50; index += 1) {
+    Object.defineProperty(details, `skipped${index}`, {
+      enumerable: true,
+      get() {
+        skippedReads += 1;
+        throw new Error("should not be read");
+      },
+    });
+  }
+
+  const result = limitLspToolDetails(details);
+
+  assert.equal(throwingReads, 1);
+  assert.equal(skippedReads, 0);
+  assert.equal(result.details.bad, "[property read failed]");
+  assert.ok(result.details.__truncated.omittedPropertiesAtLeast >= 1);
+  assert.equal(result.truncation?.omitted.unsupported, 1);
+});
+
+test("lsp tool JSON rendering summarizes before stringifying", () => {
+  let toJsonCalls = 0;
+  const details = { ok: true, blob: "x".repeat(100_000) };
+  Object.defineProperty(details, "toJSON", {
+    enumerable: false,
+    value() {
+      toJsonCalls += 1;
+      throw new Error("full stringify should not run");
+    },
+  });
+
+  const result = formatLspToolJson(details);
+
+  assert.equal(toJsonCalls, 0);
+  assert.equal(result.truncation?.truncated, true);
+  assert.match(result.text, /truncated string/);
+  assert.match(result.text, /\.\.\. truncated/);
+});
+
+test("lsp tool details budget accounts for JSON string escaping", () => {
+  const result = limitLspToolDetails({ blob: "\u0000".repeat(100_000) });
+
+  assert.equal(result.truncation?.truncated, true);
+  assert.match(result.details.blob, /truncated string/);
+  assert.ok(Buffer.byteLength(JSON.stringify(result.details), "utf8") <= LSP_TOOL_DETAILS_MAX_BYTES + 4096);
+});
+
+test("lsp tool details serializes invalid dates safely", () => {
+  const result = limitLspToolDetails({ when: new Date(NaN) });
+
+  assert.equal(result.details.when, "[invalid date]");
+  assert.equal(result.truncation, undefined);
+});
+
+test("lsp execution truncates structured details as well as visible text", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-details-limit-"));
+  await writeFile(path.join(root, "probe.py"), "value = 1\n", "utf8");
+  const { tool, service } = createRegisteredTool(root);
+
+  try {
+    const result = await tool.execute("lsp-huge", {
+      method: "raw/request",
+      path: "probe.py",
+      request: "fake/huge",
+    }, undefined, undefined, { cwd: root });
+
+    assert.equal(result.details.ok, true);
+    assert.equal(result.details.method, "raw/request");
+    assert.equal(result.details.detailsTruncation.truncated, true);
+    assert.match(result.content[0].text, /\.\.\. truncated/);
+    assert.match(result.details.result.blob, /truncated string/);
+    assert.ok(result.details.result.items.length < 1000);
+    assert.ok(Buffer.byteLength(JSON.stringify(result.details), "utf8") <= LSP_TOOL_DETAILS_MAX_BYTES + 8192);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("lsp errors are concise text while keeping structured details", async () => {

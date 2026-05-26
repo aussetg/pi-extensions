@@ -142,6 +142,11 @@ function handleMessage(message) {
     return;
   }
 
+  if (message.id !== undefined && message.method === "fake/huge") {
+    send({ jsonrpc: "2.0", id: message.id, result: hugeResult() });
+    return;
+  }
+
   if (message.id !== undefined) {
     send({ jsonrpc: "2.0", id: message.id, result: null });
     return;
@@ -285,6 +290,17 @@ function renameEdit(uri, newName) {
         },
       ],
     },
+  };
+}
+
+function hugeResult() {
+  return {
+    blob: "z".repeat(100_000),
+    items: Array.from({ length: 1000 }, (_, index) => ({
+      index,
+      label: `fake huge ${index}`,
+      text: "w".repeat(1000),
+    })),
   };
 }
 
