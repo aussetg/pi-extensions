@@ -57,6 +57,16 @@ test("classifies searches while dropping tiny pipeline formatters", () => {
   ]);
 });
 
+test("search summaries use shell argv semantics for double quoted backslashes", () => {
+  const doubleQuoted = parseShellCommand(String.raw`rg -n "join\(\"\\n\"\)" src`);
+  assert.equal(doubleQuoted[0]?.type, "search");
+  assert.equal(doubleQuoted[0].query, String.raw`join\("\n"\)`);
+
+  const singleQuoted = parseShellCommand(String.raw`rg -n 'join\("\\n"\)' src`);
+  assert.equal(singleQuoted[0]?.type, "search");
+  assert.equal(singleQuoted[0].query, String.raw`join\("\\n"\)`);
+});
+
 test("keeps unknown shell commands conservative", () => {
   assert.deepEqual(parseShellCommand("git status --short"), [
     { type: "unknown", cmd: "git status --short" },

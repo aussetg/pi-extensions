@@ -191,7 +191,40 @@ function parseDoubleQuotedString(node: TreeSitterNode): string | undefined {
   if (node.type !== "string") return undefined;
   if ((node.namedChildren ?? []).some((child) => child.type !== "string_content")) return undefined;
   if (!node.text.startsWith('"') || !node.text.endsWith('"')) return undefined;
-  return node.text.slice(1, -1);
+  return parseDoubleQuotedStringBody(node.text.slice(1, -1));
+}
+
+function parseDoubleQuotedStringBody(body: string): string {
+  let out = "";
+  for (let i = 0; i < body.length; i += 1) {
+    const char = body[i]!;
+    if (char !== "\\") {
+      out += char;
+      continue;
+    }
+
+    const next = body[i + 1];
+    if (next === undefined) {
+      out += char;
+      continue;
+    }
+    if (next === "\n") {
+      i += 1;
+      continue;
+    }
+    if (next === "\r" && body[i + 2] === "\n") {
+      i += 2;
+      continue;
+    }
+    if (next === "$" || next === "`" || next === '"' || next === "\\") {
+      out += next;
+      i += 1;
+      continue;
+    }
+
+    out += char;
+  }
+  return out;
 }
 
 function parseRawString(node: TreeSitterNode): string | undefined {
