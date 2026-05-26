@@ -1,6 +1,25 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { execSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { accessSync, constants, readFileSync, statSync } from "node:fs";
+
+let cachedSystemInfo: string | undefined;
+
+function getSystemInfo(): string {
+  cachedSystemInfo ??= buildSystemInfo();
+  return cachedSystemInfo;
+}
+
+function buildSystemInfo(): string {
+  const distro = getDistroInfo();
+  const init = getInitSystem();
+  const { manager, helper } = detectPackageManager();
+
+  return `
+
+## System
+${distro}
+Init: ${init}
+Package manager: ${manager}${helper ? ` (${helper} available)` : ""}`;
+}
 
 function getDistroInfo(): string {
   try {
@@ -14,65 +33,53 @@ function getDistroInfo(): string {
 }
 
 function detectPackageManager(): { manager: string; helper?: string } {
+  if (commandExists("paru")) return { manager: "pacman", helper: "paru" };
+  if (commandExists("yay")) return { manager: "pacman", helper: "yay" };
+  if (commandExists("pacman")) return { manager: "pacman" };
+  if (commandExists("dnf")) return { manager: "dnf" };
+  if (commandExists("yum")) return { manager: "yum" };
+  if (commandExists("apt")) return { manager: "apt" };
+  if (commandExists("zypper")) return { manager: "zypper" };
+  if (commandExists("apk")) return { manager: "apk" };
+  if (commandExists("nix")) return { manager: "nix" };
+  return { manager: "unknown" };
+}
+
+function getInitSystem(): string {
   try {
-    // Arch-based: check for AUR helper
-    if (execSync("which paru 2>/dev/null", { encoding: "utf-8" }).trim()) {
-      return { manager: "pacman", helper: "paru" };
-    }
-    if (execSync("which yay 2>/dev/null", { encoding: "utf-8" }).trim()) {
-      return { manager: "pacman", helper: "yay" };
-    }
-    if (execSync("which pacman 2>/dev/null", { encoding: "utf-8" }).trim()) {
-      return { manager: "pacman" };
-    }
-
-    // Fedora/RHEL
-    if (execSync("which dnf 2>/dev/null", { encoding: "utf-8" }).trim()) {
-      return { manager: "dnf" };
-    }
-    if (execSync("which yum 2>/dev/null", { encoding: "utf-8" }).trim()) {
-      return { manager: "yum" };
-    }
-
-    // Debian/Ubuntu
-    if (execSync("which apt 2>/dev/null", { encoding: "utf-8" }).trim()) {
-      return { manager: "apt" };
-    }
-
-    // openSUSE
-    if (execSync("which zypper 2>/dev/null", { encoding: "utf-8" }).trim()) {
-      return { manager: "zypper" };
-    }
-
-    // Alpine
-    if (execSync("which apk 2>/dev/null", { encoding: "utf-8" }).trim()) {
-      return { manager: "apk" };
-    }
-
-    // Nix
-    if (execSync("which nix 2>/dev/null", { encoding: "utf-8" }).trim()) {
-      return { manager: "nix" };
-    }
-
-    return { manager: "unknown" };
+    return readFileSync("/proc/1/comm", "utf-8").trim() || "unknown";
   } catch {
-    return { manager: "unknown" };
+    return "unknown";
+  }
+}
+
+function commandExists(command: string): boolean {
+  const pathEnv = (globalThis as { process?: { env?: { PATH?: string } } }).process?.env?.PATH ?? "";
+  for (const dir of pathEnv.split(":")) {
+    if (!dir) continue;
+    if (isExecutableFile(joinPath(dir, command))) return true;
+  }
+  return false;
+}
+
+function joinPath(dir: string, name: string): string {
+  return dir.endsWith("/") ? dir + name : `${dir}/${name}`;
+}
+
+function isExecutableFile(filePath: string): boolean {
+  try {
+    if (!statSync(filePath).isFile()) return false;
+    accessSync(filePath, constants.X_OK);
+    return true;
+  } catch {
+    return false;
   }
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on("before_agent_start", async (event, ctx) => {
-    const distro = getDistroInfo();
-    const init = execSync("ps -o comm= 1 2>/dev/null", { encoding: "utf-8" }).trim();
-    const { manager, helper } = detectPackageManager();
+  const systemInfo = getSystemInfo();
 
-    const systemInfo = `
-
-## System
-${distro}
-Init: ${init}
-Package manager: ${manager}${helper ? ` (${helper} available)` : ""}`;
-
+  pi.on("before_agent_start", async (event: { systemPrompt: string }) => {
     return { systemPrompt: event.systemPrompt + systemInfo };
   });
 }
