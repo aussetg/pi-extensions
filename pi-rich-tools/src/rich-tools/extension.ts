@@ -35,7 +35,12 @@ import {
   renderWriteCall,
   renderWriteResult,
 } from "./render.ts";
-import { bashModelContextText, cleanShellPtyArtifacts, safeBashModelText } from "./bash-model-output.ts";
+import {
+  bashModelContextText,
+  cleanShellPtyArtifacts,
+  safeBashModelText,
+  withInferredSuccessfulBashExitCode,
+} from "./bash-model-output.ts";
 import { isRecord, type ShellContextLike, type ThemeLike, type ToolResultLike } from "./util.ts";
 
 type RenderOptions = { expanded: boolean; isPartial: boolean };
@@ -132,29 +137,30 @@ function registerBashAnsiSanitizer(pi: ExtensionAPI): void {
   pi.on?.("tool_result", async (event: unknown) => {
     if (!isToolResultEvent(event, "bash")) return;
 
+    const details = withInferredSuccessfulBashExitCode(event.details, event.isError);
     const rawText = firstTextContent(event.content);
     if (rawText === undefined) {
       rememberBashAnsiOutput(event.toolCallId, undefined);
-      await cleanShellFullOutputFile(event.details);
-      const modelText = bashModelContextText("", event.details);
+      await cleanShellFullOutputFile(details);
+      const modelText = bashModelContextText("", details);
       if (modelText.length === 0) return;
       return {
         content: replaceFirstTextContent(event.content, modelText),
-        details: event.details,
+        details,
       };
     }
 
     if (hasAnsiEscapes(rawText)) rememberBashAnsiOutput(event.toolCallId, rawText);
     else rememberBashAnsiOutput(event.toolCallId, undefined);
 
-    await cleanShellFullOutputFile(event.details);
+    await cleanShellFullOutputFile(details);
 
-    const cleanedText = bashModelContextText(contextShellText(rawText), event.details);
-    if (cleanedText === rawText) return;
+    const cleanedText = bashModelContextText(contextShellText(rawText), details);
+    if (cleanedText === rawText && details === event.details) return;
 
     return {
       content: replaceFirstTextContent(event.content, cleanedText),
-      details: event.details,
+      details,
     };
   });
 }
@@ -386,7 +392,7 @@ function isToolCallEvent(
 function isToolResultEvent(
   value: unknown,
   toolName: string,
-): value is { toolName: string; toolCallId: string; content: unknown; details?: unknown } {
+): value is { toolName: string; toolCallId: string; content: unknown; details?: unknown; isError?: boolean } {
   return (
     isRecord(value) &&
     value.toolName === toolName &&

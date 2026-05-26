@@ -5,6 +5,7 @@ import {
   cleanShellPtyArtifacts,
   safeBashModelText,
   stripBashModelExitStatusForDisplay,
+  withInferredSuccessfulBashExitCode,
 } from "../src/rich-tools/bash-model-output.ts";
 
 test("bash model context output includes successful exit codes", () => {
@@ -74,4 +75,20 @@ test("bash model context output makes control and binary output safe", () => {
 test("bash PTY cleanup preserves NULs for binary detection", () => {
   assert.equal(cleanShellPtyArtifacts("^@hello"), "hello");
   assert.equal(cleanShellPtyArtifacts(`${"\x00".repeat(4)} payload`), `${"\x00".repeat(4)} payload`);
+});
+
+test("bash PTY cleanup removes cleared spinner frames", () => {
+  assert.equal(cleanShellPtyArtifacts("done\n⠙\x1b[1G\x1b[0K"), "done\n");
+  assert.equal(cleanShellPtyArtifacts("literal ⠙"), "literal ⠙");
+});
+
+test("bash success details infer exit code zero", () => {
+  assert.deepEqual(withInferredSuccessfulBashExitCode(undefined, false), { exitCode: 0 });
+  assert.equal(withInferredSuccessfulBashExitCode(undefined, undefined), undefined);
+  assert.equal(withInferredSuccessfulBashExitCode(undefined, true), undefined);
+  assert.deepEqual(
+    withInferredSuccessfulBashExitCode({ fullOutputPath: "/tmp/pi-bash.log" }, false),
+    { fullOutputPath: "/tmp/pi-bash.log", exitCode: 0 },
+  );
+  assert.deepEqual(withInferredSuccessfulBashExitCode({ exitCode: 7 }, false), { exitCode: 7 });
 });

@@ -1,10 +1,26 @@
 const TRAILING_BASH_EXIT_STATUS_RE = /(?:^|\n\n)Command exited with code (-?\d+)[ \t]*(?:\n[ \t]*)*$/;
+const ANSI_CSI_SOURCE = String.raw`\x1b\[[0-?]*[ -/]*[@-~]`;
+const SHELL_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+const CLEARED_SPINNER_RE = new RegExp(
+  `(?:\r|${ANSI_CSI_SOURCE})*[${SHELL_SPINNER_FRAMES}](?:${ANSI_CSI_SOURCE}|\r)*\x1b\[[0-?]*[ -/]*[JK](?:${ANSI_CSI_SOURCE}|\r)*`,
+  "g",
+);
 const SHELL_CONTROL_CHAR_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
 const BINARY_SIGNAL_MIN = 4;
 const BINARY_SIGNAL_RATIO = 0.08;
 
 export function cleanShellPtyArtifacts(text: string): string {
-  return text.startsWith("^@") ? text.slice(2) : text;
+  const withoutLeadingNulGlyph = text.startsWith("^@") ? text.slice(2) : text;
+  return withoutLeadingNulGlyph.replace(CLEARED_SPINNER_RE, "");
+}
+
+export function withInferredSuccessfulBashExitCode(
+  details: unknown,
+  isError: boolean | undefined,
+): unknown {
+  if (bashExitCode(details) !== undefined || isError !== false) return details;
+  if (!isRecord(details)) return { exitCode: 0 };
+  return { ...details, exitCode: 0 };
 }
 
 export function bashModelContextText(text: string, details: unknown): string {
@@ -53,9 +69,13 @@ export function stripBashModelExitStatusForDisplay(text: string): string {
 }
 
 function bashExitCode(details: unknown): number | undefined {
-  if (!details || typeof details !== "object") return undefined;
+  if (!isRecord(details)) return undefined;
   const exitCode = (details as { exitCode?: unknown }).exitCode;
   return Number.isInteger(exitCode) ? exitCode as number : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function hasBashExitStatus(text: string, exitCode: number): boolean {
