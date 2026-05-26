@@ -1,9 +1,9 @@
-import { createHash } from "node:crypto";
 import { getFiletypeFromFileName } from "../../node_modules/@pierre/diffs/dist/utils/getFiletypeFromFileName.js";
 import { parseDiffFromFile } from "../../node_modules/@pierre/diffs/dist/utils/parseDiffFromFile.js";
 import { parsePatchFiles } from "../../node_modules/@pierre/diffs/dist/utils/parsePatchFiles.js";
 import { setLanguageOverride } from "../../node_modules/@pierre/diffs/dist/utils/setLanguageOverride.js";
 import type { FileDiffMetadata } from "../../node_modules/@pierre/diffs/dist/types.js";
+import { hashTextParts } from "../hash.ts";
 import { normalizeLineEndings } from "../util.ts";
 import type { PierreDiffPayload } from "./types.ts";
 
@@ -175,23 +175,16 @@ function diffCacheKey(
   oldContent: string,
   newContent: string,
 ): string {
-  const hash = createHash("sha256");
-  hash.update(oldPath);
-  hash.update("\0");
-  hash.update(newPath);
-  hash.update("\0");
-  hash.update(oldContent);
-  hash.update("\0");
-  hash.update(newContent);
-  return `pi-rich-tools-diff-${hash.digest("hex").slice(0, 24)}`;
+  return `pi-rich-tools-diff-${hashTextParts([
+    oldPath,
+    newPath,
+    oldContent,
+    newContent,
+  ])}`;
 }
 
 function numberedDiffCacheKey(path: string, diff: string): string {
-  const hash = createHash("sha256");
-  hash.update(path);
-  hash.update("\0");
-  hash.update(diff);
-  return `pi-rich-tools-numbered-${hash.digest("hex").slice(0, 24)}`;
+  return `pi-rich-tools-numbered-${hashTextParts([path, diff])}`;
 }
 
 type NumberedDiffLine =

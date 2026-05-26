@@ -568,6 +568,53 @@ test("cached diff rows match uncached rows and reuse exact row arrays", () => {
   assert.strictEqual(cachedAgain, cached);
 });
 
+test("cached diff rows reflect in-place metadata changes", () => {
+  resetPierreRendererState();
+
+  const metadata = makeMetadata({
+    name: "mutable.txt",
+    lang: "text",
+    deletionLines: ["old"],
+    additionLines: ["new"],
+    hunkContent: [
+      {
+        type: "change",
+        deletions: 1,
+        deletionLineIndex: 0,
+        additions: 1,
+        additionLineIndex: 0,
+      },
+    ],
+    cacheKey: "stable-metadata-key",
+  });
+  const highlighted = { deletionLines: [], additionLines: [] };
+  const palette = getPierrePalette({ name: "dark" }, config);
+  const cacheKey = "stable-caller-key";
+
+  const first = buildCachedDiffRows(
+    metadata,
+    highlighted,
+    palette,
+    config,
+    { expandCollapsed: false },
+    cacheKey,
+  );
+
+  metadata.deletionLines[0] = "older";
+  metadata.additionLines[0] = "newer";
+  const second = buildCachedDiffRows(
+    metadata,
+    highlighted,
+    palette,
+    config,
+    { expandCollapsed: false },
+    cacheKey,
+  );
+
+  assert.notStrictEqual(second, first);
+  assert.deepEqual(lineTexts(second), ["older", "newer"]);
+});
+
 test("plain spans inside highlighted lines use syntax text foreground", () => {
   const palette = getPierrePalette({ name: "dark" }, config);
   const spans = flattenHighlightedLine(
@@ -936,6 +983,12 @@ function sortedCaptureKeys(captures) {
       ].join(":"),
     )
     .sort();
+}
+
+function lineTexts(rows) {
+  return rows
+    .filter((row) => row.kind === "line")
+    .map((row) => row.spans.map((span) => span.text).join(""));
 }
 
 function collapsedMetadata() {

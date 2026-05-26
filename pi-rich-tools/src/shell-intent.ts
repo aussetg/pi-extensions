@@ -915,7 +915,17 @@ function shellQuote(token: string): string {
 }
 
 function sameParsedCommand(left: ParsedShellCommand, right: ParsedShellCommand): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  if (left.type !== right.type || left.cmd !== right.cmd) return false;
+  switch (left.type) {
+    case "read":
+      return right.type === "read" && left.name === right.name && left.path === right.path;
+    case "list_files":
+      return right.type === "list_files" && left.path === right.path;
+    case "search":
+      return right.type === "search" && left.query === right.query && left.path === right.path;
+    case "unknown":
+      return right.type === "unknown";
+  }
 }
 
 function compactParsedCommand(item: ParsedShellCommand): ParsedShellCommand {

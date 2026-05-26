@@ -5,7 +5,6 @@ import {
   wrapTextWithAnsi,
   type Component,
 } from "@earendil-works/pi-tui";
-import { createHash } from "node:crypto";
 import type {
   ApplyPatchDetails,
   ApplyPatchOperation,
@@ -13,6 +12,7 @@ import type {
   ApplyPatchPreview,
 } from "./types.ts";
 import type { ApplyOperationResult } from "./apply.ts";
+import { hashText } from "./hash.ts";
 import { prepareApplyPatchArguments } from "./patch-envelope.ts";
 import { firstChangedLineFromDiff } from "./diff-lines.ts";
 import { PierreInlineDiffComponent } from "./pierre/component.ts";
@@ -947,7 +947,7 @@ function fitAnsiLine(line: string, width: number): string {
 }
 
 function hashString(value: string): string {
-  return createHash("sha256").update(value).digest("hex").slice(0, 16);
+  return hashText(value, 16);
 }
 
 function summarizeUnpreviewedResults(

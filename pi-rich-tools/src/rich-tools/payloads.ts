@@ -12,7 +12,7 @@ import {
 import {
   ByteLruCache,
   byteLength,
-  hashText,
+  hashTextParts,
   normalizeLineEndings,
   toFsPath,
 } from "./util.ts";
@@ -284,7 +284,7 @@ function buildContextOnlyPayload(options: {
 }
 
 function cacheKey(prefix: string, ...parts: string[]): string {
-  return `pi-rich:${prefix}:${hashText(parts.join("\0"))}`;
+  return `pi-rich:${prefix}:${hashTextParts(parts)}`;
 }
 
 function splitContentLines(content: string): string[] {

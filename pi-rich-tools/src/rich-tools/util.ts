@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+export { hashText, hashTextParts } from "../hash.ts";
 
 export type ThemeLike = {
   name?: string;
@@ -140,10 +140,6 @@ export function normalizeLineEndings(text: string): string {
 
 export function byteLength(text: string): number {
   return Buffer.byteLength(text, "utf8");
-}
-
-export function hashText(text: string): string {
-  return createHash("sha256").update(text).digest("hex").slice(0, 24);
 }
 
 export function toFsPath(cwd: string | undefined, rawPath: string): string {

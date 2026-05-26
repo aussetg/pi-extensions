@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import * as path from "node:path";
+import { hashStringPart } from "./hash.ts";
 import type { ApplyPatchOperation } from "./types.ts";
 import { DiffError, normalizeLineEndings, normalizePatchPath } from "./util.ts";
 
@@ -256,16 +257,12 @@ function repairEnvelopeBounds(lines: string[]): {
 function operationsKey(operations: ApplyPatchOperation[]): string | undefined {
   try {
     const hash = createHash("sha256");
-    hash.update(String(operations.length));
+    hashStringPart(hash, String(operations.length));
     for (const op of operations) {
-      hash.update("\0");
-      hash.update(typeof op.type === "string" ? op.type : "");
-      hash.update("\0");
-      hash.update(typeof op.path === "string" ? op.path : "");
-      hash.update("\0");
-      hash.update(typeof op.move_path === "string" ? op.move_path : "");
-      hash.update("\0");
-      hash.update(typeof op.diff === "string" ? op.diff : "");
+      hashStringPart(hash, typeof op.type === "string" ? op.type : "");
+      hashStringPart(hash, typeof op.path === "string" ? op.path : "");
+      hashStringPart(hash, typeof op.move_path === "string" ? op.move_path : "");
+      hashStringPart(hash, typeof op.diff === "string" ? op.diff : "");
     }
     return hash.digest("hex");
   } catch {

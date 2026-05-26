@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { hashText } from "./hash.ts";
 
 const FIRST_CHANGED_LINE_CACHE_LIMIT = 256;
 const firstChangedLineCache = new Map<string, number>();
@@ -37,9 +37,7 @@ export function firstChangedLineFromDiff(diff: string): number {
 }
 
 function firstChangedLineCacheKey(diff: string): string {
-  const hash = createHash("sha256");
-  hash.update(diff);
-  return `${diff.length}:${hash.digest("hex").slice(0, 16)}`;
+  return `${diff.length}:${hashText(diff, 16)}`;
 }
 
 function* iterateLines(text: string): Iterable<string> {

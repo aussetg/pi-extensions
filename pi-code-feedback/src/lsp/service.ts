@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { createDiagnosticSnapshot, flattenDiagnosticSnapshot } from "../diagnostics/snapshots.ts";
 import { readUtf8IfExists } from "../fs.ts";
@@ -760,11 +761,71 @@ function dedupeResults(values: unknown[]): unknown[] {
 }
 
 function stableResultKey(value: unknown): string {
-  try {
-    return JSON.stringify(value) ?? String(value);
-  } catch {
-    return String(value);
+  const hash = createHash("sha256");
+  hashStableValue(hash, value, new WeakSet<object>(), 0);
+  return `result:${hash.digest("hex").slice(0, 24)}`;
+}
+
+function hashStableValue(
+  hash: ReturnType<typeof createHash>,
+  value: unknown,
+  seen: WeakSet<object>,
+  depth: number,
+): void {
+  if (depth > 64) {
+    hash.update("depth\0");
+    return;
   }
+  if (value === null) {
+    hash.update("null\0");
+    return;
+  }
+
+  switch (typeof value) {
+    case "string":
+      hash.update("string\0");
+      hashStringPart(hash, value);
+      return;
+    case "number":
+      hash.update(`number\0${Object.is(value, -0) ? "-0" : String(value)}\0`);
+      return;
+    case "boolean":
+    case "bigint":
+    case "undefined":
+      hash.update(`${typeof value}\0${String(value)}\0`);
+      return;
+    case "symbol":
+    case "function":
+      hash.update(`${typeof value}\0`);
+      return;
+    case "object": {
+      if (seen.has(value)) {
+        hash.update("cycle\0");
+        return;
+      }
+      seen.add(value);
+      if (Array.isArray(value)) {
+        hash.update(`array\0${value.length}\0`);
+        for (const item of value) hashStableValue(hash, item, seen, depth + 1);
+      } else {
+        const record = value as Record<string, unknown>;
+        const keys = Object.keys(record).sort();
+        hash.update(`object\0${keys.length}\0`);
+        for (const key of keys) {
+          hashStringPart(hash, key);
+          hashStableValue(hash, record[key], seen, depth + 1);
+        }
+      }
+      seen.delete(value);
+    }
+  }
+}
+
+function hashStringPart(hash: ReturnType<typeof createHash>, value: string): void {
+  hash.update(String(value.length));
+  hash.update("\0");
+  hash.update(value);
+  hash.update("\0");
 }
 
 function hasHoverContent(value: unknown): boolean {

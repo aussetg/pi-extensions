@@ -1,4 +1,5 @@
 import type { Component } from "@earendil-works/pi-tui";
+import { createHash } from "node:crypto";
 import {
   truncateToWidth,
   visibleWidth,
@@ -25,7 +26,12 @@ import {
   globalPiHighlightCache,
   globalPiHighlightGeneration,
 } from "./highlight-cache.ts";
+import { hashStringPart, hashUnknown } from "../hash.ts";
 import { buildCachedDiffRows, lineNumberWidthFor } from "./rows.ts";
+import {
+  fileDiffMetadataKeyParts,
+  type FileDiffMetadataKeyParts,
+} from "./metadata-hash.ts";
 import {
   getPierreRendererConfig,
   type PierreRendererConfig,
@@ -43,7 +49,6 @@ import type {
 import { emptyHighlightedDiffSet } from "./types.ts";
 
 const PI_HIGHLIGHT_CACHE_LIMIT = 512;
-const payloadCacheKeys = new WeakMap<object, { path: string; key: string }>();
 
 interface RenderSegment {
   text: string;
@@ -51,6 +56,15 @@ interface RenderSegment {
   bg?: string;
   bold?: boolean;
 }
+
+type PierrePayloadDigest = FileDiffMetadataKeyParts & {
+  payloadKey: string;
+};
+
+type PreparedPierrePayload = {
+  payload: PierreDiffPayload;
+  digest: PierrePayloadDigest;
+};
 
 export interface PierreInlineDiffOptions {
   showFileHeaders?: boolean;
@@ -173,7 +187,8 @@ export class PierreInlineDiffComponent implements Component {
       this.payloads.length,
     );
     const safeWidth = Math.max(20, width);
-    const renderedKey = this.renderCacheKey(safeWidth);
+    const preparedPayloads = this.payloads.map(preparePayload);
+    const renderedKey = this.renderCacheKey(safeWidth, preparedPayloads);
     if (this.renderedKey === renderedKey && this.renderedLines) {
       return this.renderedLines;
     }
@@ -187,20 +202,24 @@ export class PierreInlineDiffComponent implements Component {
       lines.push(renderBlankLine(safeWidth, this.palette.editorBg));
     }
 
-    for (let i = 0; i < this.payloads.length; i++) {
-      const payload = this.payloads[i]!;
+    for (const prepared of preparedPayloads) {
+      const { payload, digest } = prepared;
       if (this.showFileHeaders || this.payloads.length > 1) {
         lines.push(renderFileHeader(payload, this.palette, this.config, safeWidth));
       }
 
-      const highlighted = this.highlightedFor(payload)[this.palette.appearance];
+      const highlighted = this.highlightedFor(prepared)[this.palette.appearance];
       const rows = buildCachedDiffRows(
         payload.metadata,
         highlighted,
         this.palette,
         this.config,
         { expandCollapsed: this.expandCollapsedHunks },
-        payloadKey(payload),
+        digest.payloadKey,
+        {
+          metadataContentKey: digest.contentKey,
+          metadataHunksKey: digest.hunksKey,
+        },
       );
       const lineNumberWidth = lineNumberWidthFor(
         payload.metadata,
@@ -241,15 +260,18 @@ export class PierreInlineDiffComponent implements Component {
     this.ingestHighlightedPayloads();
   }
 
-  private renderCacheKey(width: number): string {
+  private renderCacheKey(
+    width: number,
+    preparedPayloads: PreparedPierrePayload[],
+  ): string {
     return [
       width,
       this.showFileHeaders ? "headers" : "no-headers",
       this.expandCollapsedHunks ? "expanded" : "collapsed",
       this.suppressLeadingSpacing ? "tight" : "spaced",
       this.palette.appearance,
-      JSON.stringify(this.config),
-      ...this.payloads.map(payloadKey),
+      rendererConfigKey(this.config),
+      ...preparedPayloads.map((prepared) => prepared.digest.payloadKey),
     ].join("\u0000");
   }
 
@@ -313,10 +335,11 @@ export class PierreInlineDiffComponent implements Component {
     );
   }
 
-  private highlightedFor(payload: PierreDiffPayload): HighlightedDiffSet {
+  private highlightedFor(prepared: PreparedPierrePayload): HighlightedDiffSet {
     if (!this.config.syntaxHighlight.enabled) return emptyHighlightedDiffSet();
 
-    const key = payloadKey(payload);
+    const { payload, digest } = prepared;
+    const key = digest.payloadKey;
     const stored = this.highlightedByKey.get(key) ?? payload.highlighted;
     if (stored && hasHighlightedLines(stored)) return stored;
 
@@ -564,28 +587,31 @@ function normalizePayloads(
 }
 
 function payloadKey(payload: PierreDiffPayload): string {
-  const cached = payloadCacheKeys.get(payload.metadata);
-  if (cached && cached.path === payload.path) return cached.key;
+  return payloadDigest(payload).payloadKey;
+}
 
-  if (payload.metadata.cacheKey) {
-    payloadCacheKeys.set(payload.metadata, {
-      path: payload.path,
-      key: payload.metadata.cacheKey,
-    });
-    return payload.metadata.cacheKey;
-  }
-  const key = [
-    payload.path,
-    payload.metadata.name,
-    payload.metadata.prevName ?? "",
-    payload.metadata.type,
-    payload.metadata.lang ?? "",
-    payload.metadata.deletionLines.join("\n"),
-    payload.metadata.additionLines.join("\n"),
-    payload.metadata.hunks.map((hunk) => hunk.hunkSpecs ?? "").join("\n"),
-  ].join("\u0000");
-  payloadCacheKeys.set(payload.metadata, { path: payload.path, key });
-  return key;
+function rendererConfigKey(config: PierreRendererConfig): string {
+  const hash = createHash("sha256");
+  hashUnknown(hash, config);
+  return `cfg:${hash.digest("hex").slice(0, 16)}`;
+}
+
+function preparePayload(payload: PierreDiffPayload): PreparedPierrePayload {
+  return { payload, digest: payloadDigest(payload) };
+}
+
+function payloadDigest(payload: PierreDiffPayload): PierrePayloadDigest {
+  const { contentKey, hunksKey } = fileDiffMetadataKeyParts(payload.metadata);
+  const hash = createHash("sha256");
+  hashStringPart(hash, payload.path);
+  hashStringPart(hash, payload.metadata.cacheKey ?? "");
+  hashStringPart(hash, contentKey);
+  hashStringPart(hash, hunksKey);
+  return {
+    contentKey,
+    hunksKey,
+    payloadKey: `payload:${hash.digest("hex").slice(0, 24)}`,
+  };
 }
 
 function formatLineNumber(

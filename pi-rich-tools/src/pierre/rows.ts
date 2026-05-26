@@ -1,6 +1,10 @@
 import type { FileDiffMetadata } from "../../node_modules/@pierre/diffs/dist/types.js";
 import { diffWordsWithSpace } from "diff";
 import { cleanDiffLine, flattenHighlightedLine } from "./highlight.ts";
+import {
+  fileDiffMetadataContentKey,
+  fileDiffMetadataHunksKey,
+} from "./metadata-hash.ts";
 import type { DiffRow, DiffSpan, HighlightedDiffCode } from "./types.ts";
 import type { PierreTerminalPalette } from "./theme.ts";
 import type { PierreRendererConfig } from "./config.ts";
@@ -12,6 +16,11 @@ type PierreRowCacheState = {
   rows: Map<string, DiffRow[]>;
   highlightedCodeIds: WeakMap<object, number>;
   nextHighlightedCodeId: number;
+};
+
+export type CachedDiffRowsKeyParts = {
+  metadataContentKey: string;
+  metadataHunksKey: string;
 };
 
 function rowCacheState(): PierreRowCacheState {
@@ -212,6 +221,7 @@ export function buildCachedDiffRows(
   config: PierreRendererConfig,
   options: { expandCollapsed?: boolean } = {},
   cacheKey = "",
+  keyParts?: CachedDiffRowsKeyParts,
 ): DiffRow[] {
   const key = diffRowsCacheKey(
     metadata,
@@ -220,6 +230,7 @@ export function buildCachedDiffRows(
     config,
     options,
     cacheKey,
+    keyParts,
   );
   const rowCache = rowCacheState().rows;
   const cached = rowCache.get(key);
@@ -241,63 +252,18 @@ function diffRowsCacheKey(
   config: PierreRendererConfig,
   options: { expandCollapsed?: boolean },
   cacheKey: string,
+  keyParts: CachedDiffRowsKeyParts | undefined,
 ): string {
   return [
-    cacheKey || metadata.cacheKey || metadataContentKey(metadata),
-    metadataHunksKey(metadata),
+    cacheKey,
+    metadata.cacheKey ?? "",
+    keyParts?.metadataContentKey ?? fileDiffMetadataContentKey(metadata),
+    keyParts?.metadataHunksKey ?? fileDiffMetadataHunksKey(metadata),
     highlightedCodeKey(highlighted),
     options.expandCollapsed ? "1" : "0",
     rowPaletteKey(palette),
     rowConfigKey(config),
   ].join("\u0000");
-}
-
-function metadataContentKey(metadata: FileDiffMetadata): string {
-  return [
-    metadata.name,
-    metadata.prevName ?? "",
-    metadata.type,
-    metadata.lang ?? "",
-    metadata.deletionLines.join("\n"),
-    metadata.additionLines.join("\n"),
-  ].join("\u0001");
-}
-
-function metadataHunksKey(metadata: FileDiffMetadata): string {
-  const parts: string[] = [metadata.isPartial ? "1" : "0"];
-  for (const hunk of metadata.hunks) {
-    parts.push(
-      String(hunk.collapsedBefore),
-      String(hunk.additionStart),
-      String(hunk.additionCount),
-      String(hunk.additionLineIndex),
-      String(hunk.deletionStart),
-      String(hunk.deletionCount),
-      String(hunk.deletionLineIndex),
-      hunk.noEOFCRDeletions ? "1" : "0",
-      hunk.noEOFCRAdditions ? "1" : "0",
-      hunk.hunkSpecs ?? "",
-    );
-    for (const content of hunk.hunkContent) {
-      if (content.type === "context") {
-        parts.push(
-          "c",
-          String(content.lines),
-          String(content.deletionLineIndex),
-          String(content.additionLineIndex),
-        );
-      } else {
-        parts.push(
-          "x",
-          String(content.deletions),
-          String(content.deletionLineIndex),
-          String(content.additions),
-          String(content.additionLineIndex),
-        );
-      }
-    }
-  }
-  return parts.join("\u0001");
 }
 
 function highlightedCodeKey(highlighted: HighlightedDiffCode): string {

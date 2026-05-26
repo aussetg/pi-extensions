@@ -875,9 +875,9 @@ function isExploring(parsed: ParsedShellCommand[]): boolean {
 }
 
 function shouldSuppressExplorationOutput(result: ToolResultLike, context?: ShellContextLike): boolean {
-  if (isToolError(result, context) || hasBashTruncationNotice(result.details)) return false;
   const parsed = parseShellCommand(bashCommandArg(context?.args));
-  return parsed.length > 0 && parsed.every((item) => item.type !== "unknown");
+  if (!isExploring(parsed) || hasBashTruncationNotice(result.details)) return false;
+  return true;
 }
 
 function shouldDelayBashCallRendering(args: unknown, context?: ShellContextLike): boolean {
