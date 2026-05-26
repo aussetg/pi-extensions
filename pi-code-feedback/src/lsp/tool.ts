@@ -84,6 +84,7 @@ export function registerLspTool(pi: PiApi, runtime: CodeFeedbackRuntime, lspServ
         serverOverrides: runtime.config.lsp.servers,
         trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
         idleTimeoutMs: runtime.config.lsp.idleTimeoutMs,
+        diagnosticRefreshConcurrency: runtime.config.lsp.diagnosticRefreshConcurrency,
       });
       formatService?.configure({
         projectRoot: runtime.projectRoot,
@@ -336,6 +337,8 @@ function statusDetails(runtime: CodeFeedbackRuntime, lspService: LspService, for
   return {
     enabled: runtime.config.enabled,
     lspEnabled: runtime.config.lsp.enabled,
+    diagnosticRefreshConcurrency: runtime.config.lsp.diagnosticRefreshConcurrency,
+    diagnosticRefreshes: serviceStatus.diagnosticRefreshes,
     autoFormat: runtime.config.autoFormat,
     strict: runtime.config.strict,
     projectRoot: runtime.projectRoot,

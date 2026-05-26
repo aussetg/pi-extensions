@@ -5,6 +5,7 @@ import { readUtf8IfExists } from "../fs.ts";
 import { resolveWorkspaceRootForPath } from "../language-environments.ts";
 import { LSP_RESULT_SERVER_ID_KEY, type DiagnosticRefreshResult, type DiagnosticSnapshot, type LspDiagnostic, type LspServiceStatus, type LspUnavailableServer } from "../types.ts";
 import { LspClient, type SemanticTokensOverlayOptions } from "./client.ts";
+import { normalizeDiagnosticRefreshConcurrency } from "./diagnostic-refresh.ts";
 import { externalPositionToLsp, filePathToUri, oneLineLspRange, type LspPosition } from "./positions.ts";
 import { resolveLanguageServer, resolveLanguageServers, type LanguageServerDefinition } from "./servers.ts";
 
@@ -13,6 +14,7 @@ export interface LspServiceOptions {
   serverOverrides?: Record<string, unknown>;
   trustedEnvironmentRoots?: string[];
   idleTimeoutMs: number;
+  diagnosticRefreshConcurrency?: number;
 }
 
 export interface DiagnosticsForFileOptions {
@@ -21,7 +23,6 @@ export interface DiagnosticsForFileOptions {
 }
 
 const CODE_ACTION_DIAGNOSTIC_TIMEOUT_MS = 1200;
-const DIAGNOSTIC_REFRESH_CONCURRENCY = 1;
 
 interface ClientRequestResult {
   client: LspClient;
@@ -51,13 +52,14 @@ export class LspService {
   private serverOverrides: Record<string, unknown>;
   private trustedEnvironmentRoots: string[];
   private idleTimeoutMs: number;
+  private diagnosticRefreshConcurrency: number;
   private clients = new Map<string, LspClient>();
   private unavailableServers = new Map<string, LspUnavailableServer>();
   private idleTimer?: NodeJS.Timeout;
   private diagnosticQueue: DiagnosticRefreshJob[] = [];
   private queuedDiagnosticRefreshes = new Map<string, DiagnosticRefreshJob>();
   private runningDiagnosticRefreshes = new Map<string, DiagnosticRefreshJob>();
-  private activeDiagnosticRefreshes = 0;
+  private runningDiagnosticRefreshFiles = new Set<string>();
   private diagnosticPumpScheduled = false;
 
   constructor(options: LspServiceOptions) {
@@ -65,6 +67,7 @@ export class LspService {
     this.serverOverrides = options.serverOverrides ?? {};
     this.trustedEnvironmentRoots = options.trustedEnvironmentRoots?.map((root) => path.resolve(root)) ?? [];
     this.idleTimeoutMs = options.idleTimeoutMs;
+    this.diagnosticRefreshConcurrency = normalizeDiagnosticRefreshConcurrency(options.diagnosticRefreshConcurrency);
   }
 
   configure(options: LspServiceOptions): void {
@@ -72,7 +75,9 @@ export class LspService {
     this.serverOverrides = options.serverOverrides ?? {};
     this.trustedEnvironmentRoots = options.trustedEnvironmentRoots?.map((root) => path.resolve(root)) ?? [];
     this.idleTimeoutMs = options.idleTimeoutMs;
+    this.diagnosticRefreshConcurrency = normalizeDiagnosticRefreshConcurrency(options.diagnosticRefreshConcurrency, this.diagnosticRefreshConcurrency);
     this.armIdleTimer();
+    this.scheduleDiagnosticPump();
   }
 
   async diagnosticsForFile(filePath: string, content: string | undefined, options: DiagnosticsForFileOptions): Promise<DiagnosticSnapshot | undefined> {
@@ -280,6 +285,12 @@ export class LspService {
       activeClients: clients.filter((client) => client.state === "ready" || client.state === "starting").length,
       clients,
       unavailableServers: [...this.unavailableServers.values()],
+      diagnosticRefreshes: {
+        concurrency: this.diagnosticRefreshConcurrency,
+        active: this.runningDiagnosticRefreshes.size,
+        running: this.runningDiagnosticRefreshes.size,
+        queued: this.queuedDiagnosticRefreshes.size,
+      },
     };
   }
 
@@ -380,21 +391,45 @@ export class LspService {
   }
 
   private pumpDiagnosticQueue(): void {
-    while (this.activeDiagnosticRefreshes < DIAGNOSTIC_REFRESH_CONCURRENCY && this.diagnosticQueue.length > 0) {
-      const job = this.diagnosticQueue.shift();
-      if (!job) continue;
-      if (this.queuedDiagnosticRefreshes.get(job.key) !== job) continue;
-      this.queuedDiagnosticRefreshes.delete(job.key);
-      if (job.waiters.size === 0) continue;
+    while (this.runningDiagnosticRefreshes.size < this.diagnosticRefreshConcurrency) {
+      const job = this.takeNextDiagnosticRefreshJob();
+      if (!job) break;
 
       this.runningDiagnosticRefreshes.set(job.key, job);
-      this.activeDiagnosticRefreshes += 1;
+      this.runningDiagnosticRefreshFiles.add(job.filePath);
       void this.runDiagnosticRefreshJob(job).finally(() => {
-        this.runningDiagnosticRefreshes.delete(job.key);
-        this.activeDiagnosticRefreshes = Math.max(0, this.activeDiagnosticRefreshes - 1);
+        if (this.runningDiagnosticRefreshes.get(job.key) === job) {
+          this.runningDiagnosticRefreshes.delete(job.key);
+          this.runningDiagnosticRefreshFiles.delete(job.filePath);
+        }
         this.pumpDiagnosticQueue();
       });
     }
+  }
+
+  private takeNextDiagnosticRefreshJob(): DiagnosticRefreshJob | undefined {
+    for (let index = 0; index < this.diagnosticQueue.length; index += 1) {
+      const job = this.diagnosticQueue[index];
+      if (!job) continue;
+
+      if (this.queuedDiagnosticRefreshes.get(job.key) !== job || job.waiters.size === 0) {
+        this.diagnosticQueue.splice(index, 1);
+        if (this.queuedDiagnosticRefreshes.get(job.key) === job) this.queuedDiagnosticRefreshes.delete(job.key);
+        index -= 1;
+        continue;
+      }
+
+      // Keep versions for a single URI ordered even when the global queue runs
+      // multiple files at once. Concurrent refreshes for the same file can make
+      // older LSP publishDiagnostics responses look fresh for newer content.
+      if (this.runningDiagnosticRefreshFiles.has(job.filePath)) continue;
+
+      this.diagnosticQueue.splice(index, 1);
+      this.queuedDiagnosticRefreshes.delete(job.key);
+      return job;
+    }
+
+    return undefined;
   }
 
   private async runDiagnosticRefreshJob(job: DiagnosticRefreshJob): Promise<void> {
@@ -467,6 +502,7 @@ export class LspService {
     this.diagnosticQueue = [];
     this.queuedDiagnosticRefreshes.clear();
     this.runningDiagnosticRefreshes.clear();
+    this.runningDiagnosticRefreshFiles.clear();
 
     for (const job of jobs) {
       for (const waiter of [...job.waiters]) {

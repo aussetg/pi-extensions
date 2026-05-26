@@ -1,5 +1,6 @@
 import type { FeedbackConfig } from "./types.ts";
 import type { PiApi } from "./pi.ts";
+import { DEFAULT_DIAGNOSTIC_REFRESH_CONCURRENCY, normalizeDiagnosticRefreshConcurrency } from "./lsp/diagnostic-refresh.ts";
 
 export function createDefaultConfig(): FeedbackConfig {
   return {
@@ -19,6 +20,7 @@ export function createDefaultConfig(): FeedbackConfig {
     lsp: {
       enabled: true,
       idleTimeoutMs: 240_000,
+      diagnosticRefreshConcurrency: DEFAULT_DIAGNOSTIC_REFRESH_CONCURRENCY,
       servers: {},
     },
     formatters: {},
@@ -55,6 +57,12 @@ export function registerFlags(pi: PiApi): void {
     type: "boolean",
     default: false,
   });
+
+  pi.registerFlag?.("code-feedback-lsp-concurrency", {
+    description: `Max concurrent LSP diagnostic refreshes across different files (1-16, default ${DEFAULT_DIAGNOSTIC_REFRESH_CONCURRENCY}).`,
+    type: "string",
+    default: String(DEFAULT_DIAGNOSTIC_REFRESH_CONCURRENCY),
+  });
 }
 
 export function resolveConfig(pi: PiApi): FeedbackConfig {
@@ -75,6 +83,10 @@ export function resolveConfig(pi: PiApi): FeedbackConfig {
   if (pi.getFlag?.("code-feedback-all-diagnostics")) {
     config.diagnostics.inline = "all";
   }
+  config.lsp.diagnosticRefreshConcurrency = normalizeDiagnosticRefreshConcurrency(
+    pi.getFlag?.("code-feedback-lsp-concurrency"),
+    config.lsp.diagnosticRefreshConcurrency,
+  );
 
   return config;
 }

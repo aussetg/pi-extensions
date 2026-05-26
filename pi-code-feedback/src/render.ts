@@ -15,6 +15,7 @@ export function renderStatus(runtime: CodeFeedbackRuntime, lspStatus?: LspServic
     "pi-code-feedback / LSP status",
     `  extension: ${config.enabled ? "enabled" : "disabled"}`,
     `  lsp feedback: ${config.lsp.enabled ? "enabled" : "disabled"}`,
+    `  diagnostic refresh concurrency: ${config.lsp.diagnosticRefreshConcurrency}${formatDiagnosticRefreshSummary(lspStatus)}`,
     `  inline diagnostics: ${config.diagnostics.inline}`,
     `  auto format: ${config.autoFormat ? config.formatMode : "disabled"}`,
     `  strict: ${config.strict ? "enabled" : "disabled"}`,
@@ -275,6 +276,16 @@ function formatClientSummary(lspStatus?: LspServiceStatus): string {
     .map(([state, count]) => `${count} ${state}`)
     .join(", ");
   return `${lspStatus.clients.length} total${ordered ? ` (${ordered})` : ""}`;
+}
+
+function formatDiagnosticRefreshSummary(lspStatus?: LspServiceStatus): string {
+  const refreshes = lspStatus?.diagnosticRefreshes;
+  if (!refreshes) return "";
+  const busy = [
+    refreshes.active > 0 ? `active=${refreshes.active}` : undefined,
+    refreshes.queued > 0 ? `queued=${refreshes.queued}` : undefined,
+  ].filter(Boolean).join(" ");
+  return busy ? ` (${busy})` : "";
 }
 
 function formatFooterClient(client: LspServiceStatus["clients"][number]): string {

@@ -26,6 +26,7 @@ export function registerLspCommand(pi: PiApi, runtime: CodeFeedbackRuntime, lspS
         serverOverrides: runtime.config.lsp.servers,
         trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
         idleTimeoutMs: runtime.config.lsp.idleTimeoutMs,
+        diagnosticRefreshConcurrency: runtime.config.lsp.diagnosticRefreshConcurrency,
       });
       formatService?.configure({
         projectRoot: runtime.projectRoot,

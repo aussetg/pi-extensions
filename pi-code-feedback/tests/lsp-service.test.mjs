@@ -13,6 +13,26 @@ import { LSP_RESULT_SERVER_ID_KEY } from "../src/types.ts";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fakeServer = path.join(here, "fixtures", "fake-lsp-server.mjs");
 
+test("diagnostic refresh concurrency is configurable and clamped", () => {
+  const root = os.tmpdir();
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    diagnosticRefreshConcurrency: 3,
+  });
+
+  assert.equal(service.getStatus().diagnosticRefreshes?.concurrency, 3);
+
+  service.configure({ projectRoot: root, idleTimeoutMs: 0 });
+  assert.equal(service.getStatus().diagnosticRefreshes?.concurrency, 3);
+
+  service.configure({ projectRoot: root, idleTimeoutMs: 0, diagnosticRefreshConcurrency: 99 });
+  assert.equal(service.getStatus().diagnosticRefreshes?.concurrency, 16);
+
+  service.configure({ projectRoot: root, idleTimeoutMs: 0, diagnosticRefreshConcurrency: 0 });
+  assert.equal(service.getStatus().diagnosticRefreshes?.concurrency, 1);
+});
+
 test("diagnostics for a Python file are merged from ty and Ruff clients", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-"));
   const filePath = path.join(root, "probe.py");

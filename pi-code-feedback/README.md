@@ -16,6 +16,8 @@ Automatic formatting is deterministic: one configured/canonical formatter per fi
 
 If a language server answers after the inline tool-result timeout, linked diagnostics are queued once and injected before the next model request.
 
+Diagnostic refreshes are queued globally and run across different files with a default concurrency of 4, while refreshes for the same file stay ordered so LSP document versions do not race. Override with `--code-feedback-lsp-concurrency=<1-16>`.
+
 Inline feedback is appended to `result.content` for the model and mirrored as structured metadata under `result.details.piCodeFeedback` for renderers.
 
 For languages with multiple configured servers, diagnostics and read-only `/lsp` requests fan out across the matching servers; code actions are tagged with their source server and listed with session-local ids so `codeAction/apply` can apply the selected action directly.

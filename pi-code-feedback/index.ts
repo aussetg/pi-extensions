@@ -21,6 +21,7 @@ export default function (piValue: unknown) {
     serverOverrides: runtime.config.lsp.servers,
     trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
     idleTimeoutMs: runtime.config.lsp.idleTimeoutMs,
+    diagnosticRefreshConcurrency: runtime.config.lsp.diagnosticRefreshConcurrency,
   });
   const formatService = createFormatService({
     projectRoot: runtime.projectRoot,
@@ -40,6 +41,7 @@ export default function (piValue: unknown) {
       serverOverrides: runtime.config.lsp.servers,
       trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
       idleTimeoutMs: runtime.config.lsp.idleTimeoutMs,
+      diagnosticRefreshConcurrency: runtime.config.lsp.diagnosticRefreshConcurrency,
     });
     formatService.configure({
       projectRoot: runtime.projectRoot,

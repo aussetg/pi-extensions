@@ -176,6 +176,12 @@ export interface LspServiceStatus {
   activeClients: number;
   clients: LspClientStatus[];
   unavailableServers: LspUnavailableServer[];
+  diagnosticRefreshes?: {
+    concurrency: number;
+    active: number;
+    running: number;
+    queued: number;
+  };
 }
 
 export type SemanticTokenOverlayState = "ready" | "refreshing" | "unsupported" | "error";
@@ -365,6 +371,7 @@ export interface FeedbackConfig {
   lsp: {
     enabled: boolean;
     idleTimeoutMs: number;
+    diagnosticRefreshConcurrency: number;
     servers: Record<string, unknown>;
   };
   formatters: Record<string, unknown>;
