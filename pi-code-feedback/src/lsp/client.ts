@@ -115,13 +115,17 @@ interface TextDocumentContentChange {
 const TEXT_DOCUMENT_SYNC_NONE = 0;
 const TEXT_DOCUMENT_SYNC_FULL = 1;
 const TEXT_DOCUMENT_SYNC_INCREMENTAL = 2;
+let nextLspClientSessionId = 1;
 
 type TextDocumentSyncKind = typeof TEXT_DOCUMENT_SYNC_NONE | typeof TEXT_DOCUMENT_SYNC_FULL | typeof TEXT_DOCUMENT_SYNC_INCREMENTAL;
 
 export interface TouchDocumentOptions {
   timeoutMs: number;
   settleMs: number;
+  snapshotScope?: DiagnosticSnapshotScope;
 }
+
+export type DiagnosticSnapshotScope = "file" | "workspace";
 
 export interface SemanticTokensOverlayOptions {
   waitMs?: number;
@@ -192,6 +196,7 @@ export class LspClient {
   private lastDiagnosticTimedOut?: boolean;
   private lastError?: string;
   private lastServerLog?: LspServerLog;
+  private sessionId?: string;
 
   constructor(definition: LanguageServerDefinition, root: string) {
     this.definition = definition;
@@ -212,7 +217,7 @@ export class LspClient {
     this.lastDiagnosticDurationMs = completedAt - touchedAt;
     this.lastDiagnosticTimedOut = !fresh;
     return {
-      snapshot: this.snapshot(),
+      snapshot: this.snapshotForScope(document.uri, options.snapshotScope),
       fresh,
       timedOut: !fresh,
       requestedAt: touchedAt,
@@ -232,6 +237,10 @@ export class LspClient {
   snapshot(): DiagnosticSnapshot {
     const diagnostics = [...this.diagnostics.values()].flatMap((entry) => this.normalizeDiagnostics(entry));
     return createDiagnosticSnapshot(diagnostics);
+  }
+
+  snapshotForUri(uri: string): DiagnosticSnapshot {
+    return createDiagnosticSnapshot(this.diagnosticsForUri(uri));
   }
 
   diagnosticsForUri(uri: string): LspDiagnostic[] {
@@ -321,6 +330,14 @@ export class LspClient {
     return this.capabilities;
   }
 
+  getSessionId(): string | undefined {
+    return this.sessionId;
+  }
+
+  canResolveCodeActions(): boolean {
+    return codeActionResolveProvider(this.capabilities);
+  }
+
   getStatus(): LspClientStatus {
     return {
       id: this.id,
@@ -342,7 +359,10 @@ export class LspClient {
 
   async shutdown(): Promise<void> {
     this.finishDiagnosticWaiters(false);
-    if (!this.process || this.state === "stopped") return;
+    if (!this.process || this.state === "stopped") {
+      this.sessionId = undefined;
+      return;
+    }
 
     try {
       await this.sendRequest("shutdown", undefined, 1500);
@@ -359,6 +379,7 @@ export class LspClient {
 
     this.process.kill();
     this.state = "stopped";
+    this.sessionId = undefined;
     this.process = undefined;
     this.initializePromise = undefined;
     this.documents.clear();
@@ -393,6 +414,7 @@ export class LspClient {
       child.on("error", (error) => {
         this.lastError = error.message;
         this.state = "failed";
+        this.sessionId = undefined;
         this.rejectPending(error);
         this.finishDiagnosticWaiters(false);
       });
@@ -400,6 +422,7 @@ export class LspClient {
         this.initializePromise = undefined;
         if (this.state !== "stopped") {
           this.state = code === 0 ? "stopped" : "failed";
+          this.sessionId = undefined;
           if (code !== 0 || signal) this.lastError = `process exited code=${code ?? "null"} signal=${signal ?? "null"}`;
           this.rejectPending(new Error(this.lastError ?? "LSP process exited"));
           this.finishDiagnosticWaiters(false);
@@ -410,9 +433,11 @@ export class LspClient {
       this.capabilities = readServerCapabilities(initializeResult);
       this.notify("initialized", {});
       this.state = "ready";
+      this.sessionId = createLspClientSessionId(this.id);
       this.initializePromise = undefined;
     } catch (error) {
       this.state = "failed";
+      this.sessionId = undefined;
       this.lastError = error instanceof Error ? error.message : String(error);
       this.initializePromise = undefined;
       throw error;
@@ -804,6 +829,10 @@ export class LspClient {
     }));
   }
 
+  private snapshotForScope(uri: string, scope: DiagnosticSnapshotScope | undefined): DiagnosticSnapshot {
+    return scope === "workspace" ? this.snapshot() : this.snapshotForUri(uri);
+  }
+
   private rejectPending(error: Error): void {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timeout);
@@ -889,6 +918,11 @@ function semanticTokensProvider(capabilities: unknown): SemanticTokensProviderIn
     },
     full: provider.full === true || isRecord(provider.full),
   };
+}
+
+function codeActionResolveProvider(capabilities: unknown): boolean {
+  const provider = isRecord(capabilities) ? capabilities.codeActionProvider : undefined;
+  return isRecord(provider) && provider.resolveProvider === true;
 }
 
 function semanticTokenOverlayFromCache(
@@ -1067,6 +1101,11 @@ function configurationForItem(config: Record<string, unknown> | undefined, item:
     return current[part];
   }, config);
   return nested ?? {};
+}
+
+function createLspClientSessionId(serverId: string): string {
+  const sequence = nextLspClientSessionId++;
+  return `${serverId}:${sequence.toString(36)}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

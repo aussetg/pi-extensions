@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { displayPathFromRoot } from "../paths.ts";
 import { lspRangeToExternal, uriToFilePath, type LspRange } from "./positions.ts";
-import { workspaceEditSummary, type WorkspaceEditApplyResult } from "./workspace-edit.ts";
+import { canResolveCodeActionOnApply, workspaceEditSummary, type WorkspaceEditApplyResult } from "./workspace-edit.ts";
 import { LSP_RESULT_SERVER_ID_KEY, type LspAction } from "../types.ts";
 
 export function renderLspActionResult(action: LspAction, result: unknown, projectRoot: string): string {
@@ -143,7 +143,8 @@ function renderCodeActions(result: unknown): string {
     const preferred = action.isPreferred === true ? " preferred" : "";
     const edit = workspaceEditSummary(action.edit);
     const editText = edit.edits > 0 ? ` edits=${edit.edits} files=${edit.files}` : "";
-    lines.push(`  - ${title}${server}${kind}${preferred}${editText}`);
+    const lazy = canResolveCodeActionOnApply(action) ? " resolves-on-apply" : "";
+    lines.push(`  - ${title}${server}${kind}${preferred}${editText}${lazy}`);
   }
   if (actions.length > 40) lines.push(`  ... ${actions.length - 40} more`);
   return lines.join("\n");

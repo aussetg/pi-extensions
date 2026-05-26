@@ -66,9 +66,10 @@ test("lsp tool preserves trusted roots when reconfiguring services", async () =>
 test("lsp code actions return stable ids and apply by id", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-actions-"));
   const filePath = path.join(root, "probe.py");
+  const logPath = path.join(root, "lsp.jsonl");
   await writeFile(filePath, "import os\n", "utf8");
 
-  const { tool, service } = createRegisteredTool(root);
+  const { tool, service } = createRegisteredTool(root, "actions-resolve-log-require-diagnostics", logPath);
 
   try {
     const listResult = await tool.execute("lsp-1", {
@@ -84,7 +85,9 @@ test("lsp code actions return stable ids and apply by id", async () => {
     assert.equal(listPayload.actions.length, 1);
     assert.match(listPayload.actions[0].id, /^ca_[0-9a-z]{4}$/);
     assert.equal(listPayload.actions[0].applyable, true);
+    assert.equal(listPayload.actions[0].requiresResolve, true);
     assert.equal(listPayload.actions[0].title, "py fix T100");
+    assert.equal((await readJsonLog(logPath)).some((entry) => entry.method === "codeAction/resolve"), false);
 
     const applyResult = await tool.execute("lsp-2", {
       method: "codeAction/apply",
@@ -97,6 +100,8 @@ test("lsp code actions return stable ids and apply by id", async () => {
     assert.equal(applyPayload.editCount, 1);
     assert.deepEqual(applyPayload.changedFiles, ["probe.py"]);
     assert.match(await readFile(filePath, "utf8"), /^# fixed by py\nimport os\n/);
+    const entries = await waitForJsonLog(logPath, (entries) => entries.some((entry) => entry.method === "codeAction/resolve"));
+    assert.equal(entries.filter((entry) => entry.method === "codeAction/resolve").length, 1);
 
     const secondApply = await tool.execute("lsp-3", {
       method: "codeAction/apply",
@@ -105,6 +110,33 @@ test("lsp code actions return stable ids and apply by id", async () => {
 
     assert.equal(secondApply.isError, true);
     assert.match(secondApply.content[0].text, /Unknown code action id/);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("lsp code action listing keeps top-level commands preview-only", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-command-actions-"));
+  await writeFile(path.join(root, "probe.py"), "import os\n", "utf8");
+
+  const { tool, service } = createRegisteredTool(root, "actions-resolve-command");
+
+  try {
+    const result = await tool.execute("lsp-1", {
+      method: "textDocument/codeAction",
+      path: "probe.py",
+      line: 1,
+      column: 1,
+    }, undefined, undefined, { cwd: root });
+
+    const payload = JSON.parse(result.content[0].text);
+    assert.equal(payload.ok, true);
+    assert.equal(payload.actions.length, 1);
+    assert.equal(payload.actions[0].title, "py command T100");
+    assert.equal(payload.actions[0].applyable, false);
+    assert.equal(payload.actions[0].requiresResolve, undefined);
+    assert.equal(payload.hint, undefined);
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });
@@ -340,14 +372,36 @@ test("lsp hover execution returns raw unfenced hover text", async () => {
   }
 });
 
-function createRegisteredTool(root, mode = "actions-require-diagnostics") {
+async function waitForJsonLog(filePath, predicate) {
+  let entries = [];
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    entries = await readJsonLog(filePath);
+    if (predicate(entries)) return entries;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return entries;
+}
+
+async function readJsonLog(filePath) {
+  try {
+    return (await readFile(filePath, "utf8"))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  } catch {
+    return [];
+  }
+}
+
+function createRegisteredTool(root, mode = "actions-require-diagnostics", logPath = undefined) {
   const runtime = createRuntime(createDefaultConfig());
   setProjectRoot(runtime, root);
   runtime.config.autoFormat = false;
   runtime.config.lsp.servers = {
     python: {
       command: process.execPath,
-      args: [fakeServer, "py", "T100", "1", "", mode],
+      args: [fakeServer, "py", "T100", "1", "", mode, logPath].filter((value) => value !== undefined),
     },
     "python-ruff": { disabled: true },
   };

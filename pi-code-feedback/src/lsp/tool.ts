@@ -11,7 +11,7 @@ import type { PiApi, PiToolResult } from "../pi.ts";
 import { renderCodeActionApplySelectionError, renderLspActionResult, renderWorkspaceEditApplyResult } from "./render.ts";
 import { limitLspToolText, type LspToolTruncation } from "./tool-output.ts";
 import { renderLspToolCall, renderLspToolResult } from "./tool-renderer.ts";
-import { applyWorkspaceEdit, selectCodeActionForApply, workspaceEditSummary, workspaceEditTargetFiles, type WorkspaceEditTargetFilesResult } from "./workspace-edit.ts";
+import { applyWorkspaceEdit, canResolveCodeActionOnApply, selectCodeActionForApply, workspaceEditSummary, workspaceEditTargetFiles, type WorkspaceEditTargetFilesResult } from "./workspace-edit.ts";
 
 interface ParsedLspMethod {
   method?: LspMethod;
@@ -49,8 +49,13 @@ interface CodeActionSummary {
   server?: string;
   diagnostics: string[];
   applyable: boolean;
+  requiresResolve?: boolean;
   editSummary?: string;
 }
+
+type PreparedCodeActionForApply =
+  | { ok: true; action: Record<string, unknown>; title: string }
+  | { ok: false; error: string; details: Record<string, unknown>; hint?: string };
 
 export function registerLspTool(pi: PiApi, runtime: CodeFeedbackRuntime, lspService: LspService, formatService?: FormatService): void {
   const toolState: LspToolState = {
@@ -324,7 +329,7 @@ async function diagnosticsSnapshot(method: LspMethod, params: Record<string, unk
   if (method === "workspace/diagnostic" || params.all === true) return lspService.cachedDiagnostics("all");
   const filePath = requirePath(params);
   if (!runtime.config.enabled || !runtime.config.lsp.enabled) return lspService.cachedDiagnostics(filePath);
-  return (await lspService.diagnosticsForFile(filePath, undefined, { timeoutMs: 1200, settleMs: 100 })) ?? lspService.cachedDiagnostics(filePath);
+  return (await lspService.diagnosticsForFile(filePath, undefined, { timeoutMs: 1200, settleMs: 100, snapshotScope: "file" })) ?? lspService.cachedDiagnostics(filePath);
 }
 
 function diagnosticsTarget(method: LspMethod, params: Record<string, unknown>): string {
@@ -481,11 +486,14 @@ async function handleCodeActions(method: LspMethod, params: Record<string, unkno
     });
   }
 
-  const applyResult = await applyWorkspaceEdit(selection.action.edit, runtime.projectRoot);
+  const prepared = await prepareCodeActionForApply(selection.action, filePath, runtime, lspService, "selected code action");
+  if (!prepared.ok) return errorResult(method, prepared.error, prepared.details, prepared.hint);
+
+  const applyResult = await applyWorkspaceEdit(prepared.action.edit, runtime.projectRoot);
   if (applyResult.applied) await resyncChangedFiles(lspService, applyResult.changedFiles, runtime);
-  const title = typeof selection.action.title === "string" ? selection.action.title : "selected code action";
+  const title = prepared.title;
   return textResult(renderWorkspaceEditApplyResult(applyResult, runtime.projectRoot, `code action "${title}"`), !applyResult.applied, {
-    action: selection.action,
+    action: prepared.action,
     applyResult,
   });
 }
@@ -504,14 +512,6 @@ async function handleCodeActionApply(method: LspMethod, params: Record<string, u
     return errorResult(method, `Code action id ${id} belongs to a different project root`, { id, actionProjectRoot: cached.projectRoot, projectRoot: runtime.projectRoot });
   }
 
-  if (!cached.summary.applyable) {
-    return errorResult(method, `Code action id ${id} is not safely applyable`, {
-      id,
-      action: cached.summary,
-      targetResolutionError: cached.targetResolutionError,
-    }, "Choose an action with applyable: true from textDocument/codeAction.");
-  }
-
   const stale = validateCachedCodeAction(cached, runtime.projectRoot);
   if (stale) {
     return errorResult(method, `Code action id ${id} is stale: ${stale.reason}`, {
@@ -521,14 +521,24 @@ async function handleCodeActionApply(method: LspMethod, params: Record<string, u
     }, "Call textDocument/codeAction again and apply one of the fresh ids.");
   }
 
-  const applyResult = await applyWorkspaceEdit(cached.action.edit, runtime.projectRoot);
+  const prepared = await prepareCodeActionForApply(cached.action, cached.requestFile.filePath, runtime, lspService, `Code action id ${id}`);
+  if (!prepared.ok) {
+    return errorResult(method, prepared.error, {
+      id,
+      action: cached.summary,
+      targetResolutionError: cached.targetResolutionError,
+      ...prepared.details,
+    }, prepared.hint);
+  }
+
+  const applyResult = await applyWorkspaceEdit(prepared.action.edit, runtime.projectRoot);
   if (applyResult.applied) await resyncChangedFiles(lspService, applyResult.changedFiles, runtime);
 
   const payload = {
     ok: applyResult.applied,
     method,
     id,
-    title: cached.summary.title,
+    title: prepared.title,
     applied: applyResult.applied,
     editCount: applyResult.editCount,
     changedFiles: applyResult.changedFiles.map((filePath) => relativePath(runtime.projectRoot, filePath)),
@@ -536,7 +546,7 @@ async function handleCodeActionApply(method: LspMethod, params: Record<string, u
   };
   return structuredResult(payload, {
     ...payload,
-    action: cached.action,
+    action: prepared.action,
     applyResult,
   }, !applyResult.applied);
 }
@@ -577,15 +587,15 @@ function cacheCodeAction(
 ): CodeActionSummary {
   pruneCodeActionCache(state);
   const id = `ca_${(state.nextCodeActionId++).toString(36).padStart(4, "0")}`;
-  const targetFiles = workspaceEditTargetFiles(action.edit, projectRoot);
+  const targetFiles = action.edit === undefined ? undefined : workspaceEditTargetFiles(action.edit, projectRoot);
   const summary = summarizeCodeAction(id, action, targetFiles);
   state.codeActions.set(id, {
     id,
     createdAt: Date.now(),
     projectRoot,
     requestFile,
-    editTargets: targetFiles.ok ? targetFiles.files.map((filePath) => readEditTargetFileState(filePath, requestFile)) : [],
-    targetResolutionError: targetFiles.ok ? undefined : targetFiles.reason,
+    editTargets: targetFiles?.ok ? targetFiles.files.map((filePath) => readEditTargetFileState(filePath, requestFile)) : [],
+    targetResolutionError: targetFiles && !targetFiles.ok ? targetFiles.reason : undefined,
     action,
     summary,
   });
@@ -601,14 +611,79 @@ function pruneCodeActionCache(state: LspToolState): void {
   for (const entry of stale) state.codeActions.delete(entry.id);
 }
 
-function summarizeCodeAction(id: string, action: Record<string, unknown>, targetFiles: WorkspaceEditTargetFilesResult): CodeActionSummary {
-  const title = typeof action.title === "string" ? action.title : typeof action.command === "string" ? action.command : "untitled action";
+async function prepareCodeActionForApply(
+  action: Record<string, unknown>,
+  requestFilePath: string,
+  runtime: CodeFeedbackRuntime,
+  lspService: LspService,
+  label: string,
+): Promise<PreparedCodeActionForApply> {
+  let resolvedAction = action;
+  const needsResolve = canResolveCodeActionOnApply(action);
+
+  if (action.edit === undefined && !needsResolve) {
+    return {
+      ok: false,
+      error: `${label} is not safely applyable`,
+      details: {
+        action: summarizeCodeAction("", action, undefined),
+        editSummary: workspaceEditSummary(action.edit),
+      },
+      hint: "Choose an action with applyable: true from textDocument/codeAction.",
+    };
+  }
+
+  if (needsResolve) {
+    try {
+      const resolved = await lspService.resolveCodeAction(requestFilePath, action);
+      if (!isRecord(resolved)) {
+        return {
+          ok: false,
+          error: `${label} resolved to a non-object result`,
+          details: { action, resolved },
+          hint: "Call textDocument/codeAction again or choose another action.",
+        };
+      }
+      resolvedAction = resolved;
+    } catch (error) {
+      return {
+        ok: false,
+        error: `${label} could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+        details: { action },
+        hint: "Call textDocument/codeAction again or choose an action with an immediate WorkspaceEdit.",
+      };
+    }
+  }
+
+  const targetFiles = workspaceEditTargetFiles(resolvedAction.edit, runtime.projectRoot);
+  const edit = workspaceEditSummary(resolvedAction.edit);
+  if (!targetFiles.ok || edit.edits === 0 || edit.resourceOperations !== 0) {
+    return {
+      ok: false,
+      error: `${label} is not safely applyable`,
+      details: {
+        action: summarizeCodeAction("", resolvedAction, targetFiles),
+        targetResolutionError: targetFiles.ok ? undefined : targetFiles.reason,
+        editSummary: edit,
+      },
+      hint: needsResolve
+        ? "The selected action resolved without a safe WorkspaceEdit. Choose another action."
+        : "Choose an action with applyable: true from textDocument/codeAction.",
+    };
+  }
+
+  return { ok: true, action: resolvedAction, title: codeActionTitle(resolvedAction) };
+}
+
+function summarizeCodeAction(id: string, action: Record<string, unknown>, targetFiles: WorkspaceEditTargetFilesResult | undefined): CodeActionSummary {
+  const title = codeActionTitle(action);
   const kind = typeof action.kind === "string" ? action.kind : undefined;
   const server = typeof action[LSP_RESULT_SERVER_ID_KEY] === "string" ? action[LSP_RESULT_SERVER_ID_KEY] : undefined;
   const diagnostics = Array.isArray(action.diagnostics)
     ? action.diagnostics.map(diagnosticMessage).filter((message): message is string => Boolean(message)).slice(0, 5)
     : [];
-  const edit = workspaceEditSummary(action.edit);
+  const requiresResolve = canResolveCodeActionOnApply(action);
+  const edit = requiresResolve || action.edit === undefined ? { files: 0, edits: 0, resourceOperations: 0 } : workspaceEditSummary(action.edit);
   const hasEdit = edit.edits > 0 || edit.resourceOperations > 0;
   return {
     id,
@@ -617,9 +692,14 @@ function summarizeCodeAction(id: string, action: Record<string, unknown>, target
     preferred: action.isPreferred === true,
     server,
     diagnostics,
-    applyable: targetFiles.ok && edit.edits > 0 && edit.resourceOperations === 0,
-    editSummary: hasEdit ? formatWorkspaceEditSummary(edit) : undefined,
+    applyable: requiresResolve || (targetFiles?.ok === true && edit.edits > 0 && edit.resourceOperations === 0),
+    requiresResolve: requiresResolve || undefined,
+    editSummary: hasEdit ? formatWorkspaceEditSummary(edit) : requiresResolve ? "resolves edit on apply" : undefined,
   };
+}
+
+function codeActionTitle(action: Record<string, unknown>): string {
+  return typeof action.title === "string" ? action.title : typeof action.command === "string" ? action.command : "untitled action";
 }
 
 function diagnosticMessage(value: unknown): string | undefined {

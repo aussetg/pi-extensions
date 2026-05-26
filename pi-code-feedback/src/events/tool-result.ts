@@ -342,7 +342,14 @@ async function captureAfterDiagnosticRefresh(
   return lspService.diagnosticsForFileDetailed(filePath, content, {
     timeoutMs: inlineDiagnosticTimeoutMs(runtime),
     settleMs: inlineDiagnosticSettleMs(runtime),
+    snapshotScope: inlineDiagnosticSnapshotScope(runtime),
   });
+}
+
+function inlineDiagnosticSnapshotScope(runtime: CodeFeedbackRuntime): "file" | "workspace" {
+  return runtime.config.diagnostics.inline === "all" || runtime.config.diagnostics.includeCrossFileRelated
+    ? "workspace"
+    : "file";
 }
 
 function inlineDiagnosticTimeoutMs(runtime: CodeFeedbackRuntime): number {
@@ -447,6 +454,7 @@ function scheduleDelayedDiagnosticsIfNeeded(
   void lspService.diagnosticsForFileDetailed(completed.filePath, finalContent, {
     timeoutMs: Math.max(runtime.config.diagnostics.delayedTimeoutMs, runtime.config.diagnostics.timeoutMs),
     settleMs: runtime.config.diagnostics.settleMs,
+    snapshotScope: inlineDiagnosticSnapshotScope(runtime),
   }).then((refresh) => {
     completed.timing = addTimingPhase(completed.timing, "delayed.diagnostics", Date.now() - delayedStartedAt);
     if (!runtime.config.enabled || !runtime.config.lsp.enabled) return;

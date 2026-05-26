@@ -150,7 +150,8 @@ function renderCodeActions(text: string, theme: ThemeLike, expanded: boolean, tr
     const id = typeof action.id === "string" ? action.id : "?";
     const kind = typeof action.kind === "string" ? ` ${action.kind}` : "";
     const applyable = action.applyable === true ? fg(theme, "success", "applyable") : fg(theme, "dim", "preview-only");
-    out.push(`${fg(theme, "accent", id)} ${title}${fg(theme, "dim", kind)} ${applyable}`);
+    const resolve = action.requiresResolve === true ? fg(theme, "dim", " resolves-on-apply") : "";
+    out.push(`${fg(theme, "accent", id)} ${title}${fg(theme, "dim", kind)} ${applyable}${resolve}`);
   }
   if (!expanded && actions.length > 5) out.push(fg(theme, "dim", `… ${actions.length - 5} more`));
   if (expanded && truncation) out.push(formatTruncation(theme, truncation));

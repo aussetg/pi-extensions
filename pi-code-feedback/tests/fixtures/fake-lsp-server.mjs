@@ -59,7 +59,7 @@ function handleMessage(message) {
         capabilities: {
           textDocumentSync: mode === "incremental-log" || mode === "sync-log" ? 2 : 1,
           diagnosticProvider: { interFileDependencies: false, workspaceDiagnostics: false },
-          codeActionProvider: true,
+          codeActionProvider: codeActionProviderCapability(mode),
           hoverProvider: true,
           renameProvider: true,
           semanticTokensProvider: semanticTokensEnabled(mode) ? {
@@ -87,15 +87,16 @@ function handleMessage(message) {
   if (message.id !== undefined && message.method === "textDocument/codeAction") {
     const diagnostics = message.params?.context?.diagnostics;
     const hasDiagnostics = Array.isArray(diagnostics) && diagnostics.length > 0;
-    const result = mode === "empty" || (mode === "actions-require-diagnostics" && !hasDiagnostics)
+    const result = mode === "empty" || (codeActionsRequireDiagnostics(mode) && !hasDiagnostics)
       ? []
-      : [codeAction(message.params?.textDocument?.uri, { deferEdit: mode === "actions-resolve-require-diagnostics" })];
+      : [codeActionResult(message.params?.textDocument?.uri, { deferEdit: codeActionsDeferEdit(mode) })];
     send({ jsonrpc: "2.0", id: message.id, result });
     return;
   }
 
   if (message.id !== undefined && message.method === "codeAction/resolve") {
     const action = typeof message.params === "object" && message.params ? message.params : {};
+    if (shouldLogCodeActionResolve(mode)) log({ method: message.method, params: message.params });
     send({ jsonrpc: "2.0", id: message.id, result: { ...action, edit: editForUri(action.data?.uri) } });
     return;
   }
@@ -214,6 +215,35 @@ function codeAction(uri, options = {}) {
     data: typeof uri === "string" ? { uri } : undefined,
     edit: options.deferEdit ? undefined : editForUri(uri),
   };
+}
+
+function codeActionResult(uri, options = {}) {
+  if (mode === "actions-resolve-command") return topLevelCommand(uri);
+  return codeAction(uri, options);
+}
+
+function topLevelCommand(uri) {
+  return {
+    title: `${source} command ${code}`,
+    command: `${source}.command.${code}`,
+    arguments: typeof uri === "string" ? [uri] : [],
+  };
+}
+
+function codeActionProviderCapability(value) {
+  return value.startsWith("actions-resolve") ? { resolveProvider: true } : true;
+}
+
+function codeActionsRequireDiagnostics(value) {
+  return value === "actions-require-diagnostics" || value.startsWith("actions-resolve") || value === "actions-defer-no-resolve";
+}
+
+function codeActionsDeferEdit(value) {
+  return value.startsWith("actions-resolve") || value === "actions-defer-no-resolve";
+}
+
+function shouldLogCodeActionResolve(value) {
+  return value === "actions-resolve-log-require-diagnostics";
 }
 
 function editForUri(uri) {

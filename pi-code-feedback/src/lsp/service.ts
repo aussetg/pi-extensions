@@ -3,11 +3,12 @@ import * as path from "node:path";
 import { createDiagnosticSnapshot, flattenDiagnosticSnapshot } from "../diagnostics/snapshots.ts";
 import { readUtf8IfExists } from "../fs.ts";
 import { resolveWorkspaceRootForPath } from "../language-environments.ts";
-import { LSP_RESULT_SERVER_ID_KEY, type DiagnosticRefreshResult, type DiagnosticSnapshot, type LspDiagnostic, type LspServiceStatus, type LspUnavailableServer } from "../types.ts";
-import { LspClient, type SemanticTokensOverlayOptions } from "./client.ts";
+import { LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY, type DiagnosticRefreshResult, type DiagnosticSnapshot, type LspDiagnostic, type LspServiceStatus, type LspUnavailableServer } from "../types.ts";
+import { LspClient, type DiagnosticSnapshotScope, type SemanticTokensOverlayOptions } from "./client.ts";
 import { normalizeDiagnosticRefreshConcurrency } from "./diagnostic-refresh.ts";
 import { externalPositionToLsp, filePathToUri, oneLineLspRange, type LspPosition } from "./positions.ts";
 import { resolveLanguageServer, resolveLanguageServers, type LanguageServerDefinition } from "./servers.ts";
+import { canResolveCodeActionOnApply } from "./workspace-edit.ts";
 
 export interface LspServiceOptions {
   projectRoot: string;
@@ -20,6 +21,7 @@ export interface LspServiceOptions {
 export interface DiagnosticsForFileOptions {
   timeoutMs: number;
   settleMs: number;
+  snapshotScope?: DiagnosticSnapshotScope;
 }
 
 const CODE_ACTION_DIAGNOSTIC_TIMEOUT_MS = 1200;
@@ -93,7 +95,7 @@ export class LspService {
     if (finalContent === undefined) {
       const now = Date.now();
       return {
-        snapshot: mergeSnapshots(clients.map((client) => client.snapshot())),
+        snapshot: diagnosticSnapshotForClients(clients, filePathToUri(resolved), options.snapshotScope),
         fresh: true,
         timedOut: false,
         requestedAt: now,
@@ -105,12 +107,11 @@ export class LspService {
   }
 
   cachedDiagnostics(pathOrAll?: string): DiagnosticSnapshot {
-    const snapshot = this.snapshotAll();
-    if (!pathOrAll || pathOrAll === "all") return snapshot;
+    if (!pathOrAll || pathOrAll === "all") return this.snapshotAll();
 
     const resolved = path.resolve(this.projectRoot, pathOrAll);
     const uri = filePathToUri(resolved);
-    return createDiagnosticSnapshot(snapshot.byUri.get(uri) ?? []);
+    return this.cachedDiagnosticsForUri(uri);
   }
 
   cachedDiagnosticsIfKnown(filePath: string): DiagnosticSnapshot | undefined {
@@ -120,6 +121,11 @@ export class LspService {
     if (!clients) return undefined;
 
     const diagnostics = clients.flatMap((client) => client.diagnosticsForUri(uri));
+    return createDiagnosticSnapshot(diagnostics);
+  }
+
+  private cachedDiagnosticsForUri(uri: string): DiagnosticSnapshot {
+    const diagnostics = [...this.clients.values()].flatMap((client) => client.diagnosticsForUri(uri));
     return createDiagnosticSnapshot(diagnostics);
   }
 
@@ -246,6 +252,7 @@ export class LspService {
     await this.diagnosticsForFileDetailed(resolved, content, {
       timeoutMs: CODE_ACTION_DIAGNOSTIC_TIMEOUT_MS,
       settleMs: 0,
+      snapshotScope: "file",
     }).catch(() => undefined);
 
     const clients = this.getOrCreateClients(resolved);
@@ -262,7 +269,31 @@ export class LspService {
         context: { diagnostics },
       });
     });
-    return this.resolveAndMergeCodeActions(results);
+    return this.mergeCodeActions(results);
+  }
+
+  async resolveCodeAction(filePath: string, action: unknown): Promise<unknown> {
+    if (!isRecord(action) || action.edit !== undefined) return action;
+    if (!canResolveCodeActionOnApply(action)) {
+      throw new Error(`Code action is not resolvable by its source language server: ${path.resolve(this.projectRoot, filePath)}`);
+    }
+
+    const resolved = path.resolve(this.projectRoot, filePath);
+    const client = this.clientForCodeAction(resolved, action);
+    if (!client) {
+      const serverId = codeActionServerId(action);
+      const sessionId = codeActionServerSessionId(action);
+      throw new Error(serverId
+        ? sessionId
+          ? `Code action source server session is no longer live (${serverId} ${sessionId}): ${resolved}`
+          : `Cannot resolve code action without source server session id (${serverId}): ${resolved}`
+        : `Cannot resolve code action without source server id: ${resolved}`);
+    }
+
+    this.armIdleTimer();
+    const resolvedAction = await client.request("codeAction/resolve", stripCodeActionMetadata(action));
+    this.armIdleTimer();
+    return decorateCodeAction(client, mergeCodeActionResolution(action, resolvedAction));
   }
 
   async rename(filePath: string, line: unknown, character: unknown, newName: unknown): Promise<unknown> {
@@ -441,7 +472,7 @@ export class LspService {
     }
 
     for (const waiter of [...job.waiters]) {
-      this.resolveDiagnosticWaiter(job, waiter, result ? diagnosticResultForWaiter(result, waiter) : undefined);
+      this.resolveDiagnosticWaiter(job, waiter, result ? diagnosticResultForWaiter(result, job, waiter) : undefined);
     }
   }
 
@@ -548,25 +579,39 @@ export class LspService {
     return results;
   }
 
-  private async resolveAndMergeCodeActions(results: ClientRequestResult[]): Promise<unknown[]> {
-    const actions = await Promise.all(results.flatMap((result) => {
+  private mergeCodeActions(results: ClientRequestResult[]): unknown[] {
+    const actions = results.flatMap((result) => {
       if (!Array.isArray(result.result)) return [];
-      return result.result.map(async (action) => {
-        const resolvedAction = await this.resolveCodeActionIfNeeded(result.client, action);
-        return decorateCodeAction(result.client, resolvedAction);
-      });
-    }));
+      return result.result.map((action) => decorateCodeAction(result.client, action));
+    });
     this.armIdleTimer();
     return actions;
   }
 
-  private async resolveCodeActionIfNeeded(client: LspClient, action: unknown): Promise<unknown> {
-    if (!isRecord(action) || action.edit !== undefined) return action;
-    try {
-      return await client.request("codeAction/resolve", action);
-    } catch {
-      return action;
+  private clientForCodeAction(filePath: string, action: Record<string, unknown>): LspClient | undefined {
+    const serverId = codeActionServerId(action);
+    const sessionId = codeActionServerSessionId(action);
+    if (!serverId || !sessionId) return undefined;
+
+    return this.existingClientsForFile(filePath).find((client) => (
+      client.id === serverId &&
+      client.getSessionId() === sessionId &&
+      client.getStatus().state === "ready"
+    ));
+  }
+
+  private existingClientsForFile(filePath: string): LspClient[] {
+    const resolved = path.resolve(this.projectRoot, filePath);
+    const root = this.workspaceRootForFile(resolved);
+    const clients: LspClient[] = [];
+
+    for (const resolvedServer of resolveLanguageServers(resolved, this.serverOverrides, root, this.trustedEnvironmentRoots)) {
+      if (!resolvedServer.available) continue;
+      const client = this.clients.get(clientKey(root, resolvedServer.definition));
+      if (client) clients.push(client);
     }
+
+    return clients;
   }
 
   private getOrCreateClient(filePath: string): LspClient | undefined {
@@ -678,21 +723,32 @@ function mergeSnapshots(snapshots: DiagnosticSnapshot[]): DiagnosticSnapshot {
   return createDiagnosticSnapshot(diagnostics);
 }
 
+function diagnosticSnapshotForClients(clients: LspClient[], uri: string, scope: DiagnosticSnapshotScope | undefined): DiagnosticSnapshot {
+  if (scope === "workspace") return mergeSnapshots(clients.map((client) => client.snapshot()));
+  return createDiagnosticSnapshot(clients.flatMap((client) => client.diagnosticsForUri(uri)));
+}
+
 function mergeDiagnosticRefreshOptions(left: DiagnosticsForFileOptions, right: DiagnosticsForFileOptions): DiagnosticsForFileOptions {
   return {
     timeoutMs: Math.max(left.timeoutMs, right.timeoutMs),
     settleMs: Math.max(left.settleMs, right.settleMs),
+    snapshotScope: mergeDiagnosticSnapshotScope(left.snapshotScope, right.snapshotScope),
   };
 }
 
+function mergeDiagnosticSnapshotScope(left: DiagnosticSnapshotScope | undefined, right: DiagnosticSnapshotScope | undefined): DiagnosticSnapshotScope | undefined {
+  return left === "workspace" || right === "workspace" ? "workspace" : undefined;
+}
+
 function canShareRunningDiagnosticJob(job: DiagnosticRefreshJob, options: DiagnosticsForFileOptions): boolean {
+  if (options.snapshotScope === "workspace" && job.options.snapshotScope !== "workspace") return false;
   return options.timeoutMs <= job.options.timeoutMs && options.settleMs <= job.options.settleMs;
 }
 
 function timedOutDiagnosticRefresh(job: DiagnosticRefreshJob, waiter: DiagnosticRefreshWaiter): DiagnosticRefreshResult {
   const now = Date.now();
   return {
-    snapshot: mergeSnapshots(job.clients.map((client) => client.snapshot())),
+    snapshot: diagnosticSnapshotForClients(job.clients, filePathToUri(job.filePath), waiter.options.snapshotScope),
     fresh: false,
     timedOut: true,
     requestedAt: waiter.requestedAt,
@@ -700,11 +756,17 @@ function timedOutDiagnosticRefresh(job: DiagnosticRefreshJob, waiter: Diagnostic
   };
 }
 
-function diagnosticResultForWaiter(result: DiagnosticRefreshResult, waiter: DiagnosticRefreshWaiter): DiagnosticRefreshResult {
+function diagnosticResultForWaiter(result: DiagnosticRefreshResult, job: DiagnosticRefreshJob, waiter: DiagnosticRefreshWaiter): DiagnosticRefreshResult {
+  const uri = filePathToUri(job.filePath);
   return {
     ...result,
+    snapshot: waiter.options.snapshotScope === "workspace" ? result.snapshot : snapshotForUri(result.snapshot, uri),
     requestedAt: waiter.requestedAt,
   };
+}
+
+function snapshotForUri(snapshot: DiagnosticSnapshot, uri: string): DiagnosticSnapshot {
+  return createDiagnosticSnapshot(snapshot.byUri.get(uri) ?? [], snapshot.takenAt);
 }
 
 function diagnosticRefreshKey(filePath: string, content: string): string {
@@ -749,7 +811,42 @@ function toCodeActionDiagnostic(diagnostic: LspDiagnostic): Record<string, unkno
 
 function decorateCodeAction(client: LspClient, action: unknown): unknown {
   if (!isRecord(action)) return action;
-  return { ...action, [LSP_RESULT_SERVER_ID_KEY]: client.id };
+  const sessionId = client.getSessionId();
+  const canResolve = action.edit === undefined && !isTopLevelCommandResult(action) && sessionId && client.canResolveCodeActions();
+  return {
+    ...action,
+    [LSP_RESULT_SERVER_ID_KEY]: client.id,
+    ...(sessionId ? { [LSP_RESULT_SERVER_SESSION_ID_KEY]: sessionId } : {}),
+    ...(canResolve ? { [LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY]: true } : {}),
+  };
+}
+
+function isTopLevelCommandResult(action: Record<string, unknown>): boolean {
+  return typeof action.command === "string";
+}
+
+function codeActionServerId(action: Record<string, unknown>): string | undefined {
+  return typeof action[LSP_RESULT_SERVER_ID_KEY] === "string" ? action[LSP_RESULT_SERVER_ID_KEY] : undefined;
+}
+
+function codeActionServerSessionId(action: Record<string, unknown>): string | undefined {
+  return typeof action[LSP_RESULT_SERVER_SESSION_ID_KEY] === "string" ? action[LSP_RESULT_SERVER_SESSION_ID_KEY] : undefined;
+}
+
+function stripCodeActionMetadata(action: Record<string, unknown>): Record<string, unknown> {
+  const {
+    [LSP_RESULT_SERVER_ID_KEY]: _serverId,
+    [LSP_RESULT_SERVER_SESSION_ID_KEY]: _sessionId,
+    [LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY]: _canResolve,
+    ...rest
+  } = action;
+  return rest;
+}
+
+function mergeCodeActionResolution(original: Record<string, unknown>, resolved: unknown): Record<string, unknown> {
+  const cleanOriginal = stripCodeActionMetadata(original);
+  if (!isRecord(resolved)) return cleanOriginal;
+  return { ...cleanOriginal, ...stripCodeActionMetadata(resolved) };
 }
 
 function diagnosticOverlapsLspRange(diagnostic: LspDiagnostic, range: { start: LspPosition; end: LspPosition }): boolean {

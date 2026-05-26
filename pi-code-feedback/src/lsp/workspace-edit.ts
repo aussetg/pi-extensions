@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { LSP_RESULT_SERVER_ID_KEY } from "../types.ts";
+import { LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY } from "../types.ts";
 import { uriToFilePath, type LspPosition, type LspRange } from "./positions.ts";
 
 export interface AppliedTextEdit {
@@ -122,9 +122,16 @@ function planWorkspaceEdit(editsByPath: Map<string, CollectedEdit[]>): PlannedFi
   return planned;
 }
 
+export function canResolveCodeActionOnApply(action: Record<string, unknown>): boolean {
+  return action.edit === undefined &&
+    typeof action[LSP_RESULT_SERVER_ID_KEY] === "string" &&
+    typeof action[LSP_RESULT_SERVER_SESSION_ID_KEY] === "string" &&
+    action[LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY] === true;
+}
+
 export function selectCodeActionForApply(actions: unknown, query: unknown): { action?: Record<string, unknown>; error?: string; candidates: Record<string, unknown>[] } {
   const all = Array.isArray(actions) ? actions.filter(isRecord) : [];
-  const withEdits = all.filter((action) => isWorkspaceEdit(action.edit));
+  const withEdits = all.filter((action) => isWorkspaceEdit(action.edit) || canResolveCodeActionOnApply(action));
   const queryText = typeof query === "string" ? query.trim().toLowerCase() : "";
   const candidates = queryText.length > 0 ? withEdits.filter((action) => codeActionMatches(action, queryText)) : withEdits;
 
@@ -132,8 +139,8 @@ export function selectCodeActionForApply(actions: unknown, query: unknown): { ac
     return {
       candidates: withEdits,
       error: queryText.length > 0
-        ? `No code action with a WorkspaceEdit matched query "${query}".`
-        : "No returned code action contains a WorkspaceEdit that pi-code-feedback can apply safely.",
+        ? `No code action with a WorkspaceEdit or resolvable edit matched query "${query}".`
+        : "No returned code action contains or can resolve a WorkspaceEdit that pi-code-feedback can apply safely.",
     };
   }
 

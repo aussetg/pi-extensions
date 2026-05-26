@@ -20,5 +20,5 @@ Diagnostic refreshes are queued globally and run across different files with a d
 
 Inline feedback is appended to `result.content` for the model and mirrored as structured metadata under `result.details.piCodeFeedback` for renderers.
 
-For languages with multiple configured servers, diagnostics and read-only `/lsp` requests fan out across the matching servers; code actions are tagged with their source server and listed with session-local ids so `codeAction/apply` can apply the selected action directly.
+For languages with multiple configured servers, diagnostics and read-only `/lsp` requests fan out across the matching servers; code actions are tagged with their source server and listed with session-local ids, resolving deferred edits only when `codeAction/apply` applies the selected action.
 

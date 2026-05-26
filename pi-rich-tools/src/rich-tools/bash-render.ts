@@ -294,9 +294,10 @@ class BashResultComponent implements Component {
   render(width: number): string[] {
     if (!this.theme) return [];
 
-    const output = stripBashModelExitStatusForDisplay(
+    const rawOutput = stripBashModelExitStatusForDisplay(
       normalizeLineEndings(rememberedBashAnsiOutput(this.context) ?? textContent(this.result) ?? ""),
-    ).trim();
+    );
+    const output = stripPiBashTruncationFooterForDisplay(rawOutput, this.result.details).trim();
     const warning = bashTruncationNotice(this.result.details, this.theme);
     if (!output && !warning) return [];
 
@@ -1000,8 +1001,7 @@ function isExploring(parsed: ParsedShellCommand[]): boolean {
 
 function shouldSuppressExplorationOutput(result: ToolResultLike, context?: ShellContextLike): boolean {
   const parsed = parsedBashCommand(bashCommandArg(context?.args), context?.toolCallId);
-  if (!isExploring(parsed) || hasBashTruncationNotice(result.details)) return false;
-  return true;
+  return isExploring(parsed);
 }
 
 function shouldDelayBashCallRendering(args: unknown, context?: ShellContextLike): boolean {
@@ -1386,7 +1386,15 @@ function bashTruncationNotice(details: unknown, theme: ThemeLike): string | unde
   return warnings.length > 0 ? theme.fg("warning", `[${warnings.join(". ")}]`) : undefined;
 }
 
-function hasBashTruncationNotice(details: unknown): boolean {
+function stripPiBashTruncationFooterForDisplay(text: string, details: unknown): string {
+  if (!hasStructuredBashTruncationNotice(details)) return text;
+  return text.trimEnd().replace(
+    /(?:^|\n)[ \t]*\[Showing (?:(?:lines \d+-\d+ of \d+(?: \([^)]+\))?)|(?:last [^\]\n]+))\. Full output: [^\]\n]+\][ \t]*$/,
+    "",
+  );
+}
+
+function hasStructuredBashTruncationNotice(details: unknown): boolean {
   if (!isRecord(details)) return false;
   const truncation = details.truncation;
   return hasFullOutputPath(details)

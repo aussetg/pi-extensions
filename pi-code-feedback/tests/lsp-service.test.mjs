@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { LspClient } from "../src/lsp/client.ts";
 import { createLspService } from "../src/lsp/service.ts";
 import { selectCodeActionForApply } from "../src/lsp/workspace-edit.ts";
-import { LSP_RESULT_SERVER_ID_KEY } from "../src/types.ts";
+import { LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY } from "../src/types.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fakeServer = path.join(here, "fixtures", "fake-lsp-server.mjs");
@@ -75,6 +75,55 @@ test("diagnostics for a Python file are merged from ty and Ruff clients", async 
     assert.equal(tyClient?.lastError, undefined);
     assert.equal(tyClient?.lastServerLog?.level, "warning");
     assert.match(tyClient?.lastServerLog?.message ?? "", /WARN fake server warning/);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("file diagnostic refresh snapshots only the requested URI unless workspace scope is requested", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-scope-"));
+  const firstPath = path.join(root, "first.py");
+  const secondPath = path.join(root, "second.py");
+  await writeFile(firstPath, "first = 1\n", "utf8");
+  await writeFile(secondPath, "second = 2\n", "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1"],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    await service.diagnosticsForFileDetailed(firstPath, await readFile(firstPath, "utf8"), {
+      timeoutMs: 1000,
+      settleMs: 0,
+    });
+
+    const secondRefresh = await service.diagnosticsForFileDetailed(secondPath, await readFile(secondPath, "utf8"), {
+      timeoutMs: 1000,
+      settleMs: 0,
+    });
+
+    assert.deepEqual([...secondRefresh.snapshot.byUri.keys()], [pathToFileURL(secondPath).href]);
+    assert.deepEqual([...service.cachedDiagnostics(secondPath).byUri.keys()], [pathToFileURL(secondPath).href]);
+
+    const workspaceRefresh = await service.diagnosticsForFileDetailed(secondPath, await readFile(secondPath, "utf8"), {
+      timeoutMs: 1000,
+      settleMs: 0,
+      snapshotScope: "workspace",
+    });
+
+    assert.deepEqual(
+      [...workspaceRefresh.snapshot.byUri.keys()].sort(),
+      [pathToFileURL(firstPath).href, pathToFileURL(secondPath).href].sort(),
+    );
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });
@@ -350,6 +399,7 @@ test("timed out LSP requests send a cancel notification", async () => {
 test("code actions for a Python file are merged from ty and Ruff clients", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-actions-"));
   const filePath = path.join(root, "probe.py");
+  const logPath = path.join(root, "lsp.jsonl");
   await writeFile(filePath, "import os\n", "utf8");
 
   const service = createLspService({
@@ -362,7 +412,7 @@ test("code actions for a Python file are merged from ty and Ruff clients", async
       },
       "python-ruff": {
         command: process.execPath,
-        args: [fakeServer, "Ruff", "F401", "2", "", "actions-resolve-require-diagnostics"],
+        args: [fakeServer, "Ruff", "F401", "2", "", "actions-resolve-log-require-diagnostics", logPath],
       },
     },
   });
@@ -373,10 +423,127 @@ test("code actions for a Python file are merged from ty and Ruff clients", async
     assert.equal(actions.length, 2);
     assert.deepEqual(actions.map((action) => action[LSP_RESULT_SERVER_ID_KEY]).sort(), ["python", "python-ruff"]);
     assert.deepEqual(actions.map((action) => action.title).sort(), ["Ruff fix F401", "ty fix T100"]);
-    assert.equal(actions.every((action) => action.edit), true);
+    assert.equal(actions.filter((action) => action.edit).length, 1);
+    const deferred = actions.find((action) => action.title === "Ruff fix F401");
+    assert.equal(deferred?.[LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY], true);
+    assert.equal((await readJsonLog(logPath)).some((entry) => entry.method === "codeAction/resolve"), false);
 
     const selection = selectCodeActionForApply(actions, "python-ruff");
     assert.equal(selection.action?.title, "Ruff fix F401");
+    assert.equal(selection.action?.edit, undefined);
+
+    const resolved = await service.resolveCodeAction(filePath, selection.action);
+    assert.ok(resolved.edit);
+    const entries = await waitForJsonLog(logPath, (entries) => entries.some((entry) => entry.method === "codeAction/resolve"));
+    assert.equal(entries.filter((entry) => entry.method === "codeAction/resolve").length, 1);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("edit-less code actions are not applyable unless the source server advertised resolve", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-actions-no-resolve-"));
+  const filePath = path.join(root, "probe.py");
+  await writeFile(filePath, "import os\n", "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "actions-defer-no-resolve"],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    const actions = await service.codeActions(filePath, 1, 1);
+    assert.equal(actions.length, 1);
+    assert.equal(actions[0].edit, undefined);
+    assert.equal(actions[0][LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY], undefined);
+
+    const selection = selectCodeActionForApply(actions, "py");
+    assert.equal(selection.action, undefined);
+    assert.match(selection.error, /WorkspaceEdit or resolvable edit/);
+    await assert.rejects(
+      () => service.resolveCodeAction(filePath, actions[0]),
+      /not resolvable by its source language server/,
+    );
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("top-level command actions are not treated as resolvable edits", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-actions-command-"));
+  const filePath = path.join(root, "probe.py");
+  await writeFile(filePath, "import os\n", "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "actions-resolve-command"],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    const actions = await service.codeActions(filePath, 1, 1);
+    assert.equal(actions.length, 1);
+    assert.equal(actions[0].title, "py command T100");
+    assert.equal(actions[0].command, "py.command.T100");
+    assert.equal(actions[0].edit, undefined);
+    assert.equal(actions[0][LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY], undefined);
+
+    const selection = selectCodeActionForApply(actions, "py");
+    assert.equal(selection.action, undefined);
+    assert.match(selection.error, /WorkspaceEdit or resolvable edit/);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("deferred code actions are stale after their source LSP session is gone", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-actions-session-"));
+  const filePath = path.join(root, "probe.py");
+  const logPath = path.join(root, "lsp.jsonl");
+  await writeFile(filePath, "import os\n", "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "actions-resolve-log-require-diagnostics", logPath],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    const actions = await service.codeActions(filePath, 1, 1);
+    const selection = selectCodeActionForApply(actions, "py");
+    assert.equal(selection.action?.title, "py fix T100");
+    assert.equal(typeof selection.action?.[LSP_RESULT_SERVER_ID_KEY], "string");
+    assert.equal(typeof selection.action?.[LSP_RESULT_SERVER_SESSION_ID_KEY], "string");
+
+    await service.shutdownAll();
+    await assert.rejects(
+      () => service.resolveCodeAction(filePath, selection.action),
+      /source server session is no longer live/,
+    );
+    assert.equal(service.getStatus().clients.length, 0);
+    assert.equal((await readJsonLog(logPath)).some((entry) => entry.method === "codeAction/resolve"), false);
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });
