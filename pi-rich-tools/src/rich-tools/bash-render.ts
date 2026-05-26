@@ -49,6 +49,7 @@ const BASH_PREVIEW_LINES = 5;
 const BASH_INPUT_PREVIEW_LINES = 12;
 const BASH_INPUT_PREVIEW_SOURCE_LINES = 12;
 const BASH_INPUT_PREVIEW_CHARS = 3000;
+const BASH_OUTPUT_SKIPPED_COUNT_MAX_CHARS = 256 * 1024;
 const MAX_REMEMBERED_ANSI_OUTPUTS = 200;
 const MAX_REMEMBERED_BASH_CALLS = 500;
 const rememberedAnsiOutputByToolCallId = new Map<string, string>();
@@ -89,6 +90,17 @@ type BashSummary = {
   command: string;
   parsed: ParsedShellCommand[];
   exploratory: boolean;
+};
+
+type BashOutputPreview = {
+  lines: string[];
+  collapsed: boolean;
+  skipped?: BashSkippedOutput;
+};
+
+type BashSkippedOutput = {
+  lines: number;
+  exact: boolean;
 };
 
 export function rememberBashAnsiOutput(toolCallId: string, output: string | undefined): void {
@@ -382,17 +394,119 @@ function bashOutputPreviewLines(
   context?: ShellContextLike,
 ): string[] {
   const bgColor = toolBackgroundColor(context);
-  const visualLines = output
-    .split("\n")
-    .flatMap((line) => wrapStyledLine(styleShellOutputLine(line, color, bgColor, theme), width));
 
-  if (expanded || visualLines.length <= BASH_PREVIEW_LINES) return visualLines;
+  if (expanded) {
+    return output
+      .split("\n")
+      .flatMap((line) => wrapStyledLine(styleShellOutputLine(line, color, bgColor, theme), width));
+  }
 
-  const skipped = visualLines.length - BASH_PREVIEW_LINES;
-  const hint =
-    theme.fg("muted", `... (${skipped} earlier lines,`) +
-    ` ${keyHint("app.tools.expand", "to expand")})`;
-  return [truncateToWidth(hint, width, "..."), ...visualLines.slice(-BASH_PREVIEW_LINES)];
+  const preview = collapsedBashOutputPreviewLines(output, width, color, bgColor, theme);
+  if (!preview.collapsed) return preview.lines;
+
+  const hint = bashOutputCollapseHint(preview.skipped, width, theme);
+  return [hint, ...preview.lines];
+}
+
+function collapsedBashOutputPreviewLines(
+  output: string,
+  width: number,
+  color: "error" | "toolOutput",
+  bgColor: string,
+  theme: ThemeLike,
+): BashOutputPreview {
+  const tailLines: string[] = [];
+  let skippedWrappedLines = 0;
+  let earliestRenderedStart = output.length;
+  let end = output.length;
+  let reachedStart = false;
+
+  while (tailLines.length <= BASH_PREVIEW_LINES) {
+    const newline = output.lastIndexOf("\n", end - 1);
+    const start = newline < 0 ? 0 : newline + 1;
+    const wantedLines = Math.max(1, BASH_PREVIEW_LINES + 1 - tailLines.length);
+    const rendered = tailWrappedShellOutputLine(output, start, end, width, wantedLines, color, bgColor, theme);
+
+    skippedWrappedLines += rendered.skippedLines;
+    tailLines.unshift(...rendered.lines);
+    earliestRenderedStart = start;
+    if (newline < 0) reachedStart = true;
+
+    if (rendered.skippedLines > 0 || tailLines.length > BASH_PREVIEW_LINES) break;
+    if (reachedStart) break;
+
+    end = newline;
+  }
+
+  if (reachedStart && skippedWrappedLines === 0 && tailLines.length <= BASH_PREVIEW_LINES) {
+    return { lines: tailLines, collapsed: false };
+  }
+
+  const overRenderedLines = Math.max(0, tailLines.length - BASH_PREVIEW_LINES);
+  const skipped = skippedBashOutputSummary(
+    output,
+    earliestRenderedStart,
+    reachedStart,
+    skippedWrappedLines + overRenderedLines,
+  );
+
+  return {
+    lines: tailLines.slice(-BASH_PREVIEW_LINES),
+    collapsed: true,
+    skipped,
+  };
+}
+
+function tailWrappedShellOutputLine(
+  output: string,
+  start: number,
+  end: number,
+  width: number,
+  wantedLines: number,
+  color: "error" | "toolOutput",
+  bgColor: string,
+  theme: ThemeLike,
+): { lines: string[]; skippedLines: number } {
+  const renderLine = (text: string) => wrapStyledLine(styleShellOutputLine(text, color, bgColor, theme), width);
+  const wrapped = renderLine(output.slice(start, end));
+  const lines = wrapped.slice(-wantedLines);
+  const skippedLines = Math.max(0, wrapped.length - lines.length);
+  return { lines, skippedLines };
+}
+
+function skippedBashOutputSummary(
+  output: string,
+  earliestRenderedStart: number,
+  reachedStart: boolean,
+  exactRenderedSkippedLines: number,
+): BashSkippedOutput | undefined {
+  if (reachedStart) return { lines: Math.max(1, exactRenderedSkippedLines), exact: true };
+
+  const skippedSourceLines = skippedSourceLinesBefore(output, earliestRenderedStart);
+  if (skippedSourceLines === undefined) return undefined;
+  return {
+    lines: Math.max(1, skippedSourceLines + exactRenderedSkippedLines),
+    exact: false,
+  };
+}
+
+function skippedSourceLinesBefore(text: string, endExclusive: number): number | undefined {
+  if (endExclusive <= 0) return 0;
+  if (endExclusive > BASH_OUTPUT_SKIPPED_COUNT_MAX_CHARS) return undefined;
+
+  let count = 0;
+  for (let index = 0; index < endExclusive; index += 1) {
+    if (text.charCodeAt(index) === 10) count += 1;
+  }
+  return count;
+}
+
+function bashOutputCollapseHint(skipped: BashSkippedOutput | undefined, width: number, theme: ThemeLike): string {
+  const summary = skipped === undefined
+    ? "earlier output"
+    : `${skipped.exact ? "" : "at least "}${skipped.lines} earlier ${skipped.lines === 1 ? "line" : "lines"}`;
+  const hint = theme.fg("muted", `... (${summary},`) + ` ${keyHint("app.tools.expand", "to expand")})`;
+  return truncateToWidth(hint, width, "...");
 }
 
 function wrapStyledLine(line: string, width: number): string[] {
