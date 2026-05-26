@@ -4,7 +4,7 @@ import { computeTouchedRanges } from "../diagnostics/ranges.ts";
 import { diagnosticSeverityRank, flattenDiagnosticSnapshot, readDiagnosticSnapshotFromDetails } from "../diagnostics/snapshots.ts";
 import { mapTouchedRangesThroughFormatting } from "../format/mapping.ts";
 import type { FormatService } from "../format/service.ts";
-import { readUtf8IfExists } from "../fs.ts";
+import { formatBytes, readUtf8IfSmall, type ReadUtf8Result } from "../fs.ts";
 import type { LspService } from "../lsp/service.ts";
 import { displayPathFromRoot, resolveInputPath, shouldTrackFile } from "../paths.ts";
 import { addTimingPhase, createTimingRecorder, type TimingRecorder } from "../perf.ts";
@@ -61,17 +61,36 @@ export async function handleToolResult(
   const timing = createTimingRecorder(pending?.timing);
   if (event.isError) return;
 
-  const afterAgentContent = timing.measure("tool_result.read_after", () => readUtf8IfExists(filePath));
-  if (afterAgentContent === undefined) return;
+  const afterRead = timing.measure("tool_result.read_after", () => readUtf8IfSmall(filePath));
+  const afterAgentContent = afterRead.content;
+  if (afterAgentContent === undefined) {
+    const skippedReason = fileReadSkippedReason(afterRead);
+    if (!skippedReason) return;
+
+    lspService?.forgetFile(filePath);
+    const completed = completedEditWithSkippedExactFeedback({
+      pending,
+      id: pending?.id ?? event.toolCallId ?? `${runtime.turnIndex}:${runtime.writeIndex}:${toolName}:${filePath}:result`,
+      toolName,
+      filePath,
+      runtime,
+      skippedReason,
+    });
+    completed.timing = timing.snapshot();
+    timing.measure("tool_result.record_completed", () => recordCompletedEdit(runtime, completed));
+    completed.timing = timing.snapshot();
+    return appendInlineFeedback(event, completed, runtime, timing);
+  }
 
   const detailsDiff = readDetailsDiff(event.details);
-  let touchedRanges = timing.measure("tool_result.touched_ranges", () => computeTouchedRanges({
+  const rangeComputationResult = timing.measure("tool_result.touched_ranges", () => computeTouchedRanges({
     filePath,
     beforeContent: pending?.beforeContent,
     afterContent: afterAgentContent,
     toolName,
     detailsDiff,
   }));
+  let touchedRanges = rangeComputationResult.ranges;
 
   const formatter = await timing.measureAsync("tool_result.format", () => maybeFormatFile(formatService, runtime, filePath, afterAgentContent, touchedRanges.length > 0));
   const finalContent = formatter?.finalContent ?? afterAgentContent;
@@ -91,7 +110,7 @@ export async function handleToolResult(
     writeIndex: pending?.writeIndex ?? runtime.writeIndex,
     startedAt: pending?.startedAt ?? Date.now(),
     completedAt: Date.now(),
-    detailsDiffPresent: detailsDiff !== undefined,
+    rangeComputation: rangeComputationResult.computation,
     formatter: summarizeFormatter(formatter),
   };
 
@@ -147,12 +166,35 @@ async function handleApplyPatchToolResult(
         forgetOriginalPathIfMoved(lspService, pending, filePath);
         continue;
       }
-      const afterAgentContent = result.type === "delete_file" ? undefined : timing.measure("tool_result.read_after", () => readUtf8IfExists(filePath));
-      if (result.type !== "delete_file" && afterAgentContent === undefined) continue;
-
       const detailsDiff = typeof result.diff === "string" && result.diff.length > 0 ? result.diff : undefined;
-      let touchedRanges = afterAgentContent === undefined
-        ? []
+      const afterRead = result.type === "delete_file" ? undefined : timing.measure("tool_result.read_after", () => readUtf8IfSmall(filePath));
+      const afterAgentContent = afterRead?.content;
+      if (result.type !== "delete_file" && afterAgentContent === undefined) {
+        const skippedReason = fileReadSkippedReason(afterRead);
+        if (skippedReason) lspService?.forgetFile(filePath);
+        if (skippedReason) {
+          const completed = completedEditWithSkippedExactFeedback({
+            pending,
+            id: pending?.id ?? pendingId,
+            toolName: "apply_patch",
+            filePath,
+            runtime,
+            skippedReason,
+            applyPatchOperationIndex: index,
+            originalPath: pending?.originalPath,
+          });
+          completed.timing = timing.snapshot();
+          timing.measure("tool_result.record_completed", () => recordCompletedEdit(runtime, completed));
+          completed.timing = timing.snapshot();
+          completedEdits.push(completed);
+          timingsByEditId.set(completed.id, timing);
+        }
+        forgetOriginalPathIfMoved(lspService, pending, filePath);
+        continue;
+      }
+
+      const rangeComputationResult = afterAgentContent === undefined
+        ? undefined
         : timing.measure("tool_result.touched_ranges", () => computeTouchedRanges({
             filePath,
             beforeContent: pending?.beforeContent,
@@ -160,6 +202,7 @@ async function handleApplyPatchToolResult(
             toolName: "apply_patch",
             detailsDiff,
           }));
+      let touchedRanges = rangeComputationResult?.ranges ?? [];
 
       const formatter = afterAgentContent === undefined ? undefined : await timing.measureAsync("tool_result.format", () => maybeFormatFile(formatService, runtime, filePath, afterAgentContent, touchedRanges.length > 0));
       const finalContent = formatter?.finalContent ?? afterAgentContent;
@@ -180,7 +223,7 @@ async function handleApplyPatchToolResult(
         startedAt: pending?.startedAt ?? Date.now(),
         completedAt: Date.now(),
         skippedReason: result.type === "delete_file" ? "deleted" : undefined,
-        detailsDiffPresent: detailsDiff !== undefined,
+        rangeComputation: rangeComputationResult?.computation,
         formatter: summarizeFormatter(formatter),
         applyPatchOperationIndex: index,
         originalPath: pending?.originalPath,
@@ -241,6 +284,51 @@ function forgetOriginalPathIfMoved(lspService: LspService | undefined, pending: 
 
 function pathEquals(left: string, right: string): boolean {
   return path.resolve(left) === path.resolve(right);
+}
+
+function fileReadSkippedReason(result: ReadUtf8Result | undefined): string | undefined {
+  if (!result?.skippedReason) return undefined;
+  if (result.skippedReason === "missing") return undefined;
+  if (result.skippedReason === "too-large") {
+    const size = result.size === undefined ? "unknown size" : formatBytes(result.size);
+    const limit = result.limitBytes === undefined ? "limit" : formatBytes(result.limitBytes);
+    return `skipped large file (${size} > ${limit})`;
+  }
+  switch (result.skippedReason) {
+    case "binary":
+      return "skipped binary file";
+    case "not-file":
+      return "skipped non-regular file";
+    case "read-error":
+      return "skipped unreadable file";
+  }
+}
+
+function completedEditWithSkippedExactFeedback(input: {
+  pending: PendingEdit | undefined;
+  id: string;
+  toolName: CompletedEdit["toolName"];
+  filePath: string;
+  runtime: CodeFeedbackRuntime;
+  skippedReason: string;
+  applyPatchOperationIndex?: number;
+  originalPath?: string;
+}): CompletedEdit {
+  return {
+    id: input.id,
+    toolName: input.toolName,
+    filePath: input.filePath,
+    beforeContent: input.pending?.beforeContent,
+    afterContent: undefined,
+    touchedRanges: [],
+    turnIndex: input.pending?.turnIndex ?? input.runtime.turnIndex,
+    writeIndex: input.pending?.writeIndex ?? input.runtime.writeIndex,
+    startedAt: input.pending?.startedAt ?? Date.now(),
+    completedAt: Date.now(),
+    skippedReason: input.skippedReason,
+    applyPatchOperationIndex: input.applyPatchOperationIndex,
+    originalPath: input.originalPath,
+  };
 }
 
 async function captureAfterDiagnosticRefresh(
@@ -501,6 +589,7 @@ function toCodeFeedbackEditDetails(runtime: CodeFeedbackRuntime, edit: Completed
     filePath: edit.filePath,
     displayPath,
     touchedRanges: edit.touchedRanges,
+    rangeComputation: edit.rangeComputation,
     timing: edit.timing,
     formatter: edit.formatter,
     diagnostics: filter

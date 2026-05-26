@@ -130,7 +130,7 @@ export function registerLspTool(pi: PiApi, runtime: CodeFeedbackRuntime, lspServ
               filePath: edit.filePath,
               toolName: edit.toolName,
               touchedRanges: edit.touchedRanges,
-              detailsDiffPresent: edit.detailsDiffPresent,
+              rangeComputation: edit.rangeComputation,
               diagnosticFilter: edit.diagnosticFilter?.summary,
             })),
           });

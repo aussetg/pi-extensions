@@ -5,6 +5,7 @@ import {
   wrapTextWithAnsi,
   type Component,
 } from "@earendil-works/pi-tui";
+import { createHash } from "node:crypto";
 import type {
   ApplyPatchDetails,
   ApplyPatchOperation,
@@ -16,7 +17,7 @@ import { prepareApplyPatchArguments } from "./patch-envelope.ts";
 import { firstChangedLineFromDiff } from "./diff-lines.ts";
 import { PierreInlineDiffComponent } from "./pierre/component.ts";
 import { getPierreRendererConfig } from "./pierre/config.ts";
-import { buildPierreNumberedDiffPayload } from "./pierre/metadata.ts";
+import { buildPierreNumberedDiffPayload, MAX_DIFF_INPUT_BYTES } from "./pierre/metadata.ts";
 import type { PierreDiffPayload } from "./pierre/types.ts";
 import { shortenPathForDisplay, validatePatchPath } from "./util.ts";
 
@@ -92,7 +93,9 @@ function summarizeOperationsArgs(args: unknown): {
   if (
     op.type === "update_file" &&
     typeof op.diff === "string" &&
-    op.diff.length > 0
+    op.diff.length > 0 &&
+    op.diff.length <= MAX_RENDER_PATCH_PARSE_BYTES &&
+    Buffer.byteLength(op.diff, "utf8") <= MAX_RENDER_PATCH_PARSE_BYTES
   ) {
     return {
       operationCount: 1,
@@ -102,6 +105,32 @@ function summarizeOperationsArgs(args: unknown): {
   }
 
   return { operationCount: 1, headerPath };
+}
+
+function oversizedPatchText(args: unknown): { bytes: number } | undefined {
+  const text = patchTextFromArgs(args);
+  if (!text) return undefined;
+  const bytes = Buffer.byteLength(text, "utf8");
+  return bytes > MAX_RENDER_PATCH_PARSE_BYTES ? { bytes } : undefined;
+}
+
+function patchTextFromArgs(args: unknown): string | undefined {
+  if (typeof args === "string") return args;
+  if (!args || typeof args !== "object") return undefined;
+  const record = args as Record<string, unknown>;
+  for (const key of ["patch", "input", "diff", "text", "operations"] as const) {
+    const value = record[key];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
+}
+
+function formatByteSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kib = bytes / 1024;
+  if (kib < 1024) return `${kib >= 10 ? kib.toFixed(0) : kib.toFixed(1)} KiB`;
+  const mib = kib / 1024;
+  return `${mib >= 10 ? mib.toFixed(0) : mib.toFixed(1)} MiB`;
 }
 
 function opLabel(type: ApplyPatchOpType): "create" | "update" | "delete" {
@@ -232,9 +261,10 @@ function persistentBlankLine(width: number): string {
 
 const DEGRADED_PIERRE_CACHE_LIMIT = 128;
 const degradedPierreCache = new Map<string, PierreDiffPayload | null>();
+const MAX_RENDER_PATCH_PARSE_BYTES = 1_000_000;
 
 function degradedPierreCacheKey(preview: ApplyPatchPreview): string {
-  return `${preview.path}\u0000${preview.diff}`;
+  return `${preview.path}\u0000${preview.diff.length}\u0000${hashString(preview.diff)}`;
 }
 
 function getPierrePreviewPayload(
@@ -242,6 +272,8 @@ function getPierrePreviewPayload(
 ): PierreDiffPayload | undefined {
   if (isPierreDiffPayload(preview.pierre)) return preview.pierre;
   if (!preview.diff) return undefined;
+  if (preview.diff.length > MAX_DIFF_INPUT_BYTES) return undefined;
+  if (Buffer.byteLength(preview.diff, "utf8") > MAX_DIFF_INPUT_BYTES) return undefined;
 
   const key = degradedPierreCacheKey(preview);
   const cached = degradedPierreCache.get(key);
@@ -914,6 +946,10 @@ function fitAnsiLine(line: string, width: number): string {
   return visibleWidth(line) > width ? truncateToWidth(line, width, "") : line;
 }
 
+function hashString(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 16);
+}
+
 function summarizeUnpreviewedResults(
   results: Array<{
     type: ApplyPatchOpType;
@@ -940,6 +976,12 @@ export function renderApplyPatchCall(
 ) {
   let out = theme.fg("toolTitle", theme.bold("apply_patch"));
   try {
+    const oversized = oversizedPatchText(args);
+    if (oversized) {
+      out += " " + theme.fg("muted", `(large patch, ${formatByteSize(oversized.bytes)})`);
+      return new Text(out, 1, 1, toolBackground(theme, context));
+    }
+
     const renderArgs = prepareApplyPatchArguments(args, { recordRepairs: false });
     const { operationCount, headerPath, headerLine } =
       summarizeOperationsArgs(renderArgs);

@@ -1,7 +1,8 @@
 import { pathToFileURL } from "node:url";
-import type { RangeConfidence, TouchedRange, TouchedRangeSource, TrackedToolName } from "../types.ts";
+import type { RangeConfidence, ToolDiffUsage, TouchedRange, TouchedRangeComputation, TouchedRangeSource, TrackedToolName } from "../types.ts";
 
 const MAX_EXACT_CONTENT_DIFF_CELLS = 4_000_000;
+const MAX_TOOL_DIFF_BYTES = 1_000_000;
 
 export interface ComputeTouchedRangesInput {
   filePath: string;
@@ -11,17 +12,70 @@ export interface ComputeTouchedRangesInput {
   detailsDiff?: string;
 }
 
-export function computeTouchedRanges(input: ComputeTouchedRangesInput): TouchedRange[] {
+export interface TouchedRangeComputationResult {
+  ranges: TouchedRange[];
+  computation: TouchedRangeComputation;
+}
+
+export function computeTouchedRanges(input: ComputeTouchedRangesInput): TouchedRangeComputationResult {
   const lineCount = countLines(input.afterContent);
+  const toolDiff = analyzeToolDiff(input.detailsDiff);
 
-  const diffRanges = input.detailsDiff ? rangesFromToolDiff(input.filePath, input.detailsDiff, lineCount) : [];
-  if (diffRanges.length > 0) return diffRanges;
-
-  if (input.beforeContent === undefined) {
-    return [makeRange(input.filePath, 1, Math.max(1, lineCount), "whole-file", "approximate")];
+  if (toolDiff.usable) {
+    const diffRanges = rangesFromToolDiff(input.filePath, input.detailsDiff!, lineCount);
+    if (diffRanges.length > 0) {
+      return {
+        ranges: diffRanges,
+        computation: {
+          source: "tool-diff",
+          confidence: rangeConfidence(diffRanges, "exact"),
+          toolDiff: { present: true, used: true, bytes: toolDiff.bytes, limitBytes: MAX_TOOL_DIFF_BYTES },
+        },
+      };
+    }
+    toolDiff.usage = { present: true, used: false, skippedReason: "unparseable", bytes: toolDiff.bytes, limitBytes: MAX_TOOL_DIFF_BYTES };
   }
 
-  return rangesFromContentDiff(input.filePath, input.beforeContent, input.afterContent);
+  if (input.beforeContent === undefined) {
+    const ranges = [makeRange(input.filePath, 1, Math.max(1, lineCount), "whole-file", "approximate")];
+    return {
+      ranges,
+      computation: {
+        source: "whole-file",
+        confidence: "approximate",
+        toolDiff: toolDiff.usage,
+      },
+    };
+  }
+
+  const ranges = rangesFromContentDiff(input.filePath, input.beforeContent, input.afterContent);
+  return {
+    ranges,
+    computation: {
+      source: "content-diff",
+      confidence: rangeConfidence(ranges, "exact"),
+      toolDiff: toolDiff.usage,
+    },
+  };
+}
+
+function analyzeToolDiff(diff: string | undefined): { usable: boolean; bytes?: number; usage: ToolDiffUsage } {
+  if (typeof diff !== "string" || diff.length === 0) return { usable: false, usage: { present: false, used: false } };
+  if (diff.length > MAX_TOOL_DIFF_BYTES) {
+    return {
+      usable: false,
+      usage: { present: true, used: false, skippedReason: "too-large", minBytes: diff.length, limitBytes: MAX_TOOL_DIFF_BYTES },
+    };
+  }
+  const bytes = Buffer.byteLength(diff, "utf8");
+  if (bytes > MAX_TOOL_DIFF_BYTES) {
+    return {
+      usable: false,
+      bytes,
+      usage: { present: true, used: false, skippedReason: "too-large", bytes, limitBytes: MAX_TOOL_DIFF_BYTES },
+    };
+  }
+  return { usable: true, bytes, usage: { present: true, used: false, skippedReason: "unparseable", bytes, limitBytes: MAX_TOOL_DIFF_BYTES } };
 }
 
 export function rangesFromToolDiff(filePath: string, diff: string, maxLine: number): TouchedRange[] {
@@ -141,6 +195,20 @@ function lineNumbersToRanges(
 
   ranges.push(makeRange(filePath, start, end, source, confidence));
   return ranges;
+}
+
+function rangeConfidence(ranges: TouchedRange[], fallback: RangeConfidence): RangeConfidence {
+  let confidence = fallback;
+  for (const range of ranges) {
+    confidence = weakerConfidence(confidence, range.confidence);
+  }
+  return confidence;
+}
+
+function weakerConfidence(left: RangeConfidence, right: RangeConfidence): RangeConfidence {
+  if (left === "approximate" || right === "approximate") return "approximate";
+  if (left === "expanded" || right === "expanded") return "expanded";
+  return "exact";
 }
 
 function changedLinesFromLcs(before: string[], after: string[], offset: number): number[] {

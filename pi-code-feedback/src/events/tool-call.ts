@@ -1,4 +1,4 @@
-import { readUtf8IfExists } from "../fs.ts";
+import { readUtf8IfSmall } from "../fs.ts";
 import type { LspService } from "../lsp/service.ts";
 import { resolveInputPath, shouldTrackFile } from "../paths.ts";
 import { createTimingRecorder } from "../perf.ts";
@@ -31,7 +31,7 @@ export async function handleToolCall(event: ToolCallEvent, ctx: ToolCallContext,
   const writeIndex = nextWriteIndex(runtime);
   const id = event.toolCallId || fallbackEditId(event.toolName, filePath, runtime.turnIndex, writeIndex);
   const timing = createTimingRecorder();
-  const beforeContent = timing.measure("tool_call.read_before", () => readUtf8IfExists(filePath));
+  const beforeContent = timing.measure("tool_call.read_before", () => readUtf8IfSmall(filePath).content);
   const edit: PendingEdit = {
     id,
     toolName: event.toolName,
@@ -67,7 +67,7 @@ async function handleApplyPatchToolCall(event: ToolCallEvent, ctx: ToolCallConte
     if (!shouldTrackFile(operationPath, runtime.projectRoot) && !shouldTrackFile(finalPath, runtime.projectRoot)) continue;
 
     const id = applyPatchOperationId(event.toolCallId, runtime.turnIndex, writeIndex, index);
-    const beforeContent = timing.measure("tool_call.read_before", () => readUtf8IfExists(operationPath));
+    const beforeContent = timing.measure("tool_call.read_before", () => readUtf8IfSmall(operationPath).content);
     const edit: PendingEdit = {
       id,
       toolName: "apply_patch",

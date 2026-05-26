@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
+import { computeTouchedRanges } from "../src/diagnostics/ranges.ts";
 import { createDiagnosticSnapshot } from "../src/diagnostics/snapshots.ts";
 import { diagnosticOverlapsTouchedRange, linkDiagnosticsToTouchedRanges } from "../src/diagnostics/provenance.ts";
+import { createDefaultConfig } from "../src/config.ts";
+import { renderDiagnosticsStatus } from "../src/render.ts";
+import { createRuntime, setProjectRoot } from "../src/runtime.ts";
 
 function uri(path) {
   return pathToFileURL(path).href;
@@ -115,4 +119,56 @@ test("diagnostic linking honors maxInline while retaining full summary", () => {
     hiddenUnrelated: 0,
     hiddenByLimit: 1,
   });
+});
+
+test("oversized tool diffs record skipped provenance and fall back to content diff", () => {
+  const filePath = "/tmp/pi-code-feedback-large-diff.ts";
+  const result = computeTouchedRanges({
+    filePath,
+    beforeContent: "export const value = 1;\n",
+    afterContent: "export const value = 2;\n",
+    toolName: "edit",
+    detailsDiff: "+".repeat(1_000_001),
+  });
+
+  assert.equal(result.computation.source, "content-diff");
+  assert.equal(result.computation.toolDiff.present, true);
+  assert.equal(result.computation.toolDiff.used, false);
+  assert.equal(result.computation.toolDiff.skippedReason, "too-large");
+  assert.equal(result.ranges.length, 1);
+  assert.equal(result.ranges[0].source, "content-diff");
+});
+
+test("diagnostics status reports the range source actually used", () => {
+  const filePath = "/tmp/probe.ts";
+  const runtime = createRuntime(createDefaultConfig());
+  setProjectRoot(runtime, "/tmp");
+  runtime.completedEdits.push({
+    id: "edit-1",
+    toolName: "edit",
+    filePath,
+    beforeContent: "one\n",
+    afterContent: "two\n",
+    touchedRanges: [{
+      uri: uri(filePath),
+      filePath,
+      startLine: 1,
+      endLine: 1,
+      source: "content-diff",
+      confidence: "exact",
+    }],
+    turnIndex: 1,
+    writeIndex: 1,
+    startedAt: 1,
+    completedAt: 2,
+    rangeComputation: {
+      source: "content-diff",
+      confidence: "exact",
+      toolDiff: { present: true, used: false, skippedReason: "too-large", minBytes: 1_000_001, limitBytes: 1_000_000 },
+    },
+  });
+
+  const text = renderDiagnosticsStatus(runtime);
+  assert.match(text, /content diff \(tool diff too large\)/);
+  assert.doesNotMatch(text, /\[edit, tool diff\]/);
 });

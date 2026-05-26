@@ -3,7 +3,7 @@ import { formatTouchedRange } from "./diagnostics/ranges.ts";
 import { countDiagnosticSnapshotDiagnostics, flattenDiagnosticSnapshot } from "./diagnostics/snapshots.ts";
 import { displayPathFromRoot } from "./paths.ts";
 import type { CodeFeedbackRuntime } from "./runtime.ts";
-import { LSP_METHODS, type CompletedEdit, type DelayedDiagnosticFeedback, type DiagnosticFilterResult, type DiagnosticSeverity, type DiagnosticSnapshot, type FormatServiceStatus, type FormatterSummary, type LinkedDiagnostic, type LspDiagnostic, type LspServiceStatus } from "./types.ts";
+import { LSP_METHODS, type CompletedEdit, type DelayedDiagnosticFeedback, type DiagnosticFilterResult, type DiagnosticSeverity, type DiagnosticSnapshot, type FormatServiceStatus, type FormatterSummary, type LinkedDiagnostic, type LspDiagnostic, type LspServiceStatus, type TouchedRangeComputation } from "./types.ts";
 
 export interface FooterTheme {
   fg?: (color: string, text: string) => string;
@@ -142,7 +142,7 @@ export function renderDiagnosticsStatus(runtime: CodeFeedbackRuntime, target?: s
       : edit.touchedRanges.length > 0
       ? edit.touchedRanges.map(formatTouchedRange).join(", ")
       : "none";
-    const diffSource = edit.skippedReason ?? (edit.detailsDiffPresent ? "tool diff" : "content diff");
+    const diffSource = edit.skippedReason ?? formatRangeComputation(edit.rangeComputation);
     const operation = edit.applyPatchOperationIndex === undefined ? "" : ` op#${edit.applyPatchOperationIndex + 1}`;
     lines.push(`    ${relative}: ${ranges} [${edit.toolName}${operation}, ${diffSource}]`);
     if (edit.formatter?.changed || edit.formatter?.errors.length) {
@@ -157,13 +157,33 @@ export function renderDiagnosticsStatus(runtime: CodeFeedbackRuntime, target?: s
   return lines.join("\n");
 }
 
+function formatRangeComputation(computation: TouchedRangeComputation | undefined): string {
+  if (!computation) return "unknown";
+  const source = computation.source === "tool-diff"
+    ? "tool diff"
+    : computation.source === "content-diff"
+      ? "content diff"
+      : "whole file";
+  const toolDiff = computation.toolDiff;
+  if (toolDiff.present && !toolDiff.used) {
+    const reason = toolDiff.skippedReason === "too-large" ? "tool diff too large" : "tool diff unparseable";
+    return `${source} (${reason})`;
+  }
+  return source;
+}
+
 export function renderInlineDiagnosticFeedback(runtime: CodeFeedbackRuntime, edit: CompletedEdit): string | undefined {
   const filter = edit.diagnosticFilter;
   const hasLinkedDiagnostics = Boolean(filter && filter.linked.length > 0);
   const hasFormatterFeedback = Boolean(edit.formatter?.changed || edit.formatter?.errors.length);
-  if (!hasLinkedDiagnostics && !hasFormatterFeedback) return undefined;
+  const hasSkippedFeedback = Boolean(edit.skippedReason?.startsWith("skipped "));
+  if (!hasLinkedDiagnostics && !hasFormatterFeedback && !hasSkippedFeedback) return undefined;
 
   const lines = ["pi-code-feedback:"];
+
+  if (hasSkippedFeedback && edit.skippedReason) {
+    lines.push(`  ${edit.skippedReason}; exact edit feedback skipped`);
+  }
 
   if (edit.formatter?.changed || edit.formatter?.errors.length) {
     lines.push(`  ${formatFormatterSummary(edit.formatter, runtime.projectRoot, edit.filePath)}`);

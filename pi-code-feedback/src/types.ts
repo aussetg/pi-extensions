@@ -50,6 +50,36 @@ export type TouchedRangeSource =
   | "whole-file"
   | "formatter-map";
 
+export type TouchedRangeComputationSource = Exclude<TouchedRangeSource, "formatter-map">;
+
+export type ToolDiffSkippedReason = "too-large" | "unparseable";
+
+export type ToolDiffUsage =
+  | {
+      present: false;
+      used: false;
+    }
+  | {
+      present: true;
+      used: true;
+      bytes?: number;
+      limitBytes?: number;
+    }
+  | {
+      present: true;
+      used: false;
+      skippedReason: ToolDiffSkippedReason;
+      bytes?: number;
+      minBytes?: number;
+      limitBytes?: number;
+    };
+
+export interface TouchedRangeComputation {
+  source: TouchedRangeComputationSource;
+  confidence: RangeConfidence;
+  toolDiff: ToolDiffUsage;
+}
+
 export type DiagnosticLinkReason =
   | "overlap"
   | "related-information"
@@ -214,6 +244,7 @@ export interface CodeFeedbackEditDetails {
   filePath: string;
   displayPath: string;
   touchedRanges: TouchedRange[];
+  rangeComputation?: TouchedRangeComputation;
   timing?: CodeFeedbackTiming;
   formatter?: FormatterSummary;
   diagnostics?: CodeFeedbackDiagnosticDetails;
@@ -263,7 +294,7 @@ export interface CompletedEdit {
   completedAt: number;
   timing?: CodeFeedbackTiming;
   skippedReason?: string;
-  detailsDiffPresent: boolean;
+  rangeComputation?: TouchedRangeComputation;
   formatter?: FormatterSummary;
   diagnosticFilter?: DiagnosticFilterResult;
   applyPatchOperationIndex?: number;

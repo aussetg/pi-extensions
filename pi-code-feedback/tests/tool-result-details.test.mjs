@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { createDefaultConfig } from "../src/config.ts";
 import { createDiagnosticSnapshot } from "../src/diagnostics/snapshots.ts";
 import { handleToolResult } from "../src/events/tool-result.ts";
+import { DEFAULT_TRACKED_FILE_MAX_BYTES } from "../src/fs.ts";
 import { createRuntime, setProjectRoot } from "../src/runtime.ts";
 import { CODE_FEEDBACK_DETAILS_KEY } from "../src/types.ts";
 
@@ -82,6 +83,48 @@ test("inline diagnostics are mirrored into structured tool-result details", asyn
       hiddenUnrelated: 0,
       hiddenByLimit: 0,
     });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("large write results emit skipped exact-feedback notice", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-large-write-"));
+  const filePath = path.join(root, "large.txt");
+  await writeFile(filePath, "x".repeat(DEFAULT_TRACKED_FILE_MAX_BYTES + 1), "utf8");
+
+  const runtime = createRuntime(createDefaultConfig());
+  setProjectRoot(runtime, root);
+
+  let forgottenPath;
+  const lspService = {
+    forgetFile(file) {
+      forgottenPath = file;
+    },
+  };
+
+  try {
+    const result = await handleToolResult(
+      {
+        toolName: "write",
+        toolCallId: "write-large",
+        input: { path: "large.txt" },
+        content: [{ type: "text", text: "Wrote large.txt" }],
+        details: { existing: "preserved" },
+        isError: false,
+      },
+      { cwd: root },
+      runtime,
+      lspService,
+    );
+
+    assert.ok(result);
+    assert.equal(forgottenPath, filePath);
+    assert.equal(runtime.completedEdits.at(-1)?.skippedReason?.startsWith("skipped large file"), true);
+    assert.match(result.content.at(-1).text, /skipped large file/);
+    assert.match(result.content.at(-1).text, /exact edit feedback skipped/);
+    assert.equal(result.details.existing, "preserved");
+    assert.match(result.details[CODE_FEEDBACK_DETAILS_KEY].inlineText, /skipped large file/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

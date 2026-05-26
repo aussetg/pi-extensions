@@ -5,6 +5,10 @@ import { Text } from "@mariozechner/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+declare const Buffer: any;
+declare const process: { env: Record<string, string | undefined> };
+type BinaryBuffer = any;
+
 /**
  * Extension for image vision support.
  *
@@ -15,13 +19,58 @@ import * as path from "node:path";
  * Configuration via ~/.pi/agent/vision-config.json:
  * {
  *   "model": "GLM-5V",           // Vision model ID to use
- *   "provider": "zai"           // Provider (optional, inferred from model)
+ *   "provider": "zai",          // Provider (optional, inferred from model)
+ *   "imagePreset": "high",      // local resize policy: low, high, auto, or preserve; default high
+ *   "apiDetail": "auto",        // optional API hint: low, high, auto, or omit; omitted by default
+ *   "maxRawBytes": 104857600,    // hard local input cap; default 100 MiB
+ *   "maxPayloadBytes": 10485760, // post-resize upload cap; default 10 MiB
+ *   "maxDimension": 2048         // optional explicit local dimension cap
  * }
+ *
+ * Legacy "detail" is still accepted: low/high/auto map to both local preset and API hint;
+ * original maps to local preserve plus API auto.
  */
 
 interface VisionConfig {
   model?: string;
   provider?: string;
+  detail?: LegacyImageDetail;
+  imagePreset?: LocalImagePreset | "original";
+  apiDetail?: ApiImageDetail | "omit";
+  maxRawBytes?: number;
+  maxPayloadBytes?: number;
+  maxDimension?: number;
+}
+
+type ApiImageDetail = "low" | "high" | "auto";
+type LegacyImageDetail = ApiImageDetail | "original";
+type LocalImagePreset = "low" | "high" | "auto" | "preserve";
+
+interface ResolvedImageConfig {
+  localPreset: LocalImagePreset;
+  apiDetail?: ApiImageDetail;
+  maxRawBytes: number;
+  maxPayloadBytes: number;
+  maxDimension: number;
+  resizeByDimension: boolean;
+}
+
+interface ImageDimensions {
+  width: number;
+  height: number;
+}
+
+interface PreparedImage {
+  buffer: BinaryBuffer;
+  mimeType: string;
+  localPreset: LocalImagePreset;
+  apiDetail?: ApiImageDetail;
+  resized: boolean;
+  originalBytes: number;
+  inputBytes: number;
+  originalDimensions?: ImageDimensions;
+  inputDimensions?: ImageDimensions;
+  note?: string;
 }
 
 interface ToolResultEvent {
@@ -38,22 +87,416 @@ interface ReadImageDetails {
   visionProvider: string;
   imagePath: string;
   prompt: string;
+  imagePreset?: LocalImagePreset;
+  apiDetail?: ApiImageDetail;
+  detail?: LegacyImageDetail;
+  resized?: boolean;
+  originalBytes?: number;
+  inputBytes?: number;
+  originalDimensions?: string;
+  inputDimensions?: string;
+  imageNote?: string;
 }
 
 const TOOL_NAME = "read_image";
 const CONFIG_FILE = "~/.pi/agent/vision-config.json";
+const DEFAULT_LOCAL_IMAGE_PRESET: LocalImagePreset = "high";
+const RAW_IMAGE_HARD_LIMIT_BYTES = 100 * 1024 * 1024;
+const VISION_IMAGE_PAYLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
+const IMAGE_DIMENSION_HEADER_BYTES = 512 * 1024;
+
+let cachedConfig: { path: string; mtimeMs: number; config: VisionConfig } | undefined;
+let cachedImageMagickCommand: string | null | undefined;
 
 function loadConfig(): VisionConfig {
   try {
     const configPath = CONFIG_FILE.replace("~", process.env.HOME || "");
-    if (fs.existsSync(configPath)) {
-      const content = fs.readFileSync(configPath, "utf-8");
-      return JSON.parse(content);
-    }
+    const stat = fs.statSync(configPath);
+    if (!stat.isFile()) return {};
+    if (cachedConfig?.path === configPath && cachedConfig.mtimeMs === stat.mtimeMs) return cachedConfig.config;
+    const content = fs.readFileSync(configPath, "utf-8");
+    const config = JSON.parse(content) as VisionConfig;
+    cachedConfig = { path: configPath, mtimeMs: stat.mtimeMs, config };
+    return config;
   } catch (err) {
     // Ignore errors, fall back to defaults
   }
   return {};
+}
+
+function resolveImageConfig(config: VisionConfig): ResolvedImageConfig {
+  const localPreset = localPresetFromConfig(config);
+  const explicitMaxDimension = optionalPositiveLimit(config.maxDimension);
+  return {
+    localPreset,
+    apiDetail: requestedApiDetailFromConfig(config),
+    maxRawBytes: positiveLimit(config.maxRawBytes, RAW_IMAGE_HARD_LIMIT_BYTES),
+    maxPayloadBytes: positiveLimit(config.maxPayloadBytes, VISION_IMAGE_PAYLOAD_LIMIT_BYTES),
+    maxDimension: Math.max(1, Math.trunc(explicitMaxDimension ?? maxDimensionForLocalPreset(localPreset))),
+    resizeByDimension: explicitMaxDimension !== undefined || localPreset !== "preserve",
+  };
+}
+
+function localPresetFromConfig(config: VisionConfig): LocalImagePreset {
+  const raw = config.imagePreset ?? config.detail;
+  if (raw === "low" || raw === "high" || raw === "auto" || raw === "preserve") return raw;
+  if (raw === "original") return "preserve";
+  return DEFAULT_LOCAL_IMAGE_PRESET;
+}
+
+function requestedApiDetailFromConfig(config: VisionConfig): ApiImageDetail | undefined {
+  // API-level image detail is provider-specific. Send it only when explicitly
+  // configured instead of guessing from OpenAI-compatible transport names.
+  if (config.apiDetail === "omit") return undefined;
+  if (config.apiDetail === "low" || config.apiDetail === "high" || config.apiDetail === "auto") return config.apiDetail;
+  if (config.imagePreset === undefined) {
+    if (config.detail === "low" || config.detail === "high" || config.detail === "auto") return config.detail;
+    if (config.detail === "original") return "auto";
+  }
+  return undefined;
+}
+
+function maxDimensionForLocalPreset(preset: LocalImagePreset): number {
+  switch (preset) {
+    case "low":
+      return 768;
+    case "high":
+      return 2048;
+    case "auto":
+    case "preserve":
+      return 6000;
+  }
+}
+
+async function prepareImageForVision(filePath: string, config: VisionConfig, signal?: AbortSignal): Promise<PreparedImage> {
+  const options = resolveImageConfig(config);
+  const stat = fs.statSync(filePath);
+  if (!stat.isFile()) throw new Error(`Image path is not a regular file: ${filePath}`);
+  if (stat.size > options.maxRawBytes) {
+    throw new Error(`Image file is too large to read locally: ${formatBytes(stat.size)} > ${formatBytes(options.maxRawBytes)}`);
+  }
+
+  const originalDimensions = readImageDimensions(filePath, stat.size);
+  const targetMax = options.maxDimension;
+  const exceedsDimension = options.resizeByDimension && originalDimensions ? Math.max(originalDimensions.width, originalDimensions.height) > targetMax : false;
+  const exceedsPayload = stat.size > options.maxPayloadBytes;
+  const originalMimeType = mimeTypeForPath(filePath);
+
+  if (exceedsDimension || exceedsPayload) {
+    try {
+      const resized = await resizeImageWithImageMagick(filePath, targetMax, options.maxPayloadBytes, signal);
+      const inputDimensions = imageDimensionsFromBuffer(resized) ?? scaledDimensions(originalDimensions, targetMax);
+      if (resized.length > options.maxPayloadBytes) {
+        throw new Error(`resized image is still too large: ${formatBytes(resized.length)} > ${formatBytes(options.maxPayloadBytes)}`);
+      }
+      return {
+        buffer: resized,
+        mimeType: "image/jpeg",
+        localPreset: options.localPreset,
+        apiDetail: options.apiDetail,
+        resized: true,
+        originalBytes: stat.size,
+        inputBytes: resized.length,
+        originalDimensions,
+        inputDimensions,
+        note: `resized for ${options.localPreset} preset`,
+      };
+    } catch (err) {
+      throw new Error(`${resizeRequirementSummary(options, stat.size, originalDimensions)}; resize failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  const buffer = fs.readFileSync(filePath);
+  if (buffer.length > options.maxPayloadBytes) {
+    throw new Error(`Image payload is too large: ${formatBytes(buffer.length)} > ${formatBytes(options.maxPayloadBytes)}`);
+  }
+  return {
+    buffer,
+    mimeType: originalMimeType,
+    localPreset: options.localPreset,
+    apiDetail: options.apiDetail,
+    resized: false,
+    originalBytes: stat.size,
+    inputBytes: buffer.length,
+    originalDimensions,
+    inputDimensions: originalDimensions ?? imageDimensionsFromBuffer(buffer),
+  };
+}
+
+function positiveLimit(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function optionalPositiveLimit(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function resizeRequirementSummary(options: ResolvedImageConfig, originalBytes: number, dimensions: ImageDimensions | undefined): string {
+  if (originalBytes > options.maxPayloadBytes) {
+    return `Image exceeds payload limit (${formatBytes(originalBytes)} > ${formatBytes(options.maxPayloadBytes)})`;
+  }
+  if (dimensions && Math.max(dimensions.width, dimensions.height) > options.maxDimension) {
+    return `Image exceeds ${options.localPreset} dimension limit (${formatDimensions(dimensions)} > ${options.maxDimension}px)`;
+  }
+  return "Image resize is required";
+}
+
+function mimeTypeForPath(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  const mimeTypes: Record<string, string> = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+  };
+  return mimeTypes[ext] || "image/png";
+}
+
+function readImageDimensions(filePath: string, size: number): ImageDimensions | undefined {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const bytesToRead = Math.min(Math.max(0, size), IMAGE_DIMENSION_HEADER_BYTES);
+    const buffer = Buffer.alloc(bytesToRead);
+    const bytesRead = fs.readSync(fd, buffer, 0, bytesToRead, 0);
+    return imageDimensionsFromBuffer(buffer.subarray(0, bytesRead));
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Ignore close errors while reading best-effort metadata.
+      }
+    }
+  }
+}
+
+function imageDimensionsFromBuffer(buffer: BinaryBuffer): ImageDimensions | undefined {
+  return pngDimensions(buffer) ?? jpegDimensions(buffer) ?? gifDimensions(buffer) ?? webpDimensions(buffer);
+}
+
+function pngDimensions(buffer: BinaryBuffer): ImageDimensions | undefined {
+  if (buffer.length < 24) return undefined;
+  if (buffer.readUInt32BE(0) !== 0x89504e47 || buffer.readUInt32BE(4) !== 0x0d0a1a0a) return undefined;
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+}
+
+function gifDimensions(buffer: BinaryBuffer): ImageDimensions | undefined {
+  if (buffer.length < 10) return undefined;
+  const signature = buffer.toString("ascii", 0, 6);
+  if (signature !== "GIF87a" && signature !== "GIF89a") return undefined;
+  return { width: buffer.readUInt16LE(6), height: buffer.readUInt16LE(8) };
+}
+
+function jpegDimensions(buffer: BinaryBuffer): ImageDimensions | undefined {
+  if (buffer.length < 4 || buffer[0] !== 0xff || buffer[1] !== 0xd8) return undefined;
+  let offset = 2;
+  while (offset + 3 < buffer.length) {
+    if (buffer[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+    while (offset < buffer.length && buffer[offset] === 0xff) offset += 1;
+    const marker = buffer[offset++];
+    if (marker === undefined || marker === 0xd9 || marker === 0xda) break;
+    if (offset + 1 >= buffer.length) break;
+    const length = buffer.readUInt16BE(offset);
+    offset += 2;
+    if (length < 2 || offset + length - 2 > buffer.length) break;
+    if (isJpegStartOfFrame(marker) && offset + 5 < buffer.length) {
+      return { height: buffer.readUInt16BE(offset + 1), width: buffer.readUInt16BE(offset + 3) };
+    }
+    offset += length - 2;
+  }
+  return undefined;
+}
+
+function isJpegStartOfFrame(marker: number): boolean {
+  return (marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) || (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf);
+}
+
+function webpDimensions(buffer: BinaryBuffer): ImageDimensions | undefined {
+  if (buffer.length < 30 || buffer.toString("ascii", 0, 4) !== "RIFF" || buffer.toString("ascii", 8, 12) !== "WEBP") return undefined;
+  const type = buffer.toString("ascii", 12, 16);
+  if (type === "VP8X" && buffer.length >= 30) {
+    return { width: readUInt24LE(buffer, 24) + 1, height: readUInt24LE(buffer, 27) + 1 };
+  }
+  if (type === "VP8 " && buffer.length >= 30 && buffer[23] === 0x9d && buffer[24] === 0x01 && buffer[25] === 0x2a) {
+    return { width: buffer.readUInt16LE(26) & 0x3fff, height: buffer.readUInt16LE(28) & 0x3fff };
+  }
+  if (type === "VP8L" && buffer.length >= 25 && buffer[20] === 0x2f) {
+    const bits = buffer.readUInt32LE(21);
+    return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 };
+  }
+  return undefined;
+}
+
+function readUInt24LE(buffer: BinaryBuffer, offset: number): number {
+  return buffer[offset]! | (buffer[offset + 1]! << 8) | (buffer[offset + 2]! << 16);
+}
+
+function scaledDimensions(dimensions: ImageDimensions | undefined, maxDimension: number): ImageDimensions | undefined {
+  if (!dimensions) return undefined;
+  const scale = Math.min(1, maxDimension / Math.max(dimensions.width, dimensions.height));
+  return {
+    width: Math.max(1, Math.round(dimensions.width * scale)),
+    height: Math.max(1, Math.round(dimensions.height * scale)),
+  };
+}
+
+async function resizeImageWithImageMagick(filePath: string, maxDimension: number, outputLimit: number, signal?: AbortSignal): Promise<BinaryBuffer> {
+  const command = findImageMagickCommand();
+  if (!command) throw new Error("ImageMagick not found (need magick or convert)");
+  if (signal?.aborted) throw new Error("Image analysis was cancelled.");
+  const { spawn } = await import("node:" + "child_process") as any;
+
+  const inputPath = `${filePath}[0]`;
+  const args = [
+    inputPath,
+    "-auto-orient",
+    "-resize",
+    `${maxDimension}x${maxDimension}>`,
+    "-strip",
+    "-background",
+    "white",
+    "-alpha",
+    "remove",
+    "-alpha",
+    "off",
+    "jpeg:-",
+  ];
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const chunks: BinaryBuffer[] = [];
+    const stderr: BinaryBuffer[] = [];
+    let bytes = 0;
+    let settled = false;
+
+    const finish = (err: Error | undefined, buffer?: BinaryBuffer) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", onAbort);
+      if (err) reject(err);
+      else if (!buffer || buffer.length === 0) reject(new Error("ImageMagick produced no output"));
+      else resolve(buffer);
+    };
+    const onAbort = () => {
+      child.kill();
+      finish(new Error("Image analysis was cancelled."));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+
+    child.stdout.on("data", (chunk: BinaryBuffer) => {
+      bytes += chunk.length;
+      if (bytes > outputLimit) {
+        child.kill();
+        finish(new Error(`resized image exceeds payload budget (${formatBytes(bytes)} > ${formatBytes(outputLimit)})`));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    child.stderr.on("data", (chunk: BinaryBuffer) => stderr.push(chunk));
+    child.on("error", (err: Error) => finish(err));
+    child.on("close", (code: number | null) => {
+      if (settled) return;
+      if (code !== 0) {
+        const message = Buffer.concat(stderr).toString("utf8").trim() || `ImageMagick exited with code ${code}`;
+        finish(new Error(message));
+        return;
+      }
+      finish(undefined, Buffer.concat(chunks));
+    });
+  });
+}
+
+function findImageMagickCommand(): string | null {
+  if (cachedImageMagickCommand !== undefined) return cachedImageMagickCommand;
+  for (const command of ["magick", "convert"]) {
+    const resolved = findOnPath(command);
+    if (resolved) {
+      cachedImageMagickCommand = resolved;
+      return resolved;
+    }
+  }
+  cachedImageMagickCommand = null;
+  return null;
+}
+
+function findOnPath(command: string): string | undefined {
+  for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, command);
+    try {
+      if (!fs.statSync(candidate).isFile()) continue;
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // keep searching
+    }
+  }
+  return undefined;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kib = bytes / 1024;
+  if (kib < 1024) return `${kib >= 10 ? kib.toFixed(0) : kib.toFixed(1)} KiB`;
+  const mib = kib / 1024;
+  return `${mib >= 10 ? mib.toFixed(0) : mib.toFixed(1)} MiB`;
+}
+
+function formatDimensions(dimensions: ImageDimensions | undefined): string | undefined {
+  return dimensions ? `${dimensions.width}×${dimensions.height}` : undefined;
+}
+
+function imageDetails(base: ReadImageDetails, image?: PreparedImage): ReadImageDetails {
+  if (!image) return base;
+  return {
+    ...base,
+    imagePreset: image.localPreset,
+    apiDetail: image.apiDetail,
+    resized: image.resized,
+    originalBytes: image.originalBytes,
+    inputBytes: image.inputBytes,
+    originalDimensions: formatDimensions(image.originalDimensions),
+    inputDimensions: formatDimensions(image.inputDimensions),
+    imageNote: image.note,
+  };
+}
+
+function imagePreparationSummary(details: ReadImageDetails | undefined): string {
+  if (!details) return "";
+  const localPreset = details.imagePreset ?? legacyLocalPreset(details.detail);
+  if (!localPreset) return "";
+  const size = details.originalBytes !== undefined && details.inputBytes !== undefined && details.originalBytes !== details.inputBytes
+    ? `${formatBytes(details.originalBytes)}→${formatBytes(details.inputBytes)}`
+    : details.inputBytes !== undefined
+      ? formatBytes(details.inputBytes)
+      : "";
+  const dimensions = details.originalDimensions && details.inputDimensions && details.originalDimensions !== details.inputDimensions
+    ? `${details.originalDimensions}→${details.inputDimensions}`
+    : details.inputDimensions ?? details.originalDimensions ?? "";
+  const apiDetail = details.apiDetail ? `api ${details.apiDetail}` : "";
+  return [`${localPreset} preset`, apiDetail, dimensions, size, details.resized ? "resized" : "original"].filter(Boolean).join(", ");
+}
+
+function legacyLocalPreset(detail: LegacyImageDetail | undefined): LocalImagePreset | undefined {
+  if (detail === "original") return "preserve";
+  return detail;
+}
+
+function firstLines(text: string, maxLines: number): { text: string; truncated: boolean } {
+  let lines = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) !== 10) continue;
+    lines += 1;
+    if (lines >= maxLines) return { text: text.slice(0, index), truncated: true };
+  }
+  return { text, truncated: false };
 }
 
 async function findVisionModel(ctx: ExtensionContext): Promise<{ provider: string; model: string } | null> {
@@ -159,35 +602,7 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      // Read and encode image
-      let imageBuffer: Buffer;
-      let mimeType: string;
-
-      try {
-        imageBuffer = fs.readFileSync(absolutePath);
-        const ext = path.extname(absolutePath).toLowerCase();
-        const mimeTypes: Record<string, string> = {
-          ".png": "image/png",
-          ".jpg": "image/jpeg",
-          ".jpeg": "image/jpeg",
-          ".gif": "image/gif",
-          ".webp": "image/webp",
-        };
-        mimeType = mimeTypes[ext] || "image/png";
-      } catch (err) {
-        return {
-          content: [{ type: "text", text: `Failed to read image: ${err}` }],
-          details: {
-            visionModel: visionModelId,
-            visionProvider: provider,
-            imagePath: params.path,
-            prompt: params.prompt,
-          } as ReadImageDetails,
-          isError: true,
-        };
-      }
-
-      // Get API key & headers
+      // Get API key & headers before doing potentially expensive local resize work.
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
       if (!auth.ok || !auth.apiKey) {
         return {
@@ -195,8 +610,8 @@ export default function (pi: ExtensionAPI) {
             {
               type: "text",
               text: auth.ok
-            ? `No API key available for vision model ${provider}/${visionModelId}. Run /login or set the appropriate environment variable.`
-            : `Auth error for vision model ${provider}/${visionModelId}: ${auth.error}`,
+                ? `No API key available for vision model ${provider}/${visionModelId}. Run /login or set the appropriate environment variable.`
+                : `Auth error for vision model ${provider}/${visionModelId}: ${auth.error}`,
             },
           ],
           details: {
@@ -209,16 +624,40 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
+      // Prepare image payload. The model would resize server-side, but doing the
+      // same obvious resize locally avoids giant base64 bodies and slow uploads.
+      let preparedImage: PreparedImage;
+
+      try {
+        preparedImage = await prepareImageForVision(absolutePath, loadConfig(), signal);
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `Failed to prepare image: ${err instanceof Error ? err.message : String(err)}` }],
+          details: {
+            visionModel: visionModelId,
+            visionProvider: provider,
+            imagePath: params.path,
+            prompt: params.prompt,
+          } as ReadImageDetails,
+          isError: true,
+        };
+      }
+
+      const imageBuffer = preparedImage.buffer;
+      const mimeType = preparedImage.mimeType;
+      const imageContent: Record<string, unknown> = {
+        type: "image",
+        data: imageBuffer.toString("base64"),
+        mimeType,
+      };
+      if (preparedImage.apiDetail) imageContent.detail = preparedImage.apiDetail;
+
       // Build message for vision model
       const userMessage: Message = {
         role: "user",
         content: [
           { type: "text", text: params.prompt },
-          {
-            type: "image",
-            data: imageBuffer.toString("base64"),
-            mimeType: mimeType,
-          },
+          imageContent as any,
         ],
         timestamp: Date.now(),
       };
@@ -230,12 +669,12 @@ export default function (pi: ExtensionAPI) {
         if (response.stopReason === "aborted") {
           return {
             content: [{ type: "text", text: "Image analysis was cancelled." }],
-            details: {
+            details: imageDetails({
               visionModel: visionModelId,
               visionProvider: provider,
               imagePath: params.path,
               prompt: params.prompt,
-            } as ReadImageDetails,
+            }, preparedImage) as ReadImageDetails,
           };
         }
 
@@ -244,12 +683,12 @@ export default function (pi: ExtensionAPI) {
           const errorMsg = response.errorMessage || "Unknown error from vision model";
           return {
             content: [{ type: "text", text: `Vision model error: ${errorMsg}` }],
-            details: {
+            details: imageDetails({
               visionModel: visionModelId,
               visionProvider: provider,
               imagePath: params.path,
               prompt: params.prompt,
-            } as ReadImageDetails,
+            }, preparedImage) as ReadImageDetails,
             isError: true,
           };
         }
@@ -262,23 +701,23 @@ export default function (pi: ExtensionAPI) {
 
         return {
           content: [{ type: "text", text: textContent || "(no response from vision model)" }],
-          details: {
+          details: imageDetails({
             visionModel: visionModelId,
             visionProvider: provider,
             imagePath: params.path,
             prompt: params.prompt,
-          } as ReadImageDetails,
+          }, preparedImage) as ReadImageDetails,
         };
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
         return {
           content: [{ type: "text", text: `Vision model error: ${errorMsg}` }],
-          details: {
+          details: imageDetails({
             visionModel: visionModelId,
             visionProvider: provider,
             imagePath: params.path,
             prompt: params.prompt,
-          } as ReadImageDetails,
+          }, preparedImage) as ReadImageDetails,
           isError: true,
         };
       }
@@ -306,13 +745,16 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (expanded) {
-        const via = details ? ` (via ${details.visionProvider}/${details.visionModel})` : "";
+        const prep = imagePreparationSummary(details);
+        const via = details
+          ? ` (via ${details.visionProvider}/${details.visionModel}${prep ? `, ${prep}` : ""})`
+          : "";
         return new Text(theme.fg("success", "✓") + theme.fg("muted", via) + "\n\n" + theme.fg("toolOutput", text), 0, 0);
       }
 
       // Collapsed view
-      const lines = text.split("\n");
-      const preview = lines.slice(0, 3).join("\n") + (lines.length > 3 ? "\n..." : "");
+      const previewLines = firstLines(text, 3);
+      const preview = previewLines.text + (previewLines.truncated ? "\n..." : "");
       const via = details ? ` ${theme.fg("muted", `(${details.visionProvider}/${details.visionModel})`)}` : "";
       return new Text(theme.fg("success", "✓") + via + "\n" + theme.fg("toolOutput", preview), 0, 0);
     },
