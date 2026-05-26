@@ -85,6 +85,12 @@ type BashCallGroup = {
   invalidate?: () => void;
 };
 
+type BashSummary = {
+  command: string;
+  parsed: ParsedShellCommand[];
+  exploratory: boolean;
+};
+
 export function rememberBashAnsiOutput(toolCallId: string, output: string | undefined): void {
   rememberedAnsiOutputByToolCallId.delete(toolCallId);
   if (output === undefined) return;
@@ -185,7 +191,7 @@ export function rememberToolExecutionStart(toolName: string, toolCallId: string,
     return;
   }
 
-  const summary = summarizeBashArgs(args);
+  const summary = summarizeBashArgs(args, toolCallId);
   if (summary.command.trim() === "") return;
 
   const existing = bashCallRecordById.get(toolCallId);
@@ -359,13 +365,11 @@ function bashCallRenderState(
     };
   }
 
-  const command = bashCommandArg(args);
-  const parsed = parseShellCommand(command);
-  const exploring = isExploring(parsed);
+  const summary = record ?? summarizeBashArgs(args, context?.toolCallId);
   const active = context?.isPartial === true;
-  const lines = exploring
-    ? renderExploringCallLines(parsed, active, theme, context)
-    : renderPlainCommandCallLines(command, active);
+  const lines = summary.exploratory
+    ? renderExploringCallLines(summary.parsed, active, theme, context)
+    : renderPlainCommandCallLines(summary.command, active);
   return { hidden: false, lines, context };
 }
 
@@ -546,7 +550,7 @@ function scanAssistantBashCoalescing(
       continue;
     }
 
-    const summary = summarizeBashArgs(item.arguments);
+    const summary = summarizeBashArgs(item.arguments, item.id);
     if (summary.command.trim() === "" || !summary.exploratory) {
       upsertBashCallRecord(item.id, item.arguments, summary, undefined, generation, markDone, false);
       group = undefined;
@@ -577,10 +581,16 @@ function groupForGeneration(groupId: string | undefined, generation: number): Ba
   return group?.generation === generation ? group : undefined;
 }
 
-function summarizeBashArgs(args: unknown): { command: string; parsed: ParsedShellCommand[]; exploratory: boolean } {
+function summarizeBashArgs(args: unknown, toolCallId?: string): BashSummary {
   const command = bashCommandArg(args);
-  const parsed = parseShellCommand(command);
+  const parsed = parsedBashCommand(command, toolCallId);
   return { command, parsed, exploratory: isExploring(parsed) };
+}
+
+function parsedBashCommand(command: string, toolCallId?: string): ParsedShellCommand[] {
+  const record = toolCallId ? bashCallRecordById.get(toolCallId) : undefined;
+  if (record?.command === command) return record.parsed;
+  return parseShellCommand(command);
 }
 
 function createBashCallGroup(leaderId: string, generation: number): BashCallGroup {
@@ -597,7 +607,7 @@ function createBashCallGroup(leaderId: string, generation: number): BashCallGrou
 function upsertBashCallRecord(
   toolCallId: string,
   args: unknown,
-  summary: { command: string; parsed: ParsedShellCommand[]; exploratory: boolean },
+  summary: BashSummary,
   groupId: string | undefined,
   generation: number,
   done?: boolean,
@@ -621,7 +631,7 @@ function upsertBashCallRecord(
 
 function updateBashCallRecordFromRender(args: unknown, context?: ShellContextLike): BashCallRecord | undefined {
   if (!context?.toolCallId) return undefined;
-  const summary = summarizeBashArgs(args);
+  const summary = summarizeBashArgs(args, context.toolCallId);
   let record = bashCallRecordById.get(context.toolCallId);
   const hadRecord = record !== undefined;
   if (!record) {
@@ -875,7 +885,7 @@ function isExploring(parsed: ParsedShellCommand[]): boolean {
 }
 
 function shouldSuppressExplorationOutput(result: ToolResultLike, context?: ShellContextLike): boolean {
-  const parsed = parseShellCommand(bashCommandArg(context?.args));
+  const parsed = parsedBashCommand(bashCommandArg(context?.args), context?.toolCallId);
   if (!isExploring(parsed) || hasBashTruncationNotice(result.details)) return false;
   return true;
 }
@@ -886,7 +896,7 @@ function shouldDelayBashCallRendering(args: unknown, context?: ShellContextLike)
   const command = bashCommandArg(args).trim();
   if (!command) return true;
 
-  const parsed = parseShellCommand(command);
+  const parsed = parsedBashCommand(command, context.toolCallId);
   if (isExploring(parsed)) return false;
 
   return couldStillBecomeExploratory(command);

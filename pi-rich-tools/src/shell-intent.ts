@@ -28,7 +28,19 @@ type TreeSitterParserConstructor = new () => TreeSitterParser;
 
 let bashParser: TreeSitterParser | null | undefined;
 
+type ParseCacheEntry = { parsed: ParsedShellCommand[]; chars: number };
+type ParseCache = { map: Map<string, ParseCacheEntry>; chars: number };
+
+const MAX_PARSE_CACHE_ENTRIES = 512;
+const MAX_PARSE_CACHE_CHARS = 512 * 1024;
+const MAX_CACHEABLE_COMMAND_CHARS = 16 * 1024;
+const parseCache: ParseCache = { map: new Map(), chars: 0 };
+const fallbackParseCache: ParseCache = { map: new Map(), chars: 0 };
+
 export function parseShellCommand(command: string): ParsedShellCommand[] {
+  const cached = cachedParsedShellCommand(command);
+  if (cached) return cached;
+
   const parsed = parseShellCommandImpl(command).map(compactParsedCommand);
   const deduped: ParsedShellCommand[] = [];
   for (const item of parsed) {
@@ -37,10 +49,73 @@ export function parseShellCommand(command: string): ParsedShellCommand[] {
   }
 
   if (deduped.some((item) => item.type === "unknown")) {
-    return [{ type: "unknown", cmd: command.trim() || command }];
+    const unknownCommand: ParsedShellCommand[] = [{ type: "unknown", cmd: command.trim() || command }];
+    rememberParsedShellCommand(command, unknownCommand);
+    return unknownCommand;
   }
 
+  rememberParsedShellCommand(command, deduped);
   return deduped;
+}
+
+function cachedParsedShellCommand(command: string): ParsedShellCommand[] | undefined {
+  const cache = currentParseCache();
+  const cached = cache.map.get(command);
+  if (!cached) return undefined;
+
+  cache.map.delete(command);
+  cache.map.set(command, cached);
+  return cloneParsedCommands(cached.parsed);
+}
+
+function rememberParsedShellCommand(command: string, parsed: ParsedShellCommand[]): void {
+  if (command.length > MAX_CACHEABLE_COMMAND_CHARS) return;
+
+  const cache = currentParseCache();
+  const previous = cache.map.get(command);
+  if (previous) {
+    cache.chars -= previous.chars;
+    cache.map.delete(command);
+  }
+
+  const entry: ParseCacheEntry = {
+    parsed: cloneParsedCommands(parsed),
+    chars: command.length + parsedCommandsChars(parsed),
+  };
+  if (entry.chars > MAX_PARSE_CACHE_CHARS) return;
+
+  cache.map.set(command, entry);
+  cache.chars += entry.chars;
+  trimParseCache(cache);
+}
+
+function trimParseCache(cache: ParseCache): void {
+  while (cache.map.size > MAX_PARSE_CACHE_ENTRIES || cache.chars > MAX_PARSE_CACHE_CHARS) {
+    const oldest = cache.map.keys().next().value;
+    if (typeof oldest !== "string") return;
+    const entry = cache.map.get(oldest);
+    if (entry) cache.chars -= entry.chars;
+    cache.map.delete(oldest);
+  }
+}
+
+function currentParseCache(): ParseCache {
+  return process.env.PI_RICH_TOOLS_SHELL_INTENT_FALLBACK === "1" ? fallbackParseCache : parseCache;
+}
+
+function cloneParsedCommands(parsed: ParsedShellCommand[]): ParsedShellCommand[] {
+  return parsed.map((item) => ({ ...item }));
+}
+
+function parsedCommandsChars(parsed: ParsedShellCommand[]): number {
+  let chars = 0;
+  for (const item of parsed) {
+    chars += item.type.length + item.cmd.length;
+    if (item.type === "read") chars += item.name.length + item.path.length;
+    else if (item.type === "list_files") chars += item.path?.length ?? 0;
+    else if (item.type === "search") chars += (item.query?.length ?? 0) + (item.path?.length ?? 0);
+  }
+  return chars;
 }
 
 function parseShellCommandImpl(command: string): ParsedShellCommand[] {
