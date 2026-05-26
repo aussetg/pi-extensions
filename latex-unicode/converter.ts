@@ -74,7 +74,6 @@ const arrows: Record<string, string> = {
 	longleftrightarrow: "⟷", Longleftrightarrow: "⟺",
 	rightharpoonup: "⇀", rightharpoondown: "⇁",
 	leftharpoonup: "↼", leftharpoondown: "↽",
-	nearrow: "↗", searrow: "↘",
 	dashrightarrow: "⇥", dashleftarrow: "⇤",
 Rightsquigarrow: "⇝", leftsquigarrow: "⇜",
 };
@@ -115,7 +114,7 @@ const symbols: Record<string, string> = {
 	quad: "  ", qquad: "    ",
 	enspace: " ", thinspace: " ", negthinspace: "!", 
 	nobreakspace: " ", space: " ",
-	nabla: "∇", hbar: "ℏ",
+	hbar: "ℏ",
 	neg: "¬", flat: "♭", natural: "♮", sharp: "♯",
 	primes: "″",
 	imath: "ı", jmath: "ȷ",
@@ -295,8 +294,6 @@ const fontCommands: Record<string, FontCmd> = {
 	textbf: (a) => a, // can't easily bold in plain text
 	textit: (a) => a,
 	texttt: (a) => a,
-	mathsf: (a) => mathsf(a),
-	mathrm: (a) => a,
 	hat: (a) => a + "\u0302",      // combining circumflex
 	bar: (a) => a + "\u0304",      // combining macron
 	vec: (a) => a + "\u20D7",      // combining right arrow above
@@ -806,6 +803,11 @@ interface Segment {
 	content?: string;
 }
 
+export interface LatexUnicodeConversion {
+	text: string;
+	changed: boolean;
+}
+
 interface FenceInfo {
 	fenceChar: "`" | "~";
 	fenceLength: number;
@@ -1047,28 +1049,31 @@ function convertBareLatexCommands(text: string): string {
 	});
 }
 
-/**
- * Check if a string contains LaTeX math
- */
-export function hasLatex(text: string): boolean {
-	return scanSegments(text).some(segment => segment.kind === "inlineMath" || segment.kind === "displayMath");
+function isMathSegment(segment: Segment): boolean {
+	return segment.kind === "inlineMath" || segment.kind === "displayMath";
 }
 
-/**
- * Convert all LaTeX math in text to Unicode equivalents.
- * Returns the converted string.
- */
-export function latexToUnicode(text: string): string {
-	return scanSegments(text)
+function convertSegments(text: string): LatexUnicodeConversion {
+	const segments = scanSegments(text);
+	if (!segments.some(isMathSegment)) return { text, changed: false };
+
+	let changed = false;
+	const converted = segments
 		.map((segment) => {
 			switch (segment.kind) {
 				case "inlineMath":
-				case "displayMath":
-					return convertMathExpr(segment.content ?? "").trim();
-				case "text":
-					// Also handle bare LaTeX commands outside math delimiters when the
-					// surrounding message contains some actual math markup.
-					return convertBareLatexCommands(segment.raw);
+				case "displayMath": {
+					const next = convertMathExpr(segment.content ?? "").trim();
+					if (next !== segment.raw) changed = true;
+					return next;
+				}
+				case "text": {
+					// Also handle bare LaTeX commands outside math delimiters on conversion
+					// paths, but only when the surrounding text contains actual math markup.
+					const next = convertBareLatexCommands(segment.raw);
+					if (next !== segment.raw) changed = true;
+					return next;
+				}
 				case "inlineCode":
 				case "fencedCode":
 				default:
@@ -1076,4 +1081,30 @@ export function latexToUnicode(text: string): string {
 			}
 		})
 		.join("");
+
+	return { text: converted, changed: changed || converted !== text };
+}
+
+/**
+ * Check if a string contains LaTeX math
+ */
+export function hasLatex(text: string): boolean {
+	return scanSegments(text).some(isMathSegment);
+}
+
+/**
+ * Convert a pi message if it contains LaTeX math, returning both the text and
+ * whether it changed. This combines the old hasLatex + latexToUnicode caller
+ * flow into one segment scan.
+ */
+export function convertLatexToUnicode(text: string): LatexUnicodeConversion {
+	return convertSegments(text);
+}
+
+/**
+ * Convert all LaTeX math in text to Unicode equivalents.
+ * Returns the converted string.
+ */
+export function latexToUnicode(text: string): string {
+	return convertSegments(text).text;
 }

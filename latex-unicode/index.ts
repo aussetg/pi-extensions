@@ -9,7 +9,7 @@
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { hasLatex, latexToUnicode } from "./converter";
+import { convertLatexToUnicode } from "./converter";
 
 interface TextBlock {
   type: "text";
@@ -19,13 +19,6 @@ interface TextBlock {
 /** Mutate text blocks in a message's content array. */
 function transformContent(content: unknown): boolean {
   let changed = false;
-
-  if (typeof content === "string") {
-    // User messages can be plain strings — but the object reference
-    // on the message is what the TUI reads, so we'd need to replace
-    // it on the parent. We handle that in the caller.
-    return hasLatex(content);
-  }
 
   if (!Array.isArray(content)) return false;
 
@@ -38,8 +31,9 @@ function transformContent(content: unknown): boolean {
       "text" in block
     ) {
       const tb = block as TextBlock;
-      if (hasLatex(tb.text)) {
-        tb.text = latexToUnicode(tb.text);
+      const converted = convertLatexToUnicode(tb.text);
+      if (converted.changed) {
+        tb.text = converted.text;
         changed = true;
       }
     }
@@ -58,8 +52,9 @@ export default function (pi: ExtensionAPI) {
     const content = (msg as { content: unknown }).content;
 
     if (typeof content === "string") {
-      if (hasLatex(content)) {
-        (msg as { content: string }).content = latexToUnicode(content);
+      const converted = convertLatexToUnicode(content);
+      if (converted.changed) {
+        (msg as { content: string }).content = converted.text;
       }
       return;
     }
