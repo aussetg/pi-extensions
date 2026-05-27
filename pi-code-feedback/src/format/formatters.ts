@@ -39,6 +39,7 @@ const JS_TS_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", 
 const WEB_FORMAT_EXTENSIONS = [...JS_TS_EXTENSIONS, ".json", ".jsonc", ".css", ".scss", ".sass", ".less", ".html", ".htm"];
 const CLANG_FORMAT_EXTENSIONS = [".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"];
 const PYTHON_EXTENSIONS = [".py", ".pyi"];
+const HASKELL_FORMAT_EXTENSIONS = [".hs", ".hs-boot"];
 const LOCK_OR_GENERATED_BASENAMES = new Set([
   "package-lock.json",
   "pnpm-lock.yaml",
@@ -77,6 +78,30 @@ const FORMATTERS: FormatterCandidate[] = [
     extensions: [".zig", ".zon"],
     args: (filePath) => ["fmt", filePath],
     configured: () => true,
+  },
+  {
+    id: "fourmolu",
+    label: "Fourmolu",
+    command: "fourmolu",
+    extensions: HASKELL_FORMAT_EXTENSIONS,
+    args: (filePath) => ["--mode", "inplace", filePath],
+    configured: fourmoluConfigured,
+  },
+  {
+    id: "ormolu",
+    label: "Ormolu",
+    command: "ormolu",
+    extensions: HASKELL_FORMAT_EXTENSIONS,
+    args: (filePath) => ["--mode", "inplace", filePath],
+    configured: ormoluConfigured,
+  },
+  {
+    id: "stylish-haskell",
+    label: "stylish-haskell",
+    command: "stylish-haskell",
+    extensions: HASKELL_FORMAT_EXTENSIONS,
+    args: (filePath) => ["--inplace", filePath],
+    configured: stylishHaskellConfigured,
   },
   {
     id: "clang-format",
@@ -270,6 +295,18 @@ function blackConfigured(filePath: string, projectRoot: string, overrides: Recor
 
 function clangFormatConfigured(filePath: string, projectRoot: string, overrides: Record<string, unknown>): string | undefined | true {
   return findUp(path.dirname(filePath), projectRoot, [".clang-format", "_clang-format"]) ?? forced(overrides, "clang-format");
+}
+
+function fourmoluConfigured(filePath: string, projectRoot: string, overrides: Record<string, unknown>): string | undefined | true {
+  return findUp(path.dirname(filePath), projectRoot, ["fourmolu.yaml"]) ?? forced(overrides, "fourmolu");
+}
+
+function ormoluConfigured(filePath: string, projectRoot: string, overrides: Record<string, unknown>): string | undefined | true {
+  return findUp(path.dirname(filePath), projectRoot, [".ormolu"]) ?? forced(overrides, "ormolu");
+}
+
+function stylishHaskellConfigured(filePath: string, projectRoot: string, overrides: Record<string, unknown>): string | undefined | true {
+  return findUp(path.dirname(filePath), projectRoot, [".stylish-haskell.yaml"]) ?? forced(overrides, "stylish-haskell");
 }
 
 function forced(overrides: Record<string, unknown>, id: string): true | undefined {

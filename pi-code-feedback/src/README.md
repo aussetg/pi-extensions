@@ -8,11 +8,11 @@ Current modules:
 - `runtime.ts` — session state, pending edits, delayed findings
 - `render.ts` — compact human/agent-visible output
 - `events/` — pi lifecycle handlers, including delayed diagnostic context injection
-- `lsp/` — stdio LSP client/service, server detection, LSP-lite tool methods, raw tool output/truncation, safe WorkspaceEdit text-edit application, position helpers
+- `lsp/` — stdio LSP client/service, server detection (including HLS for Haskell), LSP-lite tool methods, raw tool output/truncation, safe WorkspaceEdit text-edit application, position helpers
 - `diagnostics/ranges.ts` — touched-range calculation
 - `diagnostics/provenance.ts` — diagnostic-to-touched-range linking
 - `diagnostics/snapshots.ts` — diagnostic snapshot normalization helpers
-- `format/formatters.ts` — deterministic formatter detection and command resolution
+- `format/formatters.ts` — deterministic formatter detection and command resolution, including Haskell formatters Fourmolu, Ormolu, and stylish-haskell
 - `format/service.ts` — formatter execution and recent formatter status
 - `format/mapping.ts` — touched-range remapping through formatter changes
 - `commands/` — the `/lsp ...` human command

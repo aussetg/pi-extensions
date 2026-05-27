@@ -23,6 +23,7 @@ export interface ResolvedLanguageServer {
 
 const TYPESCRIPT_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"];
 const CLANGD_EXTENSIONS = [".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"];
+const HASKELL_EXTENSIONS = [".hs", ".lhs", ".hs-boot", ".cabal"];
 
 const DEFAULT_SERVERS: LanguageServerDefinition[] = [
   {
@@ -59,6 +60,24 @@ const DEFAULT_SERVERS: LanguageServerDefinition[] = [
     args: [],
     extensions: [".go"],
     languageId: () => "go",
+  },
+  {
+    id: "haskell",
+    command: "haskell-language-server-wrapper",
+    args: ["--lsp"],
+    extensions: HASKELL_EXTENSIONS,
+    languageId: haskellLanguageId,
+    workspaceConfiguration: {
+      haskell: {
+        plugin: {
+          hlint: {
+            globalOn: true,
+            diagnosticsOn: true,
+            codeActionsOn: true,
+          },
+        },
+      },
+    },
   },
   {
     id: "clangd",
@@ -279,5 +298,12 @@ function cssLanguageId(filePath: string): string {
 function clangdLanguageId(filePath: string): string {
   const extension = path.extname(filePath).toLowerCase();
   return extension === ".c" || extension === ".h" ? "c" : "cpp";
+}
+
+function haskellLanguageId(filePath: string): string {
+  const extension = path.extname(filePath).toLowerCase();
+  if (extension === ".lhs") return "literate haskell";
+  if (extension === ".cabal") return "cabal";
+  return "haskell";
 }
 
