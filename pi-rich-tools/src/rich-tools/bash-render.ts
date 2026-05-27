@@ -945,7 +945,7 @@ function parsedActionLines(parsed: ParsedShellCommand[], theme: ThemeLike, conte
       case "read":
         return `${theme.fg("accent", "Read")} ${displayShellPath(item.path, context)}`;
       case "list_files":
-        return `${theme.fg("accent", "List")} ${item.path ? displayShellPath(item.path, context) : item.cmd}`;
+        return `${theme.fg("accent", "List")} ${displayShellPath(item.path ?? ".", context)}`;
       case "search":
         return `${theme.fg("accent", "Search")} ${searchDisplay(item, theme, context)}`;
       case "unknown":
