@@ -119,7 +119,10 @@ export class PierreStatusComponent implements Component {
 
 export class PierreInlineDiffComponent implements Component {
   private payloads: PierreDiffPayload[];
+  private preparedPayloads: PreparedPierrePayload[];
+  private payloadsKey: string;
   private theme: PiThemeLike;
+  private themeName: string | undefined;
   private config: PierreRendererConfig;
   private palette: PierreTerminalPalette;
   private showFileHeaders: boolean;
@@ -140,7 +143,9 @@ export class PierreInlineDiffComponent implements Component {
     options: PierreInlineDiffOptions = {},
   ) {
     this.payloads = normalizePayloads(payloads);
+    freezePayloadsForRender(this.payloads);
     this.theme = theme;
+    this.themeName = theme.name;
     this.explicitShowFileHeaders = options.showFileHeaders;
     this.expandCollapsedHunks = Boolean(options.expandCollapsedHunks);
     this.suppressLeadingSpacing = Boolean(options.suppressLeadingSpacing);
@@ -152,6 +157,8 @@ export class PierreInlineDiffComponent implements Component {
       options.showFileHeaders,
       this.payloads.length,
     );
+    this.preparedPayloads = this.payloads.map(preparePayload);
+    this.payloadsKey = preparedPayloadsKey(this.preparedPayloads);
     this.ingestHighlightedPayloads();
   }
 
@@ -160,35 +167,61 @@ export class PierreInlineDiffComponent implements Component {
     theme: PiThemeLike,
     options: PierreInlineDiffOptions = {},
   ): void {
-    this.payloads = normalizePayloads(payloads);
-    this.theme = theme;
-    this.explicitShowFileHeaders = options.showFileHeaders;
-    this.expandCollapsedHunks = Boolean(options.expandCollapsedHunks);
-    this.suppressLeadingSpacing = Boolean(options.suppressLeadingSpacing);
+    const nextPayloads = normalizePayloads(payloads);
+    const nextConfig = getPierreRendererConfig();
+    const nextExpanded = Boolean(options.expandCollapsedHunks);
+    const nextSuppressSpacing = Boolean(options.suppressLeadingSpacing);
+    const payloadsSame = samePayloadRefs(this.payloads, nextPayloads);
+    const renderInputsSame =
+      payloadsSame &&
+      this.theme === theme &&
+      this.themeName === theme.name &&
+      this.config === nextConfig &&
+      this.explicitShowFileHeaders === options.showFileHeaders &&
+      this.expandCollapsedHunks === nextExpanded &&
+      this.suppressLeadingSpacing === nextSuppressSpacing;
+
     this.invalidateView = options.onInvalidate;
-    this.config = getPierreRendererConfig();
+
+    if (renderInputsSame) return;
+
+    this.payloads = nextPayloads;
+    freezePayloadsForRender(this.payloads);
+    this.theme = theme;
+    this.themeName = theme.name;
+    this.explicitShowFileHeaders = options.showFileHeaders;
+    this.expandCollapsedHunks = nextExpanded;
+    this.suppressLeadingSpacing = nextSuppressSpacing;
+    this.config = nextConfig;
     this.palette = getPierrePalette(theme, this.config);
     this.showFileHeaders = resolveShowFileHeaders(
       this.config,
       options.showFileHeaders,
       this.payloads.length,
     );
+    if (!payloadsSame) {
+      this.preparedPayloads = this.payloads.map(preparePayload);
+      this.payloadsKey = preparedPayloadsKey(this.preparedPayloads);
+    }
     this.ingestHighlightedPayloads();
     this.clearRenderedCache();
   }
 
   render(width: number): string[] {
     this.resetLocalCachesAfterPierreReset();
-    this.config = getPierreRendererConfig();
-    this.palette = getPierrePalette(this.theme, this.config);
-    this.showFileHeaders = resolveShowFileHeaders(
-      this.config,
-      this.explicitShowFileHeaders,
-      this.payloads.length,
-    );
+    const currentConfig = getPierreRendererConfig();
+    if (currentConfig !== this.config) {
+      this.config = currentConfig;
+      this.palette = getPierrePalette(this.theme, this.config);
+      this.showFileHeaders = resolveShowFileHeaders(
+        this.config,
+        this.explicitShowFileHeaders,
+        this.payloads.length,
+      );
+      this.clearRenderedCache();
+    }
     const safeWidth = Math.max(20, width);
-    const preparedPayloads = this.payloads.map(preparePayload);
-    const renderedKey = this.renderCacheKey(safeWidth, preparedPayloads);
+    const renderedKey = this.renderCacheKey(safeWidth);
     if (this.renderedKey === renderedKey && this.renderedLines) {
       return this.renderedLines;
     }
@@ -202,7 +235,7 @@ export class PierreInlineDiffComponent implements Component {
       lines.push(renderBlankLine(safeWidth, this.palette.editorBg));
     }
 
-    for (const prepared of preparedPayloads) {
+    for (const prepared of this.preparedPayloads) {
       const { payload, digest } = prepared;
       if (this.showFileHeaders || this.payloads.length > 1) {
         lines.push(renderFileHeader(payload, this.palette, this.config, safeWidth));
@@ -262,7 +295,6 @@ export class PierreInlineDiffComponent implements Component {
 
   private renderCacheKey(
     width: number,
-    preparedPayloads: PreparedPierrePayload[],
   ): string {
     return [
       width,
@@ -271,7 +303,7 @@ export class PierreInlineDiffComponent implements Component {
       this.suppressLeadingSpacing ? "tight" : "spaced",
       this.palette.appearance,
       rendererConfigKey(this.config),
-      ...preparedPayloads.map((prepared) => prepared.digest.payloadKey),
+      this.payloadsKey,
     ].join("\u0000");
   }
 
@@ -583,17 +615,60 @@ function padRenderedLine(
 function normalizePayloads(
   payloads: PierreDiffPayload | PierreDiffPayload[],
 ): PierreDiffPayload[] {
-  return Array.isArray(payloads) ? payloads : [payloads];
+  return Array.isArray(payloads) ? [...payloads] : [payloads];
+}
+
+const frozenRenderPayloads = new WeakSet<object>();
+
+function freezePayloadsForRender(payloads: readonly PierreDiffPayload[]): void {
+  for (const payload of payloads) deepFreezeRenderPayload(payload, new WeakSet());
+}
+
+function deepFreezeRenderPayload(value: unknown, seen: WeakSet<object>): void {
+  if (!value || typeof value !== "object") return;
+  if (frozenRenderPayloads.has(value)) return;
+  if (seen.has(value)) return;
+  seen.add(value);
+
+  for (const key of Object.getOwnPropertyNames(value)) {
+    deepFreezeRenderPayload((value as Record<string, unknown>)[key], seen);
+  }
+
+  Object.freeze(value);
+  frozenRenderPayloads.add(value);
+}
+
+function samePayloadRefs(
+  a: readonly PierreDiffPayload[],
+  b: readonly PierreDiffPayload[],
+): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }
 
 function payloadKey(payload: PierreDiffPayload): string {
   return payloadDigest(payload).payloadKey;
 }
 
+function preparedPayloadsKey(payloads: readonly PreparedPierrePayload[]): string {
+  return payloads.map((prepared) => prepared.digest.payloadKey).join("\u0000");
+}
+
+const rendererConfigKeyCache = new WeakMap<PierreRendererConfig, string>();
+
 function rendererConfigKey(config: PierreRendererConfig): string {
+  const cached = rendererConfigKeyCache.get(config);
+  if (cached) return cached;
+
   const hash = createHash("sha256");
   hashUnknown(hash, config);
-  return `cfg:${hash.digest("hex").slice(0, 16)}`;
+  const key = `cfg:${hash.digest("hex").slice(0, 16)}`;
+  rendererConfigKeyCache.set(config, key);
+  return key;
 }
 
 function preparePayload(payload: PierreDiffPayload): PreparedPierrePayload {

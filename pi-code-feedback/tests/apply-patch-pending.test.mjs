@@ -71,6 +71,62 @@ test("errored or malformed apply_patch results discard the pending batch", async
   }
 });
 
+test("completed apply_patch results use persisted unifiedDiff changes", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-apply-patch-change-"));
+  const filePath = path.join(root, "probe.ts");
+  await writeFile(filePath, "export const a = 1;\nexport const b = 1;\n", "utf8");
+
+  const runtime = runtimeFor(root);
+  const input = { operations: [{ type: "update_file", path: "probe.ts" }] };
+
+  try {
+    await handleToolCall({ toolName: "apply_patch", toolCallId: "patch-change", input }, { cwd: root }, runtime);
+    await writeFile(filePath, "export const a = 1;\nexport const b = 2;\n", "utf8");
+
+    await handleToolResult(
+      {
+        toolName: "apply_patch",
+        toolCallId: "patch-change",
+        input,
+        details: {
+          stage: "done",
+          results: [
+            {
+              type: "update_file",
+              path: "probe.ts",
+              status: "completed",
+              change: {
+                type: "update",
+                unifiedDiff:
+                  "Index: probe.ts\n" +
+                  "===================================================================\n" +
+                  "--- probe.ts\n" +
+                  "+++ probe.ts\n" +
+                  "@@ -1,2 +1,2 @@\n" +
+                  " export const a = 1;\n" +
+                  "-export const b = 1;\n" +
+                  "+export const b = 2;\n",
+              },
+            },
+          ],
+        },
+        isError: false,
+      },
+      { cwd: root },
+      runtime,
+    );
+
+    assert.equal(runtime.completedEdits.length, 1);
+    assert.equal(runtime.completedEdits[0].rangeComputation.toolDiff.used, true);
+    assert.deepEqual(
+      runtime.completedEdits[0].touchedRanges.map((range) => [range.startLine, range.endLine]),
+      [[2, 2]],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 function runtimeFor(root) {
   const runtime = createRuntime(createDefaultConfig());
   runtime.config.autoFormat = false;

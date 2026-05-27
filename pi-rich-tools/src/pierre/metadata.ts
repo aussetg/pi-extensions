@@ -36,6 +36,12 @@ export interface BuildPierreNumberedDiffPayloadOptions {
   forcedType?: FileDiffMetadata["type"];
 }
 
+export interface BuildPierreUnifiedPatchPayloadOptions {
+  path: string;
+  unifiedDiff: string;
+  forcedType?: FileDiffMetadata["type"];
+}
+
 export function buildPierreUpdatePayload({
   oldPath,
   newPath,
@@ -99,6 +105,38 @@ export function buildPierreNumberedDiffPayload({
     const parsed = parsePatchFiles(
       patch,
       numberedDiffCacheKey(path, normalizedDiff),
+      true,
+    );
+    const metadata = parsed[0]?.files[0];
+    if (!metadata) return undefined;
+
+    const typedMetadata = forcedType
+      ? ({ ...metadata, type: forcedType } satisfies FileDiffMetadata)
+      : metadata;
+
+    return {
+      path,
+      metadata: normalizeDiffMetadataLanguage(typedMetadata, path),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+export function buildPierreUnifiedPatchPayload({
+  path,
+  unifiedDiff,
+  forcedType,
+}: BuildPierreUnifiedPatchPayloadOptions): PierreDiffPayload | undefined {
+  const normalizedDiff = normalizeLineEndings(unifiedDiff);
+  if (Buffer.byteLength(normalizedDiff, "utf8") > MAX_DIFF_INPUT_BYTES) {
+    return undefined;
+  }
+
+  try {
+    const parsed = parsePatchFiles(
+      normalizedDiff,
+      unifiedPatchCacheKey(path, normalizedDiff),
       true,
     );
     const metadata = parsed[0]?.files[0];
@@ -185,6 +223,10 @@ function diffCacheKey(
 
 function numberedDiffCacheKey(path: string, diff: string): string {
   return `pi-rich-tools-numbered-${hashTextParts([path, diff])}`;
+}
+
+function unifiedPatchCacheKey(path: string, diff: string): string {
+  return `pi-rich-tools-unified-${hashTextParts([path, diff])}`;
 }
 
 type NumberedDiffLine =

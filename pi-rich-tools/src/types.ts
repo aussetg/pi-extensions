@@ -1,7 +1,5 @@
 // Types used for tool progress, application, and result reporting.
 
-import type { PierreDiffPayload } from "./pierre/types.ts";
-
 export type ApplyPatchOpType = "create_file" | "update_file" | "delete_file";
 
 export interface ApplyPatchOperation {
@@ -19,11 +17,28 @@ export interface ApplyPatchOperation {
   move_path?: string;
 }
 
-export interface ApplyPatchPreview {
+export type ApplyPatchFileChange =
+  | {
+      type: "add";
+      content: string;
+    }
+  | {
+      type: "delete";
+      content: string;
+    }
+  | {
+      type: "update";
+      unifiedDiff: string;
+      movePath?: string;
+    };
+
+export interface ApplyPatchResultEntry {
+  type: ApplyPatchOpType;
   path: string;
-  diff: string;
+  status: "completed" | "failed";
+  output?: string;
+  change?: ApplyPatchFileChange;
   firstChangedLine?: number;
-  pierre?: PierreDiffPayload;
 }
 
 export type ApplyPatchDetails =
@@ -36,16 +51,7 @@ export type ApplyPatchDetails =
   | {
       stage: "done";
       fuzz: number;
-      results: Array<{
-        type: ApplyPatchOpType;
-        path: string;
-        status: "completed" | "failed";
-        output?: string;
-        diff?: string;
-        firstChangedLine?: number;
-        pierre?: PierreDiffPayload;
-      }>;
-      previews?: ApplyPatchPreview[];
+      results: ApplyPatchResultEntry[];
       warnings?: string[];
     };
 

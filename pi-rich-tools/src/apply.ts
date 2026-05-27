@@ -1,17 +1,16 @@
 import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { ApplyPatchOperation, ApplyPatchOpType } from "./types.ts";
+import type {
+  ApplyPatchFileChange,
+  ApplyPatchOperation,
+  ApplyPatchOpType,
+  ApplyPatchResultEntry,
+} from "./types.ts";
 import { applyPatchCreateBody, applyPatchUpdateWithRecovery } from "./apply-body.ts";
 import type { FuzzyMatchKind } from "./context-match.ts";
 import { generateDiffFromReplacements } from "./diff-generate.ts";
-import {
-  MAX_PREVIEW_INPUT_BYTES,
-  buildCreateFilePreview,
-  buildDeleteFilePreview,
-  buildUpdateFilePreview,
-} from "./preview.ts";
-import type { PierreDiffPayload } from "./pierre/types.ts";
+import { unifiedPatchFromNumberedDiff } from "./unified-diff.ts";
 import {
   detectLineEnding,
   DiffError,
@@ -25,6 +24,7 @@ import {
 } from "./util.ts";
 
 let tempCounter = 0;
+const MAX_PERSISTED_CHANGE_BYTES = 1_000_000;
 
 type FileMutationQueue = <T>(
   filePath: string,
@@ -220,15 +220,7 @@ export async function withMutationQueues<T>(
   return run();
 }
 
-export interface ApplyOperationResult {
-  type: ApplyPatchOpType;
-  path: string;
-  status: "completed" | "failed";
-  output?: string;
-  diff?: string;
-  firstChangedLine?: number;
-  pierre?: PierreDiffPayload;
-}
+export type ApplyOperationResult = ApplyPatchResultEntry;
 
 export interface PreparedApplyTask {
   index: number;
@@ -411,6 +403,35 @@ function fuzzyMatchWarning(
   return `Warning: ${rel} applied with fuzzy context matching (${detail}). Review the diff.`;
 }
 
+function persistableChange(change: ApplyPatchFileChange): ApplyPatchFileChange | undefined {
+  const bytes = Buffer.byteLength(changeBytesText(change), "utf8");
+  return bytes <= MAX_PERSISTED_CHANGE_BYTES ? change : undefined;
+}
+
+function changeBytesText(change: ApplyPatchFileChange): string {
+  switch (change.type) {
+    case "add":
+    case "delete":
+      return change.content;
+    case "update":
+      return change.unifiedDiff;
+  }
+}
+
+function updateChangeFromNumberedDiff(options: {
+  oldPath: string;
+  newPath: string;
+  diff: string;
+}): ApplyPatchFileChange | undefined {
+  const unifiedDiff = unifiedPatchFromNumberedDiff(options);
+  if (!unifiedDiff) return undefined;
+  return persistableChange({
+    type: "update",
+    unifiedDiff,
+    movePath: options.oldPath === options.newPath ? undefined : options.newPath,
+  });
+}
+
 // Preflight every operation against a virtual filesystem state before committing
 // any writes. This avoids partially applying a multi-file patch when an earlier
 // operation is valid but a later operation has a conflict, missing file, or path
@@ -522,7 +543,7 @@ export async function applyOperations(
             type,
             path: rel,
             status: "completed",
-            pierre: buildCreateFilePreview({ path: rel, newContent: content }),
+            change: persistableChange({ type: "add", content }),
           },
           mutation: { kind: "write", abs, content, replace: false },
           fuzz: 0,
@@ -564,13 +585,6 @@ export async function applyOperations(
           replacements,
         );
         const finalOutput = bom + restoreLineEndings(output, originalEnding);
-        const buildPierre = (newPath: string) =>
-          buildUpdateFilePreview({
-            oldPath: rel,
-            newPath,
-            oldContent: current,
-            newContent: output,
-          });
         const warningLines: string[] = [];
         if (normalizedMarkers && normalizedMarkers.length > 0) {
           warningLines.push(
@@ -596,9 +610,12 @@ export async function applyOperations(
               path: relTo,
               status: "completed",
               output: `Moved from ${rel}`,
-              diff: generatedDiff.diff,
+              change: updateChangeFromNumberedDiff({
+                oldPath: rel,
+                newPath: relTo,
+                diff: generatedDiff.diff,
+              }),
               firstChangedLine: generatedDiff.firstChangedLine,
-              pierre: buildPierre(relTo),
             },
             mutation: {
               kind: "move-write",
@@ -630,9 +647,12 @@ export async function applyOperations(
             type,
             path: rel,
             status: "completed",
-            diff: generatedDiff.diff,
+            change: updateChangeFromNumberedDiff({
+              oldPath: rel,
+              newPath: rel,
+              diff: generatedDiff.diff,
+            }),
             firstChangedLine: generatedDiff.firstChangedLine,
-            pierre: buildPierre(rel),
           },
           mutation: {
             kind: "write",
@@ -661,18 +681,18 @@ export async function applyOperations(
       if (!state.exists) throw new DiffError(`File not found at path '${rel}'`);
       if (state.isDirectory) throw new DiffError(`Path is a directory: '${rel}'`);
 
-      let pierre: PierreDiffPayload | undefined;
+      let change: ApplyPatchFileChange | undefined;
       if (
         state.isFile &&
         !state.isSymlink &&
-        (state.content !== undefined || (state.size ?? 0) <= MAX_PREVIEW_INPUT_BYTES)
+        (state.content !== undefined || (state.size ?? 0) <= MAX_PERSISTED_CHANGE_BYTES)
       ) {
         try {
           const contentState = await getVirtualState(abs, true);
           if (contentState.content !== undefined) {
-            pierre = buildDeleteFilePreview({
-              path: rel,
-              oldContent: contentState.content,
+            change = persistableChange({
+              type: "delete",
+              content: contentState.content,
             });
           }
         } catch {
@@ -683,7 +703,7 @@ export async function applyOperations(
 
       planned.push({
         task,
-        result: { type, path: rel, status: "completed", pierre },
+        result: { type, path: rel, status: "completed", change },
         mutation: { kind: "delete", abs },
         fuzz: 0,
       });

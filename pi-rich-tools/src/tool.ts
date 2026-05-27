@@ -7,7 +7,7 @@ import {
   takePreparedApplyPatchWarnings,
 } from "./patch-envelope.ts";
 import { createThrottledProgressEmitter } from "./progress.ts";
-import { collectProgressPreview, collectSuccessPreviews, renderApplyPatchCall, renderApplyPatchResult } from "./render.ts";
+import { collectProgressPreview, renderApplyPatchCall, renderApplyPatchResult } from "./render.ts";
 import type { ApplyPatchDetails, ApplyPatchOperation } from "./types.ts";
 import { DiffError, shortenPathForDisplay } from "./util.ts";
 
@@ -147,14 +147,13 @@ export function registerApplyPatchTool(pi: ExtensionAPI): void {
         );
       }
 
-      const previews = collectSuccessPreviews(results);
       const contentText = warningText
         ? `${summaryLines || "✓"}\n${warningText}`
         : summaryLines || "✓";
 
       return {
         content: [{ type: "text", text: contentText }],
-        details: { stage: "done", fuzz, results, previews, warnings },
+        details: { stage: "done", fuzz, results, warnings },
       };
     },
   });

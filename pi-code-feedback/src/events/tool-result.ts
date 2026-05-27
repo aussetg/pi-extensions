@@ -166,7 +166,9 @@ async function handleApplyPatchToolResult(
         forgetOriginalPathIfMoved(lspService, pending, filePath);
         continue;
       }
-      const detailsDiff = typeof result.diff === "string" && result.diff.length > 0 ? result.diff : undefined;
+      const detailsDiff = result.change?.type === "update" && result.change.unifiedDiff.length > 0
+        ? result.change.unifiedDiff
+        : undefined;
       const afterRead = result.type === "delete_file" ? undefined : timing.measure("tool_result.read_after", () => readUtf8IfSmall(filePath));
       const afterAgentContent = afterRead?.content;
       if (result.type !== "delete_file" && afterAgentContent === undefined) {
@@ -625,19 +627,39 @@ function readApplyPatchResults(details: unknown): ApplyPatchResultInput[] {
 
 function isApplyPatchResultInput(value: unknown): value is ApplyPatchResultInput {
   if (!value || typeof value !== "object") return false;
-  const result = value as { type?: unknown; path?: unknown; status?: unknown; diff?: unknown };
+  const result = value as { type?: unknown; path?: unknown; status?: unknown; change?: unknown };
   return (
     (result.type === "create_file" || result.type === "update_file" || result.type === "delete_file") &&
     typeof result.path === "string" &&
     (result.status === "completed" || result.status === "failed") &&
-    (result.diff === undefined || typeof result.diff === "string")
+    (result.change === undefined || isApplyPatchChangeInput(result.change))
   );
+}
+
+function isApplyPatchChangeInput(value: unknown): value is ApplyPatchChangeInput {
+  if (!value || typeof value !== "object") return false;
+  const change = value as { type?: unknown; content?: unknown; unifiedDiff?: unknown; movePath?: unknown };
+  if (change.type === "add" || change.type === "delete") {
+    return typeof change.content === "string";
+  }
+  if (change.type === "update") {
+    return (
+      typeof change.unifiedDiff === "string" &&
+      (change.movePath === undefined || typeof change.movePath === "string")
+    );
+  }
+  return false;
 }
 
 interface ApplyPatchResultInput {
   type: "create_file" | "update_file" | "delete_file";
   path: string;
   status: "completed" | "failed";
-  diff?: string;
+  change?: ApplyPatchChangeInput;
 }
+
+type ApplyPatchChangeInput =
+  | { type: "add"; content: string }
+  | { type: "delete"; content: string }
+  | { type: "update"; unifiedDiff: string; movePath?: string };
 

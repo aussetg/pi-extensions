@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { openAnsi, renderAnsiSegments } from "../src/pierre/ansi.ts";
+import { PierreInlineDiffComponent } from "../src/pierre/component.ts";
 import { continuationPrefixSegments } from "../src/pierre/gutter.ts";
 import {
   buildPiHighlightedDiff,
@@ -615,6 +616,85 @@ test("cached diff rows reflect in-place metadata changes", () => {
   assert.deepEqual(lineTexts(second), ["older", "newer"]);
 });
 
+test("Pierre component freezes render payloads instead of caching mutable metadata", () => {
+  const metadata = makeMetadata({
+    name: "immutable.txt",
+    lang: "text",
+    deletionLines: ["old"],
+    additionLines: ["new"],
+    hunkContent: [
+      {
+        type: "change",
+        deletions: 1,
+        deletionLineIndex: 0,
+        additions: 1,
+        additionLineIndex: 0,
+      },
+    ],
+    cacheKey: "component-freeze-test",
+  });
+  const payload = { path: "immutable.txt", metadata };
+
+  new PierreInlineDiffComponent(payload, { name: "dark" });
+
+  assert.throws(() => {
+    payload.metadata.additionLines[0] = "newer";
+  }, TypeError);
+});
+
+test("Pierre component snapshots caller-owned payload arrays", () => {
+  const theme = { name: "dark" };
+  const payloadA = {
+    path: "first.txt",
+    metadata: makeMetadata({
+      name: "first.txt",
+      lang: "text",
+      deletionLines: ["old first"],
+      additionLines: ["new first"],
+      hunkContent: [
+        {
+          type: "change",
+          deletions: 1,
+          deletionLineIndex: 0,
+          additions: 1,
+          additionLineIndex: 0,
+        },
+      ],
+      cacheKey: "component-array-first",
+    }),
+  };
+  const payloadB = {
+    path: "second.txt",
+    metadata: makeMetadata({
+      name: "second.txt",
+      lang: "text",
+      deletionLines: ["old second"],
+      additionLines: ["new second"],
+      hunkContent: [
+        {
+          type: "change",
+          deletions: 1,
+          deletionLineIndex: 0,
+          additions: 1,
+          additionLineIndex: 0,
+        },
+      ],
+      cacheKey: "component-array-second",
+    }),
+  };
+  const payloads = [payloadA];
+  const component = new PierreInlineDiffComponent(payloads, theme);
+
+  assert.match(stripAnsi(component.render(240).join("\n")), /new first/);
+
+  payloads[0] = payloadB;
+  component.update(payloads, theme);
+
+  const rendered = stripAnsi(component.render(240).join("\n"));
+  assert.match(rendered, /new second/);
+  assert.doesNotMatch(rendered, /new first/);
+});
+
 test("plain spans inside highlighted lines use syntax text foreground", () => {
   const palette = getPierrePalette({ name: "dark" }, config);
   const spans = flattenHighlightedLine(
@@ -989,6 +1069,10 @@ function lineTexts(rows) {
   return rows
     .filter((row) => row.kind === "line")
     .map((row) => row.spans.map((span) => span.text).join(""));
+}
+
+function stripAnsi(text) {
+  return text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
 }
 
 function collapsedMetadata() {

@@ -7,17 +7,20 @@ import {
 } from "@earendil-works/pi-tui";
 import type {
   ApplyPatchDetails,
+  ApplyPatchFileChange,
   ApplyPatchOperation,
   ApplyPatchOpType,
-  ApplyPatchPreview,
+  ApplyPatchResultEntry,
 } from "./types.ts";
-import type { ApplyOperationResult } from "./apply.ts";
-import { hashText } from "./hash.ts";
 import { prepareApplyPatchArguments } from "./patch-envelope.ts";
 import { firstChangedLineFromDiff } from "./diff-lines.ts";
 import { PierreInlineDiffComponent } from "./pierre/component.ts";
 import { getPierreRendererConfig } from "./pierre/config.ts";
-import { buildPierreNumberedDiffPayload, MAX_DIFF_INPUT_BYTES } from "./pierre/metadata.ts";
+import {
+  buildPierreCreatePayload,
+  buildPierreDeletePayload,
+  buildPierreUnifiedPatchPayload,
+} from "./pierre/metadata.ts";
 import type { PierreDiffPayload } from "./pierre/types.ts";
 import { shortenPathForDisplay, validatePatchPath } from "./util.ts";
 
@@ -173,23 +176,6 @@ function renderOperationLine(
   return `${head} ${theme.fg("muted", `— ${entry.output}`)}`;
 }
 
-export function collectSuccessPreviews(
-  results: ApplyOperationResult[],
-): ApplyPatchPreview[] {
-  const previews: ApplyPatchPreview[] = [];
-  for (const res of results) {
-    if (res.status !== "completed") continue;
-    if (!hasResultPreview(res)) continue;
-    previews.push({
-      path: shortenPathForDisplay(res.path),
-      diff: res.diff ?? "",
-      firstChangedLine: res.firstChangedLine,
-      pierre: res.pierre,
-    });
-  }
-  return previews;
-}
-
 export function collectProgressPreview(
   ops: ApplyPatchOperation[],
 ): { path?: string; diff?: string } | undefined {
@@ -259,43 +245,97 @@ function persistentBlankLine(width: number): string {
   return `\u200b${" ".repeat(Math.max(0, width))}`;
 }
 
-const DEGRADED_PIERRE_CACHE_LIMIT = 128;
-const degradedPierreCache = new Map<string, PierreDiffPayload | null>();
 const MAX_RENDER_PATCH_PARSE_BYTES = 1_000_000;
 
-function degradedPierreCacheKey(preview: ApplyPatchPreview): string {
-  return `${preview.path}\u0000${preview.diff.length}\u0000${hashString(preview.diff)}`;
+const changePayloadCache = new WeakMap<ApplyPatchFileChange, PierreDiffPayload | null>();
+const resultPayloadPartitionCache = new WeakMap<
+  ApplyPatchResultEntry[],
+  ApplyPatchResultPayloadPartition
+>();
+
+interface ApplyPatchResultPayloadPartition {
+  completed: ApplyPatchResultEntry[];
+  payloads: PierreDiffPayload[];
+  unpreviewed: ApplyPatchResultEntry[];
 }
 
-function getPierrePreviewPayload(
-  preview: ApplyPatchPreview,
-): PierreDiffPayload | undefined {
-  if (isPierreDiffPayload(preview.pierre)) return preview.pierre;
-  if (!preview.diff) return undefined;
-  if (preview.diff.length > MAX_DIFF_INPUT_BYTES) return undefined;
-  if (Buffer.byteLength(preview.diff, "utf8") > MAX_DIFF_INPUT_BYTES) return undefined;
+function partitionResultPayloads(
+  results: ApplyPatchResultEntry[],
+): ApplyPatchResultPayloadPartition {
+  const cached = resultPayloadPartitionCache.get(results);
+  if (cached) return cached;
 
-  const key = degradedPierreCacheKey(preview);
-  const cached = degradedPierreCache.get(key);
-  if (cached !== undefined) return cached ?? undefined;
+  const completed: ApplyPatchResultEntry[] = [];
+  const payloads: PierreDiffPayload[] = [];
+  const unpreviewed: ApplyPatchResultEntry[] = [];
 
-  const payload = buildPierreNumberedDiffPayload({
-    path: preview.path,
-    diff: preview.diff,
-  });
-  degradedPierreCache.set(key, payload ?? null);
-  if (degradedPierreCache.size > DEGRADED_PIERRE_CACHE_LIMIT) {
-    const oldestKey = degradedPierreCache.keys().next().value;
-    if (typeof oldestKey === "string") degradedPierreCache.delete(oldestKey);
+  for (const entry of results) {
+    if (entry.status !== "completed") continue;
+    completed.push(entry);
+
+    const payload = getPierreResultPayload(entry);
+    if (payload) payloads.push(payload);
+    else unpreviewed.push(entry);
   }
 
+  const partition = { completed, payloads, unpreviewed };
+  resultPayloadPartitionCache.set(results, partition);
+  return partition;
+}
+
+function getPierreResultPayload(
+  entry: ApplyPatchResultEntry,
+): PierreDiffPayload | undefined {
+  const change = entry.change;
+  if (!isApplyPatchFileChange(change)) return undefined;
+
+  const cached = changePayloadCache.get(change);
+  if (cached !== undefined) return cached ?? undefined;
+
+  const payload = buildPierrePayloadFromChange(entry, change);
+  changePayloadCache.set(change, payload ?? null);
   return payload;
+}
+
+function buildPierrePayloadFromChange(
+  entry: ApplyPatchResultEntry,
+  change: ApplyPatchFileChange,
+): PierreDiffPayload | undefined {
+  const displayPath = shortenPathForDisplay(entry.path);
+  switch (change.type) {
+    case "add":
+      return buildPierreCreatePayload({
+        path: displayPath,
+        newContent: change.content,
+      });
+    case "delete":
+      return buildPierreDeletePayload({
+        path: displayPath,
+        oldContent: change.content,
+      });
+    case "update":
+      if (!hasUnifiedDiffHunks(change.unifiedDiff)) return undefined;
+      return buildPierreUnifiedPatchPayload({
+        path: displayPath,
+        unifiedDiff: change.unifiedDiff,
+      });
+  }
+}
+
+function hasUnifiedDiffHunks(diff: string): boolean {
+  return /^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@/m.test(diff);
 }
 
 class ApplyPatchPierreResultComponent implements Component {
   private diff: PierreInlineDiffComponent;
+  private payloads: PierreDiffPayload[];
+  private theme: ThemeLike;
+  private expanded: boolean;
+  private invalidateView: (() => void) | undefined;
   private footerParts: ResultPart[] = [];
   private footerBg: ((text: string) => string) | undefined;
+  private renderedWidth: number | undefined;
+  private renderedLines: string[] | undefined;
 
   constructor(
     payloads: PierreDiffPayload[],
@@ -306,13 +346,17 @@ class ApplyPatchPierreResultComponent implements Component {
       invalidate?: () => void;
     },
   ) {
-    this.diff = new PierreInlineDiffComponent(payloads, theme, {
-      showFileHeaders: payloads.length > 1,
-      expandCollapsedHunks: options.expanded,
-      suppressLeadingSpacing: true,
-      onInvalidate: options.invalidate,
-    });
-    this.update(payloads, theme, options);
+    this.payloads = payloads;
+    this.theme = theme;
+    this.expanded = options.expanded;
+    this.invalidateView = options.invalidate;
+    this.footerParts = options.footerParts;
+    this.footerBg = toolBackground(theme, { isPartial: false, isError: false });
+    this.diff = new PierreInlineDiffComponent(
+      this.payloads,
+      theme,
+      this.diffOptions(this.payloads),
+    );
   }
 
   update(
@@ -324,42 +368,88 @@ class ApplyPatchPierreResultComponent implements Component {
       invalidate?: () => void;
     },
   ): void {
-    this.diff.update(payloads, theme, {
-      showFileHeaders: payloads.length > 1,
-      expandCollapsedHunks: options.expanded,
-      suppressLeadingSpacing: true,
-      onInvalidate: options.invalidate,
-    });
+    const themeSame = this.theme === theme;
+    const payloadsSame = sameArrayItems(this.payloads, payloads);
+    const footerSame = sameArrayItems(this.footerParts, options.footerParts);
+    const diffSame =
+      payloadsSame &&
+      themeSame &&
+      this.expanded === options.expanded;
+
+    this.invalidateView = options.invalidate;
+
+    if (diffSame && footerSame) return;
+
+    this.theme = theme;
+    this.expanded = options.expanded;
+
+    if (!diffSame) {
+      this.payloads = payloads;
+      this.diff.update(this.payloads, theme, this.diffOptions(this.payloads));
+    }
+
     this.footerParts = options.footerParts;
-    this.footerBg = toolBackground(theme, { isPartial: false, isError: false });
+    if (!themeSame) {
+      this.footerBg = toolBackground(theme, {
+        isPartial: false,
+        isError: false,
+      });
+    }
+    this.clearRenderedCache();
   }
 
   render(width: number): string[] {
-    const lines = this.diff.render(width);
-    if (this.footerParts.length === 0) return lines;
+    if (this.renderedWidth === width && this.renderedLines) return this.renderedLines;
 
-    return [
+    const lines = this.diff.render(width);
+    if (this.footerParts.length === 0) {
+      this.renderedWidth = width;
+      this.renderedLines = lines;
+      return lines;
+    }
+
+    const rendered = [
       ...lines,
       ...renderResultParts(this.footerParts, width, this.footerBg, {
         trailingBlank: true,
       }),
     ];
+    this.renderedWidth = width;
+    this.renderedLines = rendered;
+    return rendered;
   }
 
   invalidate(): void {
     this.diff.invalidate();
+    this.clearRenderedCache();
+  }
+
+  private clearRenderedCache(): void {
+    this.renderedWidth = undefined;
+    this.renderedLines = undefined;
+  }
+
+  private diffOptions(payloads: PierreDiffPayload[]) {
+    return {
+      showFileHeaders: payloads.length > 1,
+      expandCollapsedHunks: this.expanded,
+      suppressLeadingSpacing: true,
+      onInvalidate: () => {
+        this.clearRenderedCache();
+        this.invalidateView?.();
+      },
+    };
   }
 }
 
-function renderPierrePreviews(
-  previews: ApplyPatchPreview[],
+function renderPierrePayloads(
+  payloads: PierreDiffPayload[],
   footerParts: ResultPart[],
   expanded: boolean,
   theme: ThemeLike,
   context?: ShellContextLike,
 ): Component | undefined {
-  const payloads = previews.map(getPierrePreviewPayload).filter(isPierreDiffPayload);
-  if (payloads.length === 0 || payloads.length !== previews.length) return undefined;
+  if (payloads.length === 0) return undefined;
 
   const options = {
     footerParts,
@@ -372,6 +462,15 @@ function renderPierrePreviews(
       : new ApplyPatchPierreResultComponent(payloads, theme, options);
   component.update(payloads, theme, options);
   return component;
+}
+
+function sameArrayItems<T>(a: readonly T[], b: readonly T[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }
 
 function isPierreDiffPayload(value: unknown): value is PierreDiffPayload {
@@ -387,26 +486,16 @@ function isPierreDiffPayload(value: unknown): value is PierreDiffPayload {
   );
 }
 
-function hasNumberedDiffPreview(
-  entry: { type: ApplyPatchOpType; status: "completed" | "failed"; diff?: string },
-): boolean {
-  return (
-    entry.status === "completed" &&
-    entry.type === "update_file" &&
-    typeof entry.diff === "string" &&
-    entry.diff.length > 0
-  );
-}
-
-function hasResultPreview(
-  entry: {
-    type: ApplyPatchOpType;
-    status: "completed" | "failed";
-    diff?: string;
-    pierre?: unknown;
-  },
-): boolean {
-  return isPierreDiffPayload(entry.pierre) || hasNumberedDiffPreview(entry);
+function isApplyPatchFileChange(value: unknown): value is ApplyPatchFileChange {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Partial<ApplyPatchFileChange>;
+  if (record.type === "add" || record.type === "delete") {
+    return typeof record.content === "string";
+  }
+  if (record.type === "update") {
+    return typeof record.unifiedDiff === "string";
+  }
+  return false;
 }
 
 function resultParts(parts: Array<ResultPart | undefined>): ResultPart[] {
@@ -599,8 +688,10 @@ function renderCodeFeedbackFromDetails(
 
 class CodeFeedbackPanel implements CodeFeedbackBlock {
   private readonly content: string[];
+  private readonly theme: ThemeLike;
 
-  constructor(lines: string[], private readonly theme: ThemeLike) {
+  constructor(lines: string[], theme: ThemeLike) {
+    this.theme = theme;
     this.content = [
       lines[0]!,
       ...lines.slice(1).map((line) => line.replace(/^  /, "")),
@@ -946,27 +1037,12 @@ function fitAnsiLine(line: string, width: number): string {
   return visibleWidth(line) > width ? truncateToWidth(line, width, "") : line;
 }
 
-function hashString(value: string): string {
-  return hashText(value, 16);
-}
-
 function summarizeUnpreviewedResults(
-  results: Array<{
-    type: ApplyPatchOpType;
-    path: string;
-    status: "completed" | "failed";
-    output?: string;
-    diff?: string;
-    pierre?: unknown;
-  }>,
+  results: ApplyPatchResultEntry[],
   theme: ThemeLike,
 ): string {
-  const unpreviewed = results.filter((r) => {
-    if (r.status !== "completed") return false;
-    return !hasResultPreview(r);
-  });
-  if (unpreviewed.length === 0) return "";
-  return unpreviewed.map((r) => renderOperationLine(r, theme)).join("\n");
+  if (results.length === 0) return "";
+  return results.map((r) => renderOperationLine(r, theme)).join("\n");
 }
 
 export function renderApplyPatchCall(
@@ -1041,13 +1117,9 @@ export function renderApplyPatchResult(
 
     const failed = details.results.filter((r) => r.status === "failed");
     if (failed.length === 0) {
-      const previews =
-        details.previews ??
-        collectSuccessPreviews(details.results as ApplyOperationResult[]);
-      if (previews.length === 0) {
-        const completed = details.results.filter(
-          (r) => r.status === "completed",
-        );
+      const resultPayloads = partitionResultPayloads(details.results);
+      if (resultPayloads.payloads.length === 0) {
+        const completed = resultPayloads.completed;
         if (completed.length > 0) {
           const out = completed
             .map((r) => renderOperationLine(r, theme))
@@ -1064,10 +1136,10 @@ export function renderApplyPatchResult(
         return renderText(withFeedback(theme.fg("toolOutput", output)));
       }
 
-      const pierre = renderPierrePreviews(
-        previews,
+      const pierre = renderPierrePayloads(
+        resultPayloads.payloads,
         resultParts([
-          summarizeUnpreviewedResults(details.results, theme),
+          summarizeUnpreviewedResults(resultPayloads.unpreviewed, theme),
           warningsText,
           codeFeedback,
         ]),

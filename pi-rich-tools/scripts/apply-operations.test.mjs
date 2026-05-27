@@ -21,7 +21,7 @@ test("applyOperations creates empty files without requiring a preview", async (t
   );
 
   assert.equal(result.results[0].status, "completed");
-  assert.equal(result.results[0].pierre, undefined);
+  assert.deepEqual(result.results[0].change, { type: "add", content: "" });
   assert.equal(await readFile(join(cwd, "empty.txt"), "utf8"), "");
 });
 
@@ -36,7 +36,9 @@ test("applyOperations supports move-only updates without requiring a preview", a
 
   assert.equal(result.results[0].status, "completed");
   assert.equal(result.results[0].path, "b.txt");
-  assert.equal(result.results[0].pierre, undefined);
+  assert.equal(result.results[0].change.type, "update");
+  assert.match(result.results[0].change.unifiedDiff, /--- a\.txt/);
+  assert.match(result.results[0].change.unifiedDiff, /\+\+\+ b\.txt/);
   assert.equal(existsSync(join(cwd, "a.txt")), false);
   assert.equal(await readFile(join(cwd, "b.txt"), "utf8"), "same\n");
 });

@@ -29,11 +29,13 @@ export {
   buildPierreCreatePayload,
   buildPierreDeletePayload,
   buildPierreNumberedDiffPayload,
+  buildPierreUnifiedPatchPayload,
   buildPierreUpdatePayload,
   normalizeDiffMetadataLanguage,
   type BuildPierreCreatePayloadOptions,
   type BuildPierreDeletePayloadOptions,
   type BuildPierreNumberedDiffPayloadOptions,
+  type BuildPierreUnifiedPatchPayloadOptions,
   type BuildPierreUpdatePayloadOptions,
 } from "./metadata.ts";
 export { getPierreAppearance, getPierrePalette } from "./theme.ts";
