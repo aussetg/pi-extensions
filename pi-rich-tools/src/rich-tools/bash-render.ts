@@ -1,6 +1,6 @@
 import path from "node:path";
 import { DEFAULT_MAX_BYTES, formatSize, keyHint } from "@earendil-works/pi-coding-agent";
-import { Text, truncateToWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
+import { Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 import { querySharedSyntaxCaptures, type TreeSitterCapture } from "../pierre/syntax-service.ts";
 import { parseShellCommand, type ParsedShellCommand } from "../shell-intent.ts";
 import {
@@ -27,6 +27,7 @@ type TreeCallLine = {
   branch: "├─ " | "└─ ";
   continuation: "│  " | "   ";
   body: string;
+  backgroundColor?: string;
 };
 type PlainCommandCallLine = {
   type: "plain_command";
@@ -90,6 +91,16 @@ type BashSummary = {
   command: string;
   parsed: ParsedShellCommand[];
   exploratory: boolean;
+};
+
+type ExploringAction = {
+  command: ParsedShellCommand;
+  isError: boolean;
+};
+
+type WrappedBashCallLine = {
+  text: string;
+  backgroundColor?: string;
 };
 
 type BashOutputPreview = {
@@ -269,7 +280,7 @@ export function renderBashResult(
   theme: ThemeLike,
   context?: ShellContextLike,
 ): Component {
-  if (shouldSuppressExplorationOutput(result, context)) return EMPTY_COMPONENT;
+  if (shouldSuppressExplorationOutput(context)) return EMPTY_COMPONENT;
 
   const component = context?.lastComponent instanceof BashResultComponent
     ? context.lastComponent
@@ -341,7 +352,11 @@ class BashCallComponent implements Component {
     const safeWidth = Math.max(1, Math.trunc(width));
     const contentWidth = Math.max(1, safeWidth - 2);
     const background = toolBackground(this.theme, this.context);
-    return new Text(wrapBashCallLines(this.lines, contentWidth, this.theme, this.context).join("\n"), 1, 1, background).render(safeWidth);
+    const lines = wrapBashCallLines(this.lines, contentWidth, this.theme, this.context);
+    if (!lines.some((line) => line.backgroundColor)) {
+      return new Text(lines.map((line) => line.text).join("\n"), 1, 1, background).render(safeWidth);
+    }
+    return renderPaddedBashCallLines(lines, safeWidth, background, this.theme);
   }
 
   invalidate(): void {}
@@ -368,22 +383,22 @@ function bashCallRenderState(
     const records = group.ids
       .map((id) => bashCallRecordById.get(id))
       .filter((item): item is BashCallRecord => item !== undefined);
-    const parsed = records.flatMap((item) => item.parsed);
+    const actions = records.flatMap((item) => exploringActions(item.parsed, item.isError));
     const active = records.some((item) => !item.done) || context?.isPartial === true;
-    const isError = records.some((item) => item.isError) || context?.isError === true;
     return {
       hidden: false,
-      lines: renderExploringCallLines(parsed, active, theme, context),
-      context: { ...context, isPartial: active, isError },
+      lines: renderExploringCallLines(actions, active, theme, context),
+      context: { ...context, isPartial: active, isError: false },
     };
   }
 
   const summary = record ?? summarizeBashArgs(args, context?.toolCallId);
   const active = context?.isPartial === true;
+  const exploratoryError = record?.isError === true || context?.isError === true;
   const lines = summary.exploratory
-    ? renderExploringCallLines(summary.parsed, active, theme, context)
+    ? renderExploringCallLines(exploringActions(summary.parsed, exploratoryError), active, theme, context)
     : renderPlainCommandCallLines(summary.command, active);
-  return { hidden: false, lines, context };
+  return { hidden: false, lines, context: summary.exploratory ? { ...context, isError: false } : context };
 }
 
 function bashOutputPreviewLines(
@@ -515,12 +530,47 @@ function wrapStyledLine(line: string, width: number): string[] {
   return wrapped.length > 0 ? wrapped : [""];
 }
 
-function wrapBashCallLines(lines: BashCallLine[], width: number, theme: ThemeLike, context?: ShellContextLike): string[] {
+function wrapBashCallLines(lines: BashCallLine[], width: number, theme: ThemeLike, context?: ShellContextLike): WrappedBashCallLine[] {
   return lines.flatMap((line) => {
-    if (typeof line === "string") return wrapStyledLine(line, width);
+    if (typeof line === "string") return wrapStyledLine(line, width).map((text) => ({ text }));
     if (line.type === "plain_command") return wrapPlainCommandCallLine(line, width, theme, context);
     return wrapTreeCallLine(line, width, theme);
   });
+}
+
+function renderPaddedBashCallLines(
+  lines: WrappedBashCallLine[],
+  width: number,
+  baseBackground: ((text: string) => string) | undefined,
+  theme: ThemeLike,
+): string[] {
+  const rows = [paintBackground(" ".repeat(width), width, baseBackground)];
+  for (const line of lines) {
+    const background = line.backgroundColor && theme.bg
+      ? (text: string) => theme.bg!(line.backgroundColor!, text)
+      : baseBackground;
+    rows.push(paintBackground(` ${line.text}`, width, background));
+  }
+  rows.push(paintBackground(" ".repeat(width), width, baseBackground));
+  return rows;
+}
+
+function paintBackground(
+  text: string,
+  width: number,
+  background: ((text: string) => string) | undefined,
+): string {
+  if (!background) return text;
+  const pad = Math.max(0, width - safeVisibleWidth(text));
+  return background(`${text}${" ".repeat(pad)}`);
+}
+
+function safeVisibleWidth(text: string): number {
+  try {
+    return visibleWidth(text);
+  } catch {
+    return stripAnsiEscapes(text).length;
+  }
 }
 
 function wrapPlainCommandCallLine(
@@ -528,7 +578,7 @@ function wrapPlainCommandCallLine(
   width: number,
   theme: ThemeLike,
   context?: ShellContextLike,
-): string[] {
+): WrappedBashCallLine[] {
   const status = line.active ? "Running" : "Ran";
   const prefix = `${theme.fg("muted", "•")} ${theme.fg("toolTitle", theme.bold(status))} `;
   const preview = shellInputPreview(line.command, context?.expanded === true);
@@ -536,8 +586,9 @@ function wrapPlainCommandCallLine(
   const visualLines = highlightedLines.flatMap((commandLine, index) =>
     wrapStyledLine(index === 0 ? `${prefix}${commandLine}` : commandLine, width)
   );
+  const wrapLines = (items: string[]): WrappedBashCallLine[] => items.map((text) => ({ text }));
 
-  if (context?.expanded === true && !preview.collapsed) return visualLines;
+  if (context?.expanded === true && !preview.collapsed) return wrapLines(visualLines);
 
   let visibleLines = visualLines;
   let skippedVisualLines = 0;
@@ -546,8 +597,8 @@ function wrapPlainCommandCallLine(
     visibleLines = visibleLines.slice(0, BASH_INPUT_PREVIEW_LINES);
   }
 
-  if (!preview.collapsed && skippedVisualLines === 0) return visibleLines;
-  return [...visibleLines, truncateToWidth(inputCollapseHint(preview, skippedVisualLines, theme), width, "...")];
+  if (!preview.collapsed && skippedVisualLines === 0) return wrapLines(visibleLines);
+  return wrapLines([...visibleLines, truncateToWidth(inputCollapseHint(preview, skippedVisualLines, theme), width, "...")]);
 }
 
 function shellInputPreview(command: string, expanded: boolean): { text: string; collapsed: boolean; omittedLines: number; omittedChars: number } {
@@ -581,15 +632,16 @@ function inputCollapseHint(
   return theme.fg("muted", `... (${summary},`) + ` ${keyHint("app.tools.expand", "to expand")})`;
 }
 
-function wrapTreeCallLine(line: TreeCallLine, width: number, theme: ThemeLike): string[] {
+function wrapTreeCallLine(line: TreeCallLine, width: number, theme: ThemeLike): WrappedBashCallLine[] {
   const prefixWidth = 3;
-  if (width <= prefixWidth) return [`${theme.fg("dim", line.branch)}${line.body}`];
+  const decorate = (text: string): WrappedBashCallLine => ({ text, backgroundColor: line.backgroundColor });
+  if (width <= prefixWidth) return [decorate(`${theme.fg("dim", line.branch)}${line.body}`)];
 
   const bodyLines = wrapStyledLine(line.body, width - prefixWidth);
   const [first, ...rest] = bodyLines;
   return [
-    `${theme.fg("dim", line.branch)}${first ?? ""}`,
-    ...rest.map((item) => `${theme.fg("dim", line.continuation)}${item}`),
+    decorate(`${theme.fg("dim", line.branch)}${first ?? ""}`),
+    ...rest.map((item) => decorate(`${theme.fg("dim", line.continuation)}${item}`)),
   ];
 }
 
@@ -912,20 +964,22 @@ function rewriteAnsiResetsForToolShell(
 }
 
 function renderExploringCallLines(
-  parsed: ParsedShellCommand[],
+  actions: ExploringAction[],
   active: boolean,
   theme: ThemeLike,
   context?: ShellContextLike,
 ): BashCallLine[] {
   const lines: BashCallLine[] = [bulletLine(active ? "Exploring" : "Explored", theme)];
-  const actionLines = parsedActionLines(parsed, theme, context);
+  const actionLines = renderExploringActionLines(actions, theme, context);
   for (let i = 0; i < actionLines.length; i += 1) {
     const last = i === actionLines.length - 1;
+    const action = actionLines[i]!;
     lines.push({
       type: "tree",
       branch: last ? "└─ " : "├─ ",
       continuation: last ? "   " : "│  ",
-      body: actionLines[i]!,
+      body: action.body,
+      backgroundColor: action.isError ? "toolErrorBg" : undefined,
     });
   }
   return lines;
@@ -939,17 +993,22 @@ function bulletLine(label: string, theme: ThemeLike): string {
   return `${theme.fg("muted", "•")} ${theme.fg("toolTitle", theme.bold(label))}`;
 }
 
-function parsedActionLines(parsed: ParsedShellCommand[], theme: ThemeLike, context?: ShellContextLike): string[] {
-  return parsed.map((item) => {
+function exploringActions(parsed: ParsedShellCommand[], isError: boolean): ExploringAction[] {
+  return parsed.map((command) => ({ command, isError }));
+}
+
+function renderExploringActionLines(actions: ExploringAction[], theme: ThemeLike, context?: ShellContextLike): Array<{ body: string; isError: boolean }> {
+  return actions.map((action) => {
+    const item = action.command;
     switch (item.type) {
       case "read":
-        return `${theme.fg("accent", "Read")} ${displayShellPath(item.path, context)}`;
+        return { body: `${theme.fg("accent", "Read")} ${displayShellPath(item.path, context)}`, isError: action.isError };
       case "list_files":
-        return `${theme.fg("accent", "List")} ${displayShellPath(item.path ?? ".", context)}`;
+        return { body: `${theme.fg("accent", "List")} ${displayShellPath(item.path ?? ".", context)}`, isError: action.isError };
       case "search":
-        return `${theme.fg("accent", "Search")} ${searchDisplay(item, theme, context)}`;
+        return { body: `${theme.fg("accent", "Search")} ${searchDisplay(item, theme, context)}`, isError: action.isError };
       case "unknown":
-        return `${theme.fg("accent", "Run")} ${item.cmd}`;
+        return { body: `${theme.fg("accent", "Run")} ${item.cmd}`, isError: action.isError };
     }
   });
 }
@@ -999,7 +1058,7 @@ function isExploring(parsed: ParsedShellCommand[]): boolean {
   return parsed.length > 0 && parsed.every((item) => item.type !== "unknown");
 }
 
-function shouldSuppressExplorationOutput(result: ToolResultLike, context?: ShellContextLike): boolean {
+function shouldSuppressExplorationOutput(context?: ShellContextLike): boolean {
   const parsed = parsedBashCommand(bashCommandArg(context?.args), context?.toolCallId);
   return isExploring(parsed);
 }
