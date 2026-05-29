@@ -1,0 +1,32 @@
+{
+  "name": "pi-workflows",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Deterministic multi-agent workflows for Pi with durable artifacts and declarative UI.",
+  "main": "index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "latest",
+    "acorn": "latest",
+    "ajv": "latest",
+    "typebox": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "typescript": "latest",
+    "vitest": "latest"
+  },
+  "pi": {
+    "extensions": [
+      "index.ts"
+    ],
+    "workflows": [
+      "workflows/*.js"
+    ]
+  }
+}
