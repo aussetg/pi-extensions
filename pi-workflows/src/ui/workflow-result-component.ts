@@ -55,7 +55,9 @@ export class WorkflowProgressComponent implements ComponentLike {
 
   render(width: number): string[] {
     const details = this.details();
-    const revision = `${details.status}:${details.progress?.updatedAt ?? ""}:${details.progress?.calls.length ?? 0}:${details.progress?.running ?? 0}`;
+    const progress = details.progress;
+    const clockTick = progress && hasLiveProgress(details, progress) ? Math.floor(Date.now() / 1000) : 0;
+    const revision = `${details.status}:${progress?.updatedAt ?? ""}:${progress?.calls.length ?? 0}:${progress?.running ?? 0}:${clockTick}`;
     if (this.cachedLines && this.cachedWidth === width && this.cachedRevision === revision) return this.cachedLines;
     const lines = renderWorkflowResultLines(details, { partial: true, profile: "panel" }, this.theme, width);
     this.cachedLines = lines;
@@ -407,6 +409,10 @@ function callsForActivePhase(progress: WorkflowProgressSnapshot): WorkflowCallPr
 
 function hasAgentProgress(progress: WorkflowProgressSnapshot): boolean {
   return progress.total > 0 || progress.calls.length > 0 || progress.running > 0 || progress.completed > 0 || progress.failed > 0 || progress.cached > 0 || progress.skipped > 0;
+}
+
+function hasLiveProgress(details: WorkflowLaunchOutput, progress: WorkflowProgressSnapshot): boolean {
+  return details.status === "async_launched" || progress.running > 0 || progress.calls.some((call) => call.status === "running" || call.status === "pending");
 }
 
 function statusWord(status: WorkflowLaunchOutput["status"], theme: ThemeLike): string {

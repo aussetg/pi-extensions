@@ -54,7 +54,7 @@ describe("workflow UI placements", () => {
     const live = uniquePairs(widgetCalls.filter((call) => call.value !== undefined).map((call) => [call.key.split(":").pop()!, call.options?.placement ?? ""]));
     expect(live).toEqual([
       ["compact", "aboveEditor"],
-      ["panel", "belowEditor"],
+      ["panel", "aboveEditor"],
     ]);
 
     const panelLines = renderWidget(widgetCalls, "panel", 80);
@@ -90,7 +90,7 @@ describe("workflow UI placements", () => {
     await runStore.getLiveRun(result.runId)?.donePromise;
 
     const progressCalls = widgetCalls.filter((call) => call.key.endsWith(":__progress"));
-    expect(progressCalls.some((call) => call.value !== undefined && call.options?.placement === "belowEditor")).toBe(true);
+    expect(progressCalls.some((call) => call.value !== undefined && call.options?.placement === "aboveEditor")).toBe(true);
     expect(progressCalls.some((call) => call.value === undefined)).toBe(true);
     const progressLines = renderFactory(progressCalls.find((call) => call.value !== undefined)!.value, 80);
     expect(progressLines.length).toBeLessThanOrEqual(RENDER_LIMITS.panelViewLines);

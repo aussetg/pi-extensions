@@ -118,6 +118,7 @@ export class WorkflowRunner {
 
     const viewComponents = new Map<string, WorkflowViewComponent>();
     let progressComponent: WorkflowProgressComponent | undefined;
+    let progressRenderTimer: NodeJS.Timeout | undefined;
     const showStandardProgress = !!ctx.hasUI && !args.onUpdate;
     const updateStandardProgress = () => {
       if (!showStandardProgress) return;
@@ -126,10 +127,24 @@ export class WorkflowRunner {
           if (!progressComponent) progressComponent = new WorkflowProgressComponent(() => asyncOutput(record), theme);
           else progressComponent.invalidate();
           return progressComponent;
-        }, { placement: "belowEditor" });
+        }, { placement: "aboveEditor" });
       } catch {
         // Standard live progress is best-effort; artifacts and completion messages remain authoritative.
       }
+    };
+    const startStandardProgressTicker = () => {
+      if (!showStandardProgress || progressRenderTimer) return;
+      progressRenderTimer = setInterval(() => {
+        if (record.status !== "running" && record.status !== "paused") return;
+        progressComponent?.invalidate();
+        updateStandardProgress();
+      }, 1_000);
+      progressRenderTimer.unref?.();
+    };
+    const stopStandardProgressTicker = () => {
+      if (!progressRenderTimer) return;
+      clearInterval(progressRenderTimer);
+      progressRenderTimer = undefined;
     };
     let viewStore!: WorkflowViewStore;
     const emitProgress = () => {
@@ -148,6 +163,7 @@ export class WorkflowRunner {
       if (workflowViewPlacement(snapshot) === "runPanel") emitProgress();
     });
     updateStandardProgress();
+    startStandardProgressTicker();
     const ui = createWorkflowUiGlobal(viewStore);
     const budget = new WorkflowBudget(input.budgetTokens ?? null);
     const scheduler = new WorkflowScheduler({
@@ -195,6 +211,7 @@ export class WorkflowRunner {
       await journal.append({ type: "workflow_completed", runId: record.runId, time: nowIso(), outputPath, usage: record.usage });
       await this.deps.runStore.saveNow(record);
       const output = completedOutput(record, result, outputViews(viewStore, ["runPanel", "completion"]));
+      stopStandardProgressTicker();
       if (showStandardProgress) clearStandardProgress(ctx, record);
       clearLiveViews(ctx, record, viewStore);
       return output;
@@ -211,6 +228,7 @@ export class WorkflowRunner {
       await journal.append({ type: "workflow_failed", runId: record.runId, time: nowIso(), error, errorPath });
       await this.deps.runStore.saveNow(record);
       const output = failedOutput(record, err, outputViews(viewStore, ["runPanel", "completion"]));
+      stopStandardProgressTicker();
       if (showStandardProgress) clearStandardProgress(ctx, record);
       clearLiveViews(ctx, record, viewStore);
       return output;
@@ -384,7 +402,7 @@ function updateLiveView(ctx: any, run: RunRecord, snapshot: WorkflowViewSnapshot
     components.set(snapshot.spec.id, component);
   } else component.update(snapshot);
   try {
-    ctx.ui?.setWidget?.(key, () => component, { placement: placement === "runPanel" ? "belowEditor" : "aboveEditor" });
+    ctx.ui?.setWidget?.(key, () => component, { placement: "aboveEditor" });
   } catch {
     // UI delivery is best-effort; artifacts and final details still carry the view.
   }
