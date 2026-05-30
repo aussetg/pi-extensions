@@ -6,7 +6,7 @@ export type WorkflowCommand =
   | { action: "save"; runId: string; scope: "project" | "user"; name?: string }
   | { action: "resume"; runId: string; scriptPath?: string; args?: Record<string, unknown>; mode?: "await" | "async" }
   | { action: "stop" | "pause" | "continue" | "delete"; runId: string }
-  | { action: "retry-agent" | "skip-agent"; runId: string; callId: string }
+  | { action: "skip-agent"; runId: string; callId: string }
   | { action: "open"; runId: string; target: "result" | "script" | "journal" | "transcripts" | "ui"; viewId?: string; profile?: WorkflowOpenProfile; width?: number }
   | { action: "preview-ui"; json: string; profile?: WorkflowOpenProfile; width?: number };
 
@@ -53,7 +53,6 @@ export function parseWorkflowCommand(raw: string): WorkflowCommand {
       if (!runId) throw new Error(`Usage: /workflow ${action} <runId>`);
       return { action, runId };
     }
-    case "retry-agent":
     case "skip-agent": {
       const runId = argv.shift();
       const callId = argv.shift();
@@ -89,7 +88,7 @@ export function workflowHelpText(): string {
     "/workflow save <runId> [--scope project|user] [--name <slug>]",
     "/workflow resume <runId> [--script <scriptPath>] [--args <json>] [--await|--async]",
     "/workflow stop|pause|continue|delete <runId>",
-    "/workflow retry-agent|skip-agent <runId> <callId>",
+    "/workflow skip-agent <runId> <callId>",
     "/workflow open <runId> [result|script|journal|transcripts|ui] [viewId] [--profile compact|panel|full] [--width <columns>]",
     "/workflow preview-ui <json> [--profile compact|panel|full] [--width <columns>]",
   ].join("\n");

@@ -5,7 +5,7 @@ Pi extension for deterministic JavaScript workflows with one manually-enabled mo
 Highlights:
 
 - durable run directories under `~/.pi/agent/workflows/runs/<cwd-hash>/`;
-- isolated Pi subagents launched through `agent()`;
+- Pi subagents launched through `agent()`;
 - `parallel()`, `pipeline()`, `phase()`, `log()`, `args`, `budget`, `cwd`, and declarative `ui` globals;
 - journal-based resume for unchanged completed `agent()` calls;
 - `/workflow` manager, run/list/save/resume/open/pause/continue/stop/delete controls;
@@ -94,11 +94,25 @@ and then script statements directly; do not use `export default`, imports, `glob
 `Date.now()`, `Math.random()`, argless `new Date()`, `require`, `process`, `fs`, `fetch`, or network
 APIs.
 
-Workflow scripts run in a dedicated control child process under `systemd-run --user --scope` and `bwrap`.
-That control child sees a tiny tmpfs filesystem, a private network namespace, cgroup limits, and a
-JSON-RPC capability channel back to the parent for `agent()`, `ui.*`, logging, and child workflows.
+Subagent workspace policy is deliberately simple:
+
+- direct `agent()` calls use the shared project workspace by default;
+- `agent()` calls made inside `parallel()` or `pipeline()` default to `isolation: "worktree"` so
+  sibling fan-out agents do not stomp each other;
+- explicit `agent(prompt, { isolation: "shared" | "worktree" })` always wins.
+
+Worktree-isolated agents run in a disposable git worktree. Their edits are captured as patch
+artifacts and are not applied to the user's main working tree automatically.
+
+Workflow source is parsed before launch to reject nondeterministic and host APIs early. At runtime,
+the script talks to the parent through a JSON-only VM membrane: workflow-visible API values are
+created inside the VM realm, while host objects stay behind the capability channel. The control child
+itself runs under `systemd-run --user --scope` and `bwrap`; that OS sandbox sees a tiny tmpfs
+filesystem, a private network namespace, cgroup limits, and a JSON-RPC capability channel back to the
+parent for `agent()`, `ui.*`, logging, and child workflows.
 Subagents are still normal separate Pi child processes launched by the parent; they keep the usual
-project cwd, tools, and network access.
+tools and network access. Their cwd is either the shared project workspace or a disposable worktree,
+according to the isolation policy above.
 
 Frame rendering is intentionally bounded: renderers consume only the current run/view snapshot and cap rows, logs, calls, node depth, and table output. They never scan Pi session history during `render(width)`.
 

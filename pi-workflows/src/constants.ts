@@ -19,6 +19,13 @@ export const DEFAULT_LIMITS = {
   workflowHardTimeoutMs: 6 * 60 * 60_000,
 } as const;
 
+export const WORKFLOW_ISOLATION_POLICY = {
+  /** Plain sequential agent() calls operate in the user's current workspace. */
+  directAgentDefault: "shared",
+  /** Fan-out helpers run branch/stage agent() calls in disposable git worktrees unless explicitly overridden. */
+  fanoutAgentDefault: "worktree",
+} as const;
+
 export const WORKFLOW_CHILD_CGROUP = {
   memoryMax: "768M",
   tasksMax: "128",
@@ -53,6 +60,7 @@ export const RENDER_LIMITS = {
   progressLogs: 3,
   compactViewLines: 3,
   panelViewLines: 10,
+  workflowPanelLines: 16,
   fullViewLines: 220,
   pagerLines: 300,
 } as const;

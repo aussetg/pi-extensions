@@ -78,9 +78,8 @@ export async function routeWorkflowCommand(pi: ExtensionAPI, command: WorkflowCo
     case "continue":
     case "stop":
       return controlRun(deps, ctx, command.action, command.runId);
-    case "retry-agent":
     case "skip-agent":
-      return controlAgent(deps, ctx, command.action, command.runId, command.callId);
+      return skipAgent(deps, ctx, command.runId, command.callId);
     case "open":
       return openArtifact(deps, ctx, command.runId, command.target, command.viewId, command.profile, command.width);
     case "delete":
@@ -140,11 +139,11 @@ async function controlRun(deps: WorkflowCommandDeps, ctx: any, action: "pause" |
   await printOrNotify(ctx, `${action} sent to ${runId}`);
 }
 
-async function controlAgent(deps: WorkflowCommandDeps, ctx: any, action: "retry-agent" | "skip-agent", runId: string, callId: string): Promise<void> {
+async function skipAgent(deps: WorkflowCommandDeps, ctx: any, runId: string, callId: string): Promise<void> {
   const control = deps.runStore.getControl(runId);
   if (!control) return printOrNotify(ctx, `Run ${runId} is not live`);
-  const ok = action === "skip-agent" ? control.skipAgent(callId) : control.retryAgent(callId);
-  await printOrNotify(ctx, ok ? `${action} sent to ${callId}` : `${action} could not be applied to ${callId}`);
+  const ok = control.skipAgent(callId);
+  await printOrNotify(ctx, ok ? `skip-agent sent to ${callId}` : `skip-agent could not be applied to ${callId}`);
 }
 
 async function openArtifact(deps: WorkflowCommandDeps, ctx: any, runId: string, target: "result" | "script" | "journal" | "transcripts" | "ui", viewId?: string, profile?: WorkflowOpenProfile, width?: number): Promise<void> {

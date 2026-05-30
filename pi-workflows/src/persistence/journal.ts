@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { WorkflowJournalEvent } from "../types.js";
+import type { WorkflowJournalEvent, WorkflowUsage } from "../types.js";
 import { ensureDir } from "./paths.js";
 
 export interface JournalWriter {
@@ -64,13 +64,15 @@ export class ResumeIndex {
     return this.replayEnabled && this.results.has(chainKey);
   }
 
-  async load(chainKey: string): Promise<{ value: unknown; sourcePath: string; status: ReplayStatus } | undefined> {
+  async load(chainKey: string): Promise<{ value: unknown; sourcePath: string; status: ReplayStatus; usage?: WorkflowUsage; model?: string } | undefined> {
     if (!this.canReplay(chainKey)) return undefined;
     const entry = this.results.get(chainKey)!;
     const text = await fs.promises.readFile(entry.resultPath, "utf8");
-    const parsed = JSON.parse(text) as { result?: unknown; status?: ReplayStatus };
+    const parsed = JSON.parse(text) as { result?: unknown; status?: ReplayStatus; usage?: unknown; model?: unknown };
     const status = parsed.status === "skipped" || entry.event.status === "skipped" ? "skipped" : entry.event.status === "cached" ? "cached" : "done";
-    return { value: parsed.result ?? null, sourcePath: entry.resultPath, status };
+    const usage = normalizeUsage(entry.event.usage) ?? normalizeUsage(parsed.usage);
+    const model = typeof entry.event.model === "string" && entry.event.model.trim() ? entry.event.model : typeof parsed.model === "string" && parsed.model.trim() ? parsed.model : undefined;
+    return { value: parsed.result ?? null, sourcePath: entry.resultPath, status, usage, model };
   }
 
   disableAfterFirstMiss(): void {
@@ -84,4 +86,23 @@ export class ResumeIndex {
 
 function isReplayableAgentResult(status: Extract<WorkflowJournalEvent, { type: "agent_result" }>["status"]): boolean {
   return status === "done" || status === "skipped" || status === "cached";
+}
+
+function normalizeUsage(value: unknown): WorkflowUsage | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const object = value as Record<string, unknown>;
+  const agentCount = finiteNonNegativeInteger(object.agentCount);
+  const subagentTokens = finiteNonNegativeInteger(object.subagentTokens);
+  const toolUses = finiteNonNegativeInteger(object.toolUses);
+  if (agentCount === undefined || subagentTokens === undefined || toolUses === undefined) return undefined;
+  const usage: WorkflowUsage = { agentCount, subagentTokens, toolUses };
+  const durationMs = finiteNonNegativeInteger(object.durationMs);
+  if (durationMs !== undefined) usage.durationMs = durationMs;
+  if (typeof object.estimated === "boolean") usage.estimated = object.estimated;
+  return usage;
+}
+
+function finiteNonNegativeInteger(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return undefined;
+  return Math.ceil(value);
 }

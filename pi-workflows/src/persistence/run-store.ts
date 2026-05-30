@@ -27,7 +27,6 @@ export interface RunControlLike {
   resume(): void;
   stop(reason?: string): void;
   skipAgent(callId: string): boolean;
-  retryAgent(callId: string): boolean;
 }
 
 export interface LiveRun {

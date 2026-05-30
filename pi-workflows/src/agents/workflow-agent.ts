@@ -51,6 +51,7 @@ export interface WorkflowAgentResult {
   transcriptPath: string;
   resultPath: string;
   usage: WorkflowUsage;
+  model?: string;
   workspace?: AgentWorkspaceArtifacts;
 }
 
@@ -94,6 +95,8 @@ export class WorkflowAgent {
   private async runAttempt(call: WorkflowAgentCall, callDir: string, attempt: number): Promise<WorkflowAgentResult> {
     const messages: MessageLike[] = [];
     const stderr: string[] = [];
+    let toolExecutions = 0;
+    let model: string | undefined;
     const workspace = await prepareAgentWorkspace(call, callDir, attempt);
     const args = ["--mode", "json", "-p", "--no-session"];
     if (call.options.model) args.push("--model", call.options.model);
@@ -141,8 +144,11 @@ export class WorkflowAgent {
           } catch {
             return;
           }
+          if (event.type === "tool_execution_start") toolExecutions++;
           if ((event.type === "message_end" || event.type === "tool_result_end") && event.message) {
-            messages.push(event.message as MessageLike);
+            const message = event.message as MessageLike;
+            messages.push(message);
+            if (message.role === "assistant" && typeof message.model === "string" && message.model.trim()) model = message.model;
           }
         };
 
@@ -171,10 +177,10 @@ export class WorkflowAgent {
 
       const resultText = getFinalAssistantText(messages);
       const result = call.options.schema ? parseStructuredResult(resultText, call.options.schema) : resultText;
-      const usage = collectUsage(messages);
+      const usage = collectUsage(messages, toolExecutions);
       const resultPath = path.join(callDir, "result.json");
-      await fs.promises.writeFile(resultPath, `${JSON.stringify({ status: "done", result, resultText, usage, workspace: workspaceArtifacts }, null, 2)}\n`, "utf8");
-      return { result, resultText, transcriptPath, resultPath, usage, workspace: workspaceArtifacts };
+      await fs.promises.writeFile(resultPath, `${JSON.stringify({ status: "done", result, resultText, usage, model, workspace: workspaceArtifacts }, null, 2)}\n`, "utf8");
+      return { result, resultText, transcriptPath, resultPath, usage, model, workspace: workspaceArtifacts };
     } finally {
       await fs.promises.rm(tmp.dir, { recursive: true, force: true });
       await workspace.cleanup();
@@ -205,14 +211,15 @@ function getFinalAssistantText(messages: MessageLike[]): string {
   return "";
 }
 
-function collectUsage(messages: MessageLike[]): WorkflowUsage {
+function collectUsage(messages: MessageLike[], toolExecutions = 0): WorkflowUsage {
   const usage: WorkflowUsage = { agentCount: 1, subagentTokens: 0, toolUses: 0, estimated: false };
   for (const msg of messages) {
     if (msg.role === "assistant") {
       usage.subagentTokens += msg.usage?.totalTokens ?? (msg.usage?.input ?? 0) + (msg.usage?.output ?? 0);
-      if (Array.isArray(msg.content)) usage.toolUses += msg.content.filter((part) => part.type === "toolCall").length;
+      if (toolExecutions === 0 && Array.isArray(msg.content)) usage.toolUses += msg.content.filter((part) => part.type === "toolCall").length;
     }
   }
+  if (toolExecutions > 0) usage.toolUses = toolExecutions;
   return usage;
 }
 

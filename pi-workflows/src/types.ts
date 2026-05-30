@@ -62,6 +62,13 @@ export interface AgentOptions {
   phase?: string;
   schema?: JsonSchema;
   model?: string;
+  /**
+   * Workspace policy for this subagent.
+   *
+   * Direct `agent()` defaults to `shared`. `agent()` calls inside fan-out helpers
+   * (`parallel()` / `pipeline()`) default to `worktree`. An explicit value here
+   * always wins.
+   */
   isolation?: "shared" | "worktree";
   agentType?: string;
   stallMs?: number;
@@ -213,6 +220,7 @@ export interface WorkflowCallProgress {
   agentType?: string;
   status: CallStatus;
   cached?: boolean;
+  usage?: WorkflowUsage;
   startedAt?: string;
   endedAt?: string;
   resultPath?: string;
@@ -306,7 +314,8 @@ export type WorkflowJournalEvent =
       status: "done" | "error" | "skipped" | "aborted" | "cached";
       resultPath?: string;
       error?: string;
-      usage?: Record<string, unknown>;
+      usage?: WorkflowUsage;
+      model?: string;
     }
   | { type: "ui_defined"; runId: string; time: string; viewId: string; specPath: string }
   | { type: "ui_state"; runId: string; time: string; viewId: string; seq: number; statePath: string }

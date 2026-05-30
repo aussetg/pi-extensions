@@ -134,7 +134,6 @@ describe("RunStore live run lifecycle", () => {
       resume: () => undefined,
       stop: (reason?: string) => stopped.push(reason ?? ""),
       skipAgent: () => false,
-      retryAgent: () => false,
     };
 
     store.registerLiveRun({ runId: record.runId, sessionId: "session-a", control, donePromise: new Promise(() => undefined), notifyOnComplete: true });
@@ -163,7 +162,6 @@ describe("RunStore live run lifecycle", () => {
       resume: () => undefined,
       stop: () => stopped.push(id),
       skipAgent: () => false,
-      retryAgent: () => false,
     });
 
     store.registerLiveRun({ runId: a.record.runId, sessionId: "session-a", control: control("a"), donePromise: new Promise(() => undefined), notifyOnComplete: true });

@@ -165,8 +165,6 @@ export class WorkflowRunner {
 
     const globals = {
       agent: (prompt: unknown, opts?: unknown) => scheduler.agentCall(prompt, (opts ?? {}) as any),
-      parallel: (thunks: unknown) => scheduler.parallel(thunks),
-      pipeline: (items: unknown, ...stages: unknown[]) => scheduler.pipeline(items, ...stages),
       phase: (title: string) => scheduler.phase(title),
       log: (message: string) => scheduler.log(message),
       workflow: async (nameOrRef: unknown, childArgs?: unknown) => {
@@ -183,17 +181,6 @@ export class WorkflowRunner {
       args: stableArgs,
       budget,
       cwd: ctx.cwd,
-      console: {
-        log: (message: unknown) => void scheduler.log(String(message)),
-        info: (message: unknown) => void scheduler.log(String(message)),
-        warn: (message: unknown) => void scheduler.log(`warn: ${String(message)}`),
-        error: (message: unknown) => void scheduler.log(`error: ${String(message)}`),
-      },
-      setTimeout: (fn: any, ms?: number, ...rest: unknown[]) => {
-        if (typeof fn !== "function") throw new Error("String timers are not available in workflow scripts");
-        return setTimeout(fn, Math.min(ms ?? 0, 60_000), ...rest);
-      },
-      clearTimeout,
     };
 
     try {

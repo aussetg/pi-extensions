@@ -436,6 +436,106 @@ describe("workflow UI", () => {
     expect(lines.every((line) => visibleWidth(line) === 96)).toBe(true);
   });
 
+  it("renders per-agent usage telemetry in workflow progress rows", () => {
+    const startedAt = new Date(0).toISOString();
+    const endedAt = new Date(28_000).toISOString();
+    const lines = renderWorkflowResultLines({
+      status: "completed",
+      taskId: "task",
+      runId: "run_usage",
+      name: "usage_dashboard",
+      description: "Render per-agent usage",
+      phases: [{ title: "Implementation" }],
+      summary: "done",
+      scriptPath: "/tmp/script.js",
+      transcriptDir: "/tmp/subagents",
+      startedAt,
+      endedAt,
+      usage: { agentCount: 1, subagentTokens: 48_700, toolUses: 9, durationMs: 28_000, estimated: false },
+      progress: {
+        total: 1,
+        running: 0,
+        completed: 1,
+        failed: 0,
+        cached: 0,
+        skipped: 0,
+        phase: "Implementation",
+        calls: [{
+          callId: "0001",
+          label: "implementation",
+          phase: "Implementation",
+          model: "opus-test",
+          status: "done",
+          startedAt,
+          endedAt,
+          usage: { agentCount: 1, subagentTokens: 48_700, toolUses: 9, durationMs: 28_000, estimated: false },
+        }],
+        recentLogs: [],
+        updatedAt: endedAt,
+      },
+    }, { profile: "full", partial: true }, undefined, 140);
+
+    const text = lines.join("\n");
+    expect(text).toContain("opus-test");
+    expect(text).toContain("48.7k tok");
+    expect(text).toContain("9 tools");
+    expect(text).toContain("28s");
+    expect(lines.every((line) => visibleWidth(line) <= 140)).toBe(true);
+  });
+
+  it("uses the two-pane phase/agent dashboard for wide collapsed workflow progress", () => {
+    const details = wideWorkflowProgressDetails();
+
+    const lines = renderWorkflowResultLines(details, { profile: "panel", partial: true }, undefined, 140);
+    const text = lines.join("\n");
+
+    expect(text).toContain("Phases");
+    expect(text).toContain("Infrastructure");
+    expect(text).toContain("infra:tsconfig.json");
+    expect(text).toContain("Opus 4.8");
+    expect(text).toContain("48.7k tok");
+    expect(text).toContain("9 tools");
+    expect(lines.length).toBeLessThanOrEqual(RENDER_LIMITS.workflowPanelLines);
+    expect(lines.every((line) => visibleWidth(line) <= 140)).toBe(true);
+
+    const component = new WorkflowProgressComponent(() => details);
+    const liveLines = component.render(140);
+    expect(liveLines.join("\n")).toContain("Phases");
+    expect(liveLines.join("\n")).toContain("infra:tsconfig.json");
+    expect(liveLines.length).toBeLessThanOrEqual(RENDER_LIMITS.workflowPanelLines);
+    expect(liveLines.every((line) => visibleWidth(line) <= 140)).toBe(true);
+  });
+
+  it("keeps narrow collapsed workflow progress compact", () => {
+    const lines = renderWorkflowResultLines(wideWorkflowProgressDetails(), { profile: "panel", partial: true }, undefined, 72);
+    const text = lines.join("\n");
+
+    expect(text).toContain("progress:");
+    expect(text).not.toContain("┌ Phases");
+    expect(lines.length).toBeLessThanOrEqual(RENDER_LIMITS.panelViewLines);
+    expect(lines.every((line) => visibleWidth(line) <= 72)).toBe(true);
+  });
+
+  it("keeps live custom UI visible after the default wide progress panel", () => {
+    const checked = new WorkflowViewValidator().validateSpec({
+      version: 1,
+      id: "custom_live",
+      title: "Custom live",
+      placement: "runPanel",
+      initialState: { summary: "custom telemetry" },
+      layout: { type: "markdown", bind: "/summary", maxLines: 1 },
+    });
+    const details = { ...wideWorkflowProgressDetails(), uiViews: [{ spec: checked, state: checked.initialState!, seq: 1 }] };
+
+    const lines = renderWorkflowResultLines(details, { profile: "panel", partial: true }, undefined, 140);
+    const text = lines.join("\n");
+
+    expect(text).toContain("Phases");
+    expect(text).toContain("Custom live");
+    expect(lines.length).toBeLessThanOrEqual(RENDER_LIMITS.workflowPanelLines);
+    expect(lines.every((line) => visibleWidth(line) <= 140)).toBe(true);
+  });
+
   it("renders workflow views through compact, panel, and full profiles", () => {
     const checked = new WorkflowViewValidator().validateSpec({
       version: 1,
@@ -599,5 +699,65 @@ function sampleWorkflowDetails(overrides: Partial<WorkflowLaunchOutput> = {}): W
       updatedAt: new Date().toISOString(),
     },
     ...overrides,
+  };
+}
+
+function wideWorkflowProgressDetails(): WorkflowLaunchOutput {
+  const startedAt = new Date(0).toISOString();
+  const endedAt = new Date(28_000).toISOString();
+  const labels = [
+    "infra:package.json",
+    "infra:vite.config.ts",
+    "infra:tsconfig.json",
+    "infra:index.tsx",
+    "infra:appStore.ts",
+    "infra:reactivity.ts",
+    "infra:setupTests.ts",
+    "infra:.eslintrc.cjs",
+    "infra:README.md",
+    "infra:smoke.md",
+  ];
+  const calls = labels.map((label, index) => ({
+    callId: String(index + 1).padStart(4, "0"),
+    label,
+    phase: "Infrastructure",
+    model: "Opus 4.8",
+    status: index < 3 ? "done" as const : index === 3 ? "running" as const : "pending" as const,
+    startedAt,
+    endedAt: index < 3 ? endedAt : undefined,
+    usage: index < 3 ? { agentCount: 1, subagentTokens: 48_700, toolUses: 9, durationMs: 28_000, estimated: false } : undefined,
+  }));
+
+  return {
+    status: "async_launched",
+    taskId: "task",
+    runId: "run_wide",
+    name: "react-to-solid-migration",
+    description: "Non-destructive React→Solid.js port across 6 phases",
+    phases: [
+      { title: "Inventory" },
+      { title: "Pattern Analysis" },
+      { title: "Infrastructure" },
+      { title: "Migrate Core" },
+      { title: "Migrate App" },
+      { title: "Verify & Report" },
+    ],
+    summary: "running",
+    scriptPath: "/tmp/script.js",
+    transcriptDir: "/tmp/subagents",
+    startedAt,
+    usage: { agentCount: 10, subagentTokens: 430_000, toolUses: 71, durationMs: 330_000, estimated: false },
+    progress: {
+      total: 10,
+      running: 7,
+      completed: 3,
+      failed: 0,
+      cached: 0,
+      skipped: 0,
+      phase: "Infrastructure",
+      calls,
+      recentLogs: ["latest event should not take space in wide panel"],
+      updatedAt: endedAt,
+    },
   };
 }

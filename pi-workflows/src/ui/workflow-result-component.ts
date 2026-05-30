@@ -14,6 +14,14 @@ export type WorkflowResultRenderProfile = "compact" | "panel" | "full";
 
 type ThemeLike = { fg?: (name: string, text: string) => string; bold?: (text: string) => string } | undefined;
 
+const WIDE_PROGRESS_PANEL_MIN_WIDTH = 84;
+
+interface ProgressPanelsOptions {
+  maxPhaseRows?: number;
+  maxAgentRows?: number;
+  maxLogRows?: number;
+}
+
 export class WorkflowResultComponent implements ComponentLike {
   private readonly renderer = new WorkflowViewRenderer();
   private cachedWidth?: number;
@@ -67,7 +75,7 @@ export function renderWorkflowResultLines(details: WorkflowLaunchOutput, options
   const profile = options.profile ?? "full";
   const progress = details.progress ?? ((details as any).progress as WorkflowProgressSnapshot | undefined);
   const uiViews = details.uiViews ?? [];
-  const maxLines = profile === "panel" ? panelResultLineLimit(uiViews, renderer) : undefined;
+  const maxLines = profile === "panel" ? panelResultLineLimit(progress, uiViews, renderer, width) : undefined;
 
   if (profile === "compact") return finalizeResultLines(renderCompactResult(details, progress, theme, width), width, profile, maxLines);
   if (profile === "panel") return finalizeResultLines(renderPanelResult(details, progress, uiViews, renderer, options, theme, width), width, profile, maxLines);
@@ -91,7 +99,7 @@ function renderFullResult(details: WorkflowLaunchOutput, progress: WorkflowProgr
 
 function renderPanelResult(details: WorkflowLaunchOutput, progress: WorkflowProgressSnapshot | undefined, uiViews: WorkflowViewSnapshot[], renderer: WorkflowViewRenderer, options: WorkflowResultRenderOptions, theme: ThemeLike, width: number): string[] {
   if (uiViews.length > 0) {
-    const lines: string[] = [];
+    const lines = options.partial && progress && hasAgentProgress(progress) ? renderPanelDashboard(details, progress, theme, width, { maxPhaseRows: 5, maxAgentRows: 5, maxLogRows: 0 }) : [];
     withViewSections(lines, uiViews, renderer, width, "panel");
     if (!options.partial && details.status === "failed" && details.error) lines.push(fg(theme, "error", truncateToWidth(`error: ${sanitizeText(details.error, 1000).replace(/\n+/g, " ↵ ")}`, width)));
     return lines;
@@ -140,7 +148,7 @@ function renderDashboard(details: WorkflowLaunchOutput, progress: WorkflowProgre
   return lines;
 }
 
-function renderPanelDashboard(details: WorkflowLaunchOutput, progress: WorkflowProgressSnapshot, theme: ThemeLike, width: number): string[] {
+function renderPanelDashboard(details: WorkflowLaunchOutput, progress: WorkflowProgressSnapshot, theme: ThemeLike, width: number, progressPanelOptions: ProgressPanelsOptions = { maxPhaseRows: 8, maxAgentRows: 8, maxLogRows: 0 }): string[] {
   const title = fg(theme, "accent", bold(theme, sanitizeText(details.title ?? details.name, 240)));
   const stats = compactResultStats(details, progress, theme);
   const desc = fg(theme, "muted", sanitizeText(details.description ?? "Workflow run", 500));
@@ -149,15 +157,20 @@ function renderPanelDashboard(details: WorkflowLaunchOutput, progress: WorkflowP
     joinLeftRight(title, fg(theme, "dim", stats), width),
     joinLeftRight(desc, fg(theme, "dim", details.runId), width),
   ];
-  if (hasAgentProgress(progress)) lines.push(renderProgressLine(progress, theme, width));
-  if (progress.phase) lines.push(fg(theme, "accent", truncateToWidth(`phase: ${sanitizeText(progress.phase, 160)}`, width)));
-
   if (hasAgentProgress(progress)) {
-    const calls = callsForActivePhase(progress).slice(-3);
-    for (const call of calls) lines.push(renderCompactCallRow(call, theme, width));
+    if (width >= WIDE_PROGRESS_PANEL_MIN_WIDTH) {
+      lines.push("", ...renderProgressPanels(details, progress, theme, width, progressPanelOptions));
+    } else {
+      lines.push(renderProgressLine(progress, theme, width));
+      if (progress.phase) lines.push(fg(theme, "accent", truncateToWidth(`phase: ${sanitizeText(progress.phase, 160)}`, width)));
+      const calls = callsForActivePhase(progress).slice(-3);
+      for (const call of calls) lines.push(renderCompactCallRow(call, theme, width));
+    }
+  } else if (progress.phase) {
+    lines.push(fg(theme, "accent", truncateToWidth(`phase: ${sanitizeText(progress.phase, 160)}`, width)));
   }
   const log = progress.recentLogs.at(-1);
-  if (log) lines.push(fg(theme, "dim", truncateToWidth(`log: ${sanitizeText(log, 500)}`, width)));
+  if (log && (!hasAgentProgress(progress) || width < WIDE_PROGRESS_PANEL_MIN_WIDTH)) lines.push(fg(theme, "dim", truncateToWidth(`log: ${sanitizeText(log, 500)}`, width)));
   return lines;
 }
 
@@ -171,13 +184,13 @@ function renderHeader(details: WorkflowLaunchOutput, theme: ThemeLike, width: nu
   ];
 }
 
-function renderProgressPanels(details: WorkflowLaunchOutput, progress: WorkflowProgressSnapshot, theme: ThemeLike, width: number): string[] {
-  if (width >= 84) {
+function renderProgressPanels(details: WorkflowLaunchOutput, progress: WorkflowProgressSnapshot, theme: ThemeLike, width: number, options: ProgressPanelsOptions = {}): string[] {
+  if (width >= WIDE_PROGRESS_PANEL_MIN_WIDTH) {
     const phaseWidth = Math.min(46, Math.max(30, Math.floor(width * 0.3)));
     const agentWidth = Math.max(28, width - phaseWidth - 1);
     const calls = callsForActivePhase(progress);
-    const phaseRows = renderPhaseRows(details, progress, phaseWidth - 2, theme);
-    const agentRows = renderAgentRows(calls, progress.recentLogs, agentWidth - 2, theme);
+    const phaseRows = renderPhaseRows(details, progress, phaseWidth - 2, theme, options.maxPhaseRows);
+    const agentRows = renderAgentRows(calls, progress.recentLogs, agentWidth - 2, theme, { maxCalls: options.maxAgentRows, maxLogs: options.maxLogRows });
     const bodyHeight = Math.max(phaseRows.length, agentRows.length);
     while (phaseRows.length < bodyHeight) phaseRows.push("");
     while (agentRows.length < bodyHeight) agentRows.push("");
@@ -189,13 +202,13 @@ function renderProgressPanels(details: WorkflowLaunchOutput, progress: WorkflowP
 
   const calls = callsForActivePhase(progress);
   return [
-    ...frameBlock("Phases", renderPhaseRows(details, progress, width - 2, theme), width, theme),
+    ...frameBlock("Phases", renderPhaseRows(details, progress, width - 2, theme, options.maxPhaseRows), width, theme),
     "",
-    ...frameBlock(progress.phase ? `${sanitizeText(progress.phase, 120)} · ${calls.length} agents` : `Agents · ${progress.total}`, renderAgentRows(calls, progress.recentLogs, width - 2, theme), width, theme),
+    ...frameBlock(progress.phase ? `${sanitizeText(progress.phase, 120)} · ${calls.length} agents` : `Agents · ${progress.total}`, renderAgentRows(calls, progress.recentLogs, width - 2, theme, { maxCalls: options.maxAgentRows, maxLogs: options.maxLogRows }), width, theme),
   ];
 }
 
-function renderPhaseRows(details: WorkflowLaunchOutput, progress: WorkflowProgressSnapshot, width: number, theme: ThemeLike): string[] {
+function renderPhaseRows(details: WorkflowLaunchOutput, progress: WorkflowProgressSnapshot, width: number, theme: ThemeLike, maxRows = 14): string[] {
   const phases = phaseSpecs(details, progress);
   if (phases.length === 0) {
     return [joinLeftRight(fg(theme, "accent", "▶ Agents"), `${progress.completed}/${progress.total}`, width)];
@@ -214,27 +227,31 @@ function renderPhaseRows(details: WorkflowLaunchOutput, progress: WorkflowProgre
     rows.push(fg(theme, color, joinLeftRight(label, count, width)));
     if (active && phase.detail) rows.push(fg(theme, "dim", truncateToWidth(`  ${sanitizeText(phase.detail, 240)}`, width)));
   });
-  return rows.slice(0, 14);
+  return rows.slice(0, maxRows);
 }
 
-function renderAgentRows(calls: WorkflowCallProgress[], logs: string[], width: number, theme: ThemeLike): string[] {
+function renderAgentRows(calls: WorkflowCallProgress[], logs: string[], width: number, theme: ThemeLike, options: { maxCalls?: number; maxLogs?: number } = {}): string[] {
   const rows: string[] = [];
-  const visibleCalls = calls.slice(-RENDER_LIMITS.progressCalls);
+  const visibleCalls = tail(calls, Math.max(0, options.maxCalls ?? RENDER_LIMITS.progressCalls));
   if (visibleCalls.length === 0) rows.push(fg(theme, "dim", "No agents have started yet."));
 
   for (const call of visibleCalls) {
     const icon = callIcon(call.status);
     const left = `${icon} ${sanitizeText(call.callId, 40)} ${sanitizeText(call.label, 240)}`;
-    const meta = [call.model ? sanitizeText(call.model, 80) : undefined, call.status, callElapsed(call)].filter(Boolean).join(" · ");
+    const meta = callMeta(call);
     rows.push(fg(theme, callColor(call.status), joinLeftRight(left, meta, width)));
   }
 
-  const visibleLogs = logs.slice(-RENDER_LIMITS.progressLogs);
+  const visibleLogs = tail(logs, Math.max(0, options.maxLogs ?? RENDER_LIMITS.progressLogs));
   if (visibleLogs.length > 0) {
     if (rows.length > 0) rows.push("");
     for (const log of visibleLogs) rows.push(fg(theme, "dim", truncateToWidth(`log: ${sanitizeText(log, 500)}`, width)));
   }
   return rows;
+}
+
+function tail<T>(items: readonly T[], count: number): T[] {
+  return count <= 0 ? [] : items.slice(-count);
 }
 
 function renderArtifactLines(details: WorkflowLaunchOutput, options: WorkflowResultRenderOptions): string[] {
@@ -274,10 +291,11 @@ function finalizeResultLines(lines: string[], width: number, profile: WorkflowRe
   return clipped.map((line) => padToWidth(truncateToWidth(line, width), width));
 }
 
-function panelResultLineLimit(uiViews: WorkflowViewSnapshot[], renderer: WorkflowViewRenderer): number {
-  if (uiViews.length === 0) return RENDER_LIMITS.panelViewLines;
+function panelResultLineLimit(progress: WorkflowProgressSnapshot | undefined, uiViews: WorkflowViewSnapshot[], renderer: WorkflowViewRenderer, width: number): number {
+  const progressLimit = progress && hasAgentProgress(progress) && width >= WIDE_PROGRESS_PANEL_MIN_WIDTH ? RENDER_LIMITS.workflowPanelLines : RENDER_LIMITS.panelViewLines;
+  if (uiViews.length === 0) return progressLimit;
   const viewLimit = Math.max(...uiViews.map((snapshot) => renderer.panelLineLimit(snapshot)));
-  return Math.max(RENDER_LIMITS.panelViewLines, Math.min(UI_LIMITS.maxDashboardPanelLines + 2, viewLimit));
+  return Math.max(progressLimit, Math.min(UI_LIMITS.maxDashboardPanelLines + 2, viewLimit));
 }
 
 function compactResultStats(details: WorkflowLaunchOutput, progress: WorkflowProgressSnapshot | undefined, theme: ThemeLike, options: { terminalStatus?: boolean } = {}): string {
@@ -313,8 +331,17 @@ function renderProgressLine(progress: WorkflowProgressSnapshot, theme: ThemeLike
 
 function renderCompactCallRow(call: WorkflowCallProgress, theme: ThemeLike, width: number): string {
   const left = `${callIcon(call.status)} ${sanitizeText(call.callId, 40)} ${sanitizeText(call.label, 180)}`;
-  const right = [call.status, callElapsed(call)].filter(Boolean).join(" · ");
+  const right = callMeta(call);
   return fg(theme, callColor(call.status), joinLeftRight(left, right, width));
+}
+
+function callMeta(call: WorkflowCallProgress): string {
+  const usage = call.usage;
+  const tokens = usage ? `${compactNumber(usage.subagentTokens)} tok` : undefined;
+  const tools = usage ? `${usage.toolUses} ${usage.toolUses === 1 ? "tool" : "tools"}` : undefined;
+  const duration = usage?.durationMs !== undefined ? formatDuration(usage.durationMs) : callElapsed(call);
+  const status = call.status === "done" ? undefined : call.status;
+  return [call.model ? sanitizeText(call.model, 80) : undefined, tokens, tools, duration, status].filter(Boolean).join(" · ");
 }
 
 function workflowStatusIcon(status: WorkflowLaunchOutput["status"]): string {

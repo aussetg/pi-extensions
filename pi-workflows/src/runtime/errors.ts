@@ -32,7 +32,3 @@ export class WorkflowSkipAgentError extends Error {
     this.name = "WorkflowSkipAgentError";
   }
 }
-
-export function isBudgetOrAbortError(err: unknown): boolean {
-  return err instanceof WorkflowAbortError || err instanceof WorkflowBudgetExceededError || err instanceof WorkflowAgentCapError;
-}

@@ -76,12 +76,6 @@ export class RunControl {
     return Boolean(active);
   }
 
-  retryAgent(_callId: string): boolean {
-    // Retrying a completed call without corrupting journal replay needs a dedicated attempt graph.
-    // v1 exposes the control surface and leaves old attempts inspectable.
-    return false;
-  }
-
   isSkipped(callId: string): boolean {
     return this.skipped.has(callId);
   }

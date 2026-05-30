@@ -31,4 +31,8 @@ describe("parseWorkflowCommand", () => {
     expect(parseWorkflowCommand("preview-ui '{\"title\":\"Preview\"}' --profile panel --width 140")).toEqual({ action: "preview-ui", json: '{"title":"Preview"}', profile: "panel", width: 140 });
     expect(() => parseWorkflowCommand("open wr_1 result --profile panel")).toThrow(/only valid/);
   });
+
+  it("does not expose dead retry-agent control", () => {
+    expect(() => parseWorkflowCommand("retry-agent wr_1 0001")).toThrow(/Unknown/);
+  });
 });
