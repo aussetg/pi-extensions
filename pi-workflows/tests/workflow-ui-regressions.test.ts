@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WorkflowRegistry } from "../src/persistence/registry.js";
+import { createWorkflowExtension } from "../src/index.js";
 import { RunStore } from "../src/persistence/run-store.js";
 import { WorkflowRunner } from "../src/runtime/runner.js";
 import { createWorkflowTool } from "../src/tool/workflow-tool.js";
@@ -46,6 +47,27 @@ throw new Error('intentional workflow failure');`,
 
     expect(result.details.status).toBe("failed");
     expect(result.isError).toBe(true);
+  });
+
+  it("marks failed workflow results as TUI tool errors", async () => {
+    const handlers: Record<string, Function[]> = {};
+    const pi = {
+      registerTool: () => undefined,
+      registerCommand: () => undefined,
+      registerMessageRenderer: () => undefined,
+      getActiveTools: () => [],
+      setActiveTools: () => undefined,
+      on: (event: string, handler: Function) => {
+        handlers[event] = [...(handlers[event] ?? []), handler];
+      },
+    };
+
+    createWorkflowExtension(pi as any);
+    const toolResultHandler = handlers.tool_result?.[0];
+
+    expect(toolResultHandler).toBeTypeOf("function");
+    expect(await toolResultHandler({ type: "tool_result", toolName: "workflow", details: { status: "failed" } }, workflowCtx())).toEqual({ isError: true });
+    expect(await toolResultHandler({ type: "tool_result", toolName: "workflow", details: { status: "completed" } }, workflowCtx())).toBeUndefined();
   });
 
   it("uses the same panel profile for collapsed final results and collapsed running updates", () => {

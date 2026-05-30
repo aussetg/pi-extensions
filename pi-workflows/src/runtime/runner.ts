@@ -121,8 +121,10 @@ export class WorkflowRunner {
     const viewComponents = new Map<string, WorkflowViewComponent>();
     let progressComponent: WorkflowProgressComponent | undefined;
     let progressRenderTimer: NodeJS.Timeout | undefined;
+    const showInlineProgress = !!args.onUpdate;
     const showLiveWidgets = !!ctx.hasUI && !args.onUpdate;
     const showStandardProgress = !!ctx.hasUI && !args.onUpdate;
+    const tickProgress = showInlineProgress || showStandardProgress;
     const updateStandardProgress = () => {
       if (!showStandardProgress) return;
       try {
@@ -135,16 +137,19 @@ export class WorkflowRunner {
         // Standard live progress is best-effort; artifacts and completion messages remain authoritative.
       }
     };
-    const startStandardProgressTicker = () => {
-      if (!showStandardProgress || progressRenderTimer) return;
+    const startProgressTicker = () => {
+      if (!tickProgress || progressRenderTimer) return;
       progressRenderTimer = setInterval(() => {
         if (record.status !== "running" && record.status !== "paused") return;
-        progressComponent?.invalidate();
-        updateStandardProgress();
+        if (showInlineProgress) emitProgress();
+        else {
+          progressComponent?.invalidate();
+          updateStandardProgress();
+        }
       }, 1_000);
       progressRenderTimer.unref?.();
     };
-    const stopStandardProgressTicker = () => {
+    const stopProgressTicker = () => {
       if (!progressRenderTimer) return;
       clearInterval(progressRenderTimer);
       progressRenderTimer = undefined;
@@ -166,7 +171,7 @@ export class WorkflowRunner {
       if (workflowViewPlacement(snapshot) === "runPanel") emitProgress();
     });
     updateStandardProgress();
-    startStandardProgressTicker();
+    startProgressTicker();
     const ui = createWorkflowUiGlobal(viewStore);
     const budget = new WorkflowBudget(input.budgetTokens ?? null);
     const scheduler = new WorkflowScheduler({
@@ -214,7 +219,7 @@ export class WorkflowRunner {
       await journal.append({ type: "workflow_completed", runId: record.runId, time: nowIso(), outputPath, usage: record.usage });
       await this.deps.runStore.saveNow(record);
       const output = completedOutput(record, result, outputViews(viewStore, ["runPanel", "completion"]));
-      stopStandardProgressTicker();
+      stopProgressTicker();
       if (showStandardProgress) clearStandardProgress(ctx, record);
       clearLiveViews(ctx, record, viewStore, showLiveWidgets);
       return output;
@@ -231,7 +236,7 @@ export class WorkflowRunner {
       await journal.append({ type: "workflow_failed", runId: record.runId, time: nowIso(), error, errorPath });
       await this.deps.runStore.saveNow(record);
       const output = failedOutput(record, err, outputViews(viewStore, ["runPanel", "completion"]));
-      stopStandardProgressTicker();
+      stopProgressTicker();
       if (showStandardProgress) clearStandardProgress(ctx, record);
       clearLiveViews(ctx, record, viewStore, showLiveWidgets);
       return output;

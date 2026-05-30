@@ -10,10 +10,15 @@ export function renderWorkflowCall(args: Record<string, unknown>, theme?: any): 
   return new StaticTextComponent(`${fg("toolTitle", "workflow")} ${fg("accent", name)} · ${mode}`, { preserveAnsi: true });
 }
 
-export function renderWorkflowResult(result: { details?: WorkflowLaunchOutput | any; content?: Array<{ type: string; text?: string }> }, options?: { expanded?: boolean; isPartial?: boolean }, theme?: any): ComponentLike {
+export function renderWorkflowResult(result: { details?: WorkflowLaunchOutput | any; content?: Array<{ type: string; text?: string }> }, options?: { expanded?: boolean; isPartial?: boolean }, theme?: any, context?: { lastComponent?: unknown }): ComponentLike {
   const details = result.details as WorkflowLaunchOutput | undefined;
   if (!details) return new StaticTextComponent(result.content?.find((c) => c.type === "text")?.text ?? "workflow");
-  return new WorkflowResultComponent(details, { partial: options?.isPartial, profile: toolResultProfile(options) }, theme);
+  const renderOptions = { partial: options?.isPartial, profile: toolResultProfile(options) };
+  if (context?.lastComponent instanceof WorkflowResultComponent) {
+    context.lastComponent.update(details, renderOptions, theme);
+    return context.lastComponent;
+  }
+  return new WorkflowResultComponent(details, renderOptions, theme);
 }
 
 function toolResultProfile(options?: { expanded?: boolean; isPartial?: boolean }): WorkflowResultRenderProfile {

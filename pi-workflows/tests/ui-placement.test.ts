@@ -99,6 +99,30 @@ return 'ok';`,
     expect(widgetCalls).toEqual([]);
   });
 
+  it("ticks inline tool progress while the workflow is otherwise quiet", async () => {
+    const cwd = path.join(tmp, "project");
+    await fs.promises.mkdir(cwd, { recursive: true });
+    const updates: any[] = [];
+    const runner = new WorkflowRunner({ pi: { getActiveTools: () => [] } as any, runStore: new RunStore(), registry: new WorkflowRegistry() });
+
+    const result = await runner.launchOrRun({
+      toolCallId: "inline-progress-ticker-test",
+      input: {
+        mode: "async",
+        script: `export const meta = { name: 'inline_progress_ticker', description: 'exercise inline progress ticking' };
+phase('Quiet hold');
+await new Promise((resolve) => setTimeout(resolve, 1250));
+return 'ok';`,
+      },
+      ctx: { cwd, hasUI: true, sessionManager: { getSessionId: () => "test-session" } },
+      onUpdate: (partial) => updates.push(partial),
+    });
+
+    expect(result.status).toBe("completed");
+    expect(updates.length).toBeGreaterThanOrEqual(2);
+    expect(updates.filter((update) => update.details?.progress?.phase === "Quiet hold").length).toBeGreaterThanOrEqual(2);
+  });
+
   it("shows and clears the standard live progress widget for background runs", async () => {
     const cwd = path.join(tmp, "project");
     await fs.promises.mkdir(cwd, { recursive: true });

@@ -28,7 +28,14 @@ export class WorkflowResultComponent implements ComponentLike {
   private cachedLines?: string[];
   private minHeight = 0;
 
-  constructor(private readonly details: WorkflowLaunchOutput, private readonly options: WorkflowResultRenderOptions = {}, private readonly theme?: ThemeLike) {}
+  constructor(private details: WorkflowLaunchOutput, private options: WorkflowResultRenderOptions = {}, private theme?: ThemeLike) {}
+
+  update(details: WorkflowLaunchOutput, options: WorkflowResultRenderOptions = {}, theme?: ThemeLike): void {
+    this.details = details;
+    this.options = options;
+    this.theme = theme;
+    this.invalidate();
+  }
 
   render(width: number): string[] {
     if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
@@ -110,7 +117,6 @@ function renderPanelResult(details: WorkflowLaunchOutput, progress: WorkflowProg
   const lines = progress ? renderPanelDashboard(details, progress, theme, width) : renderHeader(details, theme, width);
   if (!options.partial) {
     if (details.error) lines.push(fg(theme, "error", truncateToWidth(`error: ${sanitizeText(details.error, 1000).replace(/\n+/g, " ↵ ")}`, width)));
-    else if (details.resultPreview) lines.push(fg(theme, "success", truncateToWidth(`result: ${sanitizeText(details.resultPreview, 1000).replace(/\n+/g, " ↵ ")}`, width)));
     if (details.outputPath) lines.push(fg(theme, "dim", truncateToWidth(`output: ${sanitizeText(details.outputPath, 1000)}`, width)));
   }
   withViewSections(lines, uiViews, renderer, width, "panel");
@@ -351,7 +357,7 @@ function workflowStatusIcon(status: WorkflowLaunchOutput["status"]): string {
   return "▶";
 }
 
-function frameBlock(title: string, body: string[], width: number, theme: ThemeLike, color = "borderMuted"): string[] {
+function frameBlock(title: string, body: string[], width: number, theme: ThemeLike, color = "muted"): string[] {
   if (width < 8) return body.map((line) => padToWidth(line, width));
   const inner = Math.max(1, width - 2);
   const safeTitle = sanitizeText(title, 180);
@@ -359,7 +365,9 @@ function frameBlock(title: string, body: string[], width: number, theme: ThemeLi
   const top = `┌${label}${"─".repeat(Math.max(0, inner - visibleWidth(label)))}┐`;
   const bottom = `└${"─".repeat(inner)}┘`;
   const rows = body.length > 0 ? body : [""];
-  return [fg(theme, color, top), ...rows.map((line) => `│${padToWidth(line, inner)}│`), fg(theme, color, bottom)].map((line) => padToWidth(line, width));
+  const leftBorder = fg(theme, color, "│");
+  const rightBorder = fg(theme, color, "│");
+  return [fg(theme, color, top), ...rows.map((line) => `${leftBorder}${padToWidth(line, inner)}${rightBorder}`), fg(theme, color, bottom)].map((line) => padToWidth(line, width));
 }
 
 function sideBySide(left: string[], right: string[], width: number): string[] {

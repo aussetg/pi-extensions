@@ -18,6 +18,13 @@ export function createWorkflowExtension(pi: ExtensionAPI): void {
   registerWorkflowCommand(pi, { runStore, registry, renderer, activation });
   pi.registerMessageRenderer?.("workflow_result", renderWorkflowResultMessage as any);
 
+  pi.on("tool_result", (event: any) => {
+    if (event.toolName !== "workflow") return undefined;
+    const status = event.details && typeof event.details === "object" ? (event.details as any).status : undefined;
+    if (status === "failed") return { isError: true };
+    return undefined;
+  });
+
   pi.on("session_start", async (_event: any, ctx: any) => {
     await registry.refresh(ctx.cwd);
     activation.reset(ctx);

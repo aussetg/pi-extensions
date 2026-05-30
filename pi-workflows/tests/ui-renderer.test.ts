@@ -6,7 +6,7 @@ import { WorkflowViewValidator } from "../src/ui/workflow-view-validator.js";
 import { renderWorkflowCall, renderWorkflowResult } from "../src/tool/workflow-tool-renderer.js";
 import { normalizeDashboardDocument, renderAlignedSparklines, renderCompactMetrics, renderCompactTable } from "../src/ui/dashboard.js";
 import { renderWorkflowResultMessage } from "../src/ui/messages.js";
-import { renderWorkflowResultLines, WorkflowProgressComponent } from "../src/ui/workflow-result-component.js";
+import { renderWorkflowResultLines, WorkflowProgressComponent, WorkflowResultComponent } from "../src/ui/workflow-result-component.js";
 import { WorkflowViewComponent } from "../src/ui/workflow-view-widget.js";
 import { visibleWidth } from "../src/utils/truncate.js";
 
@@ -506,6 +506,18 @@ describe("workflow UI", () => {
     expect(liveLines.every((line) => visibleWidth(line) <= 140)).toBe(true);
   });
 
+  it("uses readable themed borders for nested progress frames", () => {
+    const theme = {
+      fg: (name: string, text: string) => `\u001b[${name === "muted" ? 2 : name === "accent" ? 33 : name === "success" ? 32 : 90}m${text}\u001b[0m`,
+      bold: (text: string) => text,
+    };
+    const text = renderWorkflowResultLines(wideWorkflowProgressDetails(), { profile: "panel", partial: true }, theme, 140).join("\n");
+
+    expect(text).toContain("\u001b[2m┌ Phases");
+    expect(text).toContain("\u001b[2m│\u001b[0m");
+    expect(text).toContain("\u001b[33m▶ 0004");
+  });
+
   it("keeps narrow collapsed workflow progress compact", () => {
     const lines = renderWorkflowResultLines(wideWorkflowProgressDetails(), { profile: "panel", partial: true }, undefined, 72);
     const text = lines.join("\n");
@@ -647,6 +659,38 @@ describe("workflow UI", () => {
     expect(partialExpanded.join("\n")).not.toContain("Artifacts");
     expect(expanded.length).toBeGreaterThan(collapsed.length);
     expect([...collapsed, ...expanded, ...partialCollapsed, ...partialExpanded].every((line) => visibleWidth(line) <= 80)).toBe(true);
+  });
+
+  it("updates a reused workflow result component with fresh partial details", () => {
+    const first = sampleWorkflowDetails({ status: "async_launched" });
+    const second = {
+      ...first,
+      progress: {
+        ...first.progress!,
+        phase: "Second phase",
+        calls: first.progress!.calls.map((call, index, calls) => index === calls.length - 1 ? { ...call, label: "fresh partial row" } : call),
+        updatedAt: new Date(Date.now() + 10_000).toISOString(),
+      },
+    };
+
+    const component = renderWorkflowResult({ details: first }, { expanded: false, isPartial: true }) as WorkflowResultComponent;
+    expect(component.render(100).join("\n")).not.toContain("fresh partial row");
+    const reused = renderWorkflowResult({ details: second }, { expanded: false, isPartial: true }, undefined, { lastComponent: component });
+
+    expect(reused).toBe(component);
+    expect(component.render(100).join("\n")).toContain("fresh partial row");
+  });
+
+  it("keeps result JSON previews out of the collapsed workflow panel", () => {
+    const details = sampleWorkflowDetails({ status: "completed", resultPreview: '{\n  "checks": ["ok"],\n  "verdict": "done"\n}' });
+
+    const panel = renderWorkflowResultLines(details, { profile: "panel" }, undefined, 100).join("\n");
+    const full = renderWorkflowResultLines(details, { profile: "full" }, undefined, 100).join("\n");
+
+    expect(panel).not.toContain("result:");
+    expect(panel).not.toContain('"checks"');
+    expect(full).toContain("Result");
+    expect(full).toContain('"checks"');
   });
 
   it("maps workflow result message expansion to panel and full profiles", () => {
