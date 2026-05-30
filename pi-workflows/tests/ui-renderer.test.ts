@@ -518,6 +518,62 @@ describe("workflow UI", () => {
     expect(text).toContain("\u001b[33m▶ 0004");
   });
 
+  it("marks passed no-agent phases and terminal current phase as done", () => {
+    const startedAt = new Date(0).toISOString();
+    const endedAt = new Date(8_000).toISOString();
+    const details: WorkflowLaunchOutput = {
+      status: "completed",
+      taskId: "task",
+      runId: "run_phase_done",
+      name: "phase_done",
+      description: "Exercise phase completion without agents in every phase",
+      phases: [{ title: "Start" }, { title: "Checks" }, { title: "Done" }],
+      summary: "done",
+      scriptPath: "/tmp/script.js",
+      transcriptDir: "/tmp/subagents",
+      outputPath: "/tmp/output.json",
+      startedAt,
+      endedAt,
+      progress: {
+        total: 2,
+        running: 0,
+        completed: 2,
+        failed: 0,
+        cached: 0,
+        skipped: 0,
+        phase: "Done",
+        calls: [
+          { callId: "0001", label: "readability", phase: "Checks", status: "done", startedAt, endedAt },
+          { callId: "0002", label: "surface", phase: "Checks", status: "done", startedAt, endedAt },
+        ],
+        recentLogs: [],
+        updatedAt: endedAt,
+      },
+    };
+
+    const text = renderWorkflowResultLines(details, { profile: "panel" }, undefined, 140).join("\n");
+
+    expect(text).toContain("✓ 1 Start");
+    expect(text).toContain("✓ 2 Checks");
+    expect(text).toContain("✓ 3 Done");
+    expect(text).toContain("Agents · 2");
+    expect(text).not.toContain("Done · 2 agents");
+  });
+
+  it("marks the active phase as failed when the workflow fails outside an agent", () => {
+    const details = wideWorkflowProgressDetails();
+    const failed: WorkflowLaunchOutput = {
+      ...details,
+      status: "failed",
+      progress: { ...details.progress!, phase: "Verify & Report", failed: 0, running: 0 },
+      error: "token budget exhausted",
+    };
+
+    const text = renderWorkflowResultLines(failed, { profile: "panel" }, undefined, 140).join("\n");
+
+    expect(text).toContain("✗ 6 Verify & Report");
+  });
+
   it("keeps narrow collapsed workflow progress compact", () => {
     const lines = renderWorkflowResultLines(wideWorkflowProgressDetails(), { profile: "panel", partial: true }, undefined, 72);
     const text = lines.join("\n");

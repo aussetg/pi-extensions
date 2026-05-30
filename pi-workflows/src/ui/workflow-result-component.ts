@@ -203,7 +203,7 @@ function renderProgressPanels(details: WorkflowLaunchOutput, progress: WorkflowP
     while (phaseRows.length < bodyHeight) phaseRows.push("");
     while (agentRows.length < bodyHeight) agentRows.push("");
     const phases = frameBlock("Phases", phaseRows, phaseWidth, theme);
-    const title = progress.phase ? `${sanitizeText(progress.phase, 120)} · ${calls.length} agents` : `Agents · ${progress.total}`;
+    const title = agentPanelTitle(progress, calls);
     const agents = frameBlock(title, agentRows, agentWidth, theme);
     return sideBySide(phases, agents, width);
   }
@@ -212,7 +212,7 @@ function renderProgressPanels(details: WorkflowLaunchOutput, progress: WorkflowP
   return [
     ...frameBlock("Phases", renderPhaseRows(details, progress, width - 2, theme, options.maxPhaseRows), width, theme),
     "",
-    ...frameBlock(progress.phase ? `${sanitizeText(progress.phase, 120)} · ${calls.length} agents` : `Agents · ${progress.total}`, renderAgentRows(calls, progress.recentLogs, width - 2, theme, { maxCalls: options.maxAgentRows, maxLogs: options.maxLogRows }), width, theme),
+    ...frameBlock(agentPanelTitle(progress, calls), renderAgentRows(calls, progress.recentLogs, width - 2, theme, { maxCalls: options.maxAgentRows, maxLogs: options.maxLogRows }), width, theme),
   ];
 }
 
@@ -223,11 +223,13 @@ function renderPhaseRows(details: WorkflowLaunchOutput, progress: WorkflowProgre
   }
 
   const rows: string[] = [];
+  const activeIndex = phases.findIndex((phase) => phase.title === progress.phase);
   phases.forEach((phase, index) => {
     const stats = phaseStats(progress, phase.title, phases.length === 1 && phase.title === "Agents");
     const active = progress.phase === phase.title || (!progress.phase && phase.title === "Agents");
-    const failed = stats.failed > 0;
-    const complete = stats.total > 0 && stats.finished >= stats.total && !failed;
+    const passed = activeIndex >= 0 && index < activeIndex;
+    const failed = stats.failed > 0 || (active && details.status === "failed");
+    const complete = !failed && (passed || (stats.total > 0 && stats.finished >= stats.total) || (active && details.status === "completed"));
     const color = failed ? "error" : complete ? "success" : active ? "accent" : "muted";
     const icon = failed ? "✗" : complete ? "✓" : active ? "›" : "·";
     const count = stats.total > 0 ? `${stats.finished}/${stats.total}` : "";
@@ -236,6 +238,11 @@ function renderPhaseRows(details: WorkflowLaunchOutput, progress: WorkflowProgre
     if (active && phase.detail) rows.push(fg(theme, "dim", truncateToWidth(`  ${sanitizeText(phase.detail, 240)}`, width)));
   });
   return rows.slice(0, maxRows);
+}
+
+function agentPanelTitle(progress: WorkflowProgressSnapshot, visibleCalls: WorkflowCallProgress[]): string {
+  if (progress.phase && progress.calls.some((call) => call.phase === progress.phase)) return `${sanitizeText(progress.phase, 120)} · ${visibleCalls.length} agents`;
+  return `Agents · ${progress.total}`;
 }
 
 function renderAgentRows(calls: WorkflowCallProgress[], logs: string[], width: number, theme: ThemeLike, options: { maxCalls?: number; maxLogs?: number } = {}): string[] {
