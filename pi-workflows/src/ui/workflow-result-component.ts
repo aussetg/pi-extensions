@@ -84,7 +84,7 @@ export function renderWorkflowResultLines(details: WorkflowLaunchOutput, options
   const profile = options.profile ?? "full";
   const progress = details.progress ?? ((details as any).progress as WorkflowProgressSnapshot | undefined);
   const uiViews = details.uiViews ?? [];
-  const maxLines = profile === "panel" ? panelResultLineLimit(progress, uiViews, renderer, width) : undefined;
+  const maxLines = profile === "panel" ? panelResultLineLimit(details, progress, uiViews, renderer, width) : undefined;
 
   if (profile === "compact") return finalizeResultLines(renderCompactResult(details, progress, theme, width), width, profile, maxLines);
   if (profile === "panel") return finalizeResultLines(renderPanelResult(details, progress, uiViews, renderer, options, theme, width), width, profile, maxLines);
@@ -308,8 +308,8 @@ function finalizeResultLines(lines: string[], width: number, profile: WorkflowRe
   return clipped.map((line) => padToWidth(truncateToWidth(line, width), width));
 }
 
-function panelResultLineLimit(progress: WorkflowProgressSnapshot | undefined, uiViews: WorkflowViewSnapshot[], renderer: WorkflowViewRenderer, width: number): number {
-  const progressLimit = progress && hasAgentProgress(progress) && width >= WIDE_PROGRESS_PANEL_MIN_WIDTH ? RENDER_LIMITS.workflowPanelLines : RENDER_LIMITS.panelViewLines;
+function panelResultLineLimit(details: WorkflowLaunchOutput, progress: WorkflowProgressSnapshot | undefined, uiViews: WorkflowViewSnapshot[], renderer: WorkflowViewRenderer, width: number): number {
+  const progressLimit = progress && hasProgressPanel(details, progress) && width >= WIDE_PROGRESS_PANEL_MIN_WIDTH ? RENDER_LIMITS.workflowPanelLines : RENDER_LIMITS.panelViewLines;
   if (uiViews.length === 0) return progressLimit;
   const viewLimit = Math.max(...uiViews.map((snapshot) => renderer.panelLineLimit(snapshot)));
   return Math.max(progressLimit, Math.min(UI_LIMITS.maxDashboardPanelLines + 2, viewLimit));

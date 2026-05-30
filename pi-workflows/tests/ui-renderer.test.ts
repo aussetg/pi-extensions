@@ -596,6 +596,8 @@ describe("workflow UI", () => {
     expect(text).toContain("› 2 Quiet ticker");
     expect(text).toContain("No agents have started yet.");
     expect(text).toContain("log: Quiet ticker has no agents");
+    expect(text).toContain("└");
+    expect(text).not.toContain("more line(s)");
     expect(lines.length).toBeLessThanOrEqual(RENDER_LIMITS.workflowPanelLines);
     expect(lines.every((line) => visibleWidth(line) <= 140)).toBe(true);
   });
