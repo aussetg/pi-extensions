@@ -1,7 +1,7 @@
 import type { RunRecord } from "../types.js";
 import { RENDER_LIMITS } from "../constants.js";
 import { padToWidth, sanitizeText, truncateToWidth } from "../utils/truncate.js";
-import { isEscape, type ComponentLike } from "./simple-components.js";
+import { isDown, isEnter, isEscape, isUp, type ComponentLike } from "./simple-components.js";
 
 export class WorkflowManagerComponent implements ComponentLike {
   private selected = 0;
@@ -13,9 +13,9 @@ export class WorkflowManagerComponent implements ComponentLike {
 
   handleInput(data: string): void {
     if (isEscape(data)) return this.done();
-    if (data === "\r" || data === "\n") return this.done(this.runs[this.selected]?.runId);
-    if (data === "\u001b[A") this.selected = Math.max(0, this.selected - 1);
-    if (data === "\u001b[B") this.selected = Math.min(Math.max(0, this.runs.length - 1), this.selected + 1);
+    if (isEnter(data)) return this.done(this.runs[this.selected]?.runId);
+    if (isUp(data)) this.selected = Math.max(0, this.selected - 1);
+    if (isDown(data)) this.selected = Math.min(Math.max(0, this.runs.length - 1), this.selected + 1);
     this.invalidate();
   }
 

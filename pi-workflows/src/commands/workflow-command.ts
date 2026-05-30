@@ -12,7 +12,7 @@ import { WorkflowViewRenderer } from "../ui/workflow-view-renderer.js";
 import { WorkflowViewComponent } from "../ui/workflow-view-widget.js";
 import { normalizeDashboardDocument } from "../ui/dashboard.js";
 import { WorkflowManagerComponent, formatRunList } from "../ui/workflow-manager.js";
-import { PagerComponent } from "../ui/simple-components.js";
+import { isEscape, PagerComponent } from "../ui/simple-components.js";
 import type { WorkflowActivation } from "../tool/workflow-activation.js";
 import { slugify } from "../utils/ids.js";
 import { truncateForChat } from "../utils/truncate.js";
@@ -196,7 +196,7 @@ async function openUiSnapshot(deps: WorkflowCommandDeps, ctx: any, title: string
 
   if (ctx.hasUI) await ctx.ui.custom((_tui: any, _theme: any, _kb: any, done: () => void) => {
     const component = new WorkflowViewComponent(snapshot, deps.renderer, profile);
-    return { render: (w: number) => component.render(w), invalidate: () => component.invalidate(), handleInput: (data: string) => { if (data === "\u001b" || data === "\u0003") done(); } };
+    return { render: (w: number) => component.render(w), invalidate: () => component.invalidate(), handleInput: (data: string) => { if (isEscape(data)) done(); } };
   });
   else if (profile === "full") console.log(deps.renderer.renderMarkdown(snapshot));
   else console.log(deps.renderer.render(snapshot, 100, profile).join("\n"));

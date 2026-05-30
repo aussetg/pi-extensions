@@ -33,7 +33,27 @@ export class StaticTextComponent implements ComponentLike {
 }
 
 export function isEscape(data: string): boolean {
-  return data === "\u001b" || data === "\u0003";
+  return data === "\u001b" || data === "\u0003" || data === "escape" || data === "ctrl+c";
+}
+
+export function isEnter(data: string): boolean {
+  return data === "\r" || data === "\n" || data === "enter";
+}
+
+export function isUp(data: string): boolean {
+  return data === "\u001b[A" || data === "up";
+}
+
+export function isDown(data: string): boolean {
+  return data === "\u001b[B" || data === "down";
+}
+
+export function isPageUp(data: string): boolean {
+  return data === "\u001b[5~" || data === "pageup" || data === "page_up";
+}
+
+export function isPageDown(data: string): boolean {
+  return data === "\u001b[6~" || data === "pagedown" || data === "page_down";
 }
 
 export class PagerComponent implements ComponentLike {
@@ -46,10 +66,10 @@ export class PagerComponent implements ComponentLike {
 
   handleInput(data: string): void {
     if (isEscape(data)) return this.done();
-    if (data === "\u001b[A") this.offset = Math.max(0, this.offset - 1);
-    if (data === "\u001b[B") this.offset = Math.min(Math.max(0, this.lines.length - 1), this.offset + 1);
-    if (data === "\u001b[5~") this.offset = Math.max(0, this.offset - 10);
-    if (data === "\u001b[6~") this.offset = Math.min(Math.max(0, this.lines.length - 1), this.offset + 10);
+    if (isUp(data)) this.offset = Math.max(0, this.offset - 1);
+    if (isDown(data)) this.offset = Math.min(Math.max(0, this.lines.length - 1), this.offset + 1);
+    if (isPageUp(data)) this.offset = Math.max(0, this.offset - 10);
+    if (isPageDown(data)) this.offset = Math.min(Math.max(0, this.lines.length - 1), this.offset + 10);
     this.invalidate();
   }
 
