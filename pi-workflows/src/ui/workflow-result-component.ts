@@ -148,7 +148,7 @@ function renderDashboard(details: WorkflowLaunchOutput, progress: WorkflowProgre
     joinLeftRight(title, fg(theme, "dim", stats), width),
     joinLeftRight(desc, fg(theme, "dim", details.runId), width),
   ];
-  if (hasAgentProgress(progress)) lines.push("", ...renderProgressPanels(details, progress, theme, width));
+  if (hasProgressPanel(details, progress)) lines.push("", ...renderProgressPanels(details, progress, theme, width));
   else {
     if (progress.phase) lines.push(fg(theme, "accent", truncateToWidth(`phase: ${sanitizeText(progress.phase, 160)}`, width)));
     for (const log of progress.recentLogs.slice(-RENDER_LIMITS.progressLogs)) lines.push(fg(theme, "dim", truncateToWidth(`log: ${sanitizeText(log, 500)}`, width)));
@@ -165,11 +165,11 @@ function renderPanelDashboard(details: WorkflowLaunchOutput, progress: WorkflowP
     joinLeftRight(title, fg(theme, "dim", stats), width),
     joinLeftRight(desc, fg(theme, "dim", details.runId), width),
   ];
-  if (hasAgentProgress(progress)) {
+  if (hasProgressPanel(details, progress)) {
     if (width >= WIDE_PROGRESS_PANEL_MIN_WIDTH) {
       lines.push("", ...renderProgressPanels(details, progress, theme, width, progressPanelOptions));
     } else {
-      lines.push(renderProgressLine(progress, theme, width));
+      if (hasAgentProgress(progress)) lines.push(renderProgressLine(progress, theme, width));
       if (progress.phase) lines.push(fg(theme, "accent", truncateToWidth(`phase: ${sanitizeText(progress.phase, 160)}`, width)));
       const calls = callsForActivePhase(progress).slice(-3);
       for (const call of calls) lines.push(renderCompactCallRow(call, theme, width));
@@ -242,6 +242,7 @@ function renderPhaseRows(details: WorkflowLaunchOutput, progress: WorkflowProgre
 
 function agentPanelTitle(progress: WorkflowProgressSnapshot, visibleCalls: WorkflowCallProgress[]): string {
   if (progress.phase && progress.calls.some((call) => call.phase === progress.phase)) return `${sanitizeText(progress.phase, 120)} · ${visibleCalls.length} agents`;
+  if (progress.total === 0 && progress.calls.length === 0) return "Activity";
   return `Agents · ${progress.total}`;
 }
 
@@ -257,7 +258,8 @@ function renderAgentRows(calls: WorkflowCallProgress[], logs: string[], width: n
     rows.push(fg(theme, callColor(call.status), joinLeftRight(left, meta, width)));
   }
 
-  const visibleLogs = tail(logs, Math.max(0, options.maxLogs ?? RENDER_LIMITS.progressLogs));
+  const requestedMaxLogs = options.maxLogs ?? RENDER_LIMITS.progressLogs;
+  const visibleLogs = tail(logs, Math.max(0, visibleCalls.length === 0 && requestedMaxLogs === 0 ? RENDER_LIMITS.progressLogs : requestedMaxLogs));
   if (visibleLogs.length > 0) {
     if (rows.length > 0) rows.push("");
     for (const log of visibleLogs) rows.push(fg(theme, "dim", truncateToWidth(`log: ${sanitizeText(log, 500)}`, width)));
@@ -424,6 +426,10 @@ function callsForActivePhase(progress: WorkflowProgressSnapshot): WorkflowCallPr
 
 function hasAgentProgress(progress: WorkflowProgressSnapshot): boolean {
   return progress.total > 0 || progress.calls.length > 0 || progress.running > 0 || progress.completed > 0 || progress.failed > 0 || progress.cached > 0 || progress.skipped > 0;
+}
+
+function hasProgressPanel(details: WorkflowLaunchOutput, progress: WorkflowProgressSnapshot): boolean {
+  return hasAgentProgress(progress) || !!progress.phase || ((details.phases?.length ?? 0) > 0);
 }
 
 function hasLiveProgress(details: WorkflowLaunchOutput, progress: WorkflowProgressSnapshot): boolean {

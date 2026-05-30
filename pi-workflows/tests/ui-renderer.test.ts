@@ -560,6 +560,46 @@ describe("workflow UI", () => {
     expect(text).not.toContain("Done · 2 agents");
   });
 
+  it("keeps the framed phase layout before any agents start", () => {
+    const startedAt = new Date(0).toISOString();
+    const details: WorkflowLaunchOutput = {
+      status: "async_launched",
+      taskId: "task",
+      runId: "run_no_agents_yet",
+      name: "no_agents_yet",
+      description: "Exercise early phase layout",
+      phases: [{ title: "Warmup" }, { title: "Quiet ticker" }, { title: "Checks" }],
+      summary: "running",
+      scriptPath: "/tmp/script.js",
+      transcriptDir: "/tmp/subagents",
+      startedAt,
+      progress: {
+        total: 0,
+        running: 0,
+        completed: 0,
+        failed: 0,
+        cached: 0,
+        skipped: 0,
+        phase: "Quiet ticker",
+        calls: [],
+        recentLogs: ["Quiet ticker has no agents; Warmup should now show done"],
+        updatedAt: startedAt,
+      },
+    };
+
+    const lines = renderWorkflowResultLines(details, { profile: "panel", partial: true }, undefined, 140);
+    const text = lines.join("\n");
+
+    expect(text).toContain("┌ Phases");
+    expect(text).toContain("┌ Activity");
+    expect(text).toContain("✓ 1 Warmup");
+    expect(text).toContain("› 2 Quiet ticker");
+    expect(text).toContain("No agents have started yet.");
+    expect(text).toContain("log: Quiet ticker has no agents");
+    expect(lines.length).toBeLessThanOrEqual(RENDER_LIMITS.workflowPanelLines);
+    expect(lines.every((line) => visibleWidth(line) <= 140)).toBe(true);
+  });
+
   it("marks the active phase as failed when the workflow fails outside an agent", () => {
     const details = wideWorkflowProgressDetails();
     const failed: WorkflowLaunchOutput = {
