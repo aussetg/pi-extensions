@@ -12,7 +12,7 @@ import { WorkflowViewRenderer } from "../ui/workflow-view-renderer.js";
 import { WorkflowViewComponent } from "../ui/workflow-view-widget.js";
 import { normalizeDashboardDocument } from "../ui/dashboard.js";
 import { WorkflowManagerComponent, formatRunList } from "../ui/workflow-manager.js";
-import { isEscape, PagerComponent } from "../ui/simple-components.js";
+import { isClose, PagerComponent } from "../ui/simple-components.js";
 import type { WorkflowActivation } from "../tool/workflow-activation.js";
 import { slugify } from "../utils/ids.js";
 import { truncateForChat } from "../utils/truncate.js";
@@ -90,8 +90,8 @@ export async function routeWorkflowCommand(pi: ExtensionAPI, command: WorkflowCo
 async function openManager(deps: WorkflowCommandDeps, ctx: any): Promise<void> {
   const runs = deps.runStore.list("all", RENDER_LIMITS.managerRows);
   if (!ctx.hasUI) return printOrNotify(ctx, formatRunList(runs));
-  const selected = await ctx.ui.custom((tui: any, theme: any, _kb: any, done: (value?: string) => void) => {
-    const component = new WorkflowManagerComponent(runs, done, theme);
+  const selected = await ctx.ui.custom((tui: any, theme: any, kb: any, done: (value?: string) => void) => {
+    const component = new WorkflowManagerComponent(runs, done, theme, kb);
     return {
       render: (width: number) => component.render(width),
       invalidate: () => component.invalidate(),
@@ -156,8 +156,8 @@ async function openArtifact(deps: WorkflowCommandDeps, ctx: any, runId: string, 
   }
   const file = artifactPath(run, target);
   const text = target === "transcripts" ? await listTranscripts(run) : await fs.promises.readFile(file, "utf8");
-  if (ctx.hasUI) await ctx.ui.custom((tui: any, _theme: any, _kb: any, done: () => void) => {
-    const component = new PagerComponent(`${runId} ${target}`, text.split("\n"), done);
+  if (ctx.hasUI) await ctx.ui.custom((tui: any, _theme: any, kb: any, done: () => void) => {
+    const component = new PagerComponent(`${runId} ${target}`, text.split("\n"), done, kb);
     return {
       render: (width: number) => component.render(width),
       invalidate: () => component.invalidate(),
@@ -194,17 +194,17 @@ async function openUiSnapshot(deps: WorkflowCommandDeps, ctx: any, title: string
     return;
   }
 
-  if (ctx.hasUI) await ctx.ui.custom((_tui: any, _theme: any, _kb: any, done: () => void) => {
+  if (ctx.hasUI) await ctx.ui.custom((_tui: any, _theme: any, kb: any, done: () => void) => {
     const component = new WorkflowViewComponent(snapshot, deps.renderer, profile);
-    return { render: (w: number) => component.render(w), invalidate: () => component.invalidate(), handleInput: (data: string) => { if (isEscape(data)) done(); } };
+    return { render: (w: number) => component.render(w), invalidate: () => component.invalidate(), handleInput: (data: string) => { if (isClose(data, kb)) done(); } };
   });
   else if (profile === "full") console.log(deps.renderer.renderMarkdown(snapshot));
   else console.log(deps.renderer.render(snapshot, 100, profile).join("\n"));
 }
 
 async function openPager(ctx: any, title: string, lines: string[]): Promise<void> {
-  await ctx.ui.custom((tui: any, _theme: any, _kb: any, done: () => void) => {
-    const component = new PagerComponent(title, lines, done);
+  await ctx.ui.custom((tui: any, _theme: any, kb: any, done: () => void) => {
+    const component = new PagerComponent(title, lines, done, kb);
     return {
       render: (w: number) => component.render(w),
       invalidate: () => component.invalidate(),
