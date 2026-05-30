@@ -82,7 +82,9 @@ export class WorkflowRunner {
     const mode = args.input.mode ?? (ctx.hasUI ? "async" : "await");
     const execute = (onUpdate: LaunchArgs["onUpdate"] | undefined) => this.executeRun({ record, resolved, stableArgs, input: args.input, ctx, control, onUpdate });
 
-    if (mode === "async") {
+    const runInBackground = mode === "async" && !args.onUpdate;
+
+    if (runInBackground) {
       const donePromise = Promise.resolve()
         .then(() => execute(undefined))
         .then((result) => {
@@ -119,6 +121,7 @@ export class WorkflowRunner {
     const viewComponents = new Map<string, WorkflowViewComponent>();
     let progressComponent: WorkflowProgressComponent | undefined;
     let progressRenderTimer: NodeJS.Timeout | undefined;
+    const showLiveWidgets = !!ctx.hasUI && !args.onUpdate;
     const showStandardProgress = !!ctx.hasUI && !args.onUpdate;
     const updateStandardProgress = () => {
       if (!showStandardProgress) return;
@@ -156,10 +159,10 @@ export class WorkflowRunner {
       }
     };
     viewStore = new WorkflowViewStore(record, journal, this.deps.runStore, (_viewId, snapshot) => {
-      if (ctx.hasUI) updateLiveView(ctx, record, snapshot, this.renderer, viewComponents);
+      if (ctx.hasUI && (showLiveWidgets || workflowViewPlacement(snapshot) === "widget")) updateLiveView(ctx, record, snapshot, this.renderer, viewComponents);
       if (workflowViewPlacement(snapshot) === "runPanel") emitProgress();
     }, (_viewId, snapshot) => {
-      if (ctx.hasUI) clearLiveView(ctx, record, snapshot);
+      if (ctx.hasUI && (showLiveWidgets || workflowViewPlacement(snapshot) === "widget")) clearLiveView(ctx, record, snapshot);
       if (workflowViewPlacement(snapshot) === "runPanel") emitProgress();
     });
     updateStandardProgress();
@@ -213,7 +216,7 @@ export class WorkflowRunner {
       const output = completedOutput(record, result, outputViews(viewStore, ["runPanel", "completion"]));
       stopStandardProgressTicker();
       if (showStandardProgress) clearStandardProgress(ctx, record);
-      clearLiveViews(ctx, record, viewStore);
+      clearLiveViews(ctx, record, viewStore, showLiveWidgets);
       return output;
     } catch (err) {
       if (!(err instanceof WorkflowAbortError)) control.stop("workflow failed");
@@ -230,7 +233,7 @@ export class WorkflowRunner {
       const output = failedOutput(record, err, outputViews(viewStore, ["runPanel", "completion"]));
       stopStandardProgressTicker();
       if (showStandardProgress) clearStandardProgress(ctx, record);
-      clearLiveViews(ctx, record, viewStore);
+      clearLiveViews(ctx, record, viewStore, showLiveWidgets);
       return output;
     }
   }
@@ -413,9 +416,10 @@ function liveViewProfile(snapshot: WorkflowViewSnapshot): Extract<WorkflowViewRe
   return placement === "widget" || snapshot.spec.defaultExpanded === false ? "compact" : "panel";
 }
 
-function clearLiveViews(ctx: any, run: RunRecord, store: WorkflowViewStore): void {
+function clearLiveViews(ctx: any, run: RunRecord, store: WorkflowViewStore, includeRunPanels: boolean): void {
   if (!ctx.hasUI) return;
-  for (const snapshot of store.listByPlacement("runPanel", "widget")) {
+  const placements: WorkflowViewPlacement[] = includeRunPanels ? ["runPanel", "widget"] : ["widget"];
+  for (const snapshot of store.listByPlacement(...placements)) {
     clearLiveView(ctx, run, snapshot);
   }
 }

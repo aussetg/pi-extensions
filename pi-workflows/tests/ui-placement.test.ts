@@ -54,16 +54,49 @@ describe("workflow UI placements", () => {
     const live = uniquePairs(widgetCalls.filter((call) => call.value !== undefined).map((call) => [call.key.split(":").pop()!, call.options?.placement ?? ""]));
     expect(live).toEqual([
       ["compact", "aboveEditor"],
-      ["panel", "aboveEditor"],
     ]);
 
-    const panelLines = renderWidget(widgetCalls, "panel", 80);
     const compactLines = renderWidget(widgetCalls, "compact", 80);
-    expect(panelLines.length).toBeLessThanOrEqual(RENDER_LIMITS.panelViewLines);
     expect(compactLines.length).toBeLessThanOrEqual(RENDER_LIMITS.compactViewLines);
-    expect([...panelLines, ...compactLines].every((line) => visibleWidth(line) <= 80)).toBe(true);
+    expect(compactLines.every((line) => visibleWidth(line) <= 80)).toBe(true);
 
-    expect(widgetCalls.filter((call) => call.value === undefined).map((call) => call.key.split(":").pop()).sort()).toEqual(["compact", "panel"]);
+    expect(widgetCalls.filter((call) => call.value === undefined).map((call) => call.key.split(":").pop()).sort()).toEqual(["compact"]);
+  });
+
+  it("keeps async tool progress in the normal tool result when updates are available", async () => {
+    const cwd = path.join(tmp, "project");
+    await fs.promises.mkdir(cwd, { recursive: true });
+    const widgetCalls: Array<{ key: string; value: unknown; options?: { placement?: string } }> = [];
+    const updates: any[] = [];
+    const runStore = new RunStore();
+    const ctx = {
+      cwd,
+      hasUI: true,
+      sessionManager: { getSessionId: () => "test-session" },
+      ui: {
+        setWidget: (key: string, value: unknown, options?: { placement?: string }) => widgetCalls.push({ key, value, options }),
+      },
+    };
+    const runner = new WorkflowRunner({ pi: { getActiveTools: () => [] } as any, runStore, registry: new WorkflowRegistry() });
+
+    const result = await runner.launchOrRun({
+      toolCallId: "async-tool-normal-box-test",
+      input: {
+        mode: "async",
+        script: `export const meta = { name: 'async_tool_normal_box', description: 'exercise async tool rendering' };
+phase('Render');
+await log('normal tool box update');
+return 'ok';`,
+      },
+      ctx,
+      onUpdate: (partial) => updates.push(partial),
+    });
+
+    expect(result.status).toBe("completed");
+    expect(runStore.getLiveRun(result.runId)).toBeUndefined();
+    expect(updates.length).toBeGreaterThan(0);
+    expect(updates.some((update) => JSON.stringify(update.details).includes("normal tool box update"))).toBe(true);
+    expect(widgetCalls).toEqual([]);
   });
 
   it("shows and clears the standard live progress widget for background runs", async () => {
