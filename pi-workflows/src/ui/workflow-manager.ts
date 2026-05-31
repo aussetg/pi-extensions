@@ -1,56 +1,39 @@
 import type { RunRecord } from "../types.js";
 import { RENDER_LIMITS } from "../constants.js";
 import { padToWidth, sanitizeText, truncateToWidth, visibleWidth } from "../utils/truncate.js";
-import { isClose, isDown, isEnter, isUp, type ComponentLike, type KeybindingsLike } from "./simple-components.js";
+import type { ComponentLike } from "./simple-components.js";
 
 export class WorkflowManagerComponent implements ComponentLike {
-  private selected = 0;
   private cachedWidth?: number;
-  private cachedSelected?: number;
   private cachedLines?: string[];
 
-  constructor(private readonly runs: RunRecord[], private readonly done: (runId?: string) => void, private readonly theme?: any, private readonly keybindings?: KeybindingsLike) {}
-
-  handleInput(data: string): void {
-    if (isClose(data, this.keybindings)) return this.done();
-    if (isEnter(data, this.keybindings)) return this.done(this.runs[this.selected]?.runId);
-    if (isUp(data, this.keybindings)) this.selected = Math.max(0, this.selected - 1);
-    if (isDown(data, this.keybindings)) this.selected = Math.min(Math.max(0, this.runs.length - 1), this.selected + 1);
-    this.invalidate();
-  }
+  constructor(private readonly runs: RunRecord[], private readonly theme?: any) {}
 
   render(width: number): string[] {
-    if (this.cachedLines && this.cachedWidth === width && this.cachedSelected === this.selected) return this.cachedLines;
+    if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
     const fg = (name: string, text: string) => (this.theme?.fg ? this.theme.fg(name, text) : text);
-    const bg = (name: string, text: string) => (this.theme?.bg ? this.theme.bg(name, text) : text);
-    const bold = (text: string) => (this.theme?.bold ? this.theme.bold(text) : text);
-    const selectedLine = (text: string) => bg("selectedBg", padToWidth(truncateToWidth(text, width, ""), width));
     const lines = [fg("borderMuted", "─".repeat(Math.max(0, width))), fg("accent", "◆ Workflows"), ""];
     if (this.runs.length === 0) lines.push(fg("dim", "No workflow runs yet."));
     const rows = this.runs.slice(0, RENDER_LIMITS.managerRows);
     rows.forEach((run, index) => {
-      const isSelected = index === this.selected;
-      const cursor = isSelected ? fg("accent", "▸") : " ";
+      const cursor = `${index + 1}.`.padStart(3, " ");
       const counts = `${run.progress.completed}/${run.progress.total}`;
-      const color = run.status === "completed" ? "success" : run.status === "failed" || run.status === "aborted" ? "error" : isSelected ? "accent" : "muted";
+      const color = run.status === "completed" ? "success" : run.status === "failed" || run.status === "aborted" ? "error" : "muted";
       const left = `${cursor} ${statusIcon(run.status)} ${fg(color, sanitizeText(run.name, 300))} ${fg("dim", sanitizeText(run.runId, 100))}`;
       const right = fg(color, `${counts} ${run.status}`) + fg("dim", ` ${formatRunAge(run)}`);
-      lines.push(isSelected ? selectedLine(bold(joinAligned(left, right, width))) : joinAligned(left, right, width));
-      if (isSelected) lines.push(selectedLine(fg("dim", `  ↳ ${sanitizeText(run.description, 1000)}`)));
+      lines.push(joinAligned(left, right, width));
+      lines.push(fg("dim", `    ↳ ${sanitizeText(run.description, 1000)}`));
     });
     if (this.runs.length > rows.length) lines.push(fg("dim", `… ${this.runs.length - rows.length} more run(s)`));
-    const position = rows.length > 0 ? ` (${this.selected + 1}/${rows.length})` : "";
-    lines.push("", fg("dim", `↑↓ select · Enter open result · Esc/Ctrl-C close${position}`));
+    lines.push("", fg("dim", "Non-interactive preview. Use /workflow open <runId> result to inspect artifacts."));
     this.cachedLines = lines.map((line) => padToWidth(truncateToWidth(line, width), width));
     this.cachedWidth = width;
-    this.cachedSelected = this.selected;
     return this.cachedLines;
   }
 
   invalidate(): void {
     this.cachedLines = undefined;
     this.cachedWidth = undefined;
-    this.cachedSelected = undefined;
   }
 }
 

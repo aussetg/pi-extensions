@@ -12,13 +12,17 @@ Highlights:
 - the model tool is off by default; use `/workflow enable` when you want the agent to call it, and `/workflow disable` afterwards;
 - declarative UI validation and bounded renderers.
 
+The extension never installs terminal input handlers or focused custom dialogs. Workflow previews are
+rendered as passive widgets/notifications, so Escape, Ctrl-C, and every other key keep their normal Pi
+meaning.
+
 Declarative UI views are always persisted as artifacts. Their optional `placement` controls where
 else they appear:
 
 - `runPanel` (default): live full dashboard while the run is active, plus final run output;
 - `widget`: live compact widget while the run is active;
 - `completion`: final completion/failure message only;
-- `artifact`: persisted only, inspectable with `/workflow open <runId> ui`.
+- `artifact`: persisted only, previewable with `/workflow open <runId> ui`.
 
 For model-authored progress UI, prefer the model-native dashboard helper:
 

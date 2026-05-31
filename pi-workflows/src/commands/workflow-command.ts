@@ -12,7 +12,7 @@ import { WorkflowViewRenderer } from "../ui/workflow-view-renderer.js";
 import { WorkflowViewComponent } from "../ui/workflow-view-widget.js";
 import { normalizeDashboardDocument } from "../ui/dashboard.js";
 import { WorkflowManagerComponent, formatRunList } from "../ui/workflow-manager.js";
-import { isClose, PagerComponent } from "../ui/simple-components.js";
+import { PagerComponent } from "../ui/simple-components.js";
 import type { WorkflowActivation } from "../tool/workflow-activation.js";
 import { slugify } from "../utils/ids.js";
 import { truncateForChat } from "../utils/truncate.js";
@@ -24,6 +24,11 @@ export interface WorkflowCommandDeps {
   renderer: WorkflowViewRenderer;
   activation: WorkflowActivation;
 }
+
+const COMMAND_WIDGET_KEY = "workflow:command-preview";
+const COMMAND_WIDGET_TTL_MS = 30_000;
+const COMMAND_WIDGET_BODY_LINES = 8;
+const commandWidgetTimers = new Map<string, NodeJS.Timeout>();
 
 export function registerWorkflowCommand(pi: ExtensionAPI, deps: WorkflowCommandDeps): void {
   pi.registerCommand("workflow", {
@@ -90,18 +95,8 @@ export async function routeWorkflowCommand(pi: ExtensionAPI, command: WorkflowCo
 async function openManager(deps: WorkflowCommandDeps, ctx: any): Promise<void> {
   const runs = deps.runStore.list("all", RENDER_LIMITS.managerRows);
   if (!ctx.hasUI) return printOrNotify(ctx, formatRunList(runs));
-  const selected = await ctx.ui.custom((tui: any, theme: any, kb: any, done: (value?: string) => void) => {
-    const component = new WorkflowManagerComponent(runs, done, theme, kb);
-    return {
-      render: (width: number) => component.render(width),
-      invalidate: () => component.invalidate(),
-      handleInput: (data: string) => {
-        component.handleInput(data);
-        tui.requestRender?.();
-      },
-    };
-  });
-  if (selected) await openArtifact(deps, ctx, selected, "result");
+  const component = new WorkflowManagerComponent(runs, ctx.ui.theme);
+  showCommandWidget(ctx, "Workflow runs", component.render(100).slice(3));
 }
 
 async function runWorkflow(pi: ExtensionAPI, deps: WorkflowCommandDeps, ctx: any, input: WorkflowInput): Promise<void> {
@@ -156,17 +151,7 @@ async function openArtifact(deps: WorkflowCommandDeps, ctx: any, runId: string, 
   }
   const file = artifactPath(run, target);
   const text = target === "transcripts" ? await listTranscripts(run) : await fs.promises.readFile(file, "utf8");
-  if (ctx.hasUI) await ctx.ui.custom((tui: any, _theme: any, kb: any, done: () => void) => {
-    const component = new PagerComponent(`${runId} ${target}`, text.split("\n"), done, kb);
-    return {
-      render: (width: number) => component.render(width),
-      invalidate: () => component.invalidate(),
-      handleInput: (data: string) => {
-        component.handleInput(data);
-        tui.requestRender?.();
-      },
-    };
-  });
+  if (ctx.hasUI) showCommandWidget(ctx, `${runId} ${target}`, new PagerComponent(`${runId} ${target}`, text.split("\n")).render(100).slice(2), `Artifact: ${file}`);
   else console.log(truncateForChat(text, 50_000));
 }
 
@@ -189,39 +174,38 @@ async function previewUi(deps: WorkflowCommandDeps, ctx: any, json: string, prof
 async function openUiSnapshot(deps: WorkflowCommandDeps, ctx: any, title: string, snapshot: WorkflowViewSnapshot, profile: WorkflowOpenProfile, width?: number): Promise<void> {
   if (width !== undefined) {
     const lines = deps.renderer.render(snapshot, width, profile);
-    if (ctx.hasUI) return openPager(ctx, title, lines);
+    if (ctx.hasUI) return showCommandWidget(ctx, title, lines);
     console.log(lines.join("\n"));
     return;
   }
 
-  if (ctx.hasUI) await ctx.ui.custom((_tui: any, _theme: any, kb: any, done: () => void) => {
+  if (ctx.hasUI) {
     const component = new WorkflowViewComponent(snapshot, deps.renderer, profile);
-    return { render: (w: number) => component.render(w), invalidate: () => component.invalidate(), handleInput: (data: string) => { if (isClose(data, kb)) done(); } };
-  });
-  else if (profile === "full") console.log(deps.renderer.renderMarkdown(snapshot));
+    showCommandWidget(ctx, title, component.render(100));
+  } else if (profile === "full") console.log(deps.renderer.renderMarkdown(snapshot));
   else console.log(deps.renderer.render(snapshot, 100, profile).join("\n"));
 }
 
-async function openPager(ctx: any, title: string, lines: string[]): Promise<void> {
-  await ctx.ui.custom((tui: any, _theme: any, kb: any, done: () => void) => {
-    const component = new PagerComponent(title, lines, done, kb);
-    return {
-      render: (w: number) => component.render(w),
-      invalidate: () => component.invalidate(),
-      handleInput: (data: string) => {
-        component.handleInput(data);
-        tui.requestRender?.();
-      },
-    };
-  });
+function showCommandWidget(ctx: any, title: string, lines: string[], footer?: string): void {
+  const body = lines.length > 0 ? lines : ["(empty)"];
+  const bodyLimit = footer ? COMMAND_WIDGET_BODY_LINES - 1 : COMMAND_WIDGET_BODY_LINES;
+  const visible = body.slice(0, bodyLimit);
+  if (body.length > visible.length) visible.push(`… ${body.length - visible.length} more line(s)`);
+  if (footer) visible.push(footer);
+  ctx.ui.setWidget(COMMAND_WIDGET_KEY, [`◆ ${title}`, ...visible], { placement: "aboveEditor" });
+  ctx.ui.notify(`${title} preview shown above the editor for ${COMMAND_WIDGET_TTL_MS / 1000}s. No keys captured.`, "info");
+  const previous = commandWidgetTimers.get(COMMAND_WIDGET_KEY);
+  if (previous) clearTimeout(previous);
+  const timer = setTimeout(() => {
+    ctx.ui?.setWidget?.(COMMAND_WIDGET_KEY, undefined);
+    commandWidgetTimers.delete(COMMAND_WIDGET_KEY);
+  }, COMMAND_WIDGET_TTL_MS);
+  timer.unref?.();
+  commandWidgetTimers.set(COMMAND_WIDGET_KEY, timer);
 }
 
 async function deleteRun(deps: WorkflowCommandDeps, ctx: any, runId: string): Promise<void> {
-  const run = requireRun(deps.runStore.get(runId), runId);
-  if (ctx.hasUI) {
-    const ok = await ctx.ui.confirm("Delete workflow run?", `${runId}\n${run.runDir}`);
-    if (!ok) return;
-  }
+  requireRun(deps.runStore.get(runId), runId);
   await deps.runStore.delete(runId);
   await printOrNotify(ctx, `Deleted ${runId}`);
 }
