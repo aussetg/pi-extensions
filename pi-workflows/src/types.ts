@@ -1,3 +1,5 @@
+import type { ThinkingLevel } from "./thinking.js";
+
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
 export type JsonSchema = JsonObject;
@@ -62,6 +64,12 @@ export interface AgentOptions {
   phase?: string;
   schema?: JsonSchema;
   model?: string;
+  /**
+   * Pi thinking level for this subagent. When omitted, workflows default to one
+   * level below the launching session, unless the model pattern itself includes
+   * a legacy :<thinking> suffix.
+   */
+  thinking?: ThinkingLevel;
   /**
    * Workspace policy for this subagent.
    *
@@ -217,6 +225,7 @@ export interface WorkflowCallProgress {
   label: string;
   phase?: string;
   model?: string;
+  thinking?: ThinkingLevel;
   agentType?: string;
   status: CallStatus;
   cached?: boolean;
@@ -316,6 +325,7 @@ export type WorkflowJournalEvent =
       error?: string;
       usage?: WorkflowUsage;
       model?: string;
+      thinking?: ThinkingLevel;
     }
   | { type: "ui_defined"; runId: string; time: string; viewId: string; specPath: string }
   | { type: "ui_state"; runId: string; time: string; viewId: string; seq: number; statePath: string }

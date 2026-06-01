@@ -31,19 +31,20 @@ export function parseWorkflowCommand(raw: string): WorkflowCommand {
     case "run": {
       const target = argv.shift();
       if (!target) throw new Error("Usage: /workflow run <name|scriptPath> [--args <json>] [--await|--async]");
+      if (target.startsWith("--")) throw new Error("Usage: /workflow run <name|scriptPath> [--args <json>] [--await|--async]");
       return { action: "run", target, ...parseCommonOptions(argv) };
     }
     case "save": {
       const runId = argv.shift();
       if (!runId) throw new Error("Usage: /workflow save <runId> [--scope project|user] [--name <slug>]");
-      const scope = readOption(argv, "--scope") ?? "project";
-      if (scope !== "project" && scope !== "user") throw new Error("--scope must be project or user");
-      return { action: "save", runId, scope, name: readOption(argv, "--name") };
+      if (runId.startsWith("--")) throw new Error("Usage: /workflow save <runId> [--scope project|user] [--name <slug>]");
+      return { action: "save", runId, ...parseSaveOptions(argv) };
     }
     case "resume": {
       const runId = argv.shift();
       if (!runId) throw new Error("Usage: /workflow resume <runId> [--script <scriptPath>] [--args <json>] [--await|--async]");
-      return { action: "resume", runId, scriptPath: readOption(argv, "--script"), ...parseCommonOptions(argv) };
+      if (runId.startsWith("--")) throw new Error("Usage: /workflow resume <runId> [--script <scriptPath>] [--args <json>] [--await|--async]");
+      return { action: "resume", runId, ...parseResumeOptions(argv) };
     }
     case "stop":
     case "pause":
@@ -51,12 +52,14 @@ export function parseWorkflowCommand(raw: string): WorkflowCommand {
     case "delete": {
       const runId = argv.shift();
       if (!runId) throw new Error(`Usage: /workflow ${action} <runId>`);
+      if (runId.startsWith("--") || argv.length > 0) throw new Error(`Usage: /workflow ${action} <runId>`);
       return { action, runId };
     }
     case "skip-agent": {
       const runId = argv.shift();
       const callId = argv.shift();
       if (!runId || !callId) throw new Error(`Usage: /workflow ${action} <runId> <callId>`);
+      if (runId.startsWith("--") || callId.startsWith("--") || argv.length > 0) throw new Error(`Usage: /workflow ${action} <runId> <callId>`);
       return { action, runId, callId };
     }
     case "preview-ui": {
@@ -112,13 +115,15 @@ function parseRenderOptions(argv: string[], positional?: (arg: string) => void):
     const arg = argv.shift()!;
     if (arg === "--profile") {
       const value = argv.shift();
-      if (!value) throw new Error("--profile requires a value");
+      if (profile !== undefined) throw new Error("Duplicate --profile option");
+      if (!value || value.startsWith("--")) throw new Error("--profile requires a value");
       profile = parseProfile(value);
       continue;
     }
     if (arg === "--width") {
       const value = argv.shift();
-      if (!value) throw new Error("--width requires a value");
+      if (width !== undefined) throw new Error("Duplicate --width option");
+      if (!value || value.startsWith("--")) throw new Error("--width requires a value");
       width = parsePreviewWidth(value);
       continue;
     }
@@ -141,29 +146,90 @@ function parsePreviewWidth(value: string): number {
 }
 
 function parseListFilter(argv: string[]): "running" | "completed" | "all" {
-  const flags = argv.filter((arg) => arg === "--running" || arg === "--completed" || arg === "--all");
-  if (flags.length > 1) throw new Error("Use only one list filter");
-  return flags[0] === "--running" ? "running" : flags[0] === "--completed" ? "completed" : "all";
+  let filter: "running" | "completed" | "all" = "all";
+  let seen = false;
+  for (const arg of argv) {
+    if (arg === "--running" || arg === "--completed" || arg === "--all") {
+      if (seen) throw new Error("Use only one list filter");
+      seen = true;
+      filter = arg === "--running" ? "running" : arg === "--completed" ? "completed" : "all";
+      continue;
+    }
+    if (arg.startsWith("--")) throw new Error(`Unknown list option: ${arg}`);
+    throw new Error(`Unexpected argument for /workflow list: ${arg}`);
+  }
+  return filter;
 }
 
 function parseCommonOptions(argv: string[]): { args?: Record<string, unknown>; mode?: "await" | "async" } {
-  const argsRaw = readOption(argv, "--args");
-  const hasAwait = argv.includes("--await");
-  const hasAsync = argv.includes("--async");
-  if (hasAwait && hasAsync) throw new Error("--await and --async are mutually exclusive");
   let args: Record<string, unknown> | undefined;
-  if (argsRaw !== undefined) {
-    const parsed = JSON.parse(argsRaw) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("--args must be a JSON object");
-    args = parsed as Record<string, unknown>;
+  let mode: "await" | "async" | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (arg === "--args") {
+      if (args !== undefined) throw new Error("Duplicate --args option");
+      const value = requireOptionValue(argv, ++i, "--args");
+      const parsed = JSON.parse(value) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("--args must be a JSON object");
+      args = parsed as Record<string, unknown>;
+      continue;
+    }
+    if (arg === "--await" || arg === "--async") {
+      const nextMode = arg === "--await" ? "await" : "async";
+      if (mode && mode !== nextMode) throw new Error("--await and --async are mutually exclusive");
+      if (mode === nextMode) throw new Error(`Duplicate ${arg} option`);
+      mode = nextMode;
+      continue;
+    }
+    if (arg.startsWith("--")) throw new Error(`Unknown workflow option: ${arg}`);
+    throw new Error(`Unexpected argument: ${arg}`);
   }
-  return { args, mode: hasAwait ? "await" : hasAsync ? "async" : undefined };
+  return { args, mode };
 }
 
-function readOption(argv: string[], name: string): string | undefined {
-  const idx = argv.indexOf(name);
-  if (idx === -1) return undefined;
-  const value = argv[idx + 1];
+function parseSaveOptions(argv: string[]): { scope: "project" | "user"; name?: string } {
+  let scope: "project" | "user" = "project";
+  let seenScope = false;
+  let name: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (arg === "--scope") {
+      if (seenScope) throw new Error("Duplicate --scope option");
+      seenScope = true;
+      const value = requireOptionValue(argv, ++i, "--scope");
+      if (value !== "project" && value !== "user") throw new Error("--scope must be project or user");
+      scope = value;
+      continue;
+    }
+    if (arg === "--name") {
+      if (name !== undefined) throw new Error("Duplicate --name option");
+      name = requireOptionValue(argv, ++i, "--name");
+      continue;
+    }
+    if (arg.startsWith("--")) throw new Error(`Unknown save option: ${arg}`);
+    throw new Error(`Unexpected argument for /workflow save: ${arg}`);
+  }
+  return { scope, name };
+}
+
+function parseResumeOptions(argv: string[]): { scriptPath?: string; args?: Record<string, unknown>; mode?: "await" | "async" } {
+  let scriptPath: string | undefined;
+  const commonArgs: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (arg === "--script") {
+      if (scriptPath !== undefined) throw new Error("Duplicate --script option");
+      scriptPath = requireOptionValue(argv, ++i, "--script");
+      continue;
+    }
+    commonArgs.push(arg);
+    if (arg === "--args") commonArgs.push(requireOptionValue(argv, ++i, "--args"));
+  }
+  return { scriptPath, ...parseCommonOptions(commonArgs) };
+}
+
+function requireOptionValue(argv: string[], index: number, name: string): string {
+  const value = argv[index];
   if (!value || value.startsWith("--")) throw new Error(`${name} requires a value`);
   return value;
 }

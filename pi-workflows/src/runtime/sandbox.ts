@@ -3,9 +3,10 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_LIMITS, WORKFLOW_CHILD_CGROUP } from "../constants.js";
+import { DEFAULT_LIMITS, WORKFLOW_CHILD_CGROUP, WORKFLOW_RESOURCE_LIMITS } from "../constants.js";
 import type { SandboxGlobals } from "./sandbox-types.js";
 import { WorkflowAbortError } from "./errors.js";
+import { BoundedTextAccumulator, byteLength, truncateBytes } from "../utils/truncate.js";
 
 export { type SandboxGlobals } from "./sandbox-types.js";
 
@@ -29,7 +30,7 @@ export async function executeWorkflowSandbox(source: string, globals: SandboxGlo
   const unitName = `${unitBase}.scope`;
   const child = spawnSandboxedRunner(runnerPath, unitBase);
   const pending = new Map<number, PendingRequest>();
-  const stderr: string[] = [];
+  const stderr = new BoundedTextAccumulator(WORKFLOW_RESOURCE_LIMITS.workflowChildStderrBytes, "\n… workflow child stderr truncated …");
   let stdoutBuffer = "";
   let lastHeartbeat = Date.now();
   let settled = false;
@@ -72,29 +73,35 @@ export async function executeWorkflowSandbox(source: string, globals: SandboxGlo
       stdoutBuffer += chunk.toString("utf8");
       const lines = stdoutBuffer.split("\n");
       stdoutBuffer = lines.pop() ?? "";
+      if (byteLength(stdoutBuffer) > WORKFLOW_RESOURCE_LIMITS.workflowProtocolLineBytes) {
+        finish(new Error(`Workflow child protocol line exceeded ${WORKFLOW_RESOURCE_LIMITS.workflowProtocolLineBytes} bytes`));
+        return;
+      }
       for (const line of lines) handleProtocolLine(line, globals, child, pending, () => (lastHeartbeat = Date.now()), finish);
     });
 
-    child.stderr.on("data", (chunk) => stderr.push(chunk.toString("utf8")));
+    child.stderr.on("data", (chunk) => stderr.append(chunk.toString("utf8")));
     child.on("error", (err) => finish(err));
     child.on("close", (code) => {
       if (settled) return;
       if (stdoutBuffer.trim()) handleProtocolLine(stdoutBuffer, globals, child, pending, () => (lastHeartbeat = Date.now()), finish);
       if (!settled) {
-        const tail = stderr.join("").trim();
+        const tail = stderr.toString().trim();
         finish(new Error(`Workflow child exited before completion (${code ?? "signal"})${tail ? `: ${tail.slice(0, 4000)}` : ""}`));
       }
     });
 
-    writeMessage(child, {
+    const started = writeMessage(child, {
       type: "start",
       source,
       args: globals.args,
       cwd: globals.cwd,
       budgetTotal: readBudgetTotal(globals.budget),
+      budgetSpent: readBudgetSpent(globals.budget),
       pipelineLimit: DEFAULT_LIMITS.pipelineSchedulingLimit,
       heartbeatMs: DEFAULT_LIMITS.workflowHeartbeatMs,
     });
+    if (!started) finish(new Error(`Workflow start message exceeded ${WORKFLOW_RESOURCE_LIMITS.workflowParentMessageBytes} bytes`));
   });
 }
 
@@ -165,6 +172,9 @@ function spawnSandboxedRunner(runnerPath: string, unitBase: string): ChildProces
 
 function handleProtocolLine(line: string, globals: SandboxGlobals, child: ChildProcessWithoutNullStreams, pending: Map<number, PendingRequest>, touch: () => void, finish: (err: unknown, value?: unknown) => void): void {
   if (!line.trim()) return;
+  if (byteLength(line) > WORKFLOW_RESOURCE_LIMITS.workflowProtocolLineBytes) {
+    return finish(new Error(`Workflow child protocol line exceeded ${WORKFLOW_RESOURCE_LIMITS.workflowProtocolLineBytes} bytes`));
+  }
   touch();
   let msg: ProtocolMessage;
   try {
@@ -192,8 +202,8 @@ function handleProtocolLine(line: string, globals: SandboxGlobals, child: ChildP
   if (msg.type === "request") {
     pending.set(msg.id, { method: msg.method, critical: Boolean(msg.critical), startedAt: Date.now() });
     void dispatchRequest(globals, msg.method, msg.params)
-      .then((result) => writeMessage(child, { type: "reply", id: msg.id, ok: true, result }))
-      .catch((err) => writeMessage(child, { type: "reply", id: msg.id, ok: false, error: serializeError(err) }))
+      .then((result) => writeOkReply(child, msg.id, result))
+      .catch((err) => writeErrorReply(child, msg.id, err))
       .finally(() => pending.delete(msg.id));
   }
 }
@@ -205,8 +215,10 @@ async function dispatchRequest(globals: SandboxGlobals, method: string, params: 
       const result = await globals.agent(p.prompt, p.opts);
       return { __piWorkflowRpc: "agentResult", result, budgetSpent: readBudgetSpent(globals.budget) };
     }
-    case "workflow":
-      return await globals.workflow(p.nameOrRef, p.args);
+    case "workflow": {
+      const result = await globals.workflow(p.nameOrRef, p.args);
+      return { __piWorkflowRpc: "workflowResult", result, budgetSpent: readBudgetSpent(globals.budget) };
+    }
     case "phase":
       return globals.phase(String(p.title ?? ""));
     case "log":
@@ -221,6 +233,12 @@ async function dispatchRequest(globals: SandboxGlobals, method: string, params: 
       return await (globals.ui as any).patch(String(p.viewId ?? ""), p.patch);
     case "ui.close":
       return await (globals.ui as any).close(String(p.viewId ?? ""));
+    case "ui.flush": {
+      const ui = globals.ui as any;
+      if (typeof ui.flush === "function") return await ui.flush();
+      if (typeof ui.__flush === "function") return await ui.__flush();
+      return undefined;
+    }
     case "budget.spent":
       return readBudgetSpent(globals.budget);
     case "budget.remaining":
@@ -230,12 +248,30 @@ async function dispatchRequest(globals: SandboxGlobals, method: string, params: 
   }
 }
 
-function writeMessage(child: ChildProcessWithoutNullStreams, message: unknown): void {
-  if (!child.stdin.writable) return;
+function writeOkReply(child: ChildProcessWithoutNullStreams, id: number, result: unknown): void {
+  const ok = writeMessage(child, { type: "reply", id, ok: true, result });
+  if (!ok) writeErrorReply(child, id, new Error(`Workflow RPC reply exceeded ${WORKFLOW_RESOURCE_LIMITS.workflowParentMessageBytes} bytes`));
+}
+
+function writeErrorReply(child: ChildProcessWithoutNullStreams, id: number, err: unknown): void {
+  writeMessage(child, { type: "reply", id, ok: false, error: serializeError(err) });
+}
+
+function writeMessage(child: ChildProcessWithoutNullStreams, message: unknown): boolean {
+  if (!child.stdin.writable) return false;
+  let line: string;
   try {
-    child.stdin.write(`${JSON.stringify(message)}\n`);
+    line = JSON.stringify(message);
+  } catch {
+    return false;
+  }
+  if (byteLength(line) > WORKFLOW_RESOURCE_LIMITS.workflowParentMessageBytes) return false;
+  try {
+    child.stdin.write(`${line}\n`);
+    return true;
   } catch {
     // The child may have been killed while an async RPC handler was resolving.
+    return false;
   }
 }
 
@@ -301,8 +337,8 @@ function readBudgetRemaining(budget: unknown): number | null {
 
 function serializeError(err: unknown): { name: string; message: string; stack?: string } {
   return {
-    name: (err as Error)?.name ?? "Error",
-    message: (err as Error)?.message ?? String(err),
-    stack: (err as Error)?.stack,
+    name: truncateBytes((err as Error)?.name ?? "Error", 200),
+    message: truncateBytes((err as Error)?.message ?? String(err), 2000),
+    stack: (err as Error)?.stack ? truncateBytes((err as Error).stack!, 4000) : undefined,
   };
 }

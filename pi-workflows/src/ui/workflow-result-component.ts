@@ -1,6 +1,6 @@
 import type { CallStatus, WorkflowCallProgress, WorkflowLaunchOutput, WorkflowMeta, WorkflowProgressSnapshot, WorkflowViewSnapshot } from "../types.js";
 import { RENDER_LIMITS, UI_LIMITS } from "../constants.js";
-import { padToWidth, sanitizeText, truncateToWidth, visibleWidth } from "../utils/truncate.js";
+import { padToWidth, sanitizeLine, sanitizeRenderedLine, sanitizeText, truncateToWidth, visibleWidth } from "../utils/truncate.js";
 import type { ComponentLike } from "./simple-components.js";
 import { WorkflowViewRenderer } from "./workflow-view-renderer.js";
 
@@ -34,6 +34,7 @@ export class WorkflowResultComponent implements ComponentLike {
     this.details = details;
     this.options = options;
     this.theme = theme;
+    this.minHeight = 0;
     this.invalidate();
   }
 
@@ -110,21 +111,21 @@ function renderPanelResult(details: WorkflowLaunchOutput, progress: WorkflowProg
   if (uiViews.length > 0) {
     const lines = options.partial && progress && hasAgentProgress(progress) ? renderPanelDashboard(details, progress, theme, width, { maxPhaseRows: 5, maxAgentRows: 5, maxLogRows: 0 }) : [];
     withViewSections(lines, uiViews, renderer, width, "panel");
-    if (!options.partial && details.status === "failed" && details.error) lines.push(fg(theme, "error", truncateToWidth(`error: ${sanitizeText(details.error, 1000).replace(/\n+/g, " ↵ ")}`, width)));
+    if (!options.partial && details.status === "failed" && details.error) lines.push(fg(theme, "error", truncateToWidth(`error: ${sanitizeLine(details.error, 1000)}`, width)));
     return lines;
   }
 
   const lines = progress ? renderPanelDashboard(details, progress, theme, width) : renderHeader(details, theme, width);
   if (!options.partial) {
-    if (details.error) lines.push(fg(theme, "error", truncateToWidth(`error: ${sanitizeText(details.error, 1000).replace(/\n+/g, " ↵ ")}`, width)));
-    if (details.outputPath) lines.push(fg(theme, "dim", truncateToWidth(`output: ${sanitizeText(details.outputPath, 1000)}`, width)));
+    if (details.error) lines.push(fg(theme, "error", truncateToWidth(`error: ${sanitizeLine(details.error, 1000)}`, width)));
+    if (details.outputPath) lines.push(fg(theme, "dim", truncateToWidth(`output: ${sanitizeLine(details.outputPath, 1000)}`, width)));
   }
   withViewSections(lines, uiViews, renderer, width, "panel");
   return lines;
 }
 
 function renderCompactResult(details: WorkflowLaunchOutput, progress: WorkflowProgressSnapshot | undefined, theme: ThemeLike, width: number): string[] {
-  const title = fg(theme, "accent", bold(theme, sanitizeText(details.title ?? details.name, 200)));
+  const title = fg(theme, "accent", bold(theme, sanitizeLine(details.title ?? details.name, 200)));
   const stats = compactResultStats(details, progress, theme, { terminalStatus: false });
   const icon = workflowStatusIcon(details.status);
   const left = icon ? `${icon} ${title}` : title;
@@ -135,60 +136,60 @@ function renderCompactResult(details: WorkflowLaunchOutput, progress: WorkflowPr
 }
 
 function renderDashboard(details: WorkflowLaunchOutput, progress: WorkflowProgressSnapshot, theme: ThemeLike, width: number): string[] {
-  const title = fg(theme, "accent", bold(theme, sanitizeText(details.title ?? details.name, 300)));
+  const title = fg(theme, "accent", bold(theme, sanitizeLine(details.title ?? details.name, 300)));
   const status = statusWord(details.status, theme);
   const duration = elapsed(details.startedAt, details.endedAt);
   const tokenText = details.usage?.subagentTokens ? `${compactNumber(details.usage.subagentTokens)} tok` : undefined;
   const agentText = hasAgentProgress(progress) ? `${progress.completed}/${progress.total} agents` : undefined;
   const stats = [status, agentText, progress.running > 0 ? `${progress.running} running` : undefined, tokenText, duration].filter(Boolean).join(" · ");
-  const desc = fg(theme, "muted", sanitizeText(details.description ?? "Workflow run", 1000));
+  const desc = fg(theme, "muted", sanitizeLine(details.description ?? "Workflow run", 1000));
 
   const lines = [
     fg(theme, "borderMuted", "─".repeat(Math.max(0, width))),
     joinLeftRight(title, fg(theme, "dim", stats), width),
-    joinLeftRight(desc, fg(theme, "dim", details.runId), width),
+    joinLeftRight(desc, fg(theme, "dim", sanitizeLine(details.runId, 100)), width),
   ];
   if (hasProgressPanel(details, progress)) lines.push("", ...renderProgressPanels(details, progress, theme, width));
   else {
-    if (progress.phase) lines.push(fg(theme, "accent", truncateToWidth(`phase: ${sanitizeText(progress.phase, 160)}`, width)));
-    for (const log of progress.recentLogs.slice(-RENDER_LIMITS.progressLogs)) lines.push(fg(theme, "dim", truncateToWidth(`log: ${sanitizeText(log, 500)}`, width)));
+    if (progress.phase) lines.push(fg(theme, "accent", truncateToWidth(`phase: ${sanitizeLine(progress.phase, 160)}`, width)));
+    for (const log of progress.recentLogs.slice(-RENDER_LIMITS.progressLogs)) lines.push(fg(theme, "dim", truncateToWidth(`log: ${sanitizeRenderedLine(log, 500)}`, width)));
   }
   return lines;
 }
 
 function renderPanelDashboard(details: WorkflowLaunchOutput, progress: WorkflowProgressSnapshot, theme: ThemeLike, width: number, progressPanelOptions: ProgressPanelsOptions = { maxPhaseRows: 8, maxAgentRows: 8, maxLogRows: 0 }): string[] {
-  const title = fg(theme, "accent", bold(theme, sanitizeText(details.title ?? details.name, 240)));
+  const title = fg(theme, "accent", bold(theme, sanitizeLine(details.title ?? details.name, 240)));
   const stats = compactResultStats(details, progress, theme);
-  const desc = fg(theme, "muted", sanitizeText(details.description ?? "Workflow run", 500));
+  const desc = fg(theme, "muted", sanitizeLine(details.description ?? "Workflow run", 500));
   const lines = [
     fg(theme, "borderMuted", "─".repeat(Math.max(0, width))),
     joinLeftRight(title, fg(theme, "dim", stats), width),
-    joinLeftRight(desc, fg(theme, "dim", details.runId), width),
+    joinLeftRight(desc, fg(theme, "dim", sanitizeLine(details.runId, 100)), width),
   ];
   if (hasProgressPanel(details, progress)) {
     if (width >= WIDE_PROGRESS_PANEL_MIN_WIDTH) {
       lines.push("", ...renderProgressPanels(details, progress, theme, width, progressPanelOptions));
     } else {
       if (hasAgentProgress(progress)) lines.push(renderProgressLine(progress, theme, width));
-      if (progress.phase) lines.push(fg(theme, "accent", truncateToWidth(`phase: ${sanitizeText(progress.phase, 160)}`, width)));
+      if (progress.phase) lines.push(fg(theme, "accent", truncateToWidth(`phase: ${sanitizeLine(progress.phase, 160)}`, width)));
       const calls = callsForActivePhase(progress).slice(-3);
       for (const call of calls) lines.push(renderCompactCallRow(call, theme, width));
     }
   } else if (progress.phase) {
-    lines.push(fg(theme, "accent", truncateToWidth(`phase: ${sanitizeText(progress.phase, 160)}`, width)));
+    lines.push(fg(theme, "accent", truncateToWidth(`phase: ${sanitizeLine(progress.phase, 160)}`, width)));
   }
   const log = progress.recentLogs.at(-1);
-  if (log && (!hasAgentProgress(progress) || width < WIDE_PROGRESS_PANEL_MIN_WIDTH)) lines.push(fg(theme, "dim", truncateToWidth(`log: ${sanitizeText(log, 500)}`, width)));
+  if (log && (!hasAgentProgress(progress) || width < WIDE_PROGRESS_PANEL_MIN_WIDTH)) lines.push(fg(theme, "dim", truncateToWidth(`log: ${sanitizeRenderedLine(log, 500)}`, width)));
   return lines;
 }
 
 function renderHeader(details: WorkflowLaunchOutput, theme: ThemeLike, width: number): string[] {
-  const title = fg(theme, "accent", bold(theme, sanitizeText(details.title ?? details.name, 300)));
+  const title = fg(theme, "accent", bold(theme, sanitizeLine(details.title ?? details.name, 300)));
   const stats = [statusWord(details.status, theme), elapsed(details.startedAt, details.endedAt)].filter(Boolean).join(" · ");
   return [
     fg(theme, "borderMuted", "─".repeat(Math.max(0, width))),
     joinLeftRight(title, fg(theme, "dim", stats), width),
-    joinLeftRight(fg(theme, "muted", sanitizeText(details.description ?? "Workflow run", 1000)), fg(theme, "dim", details.runId), width),
+    joinLeftRight(fg(theme, "muted", sanitizeLine(details.description ?? "Workflow run", 1000)), fg(theme, "dim", sanitizeLine(details.runId, 100)), width),
   ];
 }
 
@@ -233,15 +234,15 @@ function renderPhaseRows(details: WorkflowLaunchOutput, progress: WorkflowProgre
     const color = failed ? "error" : complete ? "success" : active ? "accent" : "muted";
     const icon = failed ? "✗" : complete ? "✓" : active ? "›" : "·";
     const count = stats.total > 0 ? `${stats.finished}/${stats.total}` : "";
-    const label = `${icon} ${index + 1} ${sanitizeText(phase.title, 180)}`;
+    const label = `${icon} ${index + 1} ${sanitizeLine(phase.title, 180)}`;
     rows.push(fg(theme, color, joinLeftRight(label, count, width)));
-    if (active && phase.detail) rows.push(fg(theme, "dim", truncateToWidth(`  ${sanitizeText(phase.detail, 240)}`, width)));
+    if (active && phase.detail) rows.push(fg(theme, "dim", truncateToWidth(`  ${sanitizeLine(phase.detail, 240)}`, width)));
   });
   return rows.slice(0, maxRows);
 }
 
 function agentPanelTitle(progress: WorkflowProgressSnapshot, visibleCalls: WorkflowCallProgress[]): string {
-  if (progress.phase && progress.calls.some((call) => call.phase === progress.phase)) return `${sanitizeText(progress.phase, 120)} · ${visibleCalls.length} agents`;
+  if (progress.phase && progress.calls.some((call) => call.phase === progress.phase)) return `${sanitizeLine(progress.phase, 120)} · ${visibleCalls.length} agents`;
   if (progress.total === 0 && progress.calls.length === 0) return "Activity";
   return `Agents · ${progress.total}`;
 }
@@ -253,7 +254,7 @@ function renderAgentRows(calls: WorkflowCallProgress[], logs: string[], width: n
 
   for (const call of visibleCalls) {
     const icon = callIcon(call.status);
-    const left = `${icon} ${sanitizeText(call.callId, 40)} ${sanitizeText(call.label, 240)}`;
+    const left = `${icon} ${sanitizeLine(call.callId, 40)} ${sanitizeLine(call.label, 240)}`;
     const meta = callMeta(call);
     rows.push(fg(theme, callColor(call.status), joinLeftRight(left, meta, width)));
   }
@@ -262,7 +263,7 @@ function renderAgentRows(calls: WorkflowCallProgress[], logs: string[], width: n
   const visibleLogs = tail(logs, Math.max(0, visibleCalls.length === 0 && requestedMaxLogs === 0 ? RENDER_LIMITS.progressLogs : requestedMaxLogs));
   if (visibleLogs.length > 0) {
     if (rows.length > 0) rows.push("");
-    for (const log of visibleLogs) rows.push(fg(theme, "dim", truncateToWidth(`log: ${sanitizeText(log, 500)}`, width)));
+    for (const log of visibleLogs) rows.push(fg(theme, "dim", truncateToWidth(`log: ${sanitizeRenderedLine(log, 500)}`, width)));
   }
   return rows;
 }
@@ -273,14 +274,14 @@ function tail<T>(items: readonly T[], count: number): T[] {
 
 function renderArtifactLines(details: WorkflowLaunchOutput, options: WorkflowResultRenderOptions): string[] {
   const lines = [
-    `run: ${sanitizeText(details.runId, 100)}`,
-    `script: ${sanitizeText(details.scriptPath, 1000)}`,
-    `transcripts: ${sanitizeText(details.transcriptDir, 1000)}`,
+    `run: ${sanitizeLine(details.runId, 100)}`,
+    `script: ${sanitizeLine(details.scriptPath, 1000)}`,
+    `transcripts: ${sanitizeLine(details.transcriptDir, 1000)}`,
   ];
-  if (details.outputPath) lines.push(`output: ${sanitizeText(details.outputPath, 1000)}`);
+  if (details.outputPath) lines.push(`output: ${sanitizeLine(details.outputPath, 1000)}`);
   if (!options.message) {
-    const scriptPath = sanitizeText(JSON.stringify(details.scriptPath), 1000);
-    const runId = sanitizeText(JSON.stringify(details.runId), 200);
+    const scriptPath = sanitizeLine(JSON.stringify(details.scriptPath), 1000);
+    const runId = sanitizeLine(JSON.stringify(details.runId), 200);
     lines.push(`resume: workflow({ scriptPath: ${scriptPath}, resumeFromRunId: ${runId} })`);
   }
   return lines;
@@ -288,8 +289,8 @@ function renderArtifactLines(details: WorkflowLaunchOutput, options: WorkflowRes
 
 function renderArtifactHint(details: WorkflowLaunchOutput): string {
   const parts = [
-    `artifacts: ${sanitizeText(details.outputPath ?? details.scriptPath, 1000)}`,
-    `run: ${sanitizeText(details.runId, 100)}`,
+    `artifacts: ${sanitizeLine(details.outputPath ?? details.scriptPath, 1000)}`,
+    `run: ${sanitizeLine(details.runId, 100)}`,
   ];
   return parts.join(" · ");
 }
@@ -325,15 +326,15 @@ function compactResultStats(details: WorkflowLaunchOutput, progress: WorkflowPro
 
 function compactResultSecondary(details: WorkflowLaunchOutput, progress: WorkflowProgressSnapshot | undefined, width: number): string | undefined {
   if (details.status === "failed" && details.error) {
-    return truncateToWidth(`error: ${sanitizeText(details.error, 1000).replace(/\n+/g, " ↵ ")}`, width);
+    return truncateToWidth(`error: ${sanitizeLine(details.error, 1000)}`, width);
   }
   if (progress) {
     const latest = progress.calls.at(-1);
-    const left = progress.phase ? `phase: ${sanitizeText(progress.phase, 160)}` : sanitizeText(details.description ?? "Workflow run", 300);
-    const right = latest ? `${callIcon(latest.status)} ${sanitizeText(latest.label, 160)}` : sanitizeText(details.runId, 100);
+    const left = progress.phase ? `phase: ${sanitizeLine(progress.phase, 160)}` : sanitizeLine(details.description ?? "Workflow run", 300);
+    const right = latest ? `${callIcon(latest.status)} ${sanitizeLine(latest.label, 160)}` : sanitizeLine(details.runId, 100);
     return joinLeftRight(left, right, width);
   }
-  return joinLeftRight(sanitizeText(details.description ?? "Workflow run", 300), sanitizeText(details.runId, 100), width);
+  return joinLeftRight(sanitizeLine(details.description ?? "Workflow run", 300), sanitizeLine(details.runId, 100), width);
 }
 
 function renderProgressLine(progress: WorkflowProgressSnapshot, theme: ThemeLike, width: number): string {
@@ -347,7 +348,7 @@ function renderProgressLine(progress: WorkflowProgressSnapshot, theme: ThemeLike
 }
 
 function renderCompactCallRow(call: WorkflowCallProgress, theme: ThemeLike, width: number): string {
-  const left = `${callIcon(call.status)} ${sanitizeText(call.callId, 40)} ${sanitizeText(call.label, 180)}`;
+  const left = `${callIcon(call.status)} ${sanitizeLine(call.callId, 40)} ${sanitizeLine(call.label, 180)}`;
   const right = callMeta(call);
   return fg(theme, callColor(call.status), joinLeftRight(left, right, width));
 }
@@ -358,7 +359,7 @@ function callMeta(call: WorkflowCallProgress): string {
   const tools = usage ? `${usage.toolUses} ${usage.toolUses === 1 ? "tool" : "tools"}` : undefined;
   const duration = usage?.durationMs !== undefined ? formatDuration(usage.durationMs) : callElapsed(call);
   const status = call.status === "done" ? undefined : call.status;
-  return [call.model ? sanitizeText(call.model, 80) : undefined, tokens, tools, duration, status].filter(Boolean).join(" · ");
+  return [call.model ? sanitizeLine(call.model, 80) : undefined, call.thinking ? `thinking ${sanitizeLine(call.thinking, 20)}` : undefined, tokens, tools, duration, status].filter(Boolean).join(" · ");
 }
 
 function workflowStatusIcon(status: WorkflowLaunchOutput["status"]): string {
@@ -369,7 +370,7 @@ function workflowStatusIcon(status: WorkflowLaunchOutput["status"]): string {
 function frameBlock(title: string, body: string[], width: number, theme: ThemeLike, color = "muted"): string[] {
   if (width < 8) return body.map((line) => padToWidth(line, width));
   const inner = Math.max(1, width - 2);
-  const safeTitle = sanitizeText(title, 180);
+  const safeTitle = sanitizeLine(title, 180);
   const label = safeTitle ? truncateToWidth(` ${safeTitle} `, inner, "") : "";
   const top = `┌${label}${"─".repeat(Math.max(0, inner - visibleWidth(label)))}┐`;
   const bottom = `└${"─".repeat(inner)}┘`;

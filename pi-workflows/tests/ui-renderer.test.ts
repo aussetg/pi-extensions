@@ -6,9 +6,10 @@ import { WorkflowViewValidator } from "../src/ui/workflow-view-validator.js";
 import { renderWorkflowCall, renderWorkflowResult } from "../src/tool/workflow-tool-renderer.js";
 import { normalizeDashboardDocument, renderAlignedSparklines, renderCompactMetrics, renderCompactTable } from "../src/ui/dashboard.js";
 import { renderWorkflowResultMessage } from "../src/ui/messages.js";
+import { StaticTextComponent } from "../src/ui/simple-components.js";
 import { renderWorkflowResultLines, WorkflowProgressComponent, WorkflowResultComponent } from "../src/ui/workflow-result-component.js";
 import { WorkflowViewComponent } from "../src/ui/workflow-view-widget.js";
-import { visibleWidth } from "../src/utils/truncate.js";
+import { sanitizeLine, sanitizeRenderedLine, visibleWidth } from "../src/utils/truncate.js";
 
 const spec = {
   version: 1,
@@ -33,6 +34,97 @@ describe("workflow UI", () => {
     const lines = new WorkflowViewRenderer().renderFull({ spec: checked, state, seq: 0 }, 80);
     expect(lines.join("\n")).toContain("Median");
     expect(lines.every((line) => visibleWidth(line) <= 80)).toBe(true);
+  });
+
+  it("uses cell-aware width accounting for wide and combining glyphs", () => {
+    expect(visibleWidth("表")).toBe(2);
+    expect(visibleWidth("🙂")).toBe(2);
+    expect(visibleWidth("e\u0301")).toBe(1);
+  });
+
+  it("sanitizes rendered rows without collapsing alignment spaces", () => {
+    expect(sanitizeLine("a  b")).toBe("a b");
+    expect(sanitizeRenderedLine("a  b\tc\n\u001b[2Jd")).toBe("a  b    c ↵ d");
+    expect(sanitizeRenderedLine("\u001b[31mred\u001b[0m")).toBe("red");
+
+    const styled = sanitizeRenderedLine("\u001b[31mred\u001b[0m  ok\u001b[2J\u001b]0;owned\u0007", 100, { preserveAnsi: true });
+    expect(styled).toContain("\u001b[31mred\u001b[0m  ok");
+    expect(styled).not.toContain("\u001b[2J");
+    expect(styled).not.toContain("\u001b]");
+  });
+
+  it("sanitizes static text with trusted SGR styling while preserving indentation", () => {
+    const plain = new StaticTextComponent(["  keep    spacing"]);
+    expect(plain.render(32)[0]).toContain("  keep    spacing");
+
+    const styled = new StaticTextComponent(["\u001b[32mok\u001b[0m  keep\u001b[2J\u001b]0;owned\u0007"], { preserveAnsi: true }).render(40)[0];
+    expect(styled).toContain("\u001b[32mok\u001b[0m  keep");
+    expect(styled).not.toContain("\u001b[2J");
+    expect(styled).not.toContain("\u001b]");
+    expect(visibleWidth(styled)).toBe(40);
+  });
+
+  it("renders nominal single-line fields without embedded newlines or tabs", () => {
+    const checked = new WorkflowViewValidator().validateSpec({
+      version: 1,
+      id: "single_line",
+      title: "Title\nwith\ttab",
+      description: "Description\nwith\ttab",
+      initialState: { value: "value\nwith\ttab" },
+      layout: { type: "metric", label: "Metric\nlabel\ttab", bind: "/value" },
+    });
+
+    const lines = new WorkflowViewRenderer().renderFull({ spec: checked, state: checked.initialState!, seq: 0 }, 64);
+    expect(lines.every((line) => !line.includes("\n") && !line.includes("\t"))).toBe(true);
+    expect(lines.join("\n")).toContain("↵");
+    expect(lines.every((line) => visibleWidth(line) <= 64)).toBe(true);
+  });
+
+  it("preserves rendered table and log spacing inside workflow UI frames", () => {
+    const checked = new WorkflowViewValidator().validateSpec({
+      version: 1,
+      id: "spacing",
+      title: "Spacing",
+      initialState: {
+        rows: [{ name: "alpha", score: 7 }],
+        dash: normalizeDashboardDocument({ sections: [{ title: "Log", lines: ["  keep    spacing"] }] }),
+      },
+      layout: {
+        type: "vstack",
+        children: [
+          { type: "table", bind: "/rows", columns: [{ key: "name", label: "Name" }, { key: "score", label: "Score", format: "number" }] },
+          { type: "dashboard", bind: "/dash" },
+        ],
+      },
+    });
+
+    const lines = new WorkflowViewRenderer().renderFull({ spec: checked, state: checked.initialState!, seq: 0 }, 88);
+    const header = lines.find((line) => line.includes("Name") && line.includes("Score"));
+    const log = lines.find((line) => line.includes("keep") && line.includes("spacing"));
+
+    expect(header).toMatch(/Name {2,}│/);
+    expect(log).toContain("›   keep    spacing");
+    expect(lines.every((line) => visibleWidth(line) <= 88)).toBe(true);
+  });
+
+  it("keeps full UI truncation framed with an explicit notice", () => {
+    const checked = new WorkflowViewValidator().validateSpec({
+      version: 1,
+      id: "long_full",
+      title: "Long full view",
+      initialState: {},
+      layout: {
+        type: "vstack",
+        children: Array.from({ length: 8 }, (_ignored, block) => ({ type: "text", text: Array.from({ length: 50 }, (_ignored2, i) => `block ${block} line ${i}`).join("\n") })),
+      },
+    });
+
+    const lines = new WorkflowViewRenderer().renderFull({ spec: checked, state: checked.initialState!, seq: 0 }, 72);
+    expect(lines).toHaveLength(RENDER_LIMITS.fullViewLines);
+    expect(lines[0]).toContain("┌");
+    expect(lines.at(-1)).toContain("┘");
+    expect(lines.join("\n")).toContain("full UI truncated");
+    expect(lines.every((line) => visibleWidth(line) <= 72)).toBe(true);
   });
 
   it("lays out grid children in columns", () => {
@@ -434,6 +526,15 @@ describe("workflow UI", () => {
     expect(lines.join("\n")).toContain("Phases");
     expect(lines.join("\n")).toContain("Migration");
     expect(lines.every((line) => visibleWidth(line) === 96)).toBe(true);
+  });
+
+  it("lets reused workflow result components shrink after update", () => {
+    const component = new WorkflowResultComponent(sampleWorkflowDetails({ resultPreview: Array.from({ length: 40 }, (_ignored, i) => `line ${i}`).join("\n") }), { profile: "full" });
+    const tall = component.render(80).length;
+    component.update(sampleWorkflowDetails({ resultPreview: undefined, progress: undefined }), { profile: "compact" });
+    const short = component.render(80).length;
+
+    expect(short).toBeLessThan(tall);
   });
 
   it("renders per-agent usage telemetry in workflow progress rows", () => {

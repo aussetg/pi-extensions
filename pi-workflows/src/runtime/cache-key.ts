@@ -10,8 +10,8 @@ export interface AgentChainKeyInput {
 
 export function computeAgentChainKey(input: AgentChainKeyInput): string {
   const { opts } = input;
-  return `v3:${stableHash({
-    version: 3,
+  return `v4:${stableHash({
+    version: 4,
     previousChainKey: input.previousChainKey ?? null,
     prompt: input.prompt,
     opts: {
@@ -19,6 +19,7 @@ export function computeAgentChainKey(input: AgentChainKeyInput): string {
       phase: opts.phase ?? null,
       schema: opts.schema ?? null,
       model: opts.model ?? null,
+      thinking: opts.thinking ?? null,
       isolation: opts.isolation ?? null,
       agentType: opts.agentType ?? null,
     },

@@ -1,7 +1,7 @@
 import type { JsonObject, WorkflowFormat, WorkflowLayoutNode, WorkflowViewSnapshot } from "../types.js";
 import { RENDER_LIMITS, UI_LIMITS } from "../constants.js";
 import { getByPointer } from "../utils/json-pointer.js";
-import { clamp, padToWidth, sanitizeText, truncateToWidth, visibleWidth } from "../utils/truncate.js";
+import { clamp, padToWidth, sanitizeLine, sanitizeRenderedLine, sanitizeText, truncateToWidth, visibleWidth } from "../utils/truncate.js";
 import { dashboardPanelLineBudget, dashboardPreview, renderDashboardDocument } from "./dashboard.js";
 
 export type WorkflowViewRenderProfile = "compact" | "panel" | "full";
@@ -16,9 +16,9 @@ export class WorkflowViewRenderer {
   renderCompact(snapshot: WorkflowViewSnapshot, width = 80): string[] {
     try {
       const preview = this.firstPreview(snapshot);
-      return limitFramedLines(frameLines(`ui: ${sanitizeText(snapshot.spec.title, 200)}`, preview ? [preview] : [], width), width, RENDER_LIMITS.compactViewLines);
+      return limitFramedLines(frameLines(`ui: ${sanitizeLine(snapshot.spec.title, 200)}`, preview ? [preview] : [], width), width, RENDER_LIMITS.compactViewLines);
     } catch (err) {
-      return [padToWidth(`ui renderer error: ${sanitizeText((err as Error).message, 1000)}`, width)];
+      return [padToWidth(`ui renderer error: ${sanitizeLine((err as Error).message, 1000)}`, width)];
     }
   }
 
@@ -28,9 +28,9 @@ export class WorkflowViewRenderer {
       const lineLimit = this.panelLineLimit(snapshot);
       const bodyBudget = Math.max(1, lineLimit - 2);
       const body = truncateBodyLines(this.renderNode(snapshot.spec.layout, snapshot.state, bodyWidth, snapshot, "panel"), bodyBudget, "… full UI persisted as artifact");
-      return limitFramedLines(frameLines(sanitizeText(snapshot.spec.title, 200), body, width), width, lineLimit);
+      return limitFramedLines(frameLines(sanitizeLine(snapshot.spec.title, 200), body, width), width, lineLimit);
     } catch (err) {
-      return [padToWidth(`Workflow UI renderer failed: ${sanitizeText((err as Error).message, 1000)}`, width)];
+      return [padToWidth(`Workflow UI renderer failed: ${sanitizeLine((err as Error).message, 1000)}`, width)];
     }
   }
 
@@ -43,17 +43,18 @@ export class WorkflowViewRenderer {
     try {
       const bodyWidth = Math.max(1, width - 2);
       const layout = snapshot.spec.expandedLayout ?? snapshot.spec.layout;
-      const lines = [...(snapshot.spec.description ? [sanitizeText(snapshot.spec.description, 1000), ""] : []), ...this.renderNode(layout, snapshot.state, bodyWidth, snapshot, "full")];
-      const framed = frameLines(sanitizeText(snapshot.spec.title, 200), lines, width);
-      return framed.slice(0, RENDER_LIMITS.fullViewLines).map((line) => padToWidth(line, width));
+      const lines = [...(snapshot.spec.description ? [sanitizeLine(snapshot.spec.description, 1000), ""] : []), ...this.renderNode(layout, snapshot.state, bodyWidth, snapshot, "full")];
+      const bodyBudget = Math.max(1, RENDER_LIMITS.fullViewLines - 2);
+      const body = truncateBodyLines(lines, bodyBudget, "… full UI truncated; complete state is persisted as artifact");
+      return frameLines(sanitizeLine(snapshot.spec.title, 200), body, width).map((line) => padToWidth(line, width));
     } catch (err) {
-      return [padToWidth(`Workflow UI renderer failed: ${sanitizeText((err as Error).message, 1000)}`, width)];
+      return [padToWidth(`Workflow UI renderer failed: ${sanitizeLine((err as Error).message, 1000)}`, width)];
     }
   }
 
   renderMarkdown(snapshot: WorkflowViewSnapshot): string {
     const lines = this.renderFull(snapshot, 100).map((line) => `    ${line.trimEnd()}`);
-    return `## ${sanitizeText(snapshot.spec.title)}\n\n${lines.join("\n")}\n\nFull state is persisted in the workflow UI artifacts.\n`;
+    return `## ${sanitizeLine(snapshot.spec.title)}\n\n${lines.join("\n")}\n\nFull state is persisted in the workflow UI artifacts.\n`;
   }
 
   private panelBodyLineLimit(snapshot: WorkflowViewSnapshot): number {
@@ -78,7 +79,7 @@ export class WorkflowViewRenderer {
       case "dashboard":
         return renderDashboardDocument(getByPointer(state, node.bind ?? ""), width, { profile, frameTitle: snapshot.spec.title, maxRowsPerSection: snapshot.spec.limits?.maxRows });
       case "text":
-        return sanitizeText(node.text).split("\n");
+        return sanitizeText(node.text).split("\n").slice(0, UI_LIMITS.maxRenderedRows);
       case "markdown": {
         const text = node.text ?? String(getByPointer(state, node.bind ?? "") ?? "");
         return sanitizeText(text).split("\n").slice(0, boundedCount(node.maxLines, 30, UI_LIMITS.maxRenderedRows));
@@ -86,23 +87,25 @@ export class WorkflowViewRenderer {
       case "metric": {
         const value = getByPointer(state, node.bind);
         const status = thresholdStatus(value, node.threshold);
-        return [`${status} ${node.label}: ${formatValue(value, node.format)}`];
+        return [`${status} ${sanitizeLine(node.label, 120)}: ${formatValue(value, node.format)}`];
       }
       case "progress": {
         const percent = node.percentBind ? Number(getByPointer(state, node.percentBind)) : progressPercent(getByPointer(state, node.valueBind ?? ""), getByPointer(state, node.totalBind ?? ""));
         const value = node.valueBind ? Number(getByPointer(state, node.valueBind)) : undefined;
         const total = node.totalBind ? Number(getByPointer(state, node.totalBind)) : undefined;
-        const barWidth = Math.max(10, Math.min(30, width - node.label.length - 20));
+        const label = sanitizeLine(node.label, 120);
+        const barWidth = Math.max(10, Math.min(30, width - visibleWidth(label) - 20));
         const filled = clamp(Math.round((Number.isFinite(percent) ? percent : 0) * barWidth), 0, barWidth);
         const bar = "█".repeat(filled) + "░".repeat(barWidth - filled);
         const suffix = Number.isFinite(value) && Number.isFinite(total) ? ` ${value}/${total}` : ` ${Math.round((percent || 0) * 100)}%`;
-        return [`${node.label}: ${bar}${suffix}`];
+        return [`${label}: ${bar}${suffix}`];
       }
       case "sparkline": {
         const raw = getByPointer(state, node.bind);
         const maxPoints = boundedCount(node.maxPoints ?? snapshot.spec.limits?.maxSeriesPoints, 80, UI_LIMITS.maxSeriesPoints);
         const values = Array.isArray(raw) ? raw.filter((n): n is number => typeof n === "number" && Number.isFinite(n)).slice(-maxPoints) : [];
-        return [`${node.label}: ${sparkline(values, Math.max(0, Math.min(50, width - visibleWidth(node.label) - 3)))}`];
+        const label = sanitizeLine(node.label, 120);
+        return [`${label}: ${sparkline(values, Math.max(0, Math.min(50, width - visibleWidth(label) - 3)))}`];
       }
       case "table": {
         const raw = getByPointer(state, node.bind);
@@ -113,7 +116,7 @@ export class WorkflowViewRenderer {
         if (!raw || typeof raw !== "object" || Array.isArray(raw)) return ["(no key/value data)"];
         return Object.entries(raw as Record<string, unknown>)
           .slice(0, boundedCount(node.maxItems, 30, UI_LIMITS.maxRenderedRows))
-          .map(([key, value]) => `${sanitizeText(key, 120)}: ${formatValue(value)}`);
+          .map(([key, value]) => `${sanitizeLine(key, 120)}: ${formatValue(value)}`);
       }
       case "statusList": {
         const raw = getByPointer(state, node.bind);
@@ -121,7 +124,7 @@ export class WorkflowViewRenderer {
         return rows.map((row) => {
           const object = row && typeof row === "object" ? (row as Record<string, unknown>) : {};
           const status = String(object[node.itemStatusKey ?? "status"] ?? "");
-          const label = sanitizeText(String(object[node.itemLabelKey ?? "label"] ?? "item"), 300);
+          const label = sanitizeLine(String(object[node.itemLabelKey ?? "label"] ?? "item"), 300);
           const detail = object[node.itemDetailKey ?? "detail"];
           return `${statusIcon(status)} ${label}${detail === undefined ? "" : ` · ${formatValue(detail)}`}`;
         });
@@ -133,7 +136,7 @@ export class WorkflowViewRenderer {
       case "logTail": {
         const raw = getByPointer(state, node.bind ?? "/logs");
         const rows = Array.isArray(raw) ? raw.slice(-boundedCount(node.maxLines, 20, UI_LIMITS.maxRenderedRows)) : [];
-        return rows.map((line) => `› ${formatValue(line)}`);
+        return rows.map((line) => `› ${typeof line === "string" ? sanitizeRenderedLine(line, 1000) : formatValue(line)}`);
       }
     }
   }
@@ -145,18 +148,18 @@ export class WorkflowViewRenderer {
       if (preview) return preview;
     }
     const metric = findFirstMetric(snapshot.spec.layout);
-    return metric ? `${sanitizeText(metric.label, 120)}: ${formatValue(getByPointer(snapshot.state, metric.bind), metric.format)}` : undefined;
+    return metric ? `${sanitizeLine(metric.label, 120)}: ${formatValue(getByPointer(snapshot.state, metric.bind), metric.format)}` : undefined;
   }
 }
 
 function frameLines(title: string, body: string[], width: number): string[] {
-  if (width < 8) return [title, ...body].map((line) => padToWidth(truncateToWidth(line, width), width));
+  if (width < 8) return [sanitizeLine(title, 240), ...body.map((line) => sanitizeRenderedLine(line, 4000))].map((line) => padToWidth(truncateToWidth(line, width), width));
   const inner = Math.max(1, width - 2);
-  const label = truncateToWidth(` ${sanitizeText(title, 240)} `, inner, "");
+  const label = truncateToWidth(` ${sanitizeLine(title, 240)} `, inner, "");
   const top = `┌${label}${"─".repeat(Math.max(0, inner - visibleWidth(label)))}┐`;
   const bottom = `└${"─".repeat(inner)}┘`;
   const rows = body.length > 0 ? body : [""];
-  return [top, ...rows.map((line) => `│${padToWidth(line, inner)}│`), bottom].map((line) => padToWidth(line, width));
+  return [top, ...rows.map((line) => `│${padToWidth(sanitizeRenderedLine(line, 4000), inner)}│`), bottom].map((line) => padToWidth(line, width));
 }
 
 function truncateBodyLines(lines: string[], maxLines: number, notice: string): string[] {
@@ -273,7 +276,7 @@ function columnPath(column: { path?: string; key?: string }): string {
 }
 
 function oneLine(value: unknown): string {
-  return sanitizeText(value, 500).replace(/\n+/g, " ↵ ");
+  return sanitizeLine(value, 500);
 }
 
 function boundedCount(value: unknown, fallback: number, max: number): number {
@@ -310,8 +313,8 @@ function formatValue(value: unknown, format: WorkflowFormat | string = "text"): 
     }
   }
   if (typeof value === "boolean") return value ? "true" : "false";
-  if (typeof value === "string") return sanitizeText(value, 500);
-  return sanitizeText(JSON.stringify(value), 500);
+  if (typeof value === "string") return sanitizeLine(value, 500);
+  return sanitizeLine(JSON.stringify(value), 500);
 }
 
 function progressPercent(value: unknown, total: unknown): number {

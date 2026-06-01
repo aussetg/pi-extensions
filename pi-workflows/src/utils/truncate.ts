@@ -32,8 +32,77 @@ export function sanitizeText(value: unknown, maxBytes = 16_384): string {
   return truncateBytes(text, maxBytes);
 }
 
+export function sanitizeLine(value: unknown, maxBytes = 16_384): string {
+  return sanitizeText(value, maxBytes)
+    .replace(/\t/g, " ")
+    .replace(/\n+/g, " ↵ ")
+    .replace(/ {2,}/g, " ");
+}
+
+export interface SanitizeRenderedLineOptions {
+  preserveAnsi?: boolean;
+  tabWidth?: number;
+}
+
+export function sanitizeRenderedLine(value: unknown, maxBytes = 16_384, options: SanitizeRenderedLineOptions = {}): string {
+  const tabWidth = clamp(Math.trunc(options.tabWidth ?? 4), 1, 16);
+  const text = options.preserveAnsi ? stripAnsiExceptSgr(String(value ?? "")) : stripAnsiSequences(String(value ?? ""));
+  const controls = options.preserveAnsi ? /[\u0000-\u0008\u000B\u000C\u000E-\u001A\u001C-\u001F\u007F]/g : /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
+  const sanitized = text
+    .replace(/\r\n?/g, "\n")
+    .replace(controls, "�")
+    .replace(/\t/g, " ".repeat(tabWidth))
+    .replace(/\n+/g, " ↵ ");
+  const truncated = truncateBytes(sanitized, maxBytes);
+  return options.preserveAnsi ? stripAnsiExceptSgr(truncated) : truncated;
+}
+
+export class BoundedTextAccumulator {
+  private readonly chunks: string[] = [];
+  private bytes = 0;
+  private truncated = false;
+
+  constructor(private readonly maxBytes: number, private readonly suffix = "\n… truncated …") {}
+
+  append(value: string): void {
+    if (this.truncated || this.maxBytes <= 0 || value.length === 0) return;
+    const remaining = this.maxBytes - this.bytes;
+    if (byteLength(value) <= remaining) {
+      this.chunks.push(value);
+      this.bytes += byteLength(value);
+      return;
+    }
+
+    const room = Math.max(0, remaining - byteLength(this.suffix));
+    if (room > 0) this.chunks.push(truncateBytes(value, room, ""));
+    if (remaining >= byteLength(this.suffix)) this.chunks.push(this.suffix);
+    this.bytes = this.maxBytes;
+    this.truncated = true;
+  }
+
+  byteLength(): number {
+    return this.bytes;
+  }
+
+  wasTruncated(): boolean {
+    return this.truncated;
+  }
+
+  toString(): string {
+    return this.chunks.join("");
+  }
+}
+
 export function visibleWidth(text: string): number {
-  return stripAnsi(text).length;
+  let width = 0;
+  const clean = stripAnsi(text);
+  for (let i = 0; i < clean.length; ) {
+    const codePoint = clean.codePointAt(i);
+    if (codePoint === undefined) break;
+    width += codePointWidth(codePoint);
+    i += codePoint > 0xffff ? 2 : 1;
+  }
+  return width;
 }
 
 export function truncateToWidth(text: string, width: number, suffix = "…"): string {
@@ -63,13 +132,52 @@ function takeVisible(text: string, width: number): string {
     const codePoint = text.codePointAt(i);
     if (codePoint === undefined) break;
     const char = String.fromCodePoint(codePoint);
-    const charWidth = visibleWidth(char);
+    const charWidth = codePointWidth(codePoint);
     if (used + charWidth > width) break;
     out += char;
     used += charWidth;
     i += char.length;
   }
   return out;
+}
+
+function codePointWidth(codePoint: number): number {
+  if (codePoint === 0) return 0;
+  if (codePoint === 0x09) return 4;
+  if (codePoint < 0x20 || (codePoint >= 0x7f && codePoint < 0xa0)) return 0;
+  if (isCombiningOrFormat(codePoint)) return 0;
+  if (isWideCodePoint(codePoint)) return 2;
+  return 1;
+}
+
+function isCombiningOrFormat(codePoint: number): boolean {
+  return (
+    codePoint === 0x200d ||
+    (codePoint >= 0x0300 && codePoint <= 0x036f) ||
+    (codePoint >= 0x1ab0 && codePoint <= 0x1aff) ||
+    (codePoint >= 0x1dc0 && codePoint <= 0x1dff) ||
+    (codePoint >= 0x20d0 && codePoint <= 0x20ff) ||
+    (codePoint >= 0xfe00 && codePoint <= 0xfe0f) ||
+    (codePoint >= 0xfe20 && codePoint <= 0xfe2f) ||
+    (codePoint >= 0xe0100 && codePoint <= 0xe01ef)
+  );
+}
+
+function isWideCodePoint(codePoint: number): boolean {
+  return (
+    (codePoint >= 0x1100 && codePoint <= 0x115f) ||
+    codePoint === 0x2329 ||
+    codePoint === 0x232a ||
+    (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+    (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+    (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+    (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+    (codePoint >= 0x1f300 && codePoint <= 0x1faff) ||
+    (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+  );
 }
 
 function readAnsiSequenceEnd(text: string, start: number): number | undefined {
@@ -94,6 +202,46 @@ function readAnsiSequenceEnd(text: string, start: number): number | undefined {
   }
 
   return Math.min(text.length, start + 2);
+}
+
+function stripAnsiSequences(text: string): string {
+  let out = "";
+  for (let i = 0; i < text.length; ) {
+    if (text.charCodeAt(i) === 0x1b) {
+      i = readAnsiSequenceEnd(text, i) ?? i + 1;
+      continue;
+    }
+    const codePoint = text.codePointAt(i);
+    if (codePoint === undefined) break;
+    const char = String.fromCodePoint(codePoint);
+    out += char;
+    i += char.length;
+  }
+  return out;
+}
+
+function stripAnsiExceptSgr(text: string): string {
+  let out = "";
+  for (let i = 0; i < text.length; ) {
+    if (text.charCodeAt(i) === 0x1b) {
+      const end = readAnsiSequenceEnd(text, i) ?? i + 1;
+      const sequence = text.slice(i, end);
+      if (isSafeSgrSequence(sequence)) out += sequence;
+      i = end;
+      continue;
+    }
+    const codePoint = text.codePointAt(i);
+    if (codePoint === undefined) break;
+    const char = String.fromCodePoint(codePoint);
+    out += char;
+    i += char.length;
+  }
+  return out;
+}
+
+function isSafeSgrSequence(sequence: string): boolean {
+  if (!sequence.startsWith("\u001b[") || !sequence.endsWith("m") || sequence.length > 96) return false;
+  return /^[0-9;:]*$/.test(sequence.slice(2, -1));
 }
 
 export function clamp(n: number, min: number, max: number): number {

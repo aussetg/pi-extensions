@@ -19,6 +19,18 @@ export const DEFAULT_LIMITS = {
   workflowHardTimeoutMs: 6 * 60 * 60_000,
 } as const;
 
+export const WORKFLOW_AGENT_OPTION_LIMITS = {
+  labelBytes: 500,
+  phaseBytes: 500,
+  modelBytes: 500,
+  agentTypeBytes: 120,
+  schemaBytes: 64 * 1024,
+  schemaDepth: 16,
+  schemaNodes: 2_000,
+  stallMsMin: 1_000,
+  stallMsMax: DEFAULT_LIMITS.workflowHardTimeoutMs,
+} as const;
+
 export const WORKFLOW_ISOLATION_POLICY = {
   /** Plain sequential agent() calls operate in the user's current workspace. */
   directAgentDefault: "shared",
@@ -30,6 +42,28 @@ export const WORKFLOW_CHILD_CGROUP = {
   memoryMax: "768M",
   tasksMax: "128",
   cpuQuota: "200%",
+} as const;
+
+export const WORKFLOW_RESOURCE_LIMITS = {
+  workflowProtocolLineBytes: 1024 * 1024,
+  workflowParentMessageBytes: 1024 * 1024,
+  workflowReplayResultBytes: 8 * 1024 * 1024,
+  workflowChildStderrBytes: 64 * 1024,
+  subagentStdoutLineBytes: 1024 * 1024,
+  subagentResultTextBytes: 512 * 1024,
+  subagentStderrBytes: 128 * 1024,
+  journalEventBytes: 128 * 1024,
+  journalBytes: 32 * 1024 * 1024,
+  logMessageBytes: 4 * 1024,
+  logEntries: 1000,
+  logFileBytes: 1024 * 1024,
+  worktreeStatusBytes: 1024 * 1024,
+  worktreePatchBytes: 100 * 1024 * 1024,
+  worktreeIgnoredListBytes: 1024 * 1024,
+  worktreeIgnoredFiles: 200,
+  worktreeIgnoredFileBytes: 2 * 1024 * 1024,
+  worktreeIgnoredTotalBytes: 8 * 1024 * 1024,
+  worktreeIgnoredSymlinkBytes: 4 * 1024,
 } as const;
 
 export const UI_LIMITS = {

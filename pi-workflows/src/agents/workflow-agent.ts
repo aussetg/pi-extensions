@@ -4,7 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import type { AgentOptions, JsonSchema, WorkflowUsage } from "../types.js";
-import { truncateBytes } from "../utils/truncate.js";
+import type { ThinkingLevel } from "../thinking.js";
+import { WORKFLOW_RESOURCE_LIMITS } from "../constants.js";
+import { BoundedTextAccumulator, byteLength, truncateBytes } from "../utils/truncate.js";
 import { ensureDir } from "../persistence/paths.js";
 import { WorkflowAbortError, WorkflowSkipAgentError } from "../runtime/errors.js";
 
@@ -30,6 +32,24 @@ interface MessageLike {
   model?: string;
 }
 
+interface SubagentStreamState {
+  stdoutBytes: number;
+  eventCount: number;
+  parsedEventCount: number;
+  malformedEventCount: number;
+  droppedOversizeLines: number;
+  messageCount: number;
+  assistantMessageCount: number;
+  toolExecutions: number;
+  fallbackToolCalls: number;
+  subagentTokens: number;
+  resultText: string;
+  model?: string;
+  sessionId?: string;
+  sessionCwd?: string;
+  sessionTimestamp?: string;
+}
+
 export interface WorkflowAgentCall {
   callId: string;
   runId: string;
@@ -52,6 +72,8 @@ export interface WorkflowAgentResult {
   resultPath: string;
   usage: WorkflowUsage;
   model?: string;
+  thinking?: ThinkingLevel;
+  sessionPath?: string;
   workspace?: AgentWorkspaceArtifacts;
 }
 
@@ -67,7 +89,25 @@ interface AgentWorkspaceArtifacts {
   worktreeDir: string;
   statusPath?: string;
   patchPath?: string;
+  ignoredManifestPath?: string;
+  ignoredFilesDir?: string;
   error?: string;
+}
+
+interface IgnoredArtifactManifest {
+  version: 1;
+  kind: "worktree_ignored_files";
+  limits: {
+    maxFiles: number;
+    maxFileBytes: number;
+    maxTotalBytes: number;
+  };
+  totalBytes: number;
+  files: Array<
+    | { path: string; type: "file"; bytes: number; artifactPath: string }
+    | { path: string; type: "symlink"; bytes: number; target: string }
+  >;
+  omitted: Array<{ path: string; reason: string; bytes?: number }>;
 }
 
 export class WorkflowAgent {
@@ -93,15 +133,17 @@ export class WorkflowAgent {
   }
 
   private async runAttempt(call: WorkflowAgentCall, callDir: string, attempt: number): Promise<WorkflowAgentResult> {
-    const messages: MessageLike[] = [];
-    const stderr: string[] = [];
-    let toolExecutions = 0;
-    let model: string | undefined;
+    const stream = createSubagentStreamState();
+    const stderr = new BoundedTextAccumulator(WORKFLOW_RESOURCE_LIMITS.subagentStderrBytes, "\n… subagent stderr truncated …");
     const workspace = await prepareAgentWorkspace(call, callDir, attempt);
-    const args = ["--mode", "json", "-p", "--no-session"];
+    const sessionDir = path.join(callDir, attempt === 0 ? "pi-session" : `pi-session-attempt-${attempt}`);
+    await fs.promises.rm(sessionDir, { recursive: true, force: true });
+    await ensureDir(sessionDir);
+
+    const args = ["--mode", "json", "-p", "--session-dir", sessionDir];
     if (call.options.model) args.push("--model", call.options.model);
-    const tools = (call.activeTools ?? []).filter((name) => name !== "workflow");
-    if (tools.length > 0) args.push("--tools", tools.join(","));
+    if (call.options.thinking) args.push("--thinking", call.options.thinking);
+    args.push(...subagentToolArgs(call.activeTools));
 
     const systemPrompt = buildSubagentSystemPrompt(call);
     const tmp = await writeTempPrompt(call.callId, systemPrompt);
@@ -113,8 +155,24 @@ export class WorkflowAgent {
         const invocation = getPiInvocation(args);
         const proc = spawn(invocation.command, invocation.args, { cwd: workspace.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
         let stdoutBuffer = "";
+        let discardingOversizeLine = false;
         let stalled = false;
         let timer: NodeJS.Timeout | undefined;
+        let settled = false;
+
+        const cleanup = () => {
+          if (timer) clearTimeout(timer);
+          call.signal.removeEventListener("abort", abort);
+        };
+
+        const fail = (err: unknown) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          proc.kill("SIGTERM");
+          setTimeout(() => proc.kill("SIGKILL"), 3_000).unref?.();
+          reject(err);
+        };
 
         const resetTimer = () => {
           if (timer) clearTimeout(timer);
@@ -128,59 +186,103 @@ export class WorkflowAgent {
         resetTimer();
 
         const abort = () => {
-          proc.kill("SIGTERM");
-          setTimeout(() => proc.kill("SIGKILL"), 3_000).unref?.();
-          reject(call.signal.reason ?? new WorkflowAbortError());
+          fail(call.signal.reason ?? new WorkflowAbortError());
         };
         if (call.signal.aborted) return abort();
         call.signal.addEventListener("abort", abort, { once: true });
 
         const processLine = (line: string) => {
           if (!line.trim()) return;
+          if (byteLength(line) > WORKFLOW_RESOURCE_LIMITS.subagentStdoutLineBytes) {
+            if (isDroppableOversizedEventPrefix(line)) {
+              stream.eventCount++;
+              stream.droppedOversizeLines++;
+              resetTimer();
+              return;
+            }
+            throw new Error(`Subagent ${call.callId} stdout line exceeded ${WORKFLOW_RESOURCE_LIMITS.subagentStdoutLineBytes} bytes`);
+          }
           resetTimer();
+          stream.eventCount++;
           let event: any;
           try {
             event = JSON.parse(line);
           } catch {
+            stream.malformedEventCount++;
             return;
           }
-          if (event.type === "tool_execution_start") toolExecutions++;
-          if ((event.type === "message_end" || event.type === "tool_result_end") && event.message) {
-            const message = event.message as MessageLike;
-            messages.push(message);
-            if (message.role === "assistant" && typeof message.model === "string" && message.model.trim()) model = message.model;
-          }
+          stream.parsedEventCount++;
+          recordSubagentEvent(event, stream);
         };
 
         proc.stdout.on("data", (chunk) => {
-          stdoutBuffer += chunk.toString();
-          const lines = stdoutBuffer.split("\n");
-          stdoutBuffer = lines.pop() ?? "";
-          for (const line of lines) processLine(line);
+          stream.stdoutBytes += Buffer.byteLength(chunk);
+          try {
+            stdoutBuffer += chunk.toString("utf8");
+            while (true) {
+              const newline = stdoutBuffer.indexOf("\n");
+              if (discardingOversizeLine) {
+                if (newline === -1) {
+                  stdoutBuffer = "";
+                  return;
+                }
+                stdoutBuffer = stdoutBuffer.slice(newline + 1);
+                discardingOversizeLine = false;
+                continue;
+              }
+              if (newline === -1) {
+                if (byteLength(stdoutBuffer) > WORKFLOW_RESOURCE_LIMITS.subagentStdoutLineBytes) {
+                  if (isDroppableOversizedEventPrefix(stdoutBuffer)) {
+                    stream.eventCount++;
+                    stream.droppedOversizeLines++;
+                    discardingOversizeLine = true;
+                    stdoutBuffer = "";
+                    resetTimer();
+                    return;
+                  }
+                  throw new Error(`Subagent ${call.callId} stdout line exceeded ${WORKFLOW_RESOURCE_LIMITS.subagentStdoutLineBytes} bytes`);
+                }
+                return;
+              }
+              const line = stdoutBuffer.slice(0, newline);
+              stdoutBuffer = stdoutBuffer.slice(newline + 1);
+              processLine(line);
+            }
+          } catch (err) {
+            fail(err);
+          }
         });
-        proc.stderr.on("data", (chunk) => stderr.push(chunk.toString()));
-        proc.on("error", reject);
+        proc.stderr.on("data", (chunk) => stderr.append(chunk.toString("utf8")));
+        proc.on("error", fail);
         proc.on("close", (code) => {
-          if (timer) clearTimeout(timer);
-          call.signal.removeEventListener("abort", abort);
-          if (stdoutBuffer.trim()) processLine(stdoutBuffer);
+          if (settled) return;
+          settled = true;
+          cleanup();
+          try {
+            if (!discardingOversizeLine && stdoutBuffer.trim()) processLine(stdoutBuffer);
+          } catch (err) {
+            reject(err);
+            return;
+          }
           if (stalled) reject(new Error(`Subagent ${call.callId} stalled after ${call.stallMs}ms`));
           else resolve(code ?? 0);
         });
       });
 
       const workspaceArtifacts = await workspace.collect();
+      const sessionPath = await findPiSessionPath(sessionDir, stream.sessionId);
 
       const transcriptPath = path.join(callDir, attempt === 0 ? "transcript.json" : `transcript-attempt-${attempt}.json`);
-      await fs.promises.writeFile(transcriptPath, `${JSON.stringify({ attempt, exitCode, stderr: stderr.join(""), messages, workspace: workspaceArtifacts }, null, 2)}\n`, "utf8");
-      if (exitCode !== 0) throw new Error(`Subagent ${call.callId} exited with ${exitCode}: ${truncateBytes(stderr.join(""), 4000)}`);
+      await fs.promises.writeFile(transcriptPath, `${JSON.stringify(buildTranscriptSummary({ attempt, exitCode, stderr: stderr.toString(), sessionDir, sessionPath, stream, workspace: workspaceArtifacts }), null, 2)}\n`, "utf8");
+      if (exitCode !== 0) throw new Error(`Subagent ${call.callId} exited with ${exitCode}: ${truncateBytes(stderr.toString(), 4000)}`);
 
-      const resultText = getFinalAssistantText(messages);
+      const resultText = stream.resultText;
+      assertResultTextWithinLimit(call.callId, resultText);
       const result = call.options.schema ? parseStructuredResult(resultText, call.options.schema) : resultText;
-      const usage = collectUsage(messages, toolExecutions);
+      const usage = collectUsage(stream);
       const resultPath = path.join(callDir, "result.json");
-      await fs.promises.writeFile(resultPath, `${JSON.stringify({ status: "done", result, resultText, usage, model, workspace: workspaceArtifacts }, null, 2)}\n`, "utf8");
-      return { result, resultText, transcriptPath, resultPath, usage, model, workspace: workspaceArtifacts };
+      await fs.promises.writeFile(resultPath, `${JSON.stringify({ status: "done", result, resultText, usage, model: stream.model, thinking: call.options.thinking, sessionPath, workspace: workspaceArtifacts }, null, 2)}\n`, "utf8");
+      return { result, resultText, transcriptPath, resultPath, usage, model: stream.model, thinking: call.options.thinking, sessionPath, workspace: workspaceArtifacts };
     } finally {
       await fs.promises.rm(tmp.dir, { recursive: true, force: true });
       await workspace.cleanup();
@@ -193,34 +295,195 @@ function buildSubagentSystemPrompt(call: WorkflowAgentCall): string {
     ? `\nIf a JSON schema is provided below, return ONLY a JSON value conforming to it, with no Markdown fences.\nSchema:\n${JSON.stringify(call.options.schema, null, 2)}\n`
     : "";
   const isolationText = call.options.isolation === "worktree"
-    ? "\nIsolation: you are running in a disposable git worktree. Edits are safe from sibling agents and will be captured as a patch artifact; they are not applied to the user's main working tree automatically.\n"
+    ? "\nIsolation: you are running with cwd inside a disposable git worktree. Keep all file edits inside that worktree; in-worktree edits are captured as patch artifacts, and ignored outputs are captured separately as bounded artifacts. Nothing is applied to the user's main working tree automatically. Writes outside the worktree are not captured.\n"
     : "";
   return `You are a workflow subagent.\nWorkflow: ${call.runId}\nPhase: ${call.phase ?? "(none)"}\nTask label: ${call.label}\n${isolationText}\nWork independently. Do not ask the user questions. Use tools as needed. Return only the requested result.${schemaText}`;
 }
 
-function getFinalAssistantText(messages: MessageLike[]): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.role !== "assistant") continue;
-    if (typeof msg.content === "string") return msg.content;
-    if (Array.isArray(msg.content)) {
-      const text = msg.content.filter((part) => part.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n");
-      if (text.trim()) return text;
-    }
-  }
-  return "";
+function subagentToolArgs(activeTools: readonly string[] | undefined): string[] {
+  const tools = normalizeSubagentTools(activeTools);
+  return tools.length > 0 ? ["--tools", tools.join(",")] : ["--no-tools"];
 }
 
-function collectUsage(messages: MessageLike[], toolExecutions = 0): WorkflowUsage {
-  const usage: WorkflowUsage = { agentCount: 1, subagentTokens: 0, toolUses: 0, estimated: false };
-  for (const msg of messages) {
-    if (msg.role === "assistant") {
-      usage.subagentTokens += msg.usage?.totalTokens ?? (msg.usage?.input ?? 0) + (msg.usage?.output ?? 0);
-      if (toolExecutions === 0 && Array.isArray(msg.content)) usage.toolUses += msg.content.filter((part) => part.type === "toolCall").length;
+function normalizeSubagentTools(activeTools: readonly string[] | undefined): string[] {
+  const tools: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of activeTools ?? []) {
+    if (typeof raw !== "string") continue;
+    const name = raw.trim();
+    if (!name || name === "workflow" || name.includes(",")) continue;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    tools.push(name);
+  }
+  return tools;
+}
+
+function createSubagentStreamState(): SubagentStreamState {
+  return {
+    stdoutBytes: 0,
+    eventCount: 0,
+    parsedEventCount: 0,
+    malformedEventCount: 0,
+    droppedOversizeLines: 0,
+    messageCount: 0,
+    assistantMessageCount: 0,
+    toolExecutions: 0,
+    fallbackToolCalls: 0,
+    subagentTokens: 0,
+    resultText: "",
+  };
+}
+
+function recordSubagentEvent(event: unknown, stream: SubagentStreamState): void {
+  if (!event || typeof event !== "object" || Array.isArray(event)) return;
+  const record = event as Record<string, unknown>;
+  if (record.type === "session") {
+    if (typeof record.id === "string" && record.id.trim()) stream.sessionId = record.id;
+    if (typeof record.cwd === "string" && record.cwd.trim()) stream.sessionCwd = record.cwd;
+    if (typeof record.timestamp === "string" && record.timestamp.trim()) stream.sessionTimestamp = record.timestamp;
+    return;
+  }
+
+  if (record.type === "tool_execution_start") {
+    stream.toolExecutions++;
+    return;
+  }
+
+  if ((record.type !== "message_end" && record.type !== "tool_result_end") || !isMessageLike(record.message)) return;
+
+  stream.messageCount++;
+  const message = record.message;
+  if (message.role !== "assistant") return;
+
+  stream.assistantMessageCount++;
+  stream.subagentTokens += message.usage?.totalTokens ?? (message.usage?.input ?? 0) + (message.usage?.output ?? 0);
+  stream.fallbackToolCalls += countToolCallParts(message);
+
+  if (typeof message.model === "string" && message.model.trim()) stream.model = message.model;
+  const text = assistantTextFromMessage(message);
+  if (typeof message.content === "string" || text.trim()) stream.resultText = text;
+}
+
+function isMessageLike(value: unknown): value is MessageLike {
+  return !!value && typeof value === "object" && !Array.isArray(value) && typeof (value as MessageLike).role === "string";
+}
+
+function assistantTextFromMessage(message: MessageLike): string {
+  if (typeof message.content === "string") return message.content;
+  if (!Array.isArray(message.content)) return "";
+  return message.content.filter((part) => part.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n");
+}
+
+function countToolCallParts(message: MessageLike): number {
+  return Array.isArray(message.content) ? message.content.filter((part) => part.type === "toolCall").length : 0;
+}
+
+function collectUsage(stream: SubagentStreamState): WorkflowUsage {
+  return {
+    agentCount: 1,
+    subagentTokens: stream.subagentTokens,
+    toolUses: stream.toolExecutions > 0 ? stream.toolExecutions : stream.fallbackToolCalls,
+    estimated: false,
+  };
+}
+
+function assertResultTextWithinLimit(callId: string, resultText: string): void {
+  const bytes = byteLength(resultText);
+  if (bytes > WORKFLOW_RESOURCE_LIMITS.subagentResultTextBytes) {
+    throw new Error(`Subagent ${callId} final result exceeded ${WORKFLOW_RESOURCE_LIMITS.subagentResultTextBytes} bytes`);
+  }
+}
+
+function isDroppableOversizedEventPrefix(line: string): boolean {
+  return /^\s*\{\s*"type"\s*:\s*"(?:agent_end|turn_end|message_update|tool_execution_update|tool_execution_end|queue_update|compaction_end)"/.test(line);
+}
+
+function buildTranscriptSummary(input: { attempt: number; exitCode: number; stderr: string; sessionDir: string; sessionPath?: string; stream: SubagentStreamState; workspace?: AgentWorkspaceArtifacts }): Record<string, unknown> {
+  return {
+    attempt: input.attempt,
+    exitCode: input.exitCode,
+    stderr: input.stderr,
+    piSession: {
+      sessionDir: input.sessionDir,
+      sessionPath: input.sessionPath,
+      sessionId: input.stream.sessionId,
+      cwd: input.stream.sessionCwd,
+      timestamp: input.stream.sessionTimestamp,
+    },
+    stream: {
+      stdoutBytes: input.stream.stdoutBytes,
+      eventCount: input.stream.eventCount,
+      parsedEventCount: input.stream.parsedEventCount,
+      malformedEventCount: input.stream.malformedEventCount,
+      droppedOversizeLines: input.stream.droppedOversizeLines,
+      messageCount: input.stream.messageCount,
+      assistantMessageCount: input.stream.assistantMessageCount,
+      toolExecutions: input.stream.toolExecutions,
+      fallbackToolCalls: input.stream.fallbackToolCalls,
+      subagentTokens: input.stream.subagentTokens,
+      messagesRetained: false,
+    },
+    workspace: input.workspace,
+  };
+}
+
+async function findPiSessionPath(sessionDir: string, sessionId?: string): Promise<string | undefined> {
+  const files: Array<{ filePath: string; mtimeMs: number }> = [];
+  await collectSessionFiles(sessionDir, files, 0, { entries: 0 });
+  if (files.length === 0) return undefined;
+
+  if (sessionId) {
+    const filenameMatch = newestSession(files.filter((file) => path.basename(file.filePath).includes(sessionId)));
+    if (filenameMatch) return filenameMatch.filePath;
+
+    for (const file of files) {
+      if (await sessionHeaderMatches(file.filePath, sessionId)) return file.filePath;
     }
   }
-  if (toolExecutions > 0) usage.toolUses = toolExecutions;
-  return usage;
+
+  return newestSession(files)?.filePath;
+}
+
+async function collectSessionFiles(dir: string, files: Array<{ filePath: string; mtimeMs: number }>, depth: number, state: { entries: number }): Promise<void> {
+  if (depth > 8 || state.entries > 2_000) return;
+  let entries: fs.Dirent[];
+  try {
+    entries = await fs.promises.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (++state.entries > 2_000) return;
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      await collectSessionFiles(fullPath, files, depth + 1, state);
+    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      const stat = await fs.promises.stat(fullPath).catch(() => undefined);
+      files.push({ filePath: fullPath, mtimeMs: stat?.mtimeMs ?? 0 });
+    }
+  }
+}
+
+function newestSession(files: Array<{ filePath: string; mtimeMs: number }>): { filePath: string; mtimeMs: number } | undefined {
+  return files.sort((a, b) => b.mtimeMs - a.mtimeMs)[0];
+}
+
+async function sessionHeaderMatches(filePath: string, sessionId: string): Promise<boolean> {
+  let handle: fs.promises.FileHandle | undefined;
+  try {
+    handle = await fs.promises.open(filePath, "r");
+    const buffer = Buffer.alloc(4096);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const firstLine = buffer.subarray(0, bytesRead).toString("utf8").split("\n")[0]?.trim();
+    if (!firstLine) return false;
+    const header = JSON.parse(firstLine) as Record<string, unknown>;
+    return header.type === "session" && header.id === sessionId;
+  } catch {
+    return false;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 }
 
 function parseStructuredResult(text: string, schema: JsonSchema): unknown {
@@ -255,6 +518,8 @@ async function prepareAgentWorkspace(call: WorkflowAgentCall, callDir: string, a
   const worktreeDir = path.join(callDir, attempt === 0 ? "worktree" : `worktree-attempt-${attempt}`);
   const statusPath = path.join(callDir, attempt === 0 ? "worktree-status.txt" : `worktree-status-attempt-${attempt}.txt`);
   const patchPath = path.join(callDir, attempt === 0 ? "worktree.patch" : `worktree-attempt-${attempt}.patch`);
+  const ignoredManifestPath = path.join(callDir, attempt === 0 ? "worktree-ignored.json" : `worktree-ignored-attempt-${attempt}.json`);
+  const ignoredFilesDir = path.join(callDir, attempt === 0 ? "worktree-ignored" : `worktree-ignored-attempt-${attempt}`);
 
   await fs.promises.rm(worktreeDir, { recursive: true, force: true });
   await ensureDir(path.dirname(worktreeDir));
@@ -285,23 +550,146 @@ async function prepareAgentWorkspace(call: WorkflowAgentCall, callDir: string, a
   return {
     cwd: path.join(worktreeDir, git.prefix),
     async collect() {
-      const artifacts: AgentWorkspaceArtifacts = { kind: "worktree", worktreeDir, statusPath, patchPath };
+      const artifacts: AgentWorkspaceArtifacts = { kind: "worktree", worktreeDir, statusPath, patchPath, ignoredManifestPath, ignoredFilesDir };
+      const errors: string[] = [];
+
       try {
-        const status = await gitExec(["-C", worktreeDir, "status", "--short"], { allowFailure: true });
+        const status = await gitExec(["-C", worktreeDir, "status", "--short", "--ignored", "--untracked-files=all"], { allowFailure: true });
         await fs.promises.writeFile(statusPath, status.stdout || status.stderr || "", "utf8");
-        await gitExec(["-C", worktreeDir, "add", "-A"], { allowFailure: true });
-        const diff = await gitExec(["-C", worktreeDir, "diff", "--cached", "--binary", "HEAD"], { allowFailure: true, maxBuffer: 100 * 1024 * 1024 });
+      } catch (err) {
+        delete artifacts.statusPath;
+        errors.push(`worktree status capture failed: ${(err as Error).message}`);
+      }
+
+      try {
+        await gitExec(["-C", worktreeDir, "add", "-A"]);
+        const diff = await gitExec(["-C", worktreeDir, "diff", "--cached", "--binary", "HEAD"], { maxBuffer: WORKFLOW_RESOURCE_LIMITS.worktreePatchBytes });
         if (diff.stdout.trim()) await fs.promises.writeFile(patchPath, diff.stdout, "utf8");
         else delete artifacts.patchPath;
       } catch (err) {
-        artifacts.error = (err as Error).message;
+        if (!fs.existsSync(patchPath)) delete artifacts.patchPath;
+        errors.push(`worktree patch capture failed: ${(err as Error).message}`);
       }
+
+      try {
+        const ignored = await collectIgnoredArtifacts(worktreeDir, ignoredFilesDir, ignoredManifestPath);
+        if (!ignored.manifestWritten) delete artifacts.ignoredManifestPath;
+        if (!ignored.filesCopied) delete artifacts.ignoredFilesDir;
+      } catch (err) {
+        if (!fs.existsSync(ignoredManifestPath)) delete artifacts.ignoredManifestPath;
+        if (!fs.existsSync(ignoredFilesDir)) delete artifacts.ignoredFilesDir;
+        errors.push(`worktree ignored-file capture failed: ${(err as Error).message}`);
+      }
+      if (errors.length > 0) artifacts.error = errors.join("; ");
       return artifacts;
     },
     async cleanup() {
       await removeGitWorktree(git.root, worktreeDir);
     },
   };
+}
+
+async function collectIgnoredArtifacts(worktreeDir: string, ignoredFilesDir: string, ignoredManifestPath: string): Promise<{ manifestWritten: boolean; filesCopied: boolean }> {
+  await fs.promises.rm(ignoredFilesDir, { recursive: true, force: true });
+  await fs.promises.rm(ignoredManifestPath, { force: true });
+
+  const listed = await gitExec(["-C", worktreeDir, "ls-files", "--others", "--ignored", "--exclude-standard", "-z"], { encoding: "buffer", maxBuffer: WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredListBytes });
+  const paths = listed.stdoutBuffer.toString("utf8").split("\0").filter(Boolean);
+  const manifest: IgnoredArtifactManifest = {
+    version: 1,
+    kind: "worktree_ignored_files",
+    limits: {
+      maxFiles: WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredFiles,
+      maxFileBytes: WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredFileBytes,
+      maxTotalBytes: WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredTotalBytes,
+    },
+    totalBytes: 0,
+    files: [],
+    omitted: [],
+  };
+  let copied = 0;
+
+  for (const relative of paths) {
+    if (!isSafeRelativePath(relative)) {
+      manifest.omitted.push({ path: relative, reason: "unsafe path" });
+      continue;
+    }
+
+    const sourcePath = path.join(worktreeDir, relative);
+    if (!isInside(worktreeDir, sourcePath)) {
+      manifest.omitted.push({ path: relative, reason: "outside worktree" });
+      continue;
+    }
+
+    let stat: fs.Stats;
+    try {
+      stat = await fs.promises.lstat(sourcePath);
+    } catch (err) {
+      manifest.omitted.push({ path: relative, reason: `stat failed: ${(err as Error).message}` });
+      continue;
+    }
+
+    if (stat.isSymbolicLink()) {
+      await recordIgnoredSymlink(sourcePath, relative, manifest);
+      continue;
+    }
+
+    if (!stat.isFile()) {
+      manifest.omitted.push({ path: relative, reason: "unsupported file type" });
+      continue;
+    }
+
+    if (manifest.files.length >= WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredFiles) {
+      manifest.omitted.push({ path: relative, reason: "file count limit", bytes: stat.size });
+      continue;
+    }
+    if (stat.size > WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredFileBytes) {
+      manifest.omitted.push({ path: relative, reason: "file size limit", bytes: stat.size });
+      continue;
+    }
+    if (manifest.totalBytes + stat.size > WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredTotalBytes) {
+      manifest.omitted.push({ path: relative, reason: "total size limit", bytes: stat.size });
+      continue;
+    }
+
+    const targetPath = path.join(ignoredFilesDir, relative);
+    if (!isInside(ignoredFilesDir, targetPath)) {
+      manifest.omitted.push({ path: relative, reason: "unsafe artifact path", bytes: stat.size });
+      continue;
+    }
+    await ensureDir(path.dirname(targetPath));
+    await fs.promises.copyFile(sourcePath, targetPath);
+    manifest.totalBytes += stat.size;
+    copied++;
+    manifest.files.push({ path: relative, type: "file", bytes: stat.size, artifactPath: relative });
+  }
+
+  if (manifest.files.length === 0 && manifest.omitted.length === 0) return { manifestWritten: false, filesCopied: false };
+  await fs.promises.writeFile(ignoredManifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  return { manifestWritten: true, filesCopied: copied > 0 };
+}
+
+async function recordIgnoredSymlink(sourcePath: string, relative: string, manifest: IgnoredArtifactManifest): Promise<void> {
+  try {
+    if (manifest.files.length >= WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredFiles) {
+      manifest.omitted.push({ path: relative, reason: "file count limit" });
+      return;
+    }
+    const target = await fs.promises.readlink(sourcePath);
+    const bytes = byteLength(target);
+    if (bytes > WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredSymlinkBytes) {
+      manifest.omitted.push({ path: relative, reason: "symlink target size limit", bytes });
+      return;
+    }
+    if (manifest.totalBytes + bytes > WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredTotalBytes) {
+      manifest.omitted.push({ path: relative, reason: "total size limit", bytes });
+      return;
+    }
+    manifest.files.push({ path: relative, type: "symlink", bytes, target });
+    manifest.totalBytes += bytes;
+  } catch (err) {
+    manifest.omitted.push({ path: relative, reason: `readlink failed: ${(err as Error).message}` });
+  }
 }
 
 async function getGitWorkspace(cwd: string): Promise<{ root: string; prefix: string }> {
@@ -318,12 +706,22 @@ async function mirrorDirtyState(root: string, worktreeDir: string): Promise<void
   const untracked = await gitExec(["-C", root, "ls-files", "--others", "--exclude-standard", "-z"], { encoding: "buffer", maxBuffer: 100 * 1024 * 1024 });
   const files = untracked.stdoutBuffer.toString("utf8").split("\0").filter(Boolean);
   for (const relative of files) {
-    if (path.isAbsolute(relative) || relative.split(/[\\/]+/).includes("..")) continue;
+    if (!isSafeRelativePath(relative)) continue;
     const src = path.join(root, relative);
     const dst = path.join(worktreeDir, relative);
+    if (!isInside(worktreeDir, dst)) continue;
     await ensureDir(path.dirname(dst));
     await fs.promises.cp(src, dst, { recursive: true, force: true, verbatimSymlinks: true });
   }
+}
+
+function isSafeRelativePath(relative: string): boolean {
+  return relative !== "" && !path.isAbsolute(relative) && !relative.split(/[\\/]+/).includes("..");
+}
+
+function isInside(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 async function removeGitWorktree(root: string, worktreeDir: string): Promise<void> {

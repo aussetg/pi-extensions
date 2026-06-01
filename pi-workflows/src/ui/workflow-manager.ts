@@ -1,6 +1,6 @@
 import type { RunRecord } from "../types.js";
 import { RENDER_LIMITS } from "../constants.js";
-import { padToWidth, sanitizeText, truncateToWidth, visibleWidth } from "../utils/truncate.js";
+import { padToWidth, sanitizeLine, truncateToWidth, visibleWidth } from "../utils/truncate.js";
 import type { ComponentLike } from "./simple-components.js";
 
 export class WorkflowManagerComponent implements ComponentLike {
@@ -19,10 +19,10 @@ export class WorkflowManagerComponent implements ComponentLike {
       const cursor = `${index + 1}.`.padStart(3, " ");
       const counts = `${run.progress.completed}/${run.progress.total}`;
       const color = run.status === "completed" ? "success" : run.status === "failed" || run.status === "aborted" ? "error" : "muted";
-      const left = `${cursor} ${statusIcon(run.status)} ${fg(color, sanitizeText(run.name, 300))} ${fg("dim", sanitizeText(run.runId, 100))}`;
+      const left = `${cursor} ${statusIcon(run.status)} ${fg(color, sanitizeLine(run.name, 300))} ${fg("dim", sanitizeLine(run.runId, 100))}`;
       const right = fg(color, `${counts} ${run.status}`) + fg("dim", ` ${formatRunAge(run)}`);
       lines.push(joinAligned(left, right, width));
-      lines.push(fg("dim", `    ↳ ${sanitizeText(run.description, 1000)}`));
+      lines.push(fg("dim", `    ↳ ${sanitizeLine(run.description, 1000)}`));
     });
     if (this.runs.length > rows.length) lines.push(fg("dim", `… ${this.runs.length - rows.length} more run(s)`));
     lines.push("", fg("dim", "Non-interactive preview. Use /workflow open <runId> result to inspect artifacts."));

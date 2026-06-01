@@ -158,6 +158,9 @@ function validateBody(ast: Node, metaNode: Node): void {
         if (node.callee.type === "Identifier" && FORBIDDEN_CALLEES.has(node.callee.name)) {
           throw new WorkflowScriptError(`Forbidden call: ${node.callee.name}()`, loc(node));
         }
+        if (node.callee.type === "Identifier" && node.callee.name === "Date") {
+          throw new WorkflowScriptError("Date() is not deterministic; use new Date(value) with explicit args", loc(node));
+        }
         if (isMember(node.callee, "Date", "now")) throw new WorkflowScriptError("Date.now() is not deterministic", loc(node));
         if (isMember(node.callee, "Math", "random")) throw new WorkflowScriptError("Math.random() is not deterministic", loc(node));
         break;

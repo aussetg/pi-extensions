@@ -29,6 +29,7 @@ describe("parseWorkflowScript", () => {
 
   it("rejects nondeterministic and Node APIs", () => {
     expect(() => parseWorkflowScript(`export const meta = { name: 'x', description: 'd' };\nDate.now();`)).toThrow(/Date.now/);
+    expect(() => parseWorkflowScript(`export const meta = { name: 'x', description: 'd' };\nDate();`)).toThrow(/Date\(\)/);
     expect(() => parseWorkflowScript(`export const meta = { name: 'x', description: 'd' };\nnew Date();`)).toThrow(/argless/);
     expect(() => parseWorkflowScript(`export const meta = { name: 'x', description: 'd' };\nMath.random();`)).toThrow(/Math.random/);
     expect(() => parseWorkflowScript(`export const meta = { name: 'x', description: 'd' };\nprocess.cwd();`)).toThrow(/process/);

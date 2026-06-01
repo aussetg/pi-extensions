@@ -1,12 +1,12 @@
 import { StaticTextComponent, type ComponentLike } from "../ui/simple-components.js";
 import type { WorkflowLaunchOutput } from "../types.js";
 import { WorkflowResultComponent, type WorkflowResultRenderProfile } from "../ui/workflow-result-component.js";
-import { sanitizeText } from "../utils/truncate.js";
+import { sanitizeLine } from "../utils/truncate.js";
 
 export function renderWorkflowCall(args: Record<string, unknown>, theme?: any): StaticTextComponent {
   const fg = (name: string, text: string) => (theme?.fg ? theme.fg(name, text) : text);
-  const name = sanitizeText(String(args.name ?? args.scriptPath ?? "inline"), 300);
-  const mode = sanitizeText(String(args.mode ?? "auto"), 40);
+  const name = sanitizeLine(String(args.name ?? args.scriptPath ?? "inline"), 300);
+  const mode = sanitizeLine(String(args.mode ?? "auto"), 40);
   return new StaticTextComponent(`${fg("toolTitle", "workflow")} ${fg("accent", name)} · ${mode}`, { preserveAnsi: true });
 }
 

@@ -179,6 +179,77 @@ return ui.help();`,
     expect(result.resultPreview).toContain("ui.define");
     expect(result.resultPreview).toContain("ui.update");
   });
+
+  it("lets workflows catch UI definition errors and continue with later UI writes", async () => {
+    const runner = new WorkflowRunner({ pi: { getActiveTools: () => [] } as any, runStore: new RunStore(), registry: new WorkflowRegistry() });
+
+    const result = await runner.launchOrRun({
+      toolCallId: "ui-caught-error-regression",
+      input: {
+        mode: "await",
+        script: `export const meta = { name: 'ui_caught_error', description: 'catch UI failure and continue' };
+let caught = '';
+try {
+  await ui.define({
+    version: 1,
+    id: 'bad',
+    title: 'Bad',
+    layout: { type: 'metric', label: 'Value', bind: '/value', onClick: 'boom' },
+  });
+} catch (err) {
+  caught = err.message;
+}
+await ui.define({
+  version: 1,
+  id: 'good',
+  title: 'Good UI',
+  initialState: { value: 1 },
+  layout: { type: 'metric', label: 'Value', bind: '/value' },
+});
+await ui.update('good', { value: 2 });
+return { caught };`,
+      },
+      ctx: workflowCtx(),
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.resultPreview).toContain("unsupported key onClick");
+    expect(JSON.stringify(result.uiViews)).toContain("Good UI");
+    expect(JSON.stringify(result.uiViews)).toContain("value");
+  });
+
+  it("fails on unhandled UI errors while still running later queued UI writes", async () => {
+    const runStore = new RunStore();
+    const runner = new WorkflowRunner({ pi: { getActiveTools: () => [] } as any, runStore, registry: new WorkflowRegistry() });
+
+    const result = await runner.launchOrRun({
+      toolCallId: "ui-unhandled-error-regression",
+      input: {
+        mode: "await",
+        script: `export const meta = { name: 'ui_unhandled_error', description: 'surface unhandled UI failure' };
+ui.define({
+  version: 1,
+  id: 'bad',
+  title: 'Bad',
+  layout: { type: 'metric', label: 'Value', bind: '/value', onClick: 'boom' },
+});
+await ui.define({
+  version: 1,
+  id: 'good',
+  title: 'Good UI',
+  initialState: { value: 1 },
+  layout: { type: 'metric', label: 'Value', bind: '/value' },
+});
+return 'should fail at UI flush';`,
+      },
+      ctx: workflowCtx(),
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toMatch(/unsupported key onClick/);
+    expect(runStore.get(result.runId)?.uiViews.map((view) => view.viewId)).toEqual(["good"]);
+    expect(JSON.stringify(result.uiViews)).toContain("Good UI");
+  });
 });
 
 function workflowCtx(): any {

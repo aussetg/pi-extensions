@@ -1,7 +1,14 @@
 import { Ajv2020 } from "ajv/dist/2020.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { WorkflowRegistry } from "../src/persistence/registry.js";
+import { RunStore } from "../src/persistence/run-store.js";
 import { WorkflowRunner } from "../src/runtime/runner.js";
 import { createWorkflowTool, WorkflowInputSchema } from "../src/tool/workflow-tool.js";
+
+const validScript = "export const meta = { name: 'x', description: 'd' };\nreturn 'ok';\n";
 
 describe("WorkflowInputSchema", () => {
   const validate = new Ajv2020({ allErrors: true, strict: false }).compile(WorkflowInputSchema);
@@ -49,6 +56,35 @@ describe("WorkflowRunner input validation", () => {
   it("rejects blank workflow sources", async () => {
     const runner = new WorkflowRunner({} as any);
     await expect(runner.launchOrRun({ toolCallId: "test", input: { scriptPath: "   " }, ctx: {} })).rejects.toThrow(/non-empty/);
+  });
+
+  it("rejects unknown and invalid API fields before launch", async () => {
+    const runner = new WorkflowRunner({} as any);
+    await expect(runner.launchOrRun({ toolCallId: "test", input: { script: validScript, unknown: true } as any, ctx: {} })).rejects.toThrow(/Unknown workflow input field/);
+    await expect(runner.launchOrRun({ toolCallId: "test", input: { script: validScript, args: [] } as any, ctx: {} })).rejects.toThrow(/workflow args must be a JSON object/);
+    await expect(runner.launchOrRun({ toolCallId: "test", input: { script: validScript, mode: "later" } as any, ctx: {} })).rejects.toThrow(/mode must be await or async/);
+    await expect(runner.launchOrRun({ toolCallId: "test", input: { script: validScript, budgetTokens: 0 } as any, ctx: {} })).rejects.toThrow(/budgetTokens/);
+    await expect(runner.launchOrRun({ toolCallId: "test", input: { script: validScript, maxAgents: 0 } as any, ctx: {} })).rejects.toThrow(/maxAgents/);
+    await expect(runner.launchOrRun({ toolCallId: "test", input: { script: validScript, resumeFromRunId: "" } as any, ctx: {} })).rejects.toThrow(/resumeFromRunId/);
+  });
+
+  it("rejects unknown resume sources before creating a new run", async () => {
+    const oldAgentDir = process.env.PI_AGENT_DIR;
+    const tmp = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-workflow-resume-missing-"));
+    try {
+      process.env.PI_AGENT_DIR = path.join(tmp, "agent");
+      const cwd = path.join(tmp, "project");
+      await fs.promises.mkdir(cwd, { recursive: true });
+      const runStore = new RunStore();
+      const runner = new WorkflowRunner({ pi: {} as any, runStore, registry: new WorkflowRegistry() });
+
+      await expect(runner.launchOrRun({ toolCallId: "test", input: { script: validScript, resumeFromRunId: "wr_missing" }, ctx: { cwd, hasUI: false } })).rejects.toThrow(/Unknown workflow run to resume: wr_missing/);
+      expect(runStore.list("all")).toEqual([]);
+    } finally {
+      if (oldAgentDir === undefined) delete process.env.PI_AGENT_DIR;
+      else process.env.PI_AGENT_DIR = oldAgentDir;
+      await fs.promises.rm(tmp, { recursive: true, force: true });
+    }
   });
 
   it("converts launch validation errors into model-visible tool results", async () => {

@@ -20,6 +20,22 @@ describe("parseWorkflowCommand", () => {
     expect(() => parseWorkflowCommand("run x --await --async")).toThrow(/mutually/);
   });
 
+  it("rejects unknown, duplicate, and trailing command arguments", () => {
+    expect(() => parseWorkflowCommand("list --runing")).toThrow(/Unknown list option/);
+    expect(() => parseWorkflowCommand("list all")).toThrow(/Unexpected argument/);
+    expect(() => parseWorkflowCommand("run x --aync")).toThrow(/Unknown workflow option/);
+    expect(() => parseWorkflowCommand("run x extra")).toThrow(/Unexpected argument/);
+    expect(() => parseWorkflowCommand("run x --args '{}' --args '{}'")).toThrow(/Duplicate --args/);
+    expect(() => parseWorkflowCommand("run x --await --await")).toThrow(/Duplicate --await/);
+    expect(() => parseWorkflowCommand("save wr_1 --scope project --scope user")).toThrow(/Duplicate --scope/);
+    expect(() => parseWorkflowCommand("save wr_1 --force")).toThrow(/Unknown save option/);
+    expect(() => parseWorkflowCommand("resume wr_1 --script a.js --script b.js")).toThrow(/Duplicate --script/);
+    expect(() => parseWorkflowCommand("delete wr_1 extra")).toThrow(/Usage/);
+    expect(() => parseWorkflowCommand("skip-agent wr_1 0001 extra")).toThrow(/Usage/);
+    expect(() => parseWorkflowCommand("open wr_1 ui --profile panel --profile full")).toThrow(/Duplicate --profile/);
+    expect(() => parseWorkflowCommand("preview-ui '{}' --width 80 --width 100")).toThrow(/Duplicate --width/);
+  });
+
   it("parses aliases and open target", () => {
     expect(parseWorkflowCommand("ls --running")).toEqual({ action: "list", filter: "running" });
     expect(parseWorkflowCommand("cont wr_1")).toEqual({ action: "continue", runId: "wr_1" });

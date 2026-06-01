@@ -15,7 +15,7 @@ import { WorkflowManagerComponent, formatRunList } from "../ui/workflow-manager.
 import { PagerComponent } from "../ui/simple-components.js";
 import type { WorkflowActivation } from "../tool/workflow-activation.js";
 import { slugify } from "../utils/ids.js";
-import { truncateForChat } from "../utils/truncate.js";
+import { sanitizeLine, sanitizeRenderedLine, truncateForChat } from "../utils/truncate.js";
 import { parseWorkflowCommand, workflowHelpText, type WorkflowCommand, type WorkflowOpenProfile } from "./workflow-command-parser.js";
 
 export interface WorkflowCommandDeps {
@@ -115,7 +115,12 @@ async function saveWorkflow(deps: WorkflowCommandDeps, ctx: any, runId: string, 
   const run = requireRun(deps.runStore.get(runId), runId);
   const target = workflowFilePath(scope, ctx.cwd, slugify(name ?? run.name));
   await fs.promises.mkdir(path.dirname(target), { recursive: true });
-  await fs.promises.copyFile(run.scriptPath, target);
+  try {
+    await fs.promises.copyFile(run.scriptPath, target, fs.constants.COPYFILE_EXCL);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`Workflow file already exists: ${target}`);
+    throw err;
+  }
   await deps.registry.refresh(ctx.cwd);
   await printOrNotify(ctx, `Saved workflow ${run.name} to ${target}`);
 }
@@ -192,8 +197,9 @@ function showCommandWidget(ctx: any, title: string, lines: string[], footer?: st
   const visible = body.slice(0, bodyLimit);
   if (body.length > visible.length) visible.push(`… ${body.length - visible.length} more line(s)`);
   if (footer) visible.push(footer);
-  ctx.ui.setWidget(COMMAND_WIDGET_KEY, [`◆ ${title}`, ...visible], { placement: "aboveEditor" });
-  ctx.ui.notify(`${title} preview shown above the editor for ${COMMAND_WIDGET_TTL_MS / 1000}s. No keys captured.`, "info");
+  const safeTitle = sanitizeLine(title, 500);
+  ctx.ui.setWidget(COMMAND_WIDGET_KEY, [`◆ ${safeTitle}`, ...visible.map((line) => sanitizeRenderedLine(line, 4000))], { placement: "aboveEditor" });
+  ctx.ui.notify(`${safeTitle} preview shown above the editor for ${COMMAND_WIDGET_TTL_MS / 1000}s. No keys captured.`, "info");
   const previous = commandWidgetTimers.get(COMMAND_WIDGET_KEY);
   if (previous) clearTimeout(previous);
   const timer = setTimeout(() => {

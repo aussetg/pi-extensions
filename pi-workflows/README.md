@@ -91,7 +91,12 @@ await ui.update("custom", { summary: "done", details: "full final details" });
 ```
 
 Use `layout` for live/running/collapsed UI. Use optional `expandedLayout` for richer expanded
-results. Call `ui.help()` inside a workflow for a tiny reminder of the model-facing API.
+results. UI operations are queued and batched when left unawaited. Await `ui.define(...)`,
+`ui.update(...)`, `ui.dashboard(...)`, `ui.patch(...)`, or `ui.close(...)` when you want that call to
+act as a persistence barrier with validation/persistence errors catchable inside the workflow. After a
+batch of unawaited UI writes, use `await ui.flush()` as an explicit barrier. Unhandled UI operation
+errors still fail the workflow at final flush.
+Call `ui.help()` inside a workflow for a tiny reminder of the model-facing API.
 
 Workflow scripts are top-level async JavaScript. They begin with literal `export const meta = {...}`
 and then script statements directly; do not use `export default`, imports, `globalThis`,
@@ -105,8 +110,23 @@ Subagent workspace policy is deliberately simple:
   sibling fan-out agents do not stomp each other;
 - explicit `agent(prompt, { isolation: "shared" | "worktree" })` always wins.
 
-Worktree-isolated agents run in a disposable git worktree. Their edits are captured as patch
-artifacts and are not applied to the user's main working tree automatically.
+`agent(prompt, opts)` options are strict JSON data. Supported keys are `label`, `phase`, `schema`,
+`model`, `thinking`, `isolation`, `agentType`, and `stallMs`; unknown keys, non-string labels/model
+names, invalid enum values, non-JSON schemas, accessors, cycles, and oversized values fail before a
+subagent is launched. `stallMs` must be an integer between 1 second and the workflow hard timeout.
+Use `schema` for a JSON-object response schema.
+
+`parallel()` and `pipeline()` fail fast by default: a branch/item error fails the workflow instead of
+being converted to `null`. If best-effort behavior is desired, catch errors inside the thunk/stage and
+return an explicit `{ ok, value, error }`-style result.
+
+Worktree-isolated agents run with cwd inside a disposable git worktree. Edits made inside that
+worktree are captured as patch artifacts and are not applied to the user's main working tree
+automatically. Ignored outputs created inside the worktree are captured separately as bounded
+ignored-file artifacts plus a manifest, so build outputs under ignored paths are represented before
+the disposable worktree is removed. This is a workspace/isolation policy, not a filesystem sandbox:
+subagents are told to stay inside the worktree, and writes outside it are not captured by the
+worktree artifacts.
 
 Workflow source is parsed before launch to reject nondeterministic and host APIs early. At runtime,
 the script talks to the parent through a JSON-only VM membrane: workflow-visible API values are
@@ -114,9 +134,32 @@ created inside the VM realm, while host objects stay behind the capability chann
 itself runs under `systemd-run --user --scope` and `bwrap`; that OS sandbox sees a tiny tmpfs
 filesystem, a private network namespace, cgroup limits, and a JSON-RPC capability channel back to the
 parent for `agent()`, `ui.*`, logging, and child workflows.
-Subagents are still normal separate Pi child processes launched by the parent; they keep the usual
-tools and network access. Their cwd is either the shared project workspace or a disposable worktree,
-according to the isolation policy above.
+Subagents are still normal separate Pi child processes launched by the parent; they inherit the
+currently active tool allowlist with `workflow` removed. If no inherited non-workflow tools remain,
+the subagent is launched with `--no-tools` rather than Pi defaults. Their cwd is either the shared
+project workspace or a disposable worktree, according to the isolation policy above.
+
+Subagent thinking is deliberately slightly cheaper than the caller by default: an agent launched
+from a workflow uses one thinking level below the Pi session that launched the workflow (`xhigh` →
+`high`, `high` → `medium`, …, `minimal` → `off`). Override per call when a lane needs a different
+reasoning budget:
+
+```js
+await agent("Do the adversarial correctness pass.", {
+  label: "review",
+  thinking: "high",
+});
+```
+
+Valid values are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`. Legacy model suffixes such
+as `model: "sonnet:high"` still work unless the full string exactly names a registered model; the
+first-class `thinking` option is clearer and overrides a model suffix when both are present.
+
+Child workflows share the parent run's `budgetTokens` and `maxAgents` instead of receiving fresh
+limits. When a finite token budget is set, agent starts are serialized across the parent and child
+workflow tree so parallel fan-out cannot launch many budget-consuming subagents before the first
+usage report arrives. A single subagent can still report usage above the remaining budget; that call
+is recorded and the workflow fails immediately after the over-budget usage is charged.
 
 Frame rendering is intentionally bounded: renderers consume only the current run/view snapshot and cap rows, logs, calls, node depth, and table output. They never scan Pi session history during `render(width)`.
 

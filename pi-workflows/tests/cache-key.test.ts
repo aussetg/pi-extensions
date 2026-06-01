@@ -25,6 +25,7 @@ describe("computeAgentChainKey", () => {
 
     expect(computeAgentChainKey({ prompt: "scan", opts: { isolation: "worktree" }, activeTools: ["bash"] })).not.toBe(base);
     expect(computeAgentChainKey({ prompt: "scan", opts: { model: "other" }, activeTools: ["bash"] })).not.toBe(base);
+    expect(computeAgentChainKey({ prompt: "scan", opts: { thinking: "high" }, activeTools: ["bash"] })).not.toBe(base);
     expect(computeAgentChainKey({ prompt: "scan", opts: { schema: { type: "object", properties: { ok: { type: "boolean" } } } }, activeTools: ["bash"] })).not.toBe(base);
   });
 
@@ -40,7 +41,7 @@ describe("computeAgentChainKey", () => {
     expect(d).toBe(e);
   });
 
-  it("uses the v3 prefix and has no scriptHash or argsHash input", () => {
-    expect(computeAgentChainKey({ prompt: "scan", opts: {} })).toMatch(/^v3:/);
+  it("uses the v4 prefix and has no scriptHash or argsHash input", () => {
+    expect(computeAgentChainKey({ prompt: "scan", opts: {} })).toMatch(/^v4:/);
   });
 });

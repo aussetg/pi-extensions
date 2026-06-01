@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { RunRecord, ToolResult, WorkflowInput, WorkflowLaunchOutput, WorkflowViewPlacement, WorkflowViewSnapshot } from "../types.js";
+import type { RunRecord, ToolResult, WorkflowInput, WorkflowLaunchOutput, WorkflowUsage, WorkflowViewPlacement, WorkflowViewSnapshot } from "../types.js";
 import { CHAT_PREVIEW_BYTES, DEFAULT_LIMITS, WORKFLOW_RESULT_MESSAGE } from "../constants.js";
 import { WorkflowRegistry } from "../persistence/registry.js";
 import { RunStore } from "../persistence/run-store.js";
@@ -10,7 +10,7 @@ import { resolveLocalPath } from "../persistence/paths.js";
 import { parseWorkflowScript, type ParsedWorkflowScript } from "./parser.js";
 import { WorkflowBudget } from "./budget.js";
 import { RunControl } from "./run-control.js";
-import { WorkflowScheduler } from "./scheduler.js";
+import { WorkflowAgentQuota, WorkflowScheduler } from "./scheduler.js";
 import { executeWorkflowSandbox } from "./sandbox.js";
 import { createWorkflowUiGlobal } from "./ui-global.js";
 import { WorkflowViewStore, workflowViewPlacement } from "../ui/workflow-view-store.js";
@@ -20,7 +20,8 @@ import { WorkflowProgressComponent } from "../ui/workflow-result-component.js";
 import { nowIso } from "../utils/ids.js";
 import { truncateForChat } from "../utils/truncate.js";
 import { toStableJsonValue } from "../utils/stable-json.js";
-import { WorkflowAbortError } from "./errors.js";
+import { defaultAgentThinkingFromContext, type ModelRegistryModelLike } from "../thinking.js";
+import { WorkflowAbortError, WorkflowAgentCapError, WorkflowBudgetExceededError } from "./errors.js";
 
 export interface WorkflowRunnerDeps {
   pi: ExtensionAPI;
@@ -28,6 +29,8 @@ export interface WorkflowRunnerDeps {
   registry: WorkflowRegistry;
   renderer?: WorkflowViewRenderer;
   childDepth?: number;
+  budget?: WorkflowBudget;
+  agentQuota?: WorkflowAgentQuota;
 }
 
 export interface LaunchArgs {
@@ -61,10 +64,13 @@ export class WorkflowRunner {
 
     if (args.input.resumeFromRunId) {
       const source = this.deps.runStore.get(args.input.resumeFromRunId);
+      if (!source) throw new Error(`Unknown workflow run to resume: ${args.input.resumeFromRunId}`);
       if (source?.status === "running" || source?.status === "paused") throw new Error(`Cannot resume from running workflow ${args.input.resumeFromRunId}; stop it first.`);
     }
 
     const sessionId = ctx.sessionManager?.getSessionId?.() ?? ctx.sessionManager?.getHeader?.()?.id ?? "unknown-session";
+    const defaultAgentThinking = defaultAgentThinkingFromContext(ctx);
+    const modelRegistryModels = getModelRegistryModels(ctx);
     const { record } = await this.deps.runStore.create({
       cwd: ctx.cwd,
       sessionId,
@@ -80,7 +86,7 @@ export class WorkflowRunner {
     this.deps.runStore.registerControl(record.runId, control);
 
     const mode = args.input.mode ?? (ctx.hasUI ? "async" : "await");
-    const execute = (onUpdate: LaunchArgs["onUpdate"] | undefined) => this.executeRun({ record, resolved, stableArgs, input: args.input, ctx, control, onUpdate });
+    const execute = (onUpdate: LaunchArgs["onUpdate"] | undefined) => this.executeRun({ record, resolved, stableArgs, input: args.input, ctx, control, defaultAgentThinking, modelRegistryModels, onUpdate });
 
     const runInBackground = mode === "async" && !args.onUpdate;
 
@@ -108,14 +114,15 @@ export class WorkflowRunner {
     }
   }
 
-  private async executeRun(args: { record: RunRecord; resolved: ResolvedWorkflowSource; stableArgs: Record<string, unknown>; input: WorkflowInput; ctx: any; control: RunControl; onUpdate?: LaunchArgs["onUpdate"] }): Promise<WorkflowLaunchOutput> {
-    const { record, resolved, stableArgs, input, ctx, control } = args;
+  private async executeRun(args: { record: RunRecord; resolved: ResolvedWorkflowSource; stableArgs: Record<string, unknown>; input: WorkflowInput; ctx: any; control: RunControl; defaultAgentThinking?: ReturnType<typeof defaultAgentThinkingFromContext>; modelRegistryModels?: readonly ModelRegistryModelLike[]; onUpdate?: LaunchArgs["onUpdate"] }): Promise<WorkflowLaunchOutput> {
+    const { record, resolved, stableArgs, input, ctx, control, defaultAgentThinking, modelRegistryModels } = args;
     const journal = new JsonlJournal(record.journalPath);
     await journal.append({ type: "workflow_started", runId: record.runId, time: nowIso(), scriptHash: record.scriptHash, argsHash: record.argsHash });
     let resumeIndex: ResumeIndex | undefined;
     if (input.resumeFromRunId) {
       const source = this.deps.runStore.get(input.resumeFromRunId);
-      if (source) resumeIndex = await ResumeIndex.fromRun(source.runDir, source.journalPath);
+      if (!source) throw new Error(`Unknown workflow run to resume: ${input.resumeFromRunId}`);
+      resumeIndex = await ResumeIndex.fromRun(source.runDir, source.journalPath);
     }
 
     const viewComponents = new Map<string, WorkflowViewComponent>();
@@ -173,7 +180,8 @@ export class WorkflowRunner {
     updateStandardProgress();
     startProgressTicker();
     const ui = createWorkflowUiGlobal(viewStore);
-    const budget = new WorkflowBudget(input.budgetTokens ?? null);
+    const budget = this.deps.budget ?? new WorkflowBudget(input.budgetTokens ?? null);
+    const agentQuota = this.deps.agentQuota ?? new WorkflowAgentQuota(Math.min(input.maxAgents ?? DEFAULT_LIMITS.agentCap, DEFAULT_LIMITS.agentCap));
     const scheduler = new WorkflowScheduler({
       cwd: ctx.cwd,
       run: record,
@@ -181,22 +189,28 @@ export class WorkflowRunner {
       control,
       budget,
       resumeIndex,
-      maxAgents: Math.min(input.maxAgents ?? DEFAULT_LIMITS.agentCap, DEFAULT_LIMITS.agentCap),
+      maxAgents: agentQuota.total,
+      agentQuota,
+      defaultThinking: defaultAgentThinking,
+      modelRegistryModels,
       activeTools: safeActiveTools(this.deps.pi),
       persist: () => this.deps.runStore.scheduleSave(record),
       onProgress: emitProgress,
     });
 
     const globals = {
-      agent: (prompt: unknown, opts?: unknown) => scheduler.agentCall(prompt, (opts ?? {}) as any),
+      agent: (prompt: unknown, opts?: unknown) => scheduler.agentCall(prompt, opts === undefined ? {} : opts),
       phase: (title: string) => scheduler.phase(title),
       log: (message: string) => scheduler.log(message),
       workflow: async (nameOrRef: unknown, childArgs?: unknown) => {
         if ((this.deps.childDepth ?? 0) >= 1) throw new Error("Nested child workflows are limited to one level");
         const childInput = childWorkflowInput(nameOrRef, childArgs);
-        const child = new WorkflowRunner({ ...this.deps, childDepth: (this.deps.childDepth ?? 0) + 1 });
+        const child = new WorkflowRunner({ ...this.deps, childDepth: (this.deps.childDepth ?? 0) + 1, budget, agentQuota });
         const output = await child.launchOrRun({ toolCallId: `${record.taskId}_child`, input: childInput, signal: control.signal, ctx });
-        if (output.status === "failed") throw new Error(output.error ?? `Child workflow ${output.name} failed`);
+        addUsage(record.usage, output.usage);
+        this.deps.runStore.scheduleSave(record);
+        emitProgress();
+        if (output.status === "failed") throw childWorkflowError(output);
         if (!output.outputPath) return output;
         const parsed = JSON.parse(await fs.promises.readFile(output.outputPath, "utf8")) as { result?: unknown };
         return parsed.result ?? null;
@@ -278,16 +292,22 @@ export class WorkflowRunner {
 }
 
 function childWorkflowInput(nameOrRef: unknown, args: unknown): WorkflowInput {
-  const childArgs = args && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : undefined;
-  if (typeof nameOrRef === "string") return { name: nameOrRef, args: childArgs, mode: "await" };
-  if (nameOrRef && typeof nameOrRef === "object" && typeof (nameOrRef as any).scriptPath === "string") {
+  const childArgs = args === undefined ? undefined : validateArgsObject(args, "workflow() child args");
+  if (typeof nameOrRef === "string" && nameOrRef.trim() !== "") return { name: nameOrRef, args: childArgs, mode: "await" };
+  if (nameOrRef && typeof nameOrRef === "object" && !Array.isArray(nameOrRef) && typeof (nameOrRef as any).scriptPath === "string" && (nameOrRef as any).scriptPath.trim() !== "") {
     return { scriptPath: (nameOrRef as any).scriptPath, args: childArgs, mode: "await" };
   }
   throw new Error("workflow(nameOrRef, args?) expects a workflow name string or { scriptPath }");
 }
 
+const WORKFLOW_INPUT_KEYS = new Set(["script", "name", "scriptPath", "args", "resumeFromRunId", "mode", "budgetTokens", "maxAgents"]);
+
 function validateInput(input: WorkflowInput): void {
   if (!input || typeof input !== "object") throw new Error("workflow input must be an object");
+  if (Array.isArray(input)) throw new Error("workflow input must be an object");
+  for (const key of Object.keys(input as Record<string, unknown>)) {
+    if (!WORKFLOW_INPUT_KEYS.has(key)) throw new Error(`Unknown workflow input field: ${key}`);
+  }
   const sources = [
     ["script", input.script],
     ["name", input.name],
@@ -298,7 +318,32 @@ function validateInput(input: WorkflowInput): void {
     if (typeof value !== "string" || value.trim() === "") throw new Error(`workflow source ${key} must be a non-empty string`);
   }
   if (present.length !== 1) throw new Error("workflow requires exactly one of script, name, or scriptPath");
-  if (input.args !== undefined) toStableJsonValue(input.args);
+  if (input.args !== undefined) validateArgsObject(input.args, "workflow args");
+  if (input.resumeFromRunId !== undefined && (typeof input.resumeFromRunId !== "string" || input.resumeFromRunId.trim() === "")) throw new Error("workflow resumeFromRunId must be a non-empty string");
+  if (input.mode !== undefined && input.mode !== "await" && input.mode !== "async") throw new Error("workflow mode must be await or async");
+  if (input.budgetTokens !== undefined && (!Number.isInteger(input.budgetTokens) || input.budgetTokens < 1)) throw new Error("workflow budgetTokens must be a positive integer");
+  if (input.maxAgents !== undefined && (!Number.isInteger(input.maxAgents) || input.maxAgents < 1 || input.maxAgents > DEFAULT_LIMITS.agentCap)) throw new Error(`workflow maxAgents must be an integer from 1 to ${DEFAULT_LIMITS.agentCap}`);
+}
+
+function validateArgsObject(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be a JSON object`);
+  return toStableJsonValue(value) as Record<string, unknown>;
+}
+
+function addUsage(target: WorkflowUsage, usage: WorkflowUsage | undefined): void {
+  if (!usage) return;
+  target.agentCount += usage.agentCount;
+  target.subagentTokens += usage.subagentTokens;
+  target.toolUses += usage.toolUses;
+  if (usage.durationMs !== undefined) target.durationMs = (target.durationMs ?? 0) + usage.durationMs;
+  target.estimated = target.estimated || usage.estimated;
+}
+
+function childWorkflowError(output: WorkflowLaunchOutput): Error {
+  const message = output.error ?? `Child workflow ${output.name} failed`;
+  if (/budget/i.test(message)) return new WorkflowBudgetExceededError(message);
+  if (/agent cap/i.test(message)) return new WorkflowAgentCapError(message);
+  return new Error(message);
 }
 
 function asyncOutput(record: RunRecord): WorkflowLaunchOutput {
@@ -386,9 +431,19 @@ function progressSummary(record: RunRecord): string {
   return `Workflow ${record.name}: ${record.progress.completed}/${record.progress.total} done, ${record.progress.running} running`;
 }
 
-function safeActiveTools(pi: ExtensionAPI): string[] | undefined {
+function safeActiveTools(pi: ExtensionAPI): string[] {
   try {
-    return pi.getActiveTools?.();
+    const tools = pi.getActiveTools?.();
+    return Array.isArray(tools) ? tools : [];
+  } catch {
+    return [];
+  }
+}
+
+function getModelRegistryModels(ctx: any): readonly ModelRegistryModelLike[] | undefined {
+  try {
+    const models = ctx?.modelRegistry?.getAll?.();
+    return Array.isArray(models) ? (models as readonly ModelRegistryModelLike[]) : undefined;
   } catch {
     return undefined;
   }

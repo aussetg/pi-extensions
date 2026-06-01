@@ -13,6 +13,7 @@ let nextRpcId = 1;
 let aborted = false;
 let heartbeat;
 let budgetTotal = null;
+let budgetSpent = 0;
 let pipelineLimit = 50;
 
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -22,6 +23,7 @@ void main();
 async function main() {
   const start = await waitForStart();
   budgetTotal = typeof start.budgetTotal === "number" ? start.budgetTotal : null;
+  budgetSpent = typeof start.budgetSpent === "number" && Number.isFinite(start.budgetSpent) ? start.budgetSpent : 0;
   pipelineLimit = Number.isInteger(start.pipelineLimit) && start.pipelineLimit > 0 ? start.pipelineLimit : 50;
 
   heartbeat = setInterval(() => send({ type: "heartbeat" }), Math.max(250, Number(start.heartbeatMs) || 1000));
@@ -99,6 +101,7 @@ async function runWorkflow(source, startGlobals) {
       args: toJsonValue(startGlobals.args),
       cwd: startGlobals.cwd,
       budgetTotal,
+      budgetSpent,
       pipelineLimit,
     }),
     configurable: true,
@@ -190,7 +193,7 @@ const BOOTSTRAP_SOURCE = String.raw`
   delete globalThis.__piWorkflowBridge;
   delete globalThis.__piWorkflowStart;
 
-  let budgetSpent = 0;
+  let budgetSpent = typeof start.budgetSpent === "number" && Number.isFinite(start.budgetSpent) ? start.budgetSpent : 0;
   const budgetTotal = typeof start.budgetTotal === "number" ? start.budgetTotal : null;
   const pipelineLimit = Number.isInteger(start.pipelineLimit) && start.pipelineLimit > 0 ? start.pipelineLimit : 50;
 
@@ -238,7 +241,8 @@ const BOOTSTRAP_SOURCE = String.raw`
   }
 
   async function agent(prompt, opts = {}) {
-    const rawOpts = isRecord(opts) ? opts : {};
+    if (!isRecord(opts)) throw new Error("agent(prompt, opts?) options must be an object");
+    const rawOpts = toStrictJsonValue(opts, "agent opts");
     const contextualIsolation = defaultIsolation();
     const effectiveOpts = rawOpts.isolation === undefined && contextualIsolation ? { ...rawOpts, isolation: contextualIsolation } : rawOpts;
     const payload = await hostRpc("agent", { prompt, opts: effectiveOpts }, true);
@@ -247,6 +251,62 @@ const BOOTSTRAP_SOURCE = String.raw`
       return payload.result;
     }
     return payload;
+  }
+
+  function toStrictJsonValue(value, label, seen = new Set()) {
+    if (value === null) return null;
+    const t = typeof value;
+    if (t === "string" || t === "boolean") return value;
+    if (t === "number") {
+      if (!Number.isFinite(value)) throw new Error(label + " contains a non-finite number");
+      return value;
+    }
+    if (t === "undefined" || t === "function" || t === "symbol" || t === "bigint") throw new Error(label + " must be JSON-serializable");
+    if (Array.isArray(value)) {
+      if (seen.has(value)) throw new Error(label + " must not contain cycles");
+      seen.add(value);
+      const descriptors = Object.getOwnPropertyDescriptors(value);
+      const out = [];
+      for (let index = 0; index < value.length; index++) {
+        if (!Object.prototype.hasOwnProperty.call(value, index)) throw new Error(label + " must not contain sparse arrays");
+        out.push(toStrictJsonValue(value[index], label + "[" + index + "]", seen));
+      }
+      for (const key of Reflect.ownKeys(descriptors)) {
+        if (key === "length") continue;
+        if (typeof key === "string" && /^\d+$/.test(key)) {
+          const descriptor = descriptors[key];
+          if (descriptor.get || descriptor.set) throw new Error(label + "[" + key + "] must be a data property");
+          if (!descriptor.enumerable) throw new Error(label + "[" + key + "] must be enumerable");
+          continue;
+        }
+        throw new Error(label + " arrays must not contain extra properties");
+      }
+      seen.delete(value);
+      return out;
+    }
+    if (t === "object") {
+      const proto = Object.getPrototypeOf(value);
+      if (proto !== Object.prototype && proto !== null) throw new Error(label + " must contain only plain JSON objects");
+      if (seen.has(value)) throw new Error(label + " must not contain cycles");
+      seen.add(value);
+      const descriptors = Object.getOwnPropertyDescriptors(value);
+      const out = {};
+      for (const key of Reflect.ownKeys(descriptors)) {
+        if (typeof key !== "string") throw new Error(label + " must not contain symbol keys");
+        const descriptor = descriptors[key];
+        if (descriptor.get || descriptor.set) throw new Error(label + "." + key + " must be a data property");
+        if (!descriptor.enumerable) throw new Error(label + "." + key + " must be enumerable");
+        Object.defineProperty(out, key, {
+          value: toStrictJsonValue(descriptor.value, label + "." + key, seen),
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      }
+      seen.delete(value);
+      return out;
+    }
+    throw new Error(label + " contains an unsupported value type");
   }
 
   async function parallel(thunks) {
@@ -259,8 +319,8 @@ const BOOTSTRAP_SOURCE = String.raw`
           return await bridge.withFanoutIsolation(() => thunk());
         } catch (err) {
           if (isBudgetOrAbortError(err)) throw err;
-          await hostRpc("log", { message: "parallel branch " + index + " failed: " + errorMessage(err) }, false);
-          return null;
+          await logFanoutFailure("parallel branch", index, err);
+          throw fanoutError("parallel branch", index, err);
         }
       }),
     );
@@ -271,18 +331,20 @@ const BOOTSTRAP_SOURCE = String.raw`
     if (stages.length === 0 || stages.some((stage) => typeof stage !== "function")) throw new Error("pipeline() expects one or more stage functions");
     const results = new Array(items.length);
     let next = 0;
+    let failed = false;
 
     async function worker() {
-      while (next < items.length) {
+      while (!failed && next < items.length) {
         const index = next++;
         let current = items[index];
         try {
           for (const stage of stages) current = await bridge.withFanoutIsolation(() => stage(current, index));
           results[index] = current;
         } catch (err) {
+          failed = true;
           if (isBudgetOrAbortError(err)) throw err;
-          await hostRpc("log", { message: "pipeline item " + index + " failed: " + errorMessage(err) }, false);
-          results[index] = null;
+          await logFanoutFailure("pipeline item", index, err);
+          throw fanoutError("pipeline item", index, err);
         }
       }
     }
@@ -301,44 +363,121 @@ const BOOTSTRAP_SOURCE = String.raw`
   }
 
   function workflow(nameOrRef, args) {
-    return hostRpc("workflow", { nameOrRef, args }, true);
+    return hostRpc("workflow", { nameOrRef, args }, true).then((payload) => {
+      if (payload && typeof payload === "object" && payload.__piWorkflowRpc === "workflowResult") {
+        if (typeof payload.budgetSpent === "number" && Number.isFinite(payload.budgetSpent)) budgetSpent = payload.budgetSpent;
+        return payload.result;
+      }
+      return payload;
+    });
   }
 
   function createUiGlobal() {
     let chain = Promise.resolve();
+    const failures = [];
     const enqueue = (work) => {
-      chain = chain.then(work);
-      return chain;
+      const run = chain.then(work);
+      chain = run.catch(() => undefined);
+      return run;
     };
-    const observe = (promise) => {
-      promise.catch(() => undefined);
-      return promise;
+    const firstUnhandledFailure = () => failures.find((operation) => operation.error && !operation.handled);
+    const markFailedOperationsHandled = () => {
+      for (const operation of failures) {
+        if (operation.error) operation.handled = true;
+      }
     };
+    const flushBarrier = (shouldMarkFailuresHandled = () => false) => enqueue(async () => {
+      await Promise.resolve();
+      const failed = firstUnhandledFailure();
+      if (failed) {
+        if (shouldMarkFailuresHandled()) markFailedOperationsHandled();
+        throw failed.error;
+      }
+      return await hostRpc("ui.flush", {}, false);
+    });
+    const track = (promise, fields = {}, opts = {}) => {
+      const operation = { handled: false, error: undefined };
+      promise.catch((err) => {
+        operation.error = err;
+        failures.push(operation);
+      });
+      const markHandled = () => {
+        operation.handled = true;
+        if (typeof opts.onHandled === "function") opts.onHandled();
+      };
+      const awaitedPromise = () => {
+        if (!opts.flushOnAwait) return promise;
+        return promise.then((value) => flushBarrier(() => operation.handled).then(() => value));
+      };
+      const handle = Object.create(null);
+      for (const [key, value] of Object.entries(fields)) {
+        if (value !== undefined) Object.defineProperty(handle, key, { value, enumerable: true, writable: false, configurable: false });
+      }
+      Object.defineProperties(handle, {
+        then: {
+          value: (onFulfilled, onRejected) => {
+            if (typeof onRejected === "function") markHandled();
+            return awaitedPromise().then(onFulfilled, onRejected);
+          },
+          enumerable: false,
+          writable: false,
+          configurable: false,
+        },
+        catch: {
+          value: (onRejected) => {
+            markHandled();
+            return awaitedPromise().catch(onRejected);
+          },
+          enumerable: false,
+          writable: false,
+          configurable: false,
+        },
+        finally: {
+          value: (onFinally) => {
+            return awaitedPromise().finally(onFinally);
+          },
+          enumerable: false,
+          writable: false,
+          configurable: false,
+        },
+      });
+      return Object.freeze(handle);
+    };
+    const trackUiOperation = (promise, fields = {}) => track(promise, fields, { flushOnAwait: true });
     const dashboard = (doc) => {
-      observe(enqueue(() => hostRpc("ui.dashboard", { doc }, false)));
-      return { id: "dashboard" };
+      return trackUiOperation(enqueue(() => hostRpc("ui.dashboard", { doc }, false)), { id: "dashboard" });
+    };
+    const flush = () => {
+      let handled = false;
+      const promise = flushBarrier(() => handled);
+      return track(promise, {}, {
+        onHandled: () => {
+          handled = true;
+        },
+      });
     };
 
     return Object.freeze({
       define: (spec) => {
         if (isDashboardDefineInput(spec)) return dashboard(spec);
         const id = spec && typeof spec === "object" ? spec.id : undefined;
-        observe(enqueue(() => hostRpc("ui.define", { spec }, false)));
-        return { id };
+        return trackUiOperation(enqueue(() => hostRpc("ui.define", { spec }, false)), { id });
       },
       update: (...updateArgs) => {
         const [viewId, state] = updateArgs;
         if (updateArgs.length === 1 && isRecord(viewId)) return dashboard(viewId);
-        return observe(enqueue(() => hostRpc("ui.update", { viewId, state }, false)));
+        return trackUiOperation(enqueue(() => hostRpc("ui.update", { viewId, state }, false)));
       },
       dashboard,
-      help: () => "Prefer ui.dashboard({ title, progress, metrics, charts, tables, sections }); repeated calls update the same default dashboard. Strict API: ui.define({ version: 1, id, title, initialState, layout }); ui.update(id, state). Workflow scripts are top-level async JS; do not use export default, globalThis, Date.now(), or Math.random().",
-      patch: (viewId, patch) => observe(enqueue(() => hostRpc("ui.patch", { viewId, patch }, false))),
+      help: () => "Prefer ui.dashboard({ title, progress, metrics, charts, tables, sections }); repeated calls update the same default dashboard. Await ui.define/update/dashboard/patch/close or ui.flush() when you need a persistence barrier. Strict API: ui.define({ version: 1, id, title, initialState, layout }); ui.update(id, state). Workflow scripts are top-level async JS; do not use export default, globalThis, Date.now(), or Math.random().",
+      patch: (viewId, patch) => trackUiOperation(enqueue(() => hostRpc("ui.patch", { viewId, patch }, false))),
       close: (viewId) => {
-        observe(enqueue(() => hostRpc("ui.close", { viewId }, false)));
-        return { id: viewId };
+        return trackUiOperation(enqueue(() => hostRpc("ui.close", { viewId }, false)), { id: viewId });
       },
-      __flush: () => chain,
+      flush,
+      __flush: async () => {
+        await flushBarrier();
+      },
     });
   }
 
@@ -401,6 +540,18 @@ const BOOTSTRAP_SOURCE = String.raw`
     return ["WorkflowAbortError", "WorkflowBudgetExceededError", "WorkflowAgentCapError"].includes(err?.name);
   }
 
+  async function logFanoutFailure(kind, index, err) {
+    try {
+      await hostRpc("log", { message: kind + " " + index + " failed: " + errorMessage(err) }, false);
+    } catch {
+      // Preserve the branch/item failure as the primary error.
+    }
+  }
+
+  function fanoutError(kind, index, err) {
+    return namedError("WorkflowFanoutError", kind + " " + index + " failed: " + errorMessage(err));
+  }
+
   function namedError(name, message) {
     const err = new Error(message);
     err.name = name;
@@ -435,7 +586,12 @@ const BOOTSTRAP_SOURCE = String.raw`
     poisonConstructor(Object.getPrototypeOf(async function* () {}));
     Object.defineProperty(ForbiddenFunction, "constructor", { value: ForbiddenFunction, writable: false, configurable: false });
 
-    const deterministicMath = Object.create(Math);
+    const deterministicMath = Object.create(null);
+    for (const key of Reflect.ownKeys(Math)) {
+      if (key === "random") continue;
+      const descriptor = Object.getOwnPropertyDescriptor(Math, key);
+      if (descriptor) Object.defineProperty(deterministicMath, key, descriptor);
+    }
     Object.defineProperty(deterministicMath, "random", {
       value: () => {
         throw new Error("Math.random() is not deterministic in workflow scripts");
@@ -444,19 +600,61 @@ const BOOTSTRAP_SOURCE = String.raw`
       configurable: false,
     });
 
-    class DeterministicDate extends Date {
-      constructor(...args) {
-        if (args.length === 0) throw new Error("argless new Date() is not deterministic in workflow scripts");
-        super(...args);
-      }
-      static now() {
-        throw new Error("Date.now() is not deterministic in workflow scripts");
-      }
+    const NativeDate = Date;
+    function DeterministicDate(...args) {
+      if (!new.target) throw new Error("Date() is not deterministic in workflow scripts; use new Date(value) with explicit args");
+      if (args.length === 0) throw new Error("argless new Date() is not deterministic in workflow scripts");
+      return Reflect.construct(NativeDate, args, new.target === DeterministicDate ? NativeDate : new.target);
+    }
+    for (const key of ["parse", "UTC"]) {
+      const descriptor = Object.getOwnPropertyDescriptor(NativeDate, key);
+      if (descriptor) Object.defineProperty(DeterministicDate, key, descriptor);
+    }
+    Object.defineProperties(DeterministicDate, {
+      now: {
+        value: () => {
+          throw new Error("Date.now() is not deterministic in workflow scripts");
+        },
+        writable: false,
+        configurable: false,
+      },
+      prototype: {
+        value: NativeDate.prototype,
+        writable: false,
+        configurable: false,
+      },
+    });
+    try {
+      Object.defineProperty(NativeDate.prototype, "constructor", {
+        value: DeterministicDate,
+        writable: false,
+        configurable: false,
+      });
+    } catch {
+      // Non-critical hardening only.
+    }
+    try {
+      Object.setPrototypeOf(DeterministicDate, null);
+    } catch {
+      // Non-critical hardening only.
+    }
+
+    const frozenMath = Object.freeze(deterministicMath);
+    try {
+      Object.setPrototypeOf(frozenMath, null);
+    } catch {
+      // Non-critical hardening only.
+    }
+
+    try {
+      Object.freeze(DeterministicDate);
+    } catch {
+      // Non-critical hardening only.
     }
 
     Object.defineProperties(globalThis, {
       Date: { value: DeterministicDate, writable: false, configurable: false },
-      Math: { value: Object.freeze(deterministicMath), writable: false, configurable: false },
+      Math: { value: frozenMath, writable: false, configurable: false },
       Function: { value: ForbiddenFunction, writable: false, configurable: false },
       eval: { value: forbiddenEval, writable: false, configurable: false },
     });

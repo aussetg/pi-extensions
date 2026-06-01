@@ -37,6 +37,17 @@ export interface LiveRun {
   notifyOnComplete: boolean;
 }
 
+interface RunOwnerFile {
+  runId: string;
+  sessionId: string;
+  pid: number;
+  updatedAt: string;
+}
+
+const RUN_OWNER_FILE = "owner.json";
+const RUN_OWNER_HEARTBEAT_MS = 10_000;
+const RUN_OWNER_STALE_MS = 60_000;
+
 export class RunStore {
   private static readonly saveDebounceMs = 100;
 
@@ -47,6 +58,7 @@ export class RunStore {
   private readonly saveQueues = new Map<string, Promise<void>>();
   private readonly saveTimers = new Map<string, NodeJS.Timeout>();
   private readonly scheduledSaves = new Map<string, RunRecord>();
+  private readonly ownerTimers = new Map<string, NodeJS.Timeout>();
   private currentRoot?: string;
 
   rootFor(cwd: string): string {
@@ -75,7 +87,7 @@ export class RunStore {
       if (!entry.isDirectory()) continue;
       const recordPath = path.join(root, entry.name, "run.json");
       try {
-        const record = JSON.parse(await fs.promises.readFile(recordPath, "utf8")) as RunRecord;
+        const record = normalizeLoadedRunRecord(JSON.parse(await fs.promises.readFile(recordPath, "utf8")), root, entry.name);
         if (this.controls.has(record.runId)) continue;
         this.runs.set(record.runId, record);
         this.runRoots.set(record.runId, root);
@@ -146,6 +158,7 @@ export class RunStore {
     await fs.promises.writeFile(argsPath, `${JSON.stringify(stableArgs, null, 2)}\n`, "utf8");
     await fs.promises.writeFile(journalPath, "", "utf8");
     await fs.promises.writeFile(logsPath, "", "utf8");
+    await writeRunOwner(runDir, runId, args.sessionId);
     this.runs.set(runId, record);
     this.runRoots.set(runId, root);
     await this.saveNow(record);
@@ -209,6 +222,7 @@ export class RunStore {
     await this.enqueueSave(record.runId, async () => {
       await this.writeRunRecord(record);
       await this.writeManifest(record);
+      if (isTerminalStatus(record.status)) await removeRunOwner(record.runDir).catch(() => undefined);
     });
   }
 
@@ -275,11 +289,15 @@ export class RunStore {
   registerLiveRun(live: LiveRun): void {
     this.liveRuns.set(live.runId, live);
     this.controls.set(live.runId, live.control);
+    this.startOwnerHeartbeat(live.runId, live.sessionId);
   }
 
   unregisterControl(runId: string): void {
     this.controls.delete(runId);
     this.liveRuns.delete(runId);
+    this.stopOwnerHeartbeat(runId);
+    const record = this.runs.get(runId);
+    if (record && isTerminalStatus(record.status)) void removeRunOwner(record.runDir).catch(() => undefined);
   }
 
   unregisterLiveRun(runId: string): void {
@@ -334,11 +352,21 @@ export class RunStore {
   async delete(runId: string): Promise<boolean> {
     const record = this.get(runId);
     if (!record) return false;
-    const control = this.controls.get(runId);
-    if (control) control.stop("deleted");
+    const live = this.liveRuns.get(runId);
+    if (live) {
+      live.notifyOnComplete = false;
+      this.stopOwnerHeartbeat(runId);
+      live.control.stop("deleted");
+      await live.donePromise.catch(() => undefined);
+    } else {
+      const control = this.controls.get(runId);
+      if (control) control.stop("deleted");
+    }
     this.cancelScheduledSave(runId);
     await this.flush(runId).catch(() => undefined);
+    this.stopOwnerHeartbeat(runId);
     this.controls.delete(runId);
+    this.liveRuns.delete(runId);
     await fs.promises.rm(record.runDir, { recursive: true, force: true });
     this.runs.delete(runId);
     this.runRoots.delete(runId);
@@ -351,9 +379,10 @@ export class RunStore {
     for (const run of this.runs.values()) {
       if (this.currentRoot && this.runRoots.get(run.runId) !== this.currentRoot) continue;
       if ((run.status === "running" || run.status === "paused") && !this.controls.has(run.runId)) {
+        if (await hasLiveOwner(run)) continue;
         run.status = "stale";
         run.endedAt = nowIso();
-        run.recovery = { scriptPath: run.scriptPath, resumeFromRunId: run.runId };
+        run.recovery = await recoveryForRun(run);
         await this.flush(run.runId);
         await this.saveNow(run);
         count++;
@@ -368,6 +397,180 @@ export class RunStore {
     this.saveTimers.delete(runId);
     this.scheduledSaves.delete(runId);
   }
+
+  private startOwnerHeartbeat(runId: string, sessionId: string): void {
+    this.stopOwnerHeartbeat(runId);
+    void this.touchOwner(runId, sessionId).catch(() => undefined);
+    const timer = setInterval(() => {
+      void this.touchOwner(runId, sessionId).catch(() => undefined);
+    }, RUN_OWNER_HEARTBEAT_MS);
+    timer.unref?.();
+    this.ownerTimers.set(runId, timer);
+  }
+
+  private stopOwnerHeartbeat(runId: string): void {
+    const timer = this.ownerTimers.get(runId);
+    if (timer) clearInterval(timer);
+    this.ownerTimers.delete(runId);
+  }
+
+  private async touchOwner(runId: string, sessionId: string): Promise<void> {
+    const record = this.runs.get(runId);
+    if (!record || isTerminalStatus(record.status)) return;
+    await writeRunOwner(record.runDir, runId, sessionId);
+  }
+}
+
+function normalizeLoadedRunRecord(raw: unknown, root: string, dirName: string): RunRecord {
+  if (!isRecord(raw)) throw new Error("run.json must contain an object");
+  if (typeof raw.runId !== "string" || raw.runId !== dirName) throw new Error("run.json runId must match its directory");
+
+  const runDir = path.join(root, dirName);
+  const paths = canonicalRunPaths(runDir);
+  const record = raw as unknown as RunRecord;
+  return {
+    ...record,
+    runDir,
+    scriptPath: paths.scriptPath,
+    journalPath: paths.journalPath,
+    logsPath: paths.logsPath,
+    manifestPath: paths.manifestPath,
+    argsPath: paths.argsPath,
+    transcriptDir: paths.transcriptDir,
+    outputPath: scopedOrExistingDefault(record.outputPath, runDir, "output.json"),
+    errorPath: scopedOrExistingDefault(record.errorPath, runDir, "error.json"),
+    uiViews: normalizeUiViews(record.uiViews, runDir),
+    recovery: normalizeRecovery(record.recovery, paths.scriptPath, record.runId),
+  };
+}
+
+function canonicalRunPaths(runDir: string): Pick<RunRecord, "scriptPath" | "journalPath" | "logsPath" | "manifestPath" | "argsPath" | "transcriptDir"> {
+  return {
+    scriptPath: path.join(runDir, "script.js"),
+    journalPath: path.join(runDir, "journal.jsonl"),
+    logsPath: path.join(runDir, "logs.jsonl"),
+    manifestPath: path.join(runDir, "manifest.json"),
+    argsPath: path.join(runDir, "args.json"),
+    transcriptDir: path.join(runDir, "subagents"),
+  };
+}
+
+function scopedOrExistingDefault(rawPath: unknown, runDir: string, fileName: string): string | undefined {
+  const scoped = scopedPath(rawPath, runDir);
+  if (scoped) return scoped;
+  const fallback = path.join(runDir, fileName);
+  return fs.existsSync(fallback) ? fallback : undefined;
+}
+
+function normalizeUiViews(rawViews: unknown, runDir: string): RunRecord["uiViews"] {
+  if (!Array.isArray(rawViews)) return [];
+  const views: RunRecord["uiViews"] = [];
+  const seen = new Set<string>();
+  for (const rawView of rawViews) {
+    if (!isRecord(rawView) || typeof rawView.viewId !== "string" || !/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(rawView.viewId)) continue;
+    if (seen.has(rawView.viewId)) continue;
+    seen.add(rawView.viewId);
+    const viewDir = path.join(runDir, "ui", rawView.viewId);
+    views.push({
+      viewId: rawView.viewId,
+      title: typeof rawView.title === "string" ? rawView.title : rawView.viewId,
+      specPath: path.join(viewDir, "spec.json"),
+      latestStatePath: path.join(viewDir, "state-latest.json"),
+    });
+  }
+  return views;
+}
+
+function normalizeRecovery(rawRecovery: unknown, scriptPath: string, runId: string): RunRecord["recovery"] {
+  if (!isRecord(rawRecovery)) return { scriptPath, resumeFromRunId: runId };
+  const args = isRecord(rawRecovery.args) ? (rawRecovery.args as Record<string, unknown>) : undefined;
+  return {
+    scriptPath,
+    resumeFromRunId: typeof rawRecovery.resumeFromRunId === "string" && rawRecovery.resumeFromRunId.trim() ? rawRecovery.resumeFromRunId : runId,
+    ...(args ? { args } : {}),
+  };
+}
+
+function scopedPath(rawPath: unknown, runDir: string): string | undefined {
+  if (typeof rawPath !== "string" || rawPath.includes("\0")) return undefined;
+  const resolved = path.resolve(path.isAbsolute(rawPath) ? rawPath : path.join(runDir, rawPath));
+  return isInsideOrSame(runDir, resolved) ? resolved : undefined;
+}
+
+function isInsideOrSame(parent: string, child: string): boolean {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function isTerminalStatus(status: RunStatus): boolean {
+  return status !== "running" && status !== "paused";
+}
+
+async function writeRunOwner(runDir: string, runId: string, sessionId: string): Promise<void> {
+  const owner: RunOwnerFile = { runId, sessionId, pid: process.pid, updatedAt: nowIso() };
+  const filePath = runOwnerPath(runDir);
+  const tmpPath = path.join(runDir, `.${RUN_OWNER_FILE}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`);
+  try {
+    await fs.promises.writeFile(tmpPath, `${JSON.stringify(owner, null, 2)}\n`, "utf8");
+    await fs.promises.rename(tmpPath, filePath);
+  } catch (err) {
+    await fs.promises.rm(tmpPath, { force: true }).catch(() => undefined);
+    throw err;
+  }
+}
+
+async function removeRunOwner(runDir: string): Promise<void> {
+  await fs.promises.rm(runOwnerPath(runDir), { force: true });
+}
+
+async function hasLiveOwner(run: RunRecord): Promise<boolean> {
+  const owner = await readRunOwner(run.runDir);
+  if (!owner || owner.runId !== run.runId || !Number.isInteger(owner.pid) || owner.pid <= 0) return false;
+  const updatedAt = Date.parse(owner.updatedAt);
+  if (!Number.isFinite(updatedAt) || Date.now() - updatedAt > RUN_OWNER_STALE_MS) return false;
+  return processIsAlive(owner.pid);
+}
+
+async function readRunOwner(runDir: string): Promise<RunOwnerFile | undefined> {
+  try {
+    const parsed = JSON.parse(await fs.promises.readFile(runOwnerPath(runDir), "utf8")) as unknown;
+    if (!isRecord(parsed)) return undefined;
+    if (typeof parsed.runId !== "string" || typeof parsed.sessionId !== "string" || typeof parsed.pid !== "number" || typeof parsed.updatedAt !== "string") return undefined;
+    return parsed as unknown as RunOwnerFile;
+  } catch {
+    return undefined;
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+async function recoveryForRun(run: RunRecord): Promise<RunRecord["recovery"]> {
+  const args = run.recovery?.args ?? (await readArgsFile(run.argsPath));
+  return { scriptPath: run.scriptPath, resumeFromRunId: run.runId, ...(args ? { args } : {}) };
+}
+
+async function readArgsFile(argsPath: string): Promise<Record<string, unknown> | undefined> {
+  try {
+    const parsed = JSON.parse(await fs.promises.readFile(argsPath, "utf8")) as unknown;
+    return isRecord(parsed) ? (parsed as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function runOwnerPath(runDir: string): string {
+  return path.join(runDir, RUN_OWNER_FILE);
 }
 
 async function atomicWriteJson(filePath: string, value: unknown): Promise<void> {

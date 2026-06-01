@@ -64,6 +64,78 @@ describe("WorkflowViewStore coalesced persistence", () => {
     await expect(fs.promises.readFile(path.join(record.runDir, "ui", "slow", "state-0003.json"), "utf8").then(JSON.parse)).resolves.toEqual({ value: 3 });
   });
 
+  it("exposes ui.flush as an explicit persistence barrier", async () => {
+    const cwd = path.join(tmp, "project");
+    await fs.promises.mkdir(cwd, { recursive: true });
+    const runStore = new RunStore();
+    const { record } = await runStore.create({ cwd, sessionId: "s", meta, source, args: {} });
+    const journal = new JsonlJournal(record.journalPath);
+    const store = new WorkflowViewStore(record, journal, runStore);
+    const ui = createWorkflowUiGlobal(store) as any;
+
+    await ui.define({
+      version: 1,
+      id: "barrier",
+      title: "Barrier",
+      limits: { updateHz: 0.1 },
+      initialState: { value: 0 },
+      layout: { type: "metric", label: "Value", bind: "/value" },
+    });
+    await ui.update("barrier", { value: 1 });
+    await ui.update("barrier", { value: 2 });
+
+    const view = record.uiViews.find((v) => v.viewId === "barrier")!;
+    expect(JSON.parse(await fs.promises.readFile(view.latestStatePath, "utf8"))).toEqual({ value: 0 });
+
+    await ui.flush();
+
+    expect(JSON.parse(await fs.promises.readFile(view.latestStatePath, "utf8"))).toEqual({ value: 2 });
+  });
+
+  it("accepts chart-only and table-only dashboard shorthand through host ui.define", async () => {
+    const cwd = path.join(tmp, "project");
+    await fs.promises.mkdir(cwd, { recursive: true });
+    const runStore = new RunStore();
+    const { record } = await runStore.create({ cwd, sessionId: "s", meta, source, args: {} });
+    const journal = new JsonlJournal(record.journalPath);
+    const store = new WorkflowViewStore(record, journal, runStore);
+    const ui = createWorkflowUiGlobal(store) as any;
+
+    await ui.define({ charts: [{ label: "tokens", values: [1, 2, 3] }] });
+
+    const first = store.get("dashboard")!;
+    expect(first.spec.layout).toEqual({ type: "dashboard" });
+    expect(first.state.charts).toEqual([{ type: "sparkline", label: "tokens", values: [1, 2, 3], value: 3 }]);
+
+    await ui.define({ tables: [{ columns: ["lane"], rows: [{ lane: "review" }] }] });
+
+    const second = store.get("dashboard")!;
+    expect(second.spec.layout).toEqual({ type: "dashboard" });
+    expect(second.state.tables).toEqual([{ columns: [{ key: "lane", label: "Lane" }], rows: [{ lane: "review" }], maxRows: 12 }]);
+    expect(record.uiViews.map((view) => view.viewId)).toEqual(["dashboard"]);
+  });
+
+  it("does not treat full specs with charts or tables as dashboard shorthand", async () => {
+    const cwd = path.join(tmp, "project");
+    await fs.promises.mkdir(cwd, { recursive: true });
+    const runStore = new RunStore();
+    const { record } = await runStore.create({ cwd, sessionId: "s", meta, source, args: {} });
+    const journal = new JsonlJournal(record.journalPath);
+    const store = new WorkflowViewStore(record, journal, runStore);
+    const ui = createWorkflowUiGlobal(store) as any;
+
+    await ui.define({
+      version: 1,
+      id: "chart_spec",
+      title: "Chart spec",
+      initialState: { charts: [{ label: "tokens", values: [1, 2, 3] }] },
+      layout: { type: "dashboard" },
+    });
+
+    expect(store.get("chart_spec")?.spec.id).toBe("chart_spec");
+    expect(store.get("dashboard")).toBeUndefined();
+  });
+
   it("delivers immutable render snapshots while retaining mutable state for patches", async () => {
     const cwd = path.join(tmp, "project");
     await fs.promises.mkdir(cwd, { recursive: true });
@@ -115,6 +187,61 @@ describe("WorkflowViewStore coalesced persistence", () => {
     ]);
 
     expect(store.get("patch_top_level")?.state).toEqual({ notes: "new", checks: [{ label: "patched", status: "done" }] });
+  });
+
+  it("recovers the UI queue after a caught operation failure", async () => {
+    const cwd = path.join(tmp, "project");
+    await fs.promises.mkdir(cwd, { recursive: true });
+    const runStore = new RunStore();
+    const { record } = await runStore.create({ cwd, sessionId: "s", meta, source, args: {} });
+    const journal = new JsonlJournal(record.journalPath);
+    const store = new WorkflowViewStore(record, journal, runStore);
+    const ui = createWorkflowUiGlobal(store) as any;
+
+    await expect(ui.define({
+      version: 1,
+      id: "bad",
+      title: "Bad",
+      layout: { type: "metric", label: "Value", bind: "/value", onClick: "boom" },
+    })).rejects.toThrow(/unsupported key onClick/);
+
+    await ui.define({
+      version: 1,
+      id: "good",
+      title: "Good",
+      initialState: { value: 1 },
+      layout: { type: "metric", label: "Value", bind: "/value" },
+    });
+    await ui.__flush();
+
+    expect(record.uiViews.map((view) => view.viewId)).toEqual(["good"]);
+  });
+
+  it("surfaces unhandled UI operation failures on flush without poisoning later writes", async () => {
+    const cwd = path.join(tmp, "project");
+    await fs.promises.mkdir(cwd, { recursive: true });
+    const runStore = new RunStore();
+    const { record } = await runStore.create({ cwd, sessionId: "s", meta, source, args: {} });
+    const journal = new JsonlJournal(record.journalPath);
+    const store = new WorkflowViewStore(record, journal, runStore);
+    const ui = createWorkflowUiGlobal(store) as any;
+
+    ui.define({
+      version: 1,
+      id: "bad",
+      title: "Bad",
+      layout: { type: "metric", label: "Value", bind: "/value", onClick: "boom" },
+    });
+    await ui.define({
+      version: 1,
+      id: "good",
+      title: "Good",
+      initialState: { value: 1 },
+      layout: { type: "metric", label: "Value", bind: "/value" },
+    });
+
+    await expect(ui.flush()).rejects.toThrow(/unsupported key onClick/);
+    expect(record.uiViews.map((view) => view.viewId)).toEqual(["good"]);
   });
 
   it("closes views without deleting persisted artifacts", async () => {

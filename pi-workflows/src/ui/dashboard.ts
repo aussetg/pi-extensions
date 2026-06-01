@@ -18,7 +18,7 @@ import type {
   WorkflowFormat,
 } from "../types.js";
 import { getByPointer } from "../utils/json-pointer.js";
-import { clamp, padToWidth, sanitizeText, truncateToWidth, visibleWidth } from "../utils/truncate.js";
+import { clamp, padToWidth, sanitizeLine, sanitizeRenderedLine, sanitizeText, truncateToWidth, visibleWidth } from "../utils/truncate.js";
 
 const FORMATS = new Set<WorkflowFormat>(["text", "number", "percent", "duration", "bytes", "tokens", "cost", "status"]);
 const CHART_FORMATS = new Set<WorkflowDashboardChartFormat>(["number", "duration", "percent"]);
@@ -62,9 +62,9 @@ export function renderDashboardDocument(input: unknown, width: number, options: 
 
   const lines: string[] = [];
   const bodyWidth = Math.max(1, width);
-  const frameTitle = sanitizeText(options.frameTitle ?? "", 200).trim();
-  const title = sanitizeText(doc.title ?? "", 200).trim();
-  const status = sanitizeText(doc.status ?? "", 80).trim();
+  const frameTitle = sanitizeLine(options.frameTitle ?? "", 200).trim();
+  const title = sanitizeLine(doc.title ?? "", 200).trim();
+  const status = sanitizeLine(doc.status ?? "", 80).trim();
 
   if (title && title !== frameTitle) lines.push(titleLine(title, status, bodyWidth));
   else if (status) lines.push(truncateToWidth(`status: ${status}`, bodyWidth));
@@ -102,11 +102,11 @@ export function dashboardPreview(input: unknown): string | undefined {
   if (doc.summary) return oneLine(doc.summary, 300);
   if (doc.progress) return progressPreview(doc.progress);
   const metric = doc.metrics?.[0];
-  if (metric) return `${sanitizeText(metric.label, 120)}: ${formatDashboardValue(metric.value, metric.format)}`;
+  if (metric) return `${sanitizeLine(metric.label, 120)}: ${formatDashboardValue(metric.value, metric.format)}`;
   const section = doc.sections?.[0];
   if (section?.summary) return oneLine(section.summary, 300);
-  if (section?.title) return sanitizeText(section.title, 160);
-  return doc.status ? `status: ${sanitizeText(doc.status, 80)}` : undefined;
+  if (section?.title) return sanitizeLine(section.title, 160);
+  return doc.status ? `status: ${sanitizeLine(doc.status, 80)}` : undefined;
 }
 
 function renderDashboardBillboard(doc: WorkflowDashboardDocument, width: number, options: DashboardRenderOptions): string[] {
@@ -202,7 +202,7 @@ function renderSection(section: WorkflowDashboardSection, width: number, options
   const rawLines = section.lines ?? [];
   const logLines = rawLines.slice(-maxLines);
   if (rawLines.length > logLines.length) lines.push(truncateToWidth(`… ${rawLines.length - logLines.length} earlier line(s)`, width));
-  for (const line of logLines) lines.push(truncateToWidth(`› ${sanitizeText(line, 1000)}`, width));
+  for (const line of logLines) lines.push(truncateToWidth(`› ${sanitizeRenderedLine(line, 1000)}`, width));
   return lines;
 }
 
@@ -310,7 +310,7 @@ function renderTableSeparator(widths: number[], width: number): string {
 }
 
 function chartLabel(chart: WorkflowDashboardChart): string {
-  return sanitizeText(chart.label ?? "chart", 120).replace(/\n+/g, " ↵ ");
+  return sanitizeLine(chart.label ?? "chart", 120);
 }
 
 function chartValue(chart: WorkflowDashboardChart): string {
@@ -325,7 +325,7 @@ function metricCompactCell(metric: WorkflowDashboardMetric, cellWidth: number, v
   const value = padLeftToWidth(metricValue(metric), Math.min(valueWidth, cellWidth));
   if (cellWidth <= valueWidth + 1) return padToWidth(value, cellWidth);
   const labelWidth = Math.max(1, cellWidth - valueWidth - 1);
-  const label = padToWidth(truncateToWidth(sanitizeText(metric.label, 120), labelWidth, ""), labelWidth);
+  const label = padToWidth(truncateToWidth(sanitizeLine(metric.label, 120), labelWidth, ""), labelWidth);
   return padToWidth(`${label} ${value}`, cellWidth);
 }
 
@@ -363,7 +363,7 @@ function renderCompactTableRow(cells: string[], widths: number[], rightAlign: bo
 }
 
 function tableColumnLabel(column: WorkflowDashboardTableColumn): string {
-  return sanitizeText(column.label ?? columnLabel(column.path ?? column.key ?? "column"), 80);
+  return sanitizeLine(column.label ?? columnLabel(column.path ?? column.key ?? "column"), 80);
 }
 
 function tableCellValue(row: unknown, column: WorkflowDashboardTableColumn): unknown {
@@ -409,14 +409,14 @@ function indexOfLargest(values: number[]): number {
 }
 
 function metricCell(metric: WorkflowDashboardMetric): string {
-  const status = metric.status ? `[${sanitizeText(metric.status, 40)}] ` : "";
-  const detail = metric.detail ? ` · ${sanitizeText(metric.detail, 200)}` : "";
-  return `${status}${sanitizeText(metric.label, 120)}: ${formatDashboardValue(metric.value, metric.format)}${detail}`;
+  const status = metric.status ? `[${sanitizeLine(metric.status, 40)}] ` : "";
+  const detail = metric.detail ? ` · ${sanitizeLine(metric.detail, 200)}` : "";
+  return `${status}${sanitizeLine(metric.label, 120)}: ${formatDashboardValue(metric.value, metric.format)}${detail}`;
 }
 
 function renderRow(row: WorkflowDashboardRow, width: number): string {
   const label = rowLabel(row);
-  const status = row.status ? `[${sanitizeText(row.status, 40)}] ` : "";
+  const status = row.status ? `[${sanitizeLine(row.status, 40)}] ` : "";
   const value = row.value === undefined ? "" : `: ${formatDashboardValue(row.value)}`;
   const detail = row.detail === undefined ? "" : ` · ${formatDashboardValue(row.detail)}`;
   if (label) return truncateToWidth(`${status}${label}${value}${detail}`, width);
@@ -424,23 +424,23 @@ function renderRow(row: WorkflowDashboardRow, width: number): string {
   const cells = Object.entries(row)
     .filter(([key]) => !["status", "detail", "value"].includes(key))
     .slice(0, 5)
-    .map(([key, value]) => `${sanitizeText(key, 60)}: ${formatDashboardValue(value)}`);
+    .map(([key, value]) => `${sanitizeLine(key, 60)}: ${formatDashboardValue(value)}`);
   return truncateToWidth(`${status}${cells.length > 0 ? cells.join(" · ") : formatDashboardValue(row.value ?? row.detail ?? "")}`, width);
 }
 
 function renderProgress(progress: WorkflowDashboardProgress, width: number): string {
-  const label = sanitizeText(progress.label ?? "Progress", 80);
+  const label = sanitizeLine(progress.label ?? "Progress", 80);
   const percent = progressPercent(progress);
   const barWidth = Math.max(8, Math.min(30, width - visibleWidth(label) - 20));
   const filled = clamp(Math.round(percent * barWidth), 0, barWidth);
   const bar = `${"█".repeat(filled)}${"░".repeat(barWidth - filled)}`;
   const suffix = typeof progress.value === "number" && typeof progress.total === "number" ? ` ${formatNumber(progress.value)}/${formatNumber(progress.total)}` : ` ${Math.round(percent * 100)}%`;
-  const detail = progress.detail ? ` · ${sanitizeText(progress.detail, 200)}` : "";
+  const detail = progress.detail ? ` · ${sanitizeLine(progress.detail, 200)}` : "";
   return truncateToWidth(`${label}: ${bar}${suffix}${detail}`, width);
 }
 
 function progressPreview(progress: WorkflowDashboardProgress): string {
-  const label = sanitizeText(progress.label ?? "Progress", 80);
+  const label = sanitizeLine(progress.label ?? "Progress", 80);
   if (typeof progress.value === "number" && typeof progress.total === "number") return `${label}: ${formatNumber(progress.value)}/${formatNumber(progress.total)}`;
   return `${label}: ${Math.round(progressPercent(progress) * 100)}%`;
 }
@@ -450,12 +450,12 @@ function titleLine(title: string, status: string, width: number): string {
 }
 
 function sectionTitle(title: string, width: number): string {
-  return truncateToWidth(`▸ ${sanitizeText(title, 160)}`, width);
+  return truncateToWidth(`▸ ${sanitizeLine(title, 160)}`, width);
 }
 
 function splitLines(text: string, maxLines: number, width: number): string[] {
   const lines = sanitizeText(text, 4000).split("\n").slice(0, Math.max(1, maxLines));
-  return lines.map((line) => truncateToWidth(line, width));
+  return lines.map((line) => truncateToWidth(sanitizeRenderedLine(line, 4000), width));
 }
 
 function normalizePanel(input: unknown): WorkflowDashboardPanel | undefined {
@@ -705,7 +705,7 @@ function normalizeLines(input: unknown): string[] | undefined {
 
 function rowLabel(row: WorkflowDashboardRow): string | undefined {
   const raw = row.label ?? row.name ?? row.title;
-  return raw === undefined ? undefined : sanitizeText(raw, 240);
+  return raw === undefined ? undefined : sanitizeLine(raw, 240);
 }
 
 function progressPercent(progress: WorkflowDashboardProgress): number {
@@ -738,8 +738,8 @@ function formatDashboardValue(value: unknown, format: WorkflowFormat | string = 
     }
   }
   if (typeof value === "boolean") return value ? "true" : "false";
-  if (typeof value === "string") return sanitizeText(value, 500).replace(/\n+/g, " ↵ ");
-  return sanitizeText(safeJsonStringify(value), 500);
+  if (typeof value === "string") return sanitizeLine(value, 500);
+  return sanitizeLine(safeJsonStringify(value), 500);
 }
 
 function formatNumber(value: number): string {
@@ -758,7 +758,7 @@ function formatUnits(value: number, units: string[], base = 1024): string {
 
 function optionalText(value: unknown, maxBytes: number): string | undefined {
   if (value === undefined || value === null) return undefined;
-  const text = sanitizeText(value, maxBytes).trim();
+  const text = sanitizeLine(value, maxBytes).trim();
   return text === "" ? undefined : text;
 }
 
@@ -769,7 +769,7 @@ function optionalMultilineText(value: unknown): string | undefined {
 }
 
 function oneLine(value: unknown, maxBytes: number): string {
-  return sanitizeText(value, maxBytes).replace(/\n+/g, " ↵ ");
+  return sanitizeLine(value, maxBytes);
 }
 
 function valueText(value: unknown, maxBytes: number): string {
