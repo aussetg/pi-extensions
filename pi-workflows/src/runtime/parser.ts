@@ -40,22 +40,7 @@ const FORBIDDEN_CALLEES = new Set(["require", "eval", "Function"]);
 const FORBIDDEN_PROPERTIES = new Set(["constructor", "prototype", "__proto__"]);
 
 export function parseWorkflowScript(source: string): ParsedWorkflowScript {
-  const bytes = Buffer.byteLength(source, "utf8");
-  if (bytes > SCRIPT_MAX_BYTES) throw new WorkflowScriptError(`Workflow script is too large (${bytes} bytes)`);
-
-  let ast: Node;
-  try {
-    ast = parse(source, {
-      ecmaVersion: "latest",
-      sourceType: "module",
-      allowAwaitOutsideFunction: true,
-      allowReturnOutsideFunction: true,
-      locations: true,
-    } as any);
-  } catch (err) {
-    const e = err as Error & { loc?: { line: number; column: number } };
-    throw new WorkflowScriptError(`Invalid workflow JavaScript: ${e.message}`, e.loc);
-  }
+  const ast = parseWorkflowAst(source);
 
   const first = ast.body?.[0];
   if (!first) throw new WorkflowScriptError("Workflow script must begin with literal export const meta = {...}");
@@ -67,6 +52,28 @@ export function parseWorkflowScript(source: string): ParsedWorkflowScript {
     executableSource: source.slice(first.end),
     scriptHash: sha256(source),
   };
+}
+
+export function validateWorkflowExecutableSource(source: string): void {
+  validateBody(parseWorkflowAst(source));
+}
+
+function parseWorkflowAst(source: string): Node {
+  const bytes = Buffer.byteLength(source, "utf8");
+  if (bytes > SCRIPT_MAX_BYTES) throw new WorkflowScriptError(`Workflow script is too large (${bytes} bytes)`);
+
+  try {
+    return parse(source, {
+      ecmaVersion: "latest",
+      sourceType: "module",
+      allowAwaitOutsideFunction: true,
+      allowReturnOutsideFunction: true,
+      locations: true,
+    } as any);
+  } catch (err) {
+    const e = err as Error & { loc?: { line: number; column: number } };
+    throw new WorkflowScriptError(`Invalid workflow JavaScript: ${e.message}`, e.loc);
+  }
 }
 
 function extractMeta(first: Node): WorkflowMeta {
@@ -129,9 +136,9 @@ function propertyKey(key: Node): string {
   throw new WorkflowScriptError("Metadata object keys must be simple identifiers or string literals", loc(key));
 }
 
-function validateBody(ast: Node, metaNode: Node): void {
+function validateBody(ast: Node, metaNode?: Node): void {
   walk(ast, undefined, undefined, (node, parent, key) => {
-    if (node === metaNode) return;
+    if (metaNode && node === metaNode) return;
     switch (node.type) {
       case "ImportDeclaration":
       case "ImportExpression":

@@ -245,6 +245,42 @@ describe("WorkflowViewStore coalesced persistence", () => {
     expect(record.uiViews.map((view) => view.viewId)).toEqual(["good"]);
   });
 
+  it("treats caught host ui.flush failures as handled for later barriers", async () => {
+    const cwd = path.join(tmp, "project");
+    await fs.promises.mkdir(cwd, { recursive: true });
+    const runStore = new RunStore();
+    const { record } = await runStore.create({ cwd, sessionId: "s", meta, source, args: {} });
+    const journal = new JsonlJournal(record.journalPath);
+    const store = new WorkflowViewStore(record, journal, runStore);
+    const ui = createWorkflowUiGlobal(store) as any;
+
+    ui.define({
+      version: 1,
+      id: "bad",
+      title: "Bad",
+      layout: { type: "metric", label: "Value", bind: "/value", onClick: "boom" },
+    });
+
+    let caught = "";
+    try {
+      await ui.flush();
+    } catch (err) {
+      caught = (err as Error).message;
+    }
+
+    await ui.define({
+      version: 1,
+      id: "good",
+      title: "Good",
+      initialState: { value: 1 },
+      layout: { type: "metric", label: "Value", bind: "/value" },
+    });
+    await ui.__flush();
+
+    expect(caught).toMatch(/unsupported key onClick/);
+    expect(record.uiViews.map((view) => view.viewId)).toEqual(["good"]);
+  });
+
   it("closes views without deleting persisted artifacts", async () => {
     const cwd = path.join(tmp, "project");
     await fs.promises.mkdir(cwd, { recursive: true });

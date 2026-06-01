@@ -47,6 +47,9 @@ export const WORKFLOW_CHILD_CGROUP = {
 export const WORKFLOW_RESOURCE_LIMITS = {
   workflowProtocolLineBytes: 1024 * 1024,
   workflowParentMessageBytes: 1024 * 1024,
+  workflowPendingRpcRequests: 4096,
+  workflowFanoutGroupDepth: 64,
+  workflowProtocolErrorBytes: 8 * 1024,
   workflowOutputBytes: 2 * 1024 * 1024,
   workflowReplayResultBytes: 8 * 1024 * 1024,
   workflowChildStderrBytes: 64 * 1024,

@@ -10,6 +10,10 @@ interface UiOperation {
   error?: unknown;
 }
 
+interface TrackOptions {
+  onHandled?: () => void;
+}
+
 export function createWorkflowUiGlobal(store: WorkflowViewStore): Record<string, unknown> {
   let chain: Promise<unknown> = Promise.resolve();
   const failures: UiOperation[] = [];
@@ -19,12 +23,31 @@ export function createWorkflowUiGlobal(store: WorkflowViewStore): Record<string,
     next.catch(() => undefined);
     return next;
   };
-  const track = <T>(promise: Promise<T>, fields: Record<string, unknown> = {}): PromiseLike<T> & Record<string, unknown> => {
+  const firstUnhandledFailure = () => failures.find((operation) => operation.error && !operation.handled);
+  const markFailedOperationsHandled = () => {
+    for (const operation of failures) {
+      if (operation.error) operation.handled = true;
+    }
+  };
+  const flushBarrier = (shouldMarkFailuresHandled = () => false): Promise<void> => enqueue(async () => {
+    await Promise.resolve();
+    const failed = firstUnhandledFailure();
+    if (failed) {
+      if (shouldMarkFailuresHandled()) markFailedOperationsHandled();
+      throw failed.error;
+    }
+    await store.flush();
+  });
+  const track = <T>(promise: Promise<T>, fields: Record<string, unknown> = {}, opts: TrackOptions = {}): PromiseLike<T> & Record<string, unknown> => {
     const operation: UiOperation = { handled: false };
     promise.catch((err) => {
       operation.error = err;
       failures.push(operation);
     });
+    const markHandled = () => {
+      operation.handled = true;
+      opts.onHandled?.();
+    };
     const handle = Object.create(null) as PromiseLike<T> & Record<string, unknown>;
     for (const [key, value] of Object.entries(fields)) {
       if (value !== undefined) Object.defineProperty(handle, key, { value, enumerable: true, writable: false, configurable: false });
@@ -32,7 +55,7 @@ export function createWorkflowUiGlobal(store: WorkflowViewStore): Record<string,
     Object.defineProperties(handle, {
       then: {
         value: (onFulfilled?: ((value: T) => unknown) | null, onRejected?: ((reason: unknown) => unknown) | null) => {
-          if (typeof onRejected === "function") operation.handled = true;
+          if (typeof onRejected === "function") markHandled();
           return promise.then(onFulfilled as any, onRejected as any);
         },
         enumerable: false,
@@ -41,7 +64,7 @@ export function createWorkflowUiGlobal(store: WorkflowViewStore): Record<string,
       },
       catch: {
         value: (onRejected?: ((reason: unknown) => unknown) | null) => {
-          operation.handled = true;
+          markHandled();
           return promise.catch(onRejected as any);
         },
         enumerable: false,
@@ -60,12 +83,14 @@ export function createWorkflowUiGlobal(store: WorkflowViewStore): Record<string,
     Object.freeze(handle);
     return handle;
   };
-  const flush = async () => {
-    await chain;
-    await Promise.resolve();
-    const failed = failures.find((operation) => operation.error && !operation.handled);
-    if (failed) throw failed.error;
-    await store.flush();
+  const flush = () => {
+    let handled = false;
+    const promise = flushBarrier(() => handled);
+    return track(promise, {}, {
+      onHandled: () => {
+        handled = true;
+      },
+    });
   };
   const dashboard = (doc: unknown) => enqueue(async () => {
     const state = normalizeDashboardDocument(doc);
@@ -101,7 +126,7 @@ export function createWorkflowUiGlobal(store: WorkflowViewStore): Record<string,
     })),
     close: (viewId: string) => track(enqueue(async () => store.close(viewId)), { id: viewId }),
     flush,
-    __flush: flush,
+    __flush: () => flushBarrier(),
   };
 }
 

@@ -1,7 +1,70 @@
 import { describe, expect, it } from "vitest";
 import { WORKFLOW_RESOURCE_LIMITS } from "../src/constants.js";
-import { executeWorkflowSandbox } from "../src/runtime/sandbox.js";
+import { decodeChildProtocolLine, executeWorkflowSandbox } from "../src/runtime/sandbox.js";
 import type { SandboxGlobals } from "../src/runtime/sandbox-types.js";
+
+describe("workflow child protocol validation", () => {
+  it("accepts well-formed request envelopes", () => {
+    expect(decodeChildProtocolLine(JSON.stringify({ type: "request", id: 1, method: "log", critical: false, fanoutGroupIds: [1, 2], params: { message: "hello" } }))).toEqual({
+      type: "request",
+      id: 1,
+      method: "log",
+      critical: false,
+      fanoutGroupIds: [1, 2],
+      params: { message: "hello" },
+    });
+  });
+
+  it("rejects malformed or duplicate request ids", () => {
+    for (const id of [undefined, null, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "1"]) {
+      expect(() => decodeChildProtocolLine(requestLine({ id }))).toThrow(/request id/);
+    }
+    expect(() => decodeChildProtocolLine(requestLine({ id: 1 }), new Set([1]))).toThrow(/duplicate request id/);
+  });
+
+  it("rejects request floods before adding more pending RPCs", () => {
+    const fullPending = { size: WORKFLOW_RESOURCE_LIMITS.workflowPendingRpcRequests, has: () => false };
+    expect(() => decodeChildProtocolLine(requestLine({ id: 99 }), fullPending)).toThrow(/too many pending RPC requests/);
+  });
+
+  it("rejects unknown methods and mismatched critical flags", () => {
+    expect(() => decodeChildProtocolLine(requestLine({ method: "eval" }))).toThrow(/unsupported RPC method/);
+    expect(() => decodeChildProtocolLine(requestLine({ method: "agent", critical: false }))).toThrow(/agent RPC must be critical/);
+    expect(() => decodeChildProtocolLine(requestLine({ method: "workflow", critical: false }))).toThrow(/workflow RPC must be critical/);
+    expect(() => decodeChildProtocolLine(requestLine({ method: "log", critical: true }))).toThrow(/log RPC must be non-critical/);
+    expect(() => decodeChildProtocolLine(requestLine({ critical: "true" }))).toThrow(/critical must be a boolean/);
+  });
+
+  it("rejects malformed request params and fanout group ids", () => {
+    expect(() => decodeChildProtocolLine(requestLine({ params: [] }))).toThrow(/params must be an object/);
+    expect(() => decodeChildProtocolLine(requestLine({ fanoutGroupIds: "1" }))).toThrow(/fanoutGroupIds must be an array/);
+    expect(() => decodeChildProtocolLine(requestLine({ fanoutGroupIds: [0] }))).toThrow(/positive safe integers/);
+    expect(() => decodeChildProtocolLine(requestLine({ fanoutGroupIds: [1, 1] }))).toThrow(/duplicate fanout group id/);
+    expect(() => decodeChildProtocolLine(requestLine({ fanoutGroupIds: Array.from({ length: WORKFLOW_RESOURCE_LIMITS.workflowFanoutGroupDepth + 1 }, (_, index) => index + 1) }))).toThrow(/fanoutGroupIds exceeds/);
+  });
+
+  it("rejects malformed cancel and top-level protocol messages", () => {
+    expect(() => decodeChildProtocolLine("not json")).toThrow(/invalid JSON/);
+    expect(() => decodeChildProtocolLine(JSON.stringify(null))).toThrow(/message must be an object/);
+    expect(() => decodeChildProtocolLine(JSON.stringify({ type: "mystery" }))).toThrow(/unsupported message type/);
+    expect(() => decodeChildProtocolLine(JSON.stringify({ type: "heartbeat", extra: true }))).toThrow(/unknown field/);
+    expect(() => decodeChildProtocolLine(JSON.stringify({ type: "cancel", fanoutGroupId: "1" }))).toThrow(/cancel fanoutGroupId/);
+    expect(() => decodeChildProtocolLine(JSON.stringify({ type: "cancel", fanoutGroupId: 1, reason: "bad" }))).toThrow(/cancel reason must be an object/);
+    expect(() => decodeChildProtocolLine(JSON.stringify({ type: "cancel", fanoutGroupId: 1, reason: { message: 1 } }))).toThrow(/message must be a string/);
+  });
+
+  it("bounds failed and cancel error strings", () => {
+    const long = "x".repeat(WORKFLOW_RESOURCE_LIMITS.workflowProtocolErrorBytes + 100);
+    const failed = decodeChildProtocolLine(JSON.stringify({ type: "failed", name: long, error: long, stack: long })) as any;
+    const cancel = decodeChildProtocolLine(JSON.stringify({ type: "cancel", fanoutGroupId: 1, reason: { name: long, message: long } })) as any;
+
+    expect(Buffer.byteLength(failed.name, "utf8")).toBeLessThanOrEqual(200);
+    expect(Buffer.byteLength(failed.error, "utf8")).toBeLessThanOrEqual(WORKFLOW_RESOURCE_LIMITS.workflowProtocolErrorBytes);
+    expect(Buffer.byteLength(failed.stack, "utf8")).toBeLessThanOrEqual(WORKFLOW_RESOURCE_LIMITS.workflowProtocolErrorBytes);
+    expect(Buffer.byteLength(cancel.reason.name, "utf8")).toBeLessThanOrEqual(200);
+    expect(Buffer.byteLength(cancel.reason.message, "utf8")).toBeLessThanOrEqual(WORKFLOW_RESOURCE_LIMITS.workflowProtocolErrorBytes);
+  });
+});
 
 describe("workflow child sandbox", () => {
   it("runs workflow code through child-process RPC", async () => {
@@ -462,7 +525,7 @@ return await parallel([
   });
 
   it("rejects direct constructor escapes on workflow API functions", async () => {
-    await expect(executeWorkflowSandbox("return agent.constructor('return process')().cwd();", fakeGlobals(), new AbortController().signal)).rejects.toThrow(/Function constructor|Code generation|not available/);
+    await expect(executeWorkflowSandbox("return agent.constructor('return process')().cwd();", fakeGlobals(), new AbortController().signal)).rejects.toThrow(/Forbidden property access|Function constructor|Code generation|not available/);
   });
 
   it("rejects computed constructor escapes on workflow API functions", async () => {
@@ -470,13 +533,13 @@ return await parallel([
   });
 
   it("rejects constructor escapes through workflow args", async () => {
-    await expect(executeWorkflowSandbox("return args.constructor.constructor('return process')().cwd();", fakeGlobals({ args: { ok: true } }), new AbortController().signal)).rejects.toThrow(/Function constructor|Code generation|not available/);
+    await expect(executeWorkflowSandbox("return args.constructor.constructor('return process')().cwd();", fakeGlobals({ args: { ok: true } }), new AbortController().signal)).rejects.toThrow(/Forbidden property access|Function constructor|Code generation|not available/);
   });
 
   it("rejects constructor escapes through agent results", async () => {
     const globals = fakeGlobals({ agent: async () => ({ ok: true }) });
 
-    await expect(executeWorkflowSandbox("const result = await agent('x'); return result.constructor.constructor('return process')().cwd();", globals, new AbortController().signal)).rejects.toThrow(/Function constructor|Code generation|not available/);
+    await expect(executeWorkflowSandbox("const result = await agent('x'); return result.constructor.constructor('return process')().cwd();", globals, new AbortController().signal)).rejects.toThrow(/Forbidden property access|Function constructor|Code generation|not available/);
   });
 
   it("rejects constructor escapes through caught RPC errors", async () => {
@@ -486,7 +549,14 @@ return await parallel([
       },
     });
 
-    await expect(executeWorkflowSandbox("try { await agent('x'); } catch (err) { return err.constructor.constructor('return process')().cwd(); }", globals, new AbortController().signal)).rejects.toThrow(/Function constructor|Code generation|not available/);
+    await expect(executeWorkflowSandbox("try { await agent('x'); } catch (err) { return err.constructor.constructor('return process')().cwd(); }", globals, new AbortController().signal)).rejects.toThrow(/Forbidden property access|Function constructor|Code generation|not available/);
+  });
+
+  it("enforces parser-only bans at the sandbox boundary", async () => {
+    await expect(executeWorkflowSandbox("return globalThis.process;", fakeGlobals(), new AbortController().signal)).rejects.toThrow(/Forbidden global\/API: globalThis/);
+    await expect(executeWorkflowSandbox("import fs from 'node:fs';\nreturn 'bad';", fakeGlobals(), new AbortController().signal)).rejects.toThrow(/may not import/);
+    await expect(executeWorkflowSandbox("return import('node:fs');", fakeGlobals(), new AbortController().signal)).rejects.toThrow(/may not import/);
+    await expect(executeWorkflowSandbox("export const x = 1;", fakeGlobals(), new AbortController().signal)).rejects.toThrow(/may not export/);
   });
 
   it("uses null-prototype deterministic Math and Date globals", async () => {
@@ -503,7 +573,7 @@ return await parallel([
     const globals = fakeGlobals();
     await expect(executeWorkflowSandbox("return Object.getPrototypeOf(Math).random();", globals, new AbortController().signal)).rejects.toThrow(/Cannot read|null|undefined|not deterministic/);
     await expect(executeWorkflowSandbox("return Object.getPrototypeOf(Date).now();", globals, new AbortController().signal)).rejects.toThrow(/Cannot read|null|undefined|not deterministic/);
-    await expect(executeWorkflowSandbox("return Object.getPrototypeOf(new Date(0)).constructor.now();", globals, new AbortController().signal)).rejects.toThrow(/Date\.now\(\) is not deterministic/);
+    await expect(executeWorkflowSandbox("return Object.getPrototypeOf(new Date(0)).constructor.now();", globals, new AbortController().signal)).rejects.toThrow(/Forbidden property access|Date\.now\(\) is not deterministic/);
     await expect(executeWorkflowSandbox("return Date(0);", globals, new AbortController().signal)).rejects.toThrow(/Date\(\) is not deterministic/);
   });
 
@@ -576,6 +646,10 @@ function recordingUi(calls: string[], overrides: Record<string, unknown> = {}): 
     },
     ...overrides,
   };
+}
+
+function requestLine(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({ type: "request", id: 1, method: "log", critical: false, params: { message: "hello" }, ...overrides });
 }
 
 async function delay(ms: number): Promise<void> {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseWorkflowScript } from "../src/runtime/parser.js";
+import { parseWorkflowScript, validateWorkflowExecutableSource } from "../src/runtime/parser.js";
 
 const valid = `export const meta = { name: 'x', description: 'desc', phases: [{ title: 'A' }] };\nphase('A');\nreturn await agent('hi');`;
 
@@ -34,5 +34,13 @@ describe("parseWorkflowScript", () => {
     expect(() => parseWorkflowScript(`export const meta = { name: 'x', description: 'd' };\nMath.random();`)).toThrow(/Math.random/);
     expect(() => parseWorkflowScript(`export const meta = { name: 'x', description: 'd' };\nprocess.cwd();`)).toThrow(/process/);
     expect(() => parseWorkflowScript(`export const meta = { name: 'x', description: 'd' };\nrequire('fs');`)).toThrow(/require/);
+  });
+
+  it("validates executable-only sources for sandbox entrypoints", () => {
+    expect(() => validateWorkflowExecutableSource("return await agent('hi');")).not.toThrow();
+    expect(() => validateWorkflowExecutableSource("return globalThis.process;")).toThrow(/globalThis/);
+    expect(() => validateWorkflowExecutableSource("import fs from 'node:fs';\nreturn fs;")).toThrow(/may not import/);
+    expect(() => validateWorkflowExecutableSource("return import('node:fs');")).toThrow(/may not import/);
+    expect(() => validateWorkflowExecutableSource("export const x = 1;")).toThrow(/may not export/);
   });
 });
