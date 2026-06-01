@@ -22,10 +22,11 @@ export class WorkflowViewRenderer {
     }
   }
 
-  renderPanel(snapshot: WorkflowViewSnapshot, width = 100): string[] {
+  renderPanel(snapshot: WorkflowViewSnapshot, width = 100, maxLines?: number): string[] {
     try {
       const bodyWidth = Math.max(1, width - 2);
-      const lineLimit = this.panelLineLimit(snapshot);
+      const naturalLineLimit = this.panelLineLimit(snapshot);
+      const lineLimit = maxLines === undefined ? naturalLineLimit : Math.max(1, Math.min(naturalLineLimit, Math.floor(maxLines)));
       const bodyBudget = Math.max(1, lineLimit - 2);
       const body = truncateBodyLines(this.renderNode(snapshot.spec.layout, snapshot.state, bodyWidth, snapshot, "panel"), bodyBudget, "… full UI persisted as artifact");
       return limitFramedLines(frameLines(sanitizeLine(snapshot.spec.title, 200), body, width), width, lineLimit);

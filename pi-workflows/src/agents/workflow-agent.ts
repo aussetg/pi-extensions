@@ -2,12 +2,14 @@ import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import type { AgentOptions, JsonSchema, WorkflowUsage } from "../types.js";
 import type { ThinkingLevel } from "../thinking.js";
 import { WORKFLOW_RESOURCE_LIMITS } from "../constants.js";
 import { BoundedTextAccumulator, byteLength, truncateBytes } from "../utils/truncate.js";
 import { ensureDir } from "../persistence/paths.js";
+import { readBoundedTextFile } from "../persistence/safe-paths.js";
 import { WorkflowAbortError, WorkflowSkipAgentError } from "../runtime/errors.js";
 
 interface MessagePart {
@@ -79,6 +81,7 @@ export interface WorkflowAgentResult {
 
 interface AgentWorkspace {
   cwd: string;
+  cleanupLabel?: string;
   artifacts?: AgentWorkspaceArtifacts;
   collect(): Promise<AgentWorkspaceArtifacts | undefined>;
   cleanup(): Promise<void>;
@@ -150,10 +153,13 @@ export class WorkflowAgent {
     args.push("--append-system-prompt", tmp.filePath);
     args.push(call.prompt);
 
+    let completedResult: WorkflowAgentResult | undefined;
+    let primaryError: unknown;
     try {
       const exitCode = await new Promise<number>((resolve, reject) => {
         const invocation = getPiInvocation(args);
         const proc = spawn(invocation.command, invocation.args, { cwd: workspace.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+        const stdoutDecoder = new StringDecoder("utf8");
         let stdoutBuffer = "";
         let discardingOversizeLine = false;
         let stalled = false;
@@ -212,13 +218,14 @@ export class WorkflowAgent {
             return;
           }
           stream.parsedEventCount++;
-          recordSubagentEvent(event, stream);
+          recordSubagentEvent(call.callId, event, stream);
         };
 
         proc.stdout.on("data", (chunk) => {
-          stream.stdoutBytes += Buffer.byteLength(chunk);
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
+          stream.stdoutBytes += buffer.length;
           try {
-            stdoutBuffer += chunk.toString("utf8");
+            stdoutBuffer += stdoutDecoder.write(buffer);
             while (true) {
               const newline = stdoutBuffer.indexOf("\n");
               if (discardingOversizeLine) {
@@ -259,6 +266,7 @@ export class WorkflowAgent {
           settled = true;
           cleanup();
           try {
+            stdoutBuffer += stdoutDecoder.end();
             if (!discardingOversizeLine && stdoutBuffer.trim()) processLine(stdoutBuffer);
           } catch (err) {
             reject(err);
@@ -281,13 +289,66 @@ export class WorkflowAgent {
       const result = call.options.schema ? parseStructuredResult(resultText, call.options.schema) : resultText;
       const usage = collectUsage(stream);
       const resultPath = path.join(callDir, "result.json");
-      await fs.promises.writeFile(resultPath, `${JSON.stringify({ status: "done", result, resultText, usage, model: stream.model, thinking: call.options.thinking, sessionPath, workspace: workspaceArtifacts }, null, 2)}\n`, "utf8");
-      return { result, resultText, transcriptPath, resultPath, usage, model: stream.model, thinking: call.options.thinking, sessionPath, workspace: workspaceArtifacts };
+      completedResult = { result, resultText, transcriptPath, resultPath, usage, model: stream.model, thinking: call.options.thinking, sessionPath, workspace: workspaceArtifacts };
+      await writeWorkflowAgentResult(completedResult);
+      return completedResult;
+    } catch (err) {
+      primaryError = err;
+      throw err;
     } finally {
-      await fs.promises.rm(tmp.dir, { recursive: true, force: true });
-      await workspace.cleanup();
+      const cleanupErrors = await cleanupAttempt(tmp.dir, workspace);
+      if (cleanupErrors.length > 0) {
+        if (completedResult) {
+          await recordSuccessfulCleanupErrors(completedResult, cleanupErrors);
+        } else if (primaryError === undefined) {
+          throw new Error(cleanupErrors.join("; "));
+        }
+      }
     }
   }
+}
+
+async function cleanupAttempt(tmpDir: string, workspace: AgentWorkspace): Promise<string[]> {
+  const errors: string[] = [];
+  try {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true });
+  } catch (err) {
+    errors.push(`temporary prompt cleanup failed: ${(err as Error).message}`);
+  }
+
+  try {
+    await workspace.cleanup();
+  } catch (err) {
+    errors.push(`${workspace.cleanupLabel ?? "workspace"} cleanup failed: ${(err as Error).message}`);
+  }
+  return errors;
+}
+
+async function recordSuccessfulCleanupErrors(result: WorkflowAgentResult, cleanupErrors: string[]): Promise<void> {
+  if (!result.workspace) return;
+  result.workspace.error = appendArtifactError(result.workspace.error, cleanupErrors.join("; "));
+  await Promise.all([
+    writeWorkflowAgentResult(result).catch(() => undefined),
+    rewriteTranscriptWorkspace(result.transcriptPath, result.workspace).catch(() => undefined),
+  ]);
+}
+
+function appendArtifactError(existing: string | undefined, message: string): string {
+  return existing ? `${existing}; ${message}` : message;
+}
+
+async function writeWorkflowAgentResult(result: WorkflowAgentResult): Promise<void> {
+  await fs.promises.writeFile(
+    result.resultPath,
+    `${JSON.stringify({ status: "done", result: result.result, resultText: result.resultText, usage: result.usage, model: result.model, thinking: result.thinking, sessionPath: result.sessionPath, workspace: result.workspace }, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+async function rewriteTranscriptWorkspace(transcriptPath: string, workspace: AgentWorkspaceArtifacts): Promise<void> {
+  const value = JSON.parse(await readBoundedTextFile(transcriptPath, WORKFLOW_RESOURCE_LIMITS.workflowOutputBytes)) as Record<string, unknown>;
+  value.workspace = workspace;
+  await fs.promises.writeFile(transcriptPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
 function buildSubagentSystemPrompt(call: WorkflowAgentCall): string {
@@ -335,7 +396,7 @@ function createSubagentStreamState(): SubagentStreamState {
   };
 }
 
-function recordSubagentEvent(event: unknown, stream: SubagentStreamState): void {
+function recordSubagentEvent(callId: string, event: unknown, stream: SubagentStreamState): void {
   if (!event || typeof event !== "object" || Array.isArray(event)) return;
   const record = event as Record<string, unknown>;
   if (record.type === "session") {
@@ -361,7 +422,7 @@ function recordSubagentEvent(event: unknown, stream: SubagentStreamState): void 
   stream.fallbackToolCalls += countToolCallParts(message);
 
   if (typeof message.model === "string" && message.model.trim()) stream.model = message.model;
-  const text = assistantTextFromMessage(message);
+  const text = assistantTextFromMessage(callId, message);
   if (typeof message.content === "string" || text.trim()) stream.resultText = text;
 }
 
@@ -369,10 +430,23 @@ function isMessageLike(value: unknown): value is MessageLike {
   return !!value && typeof value === "object" && !Array.isArray(value) && typeof (value as MessageLike).role === "string";
 }
 
-function assistantTextFromMessage(message: MessageLike): string {
-  if (typeof message.content === "string") return message.content;
+function assistantTextFromMessage(callId: string, message: MessageLike): string {
+  if (typeof message.content === "string") {
+    assertResultTextWithinLimit(callId, message.content);
+    return message.content;
+  }
   if (!Array.isArray(message.content)) return "";
-  return message.content.filter((part) => part.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n");
+  const chunks: string[] = [];
+  let bytes = 0;
+  for (const part of message.content) {
+    if (part.type !== "text" || typeof part.text !== "string") continue;
+    bytes += byteLength(part.text) + (chunks.length > 0 ? 1 : 0);
+    if (bytes > WORKFLOW_RESOURCE_LIMITS.subagentResultTextBytes) {
+      throw new Error(`Subagent ${callId} final result exceeded ${WORKFLOW_RESOURCE_LIMITS.subagentResultTextBytes} bytes`);
+    }
+    chunks.push(part.text);
+  }
+  return chunks.join("\n");
 }
 
 function countToolCallParts(message: MessageLike): number {
@@ -549,6 +623,7 @@ async function prepareAgentWorkspace(call: WorkflowAgentCall, callDir: string, a
 
   return {
     cwd: path.join(worktreeDir, git.prefix),
+    cleanupLabel: "worktree",
     async collect() {
       const artifacts: AgentWorkspaceArtifacts = { kind: "worktree", worktreeDir, statusPath, patchPath, ignoredManifestPath, ignoredFilesDir };
       const errors: string[] = [];

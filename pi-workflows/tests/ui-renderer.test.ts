@@ -9,7 +9,7 @@ import { renderWorkflowResultMessage } from "../src/ui/messages.js";
 import { StaticTextComponent } from "../src/ui/simple-components.js";
 import { renderWorkflowResultLines, WorkflowProgressComponent, WorkflowResultComponent } from "../src/ui/workflow-result-component.js";
 import { WorkflowViewComponent } from "../src/ui/workflow-view-widget.js";
-import { sanitizeLine, sanitizeRenderedLine, visibleWidth } from "../src/utils/truncate.js";
+import { sanitizeLine, sanitizeRenderedLine, truncateToWidth, visibleWidth } from "../src/utils/truncate.js";
 
 const spec = {
   version: 1,
@@ -51,6 +51,8 @@ describe("workflow UI", () => {
     expect(styled).toContain("\u001b[31mred\u001b[0m  ok");
     expect(styled).not.toContain("\u001b[2J");
     expect(styled).not.toContain("\u001b]");
+
+    expect(sanitizeRenderedLine("\u001b[31munclosed", 100, { preserveAnsi: true })).toBe("\u001b[31munclosed\u001b[0m");
   });
 
   it("sanitizes static text with trusted SGR styling while preserving indentation", () => {
@@ -62,6 +64,16 @@ describe("workflow UI", () => {
     expect(styled).not.toContain("\u001b[2J");
     expect(styled).not.toContain("\u001b]");
     expect(visibleWidth(styled)).toBe(40);
+  });
+
+  it("resets trusted SGR styling when width truncation cuts before reset", () => {
+    const truncated = truncateToWidth("\u001b[31mabcdef\u001b[0m plain", 5);
+    expect(truncated).toBe("\u001b[31mabcd…\u001b[0m");
+    expect(visibleWidth(truncated)).toBe(5);
+
+    const rendered = new StaticTextComponent(["\u001b[32mabcdefghij\u001b[0m"], { preserveAnsi: true }).render(4)[0];
+    expect(rendered).toBe("\u001b[32mabcd\u001b[0m");
+    expect(visibleWidth(rendered)).toBe(4);
   });
 
   it("renders nominal single-line fields without embedded newlines or tabs", () => {
@@ -743,6 +755,39 @@ describe("workflow UI", () => {
 
     expect(text).toContain("Phases");
     expect(text).toContain("Custom live");
+    expect(lines.length).toBeLessThanOrEqual(RENDER_LIMITS.workflowPanelLines);
+    expect(lines.every((line) => visibleWidth(line) <= 140)).toBe(true);
+  });
+
+  it("keeps live custom UI panels framed instead of clipping them after progress", () => {
+    const checked = new WorkflowViewValidator().validateSpec({
+      version: 1,
+      id: "review_panel",
+      title: "Review dashboard",
+      placement: "runPanel",
+      initialState: normalizeDashboardDocument({
+        panel: { lines: 12 },
+        metrics: { findings: 26 },
+        tables: [{
+          columns: ["area", "status"],
+          rows: Array.from({ length: 8 }, (_, index) => ({ area: `area-${index}`, status: index < 2 ? "running" : "queued" })),
+        }],
+        sections: [{ title: "Activity", lines: ["working", "still working"] }],
+      }),
+      layout: { type: "dashboard" },
+    });
+    const details = { ...wideWorkflowProgressDetails(), uiViews: [{ spec: checked, state: checked.initialState!, seq: 1 }] };
+
+    const lines = renderWorkflowResultLines(details, { profile: "panel", partial: true }, undefined, 140);
+    const text = lines.join("\n");
+    const panelTop = lines.findIndex((line) => line.includes("┌ Review dashboard"));
+    const panelBottom = lines.findIndex((line, index) => index > panelTop && line.includes("└"));
+
+    expect(text).toContain("Review dashboard");
+    expect(text).toContain("findings");
+    expect(panelTop).toBeGreaterThanOrEqual(0);
+    expect(panelBottom).toBeGreaterThan(panelTop);
+    expect(lines.at(-1)).not.toMatch(/more line\(s\)$/);
     expect(lines.length).toBeLessThanOrEqual(RENDER_LIMITS.workflowPanelLines);
     expect(lines.every((line) => visibleWidth(line) <= 140)).toBe(true);
   });

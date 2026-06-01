@@ -62,6 +62,46 @@ describe("WorkflowAgent worktree isolation", () => {
     expect(persisted.usage.toolUses).toBe(2);
   });
 
+  it("decodes Pi JSON stdout across split UTF-8 chunks", async () => {
+    const repo = path.join(tmp, "repo-split-utf8");
+    const fakePi = path.join(tmp, "fake-pi-split-utf8.mjs");
+    const transcriptDir = path.join(tmp, "transcripts-split-utf8");
+    const resultText = "chunked 🙂 utf8";
+
+    await fs.promises.mkdir(repo, { recursive: true });
+    await fs.promises.writeFile(
+      fakePi,
+      [
+        `const resultText = ${JSON.stringify(resultText)};`,
+        "const line = JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: resultText, usage: { input: 1, output: 1 } } }) + '\\n';",
+        "const bytes = Buffer.from(line, 'utf8');",
+        "const marker = Buffer.from('🙂', 'utf8');",
+        "const split = bytes.indexOf(marker) + 1;",
+        "process.stdout.write(bytes.subarray(0, split));",
+        "await new Promise((resolve) => setTimeout(resolve, 30));",
+        "process.stdout.write(bytes.subarray(split));",
+      ].join("\n"),
+      "utf8",
+    );
+    process.argv[1] = fakePi;
+
+    const result = await new WorkflowAgent().run({
+      callId: "0001",
+      runId: "wr_test",
+      cwd: repo,
+      label: "split utf8",
+      prompt: "emit split utf8",
+      options: { isolation: "shared" },
+      transcriptDir,
+      signal: new AbortController().signal,
+      stallMs: 10_000,
+      stallRetries: 0,
+    });
+
+    expect(result.result).toBe(resultText);
+    expect(result.usage).toEqual({ agentCount: 1, subagentTokens: 2, toolUses: 0, estimated: false });
+  });
+
   it("passes inherited non-workflow tools to subagents", async () => {
     const argv = await runFakeAgentAndReadArgv("tools", ["workflow", "read", "bash", "read", "bad,tool", " "]);
 
@@ -212,12 +252,15 @@ describe("WorkflowAgent worktree isolation", () => {
     await fs.promises.mkdir(repo, { recursive: true });
     await fs.promises.writeFile(
       fakePi,
-      `console.log(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'x'.repeat(${WORKFLOW_RESOURCE_LIMITS.subagentResultTextBytes + 1}), usage: { input: 1, output: 1 } } }));`,
+      [
+        `process.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'x'.repeat(${WORKFLOW_RESOURCE_LIMITS.subagentResultTextBytes + 1}), usage: { input: 1, output: 1 } } }) + '\\n');`,
+        "await new Promise((resolve) => setTimeout(resolve, 5_000));",
+      ].join("\n"),
       "utf8",
     );
     process.argv[1] = fakePi;
 
-    await expect(new WorkflowAgent().run({
+    const run = new WorkflowAgent().run({
       callId: "0001",
       runId: "wr_test",
       cwd: repo,
@@ -228,7 +271,10 @@ describe("WorkflowAgent worktree isolation", () => {
       signal: new AbortController().signal,
       stallMs: 10_000,
       stallRetries: 0,
-    })).rejects.toThrow(/final result exceeded/);
+    });
+
+    await expect(rejectionMessageWithin(run, 1000)).resolves.toMatch(/final result exceeded/);
+    expect(await exists(path.join(transcriptDir, "0001", "result.json"))).toBe(false);
   });
 
   it("runs the subagent in a disposable git worktree and captures edits as a patch", async () => {
@@ -277,6 +323,60 @@ describe("WorkflowAgent worktree isolation", () => {
     const patch = await fs.promises.readFile(result.workspace!.patchPath!, "utf8");
     expect(patch).toContain("agent-output.txt");
     expect(patch).toContain("from isolated agent");
+  });
+
+  it("does not mask a successful worktree result when cleanup fails", async () => {
+    const repo = path.join(tmp, "repo-cleanup-failure");
+    const fakePi = path.join(tmp, "fake-pi-cleanup-failure.mjs");
+    const transcriptDir = path.join(tmp, "transcripts-cleanup-failure");
+    const worktreeDir = path.join(transcriptDir, "0001", "worktree");
+
+    await fs.promises.mkdir(repo, { recursive: true });
+    await exec("git", ["-C", repo, "init"]);
+    await exec("git", ["-C", repo, "config", "user.name", "test"]);
+    await exec("git", ["-C", repo, "config", "user.email", "test@example.invalid"]);
+    await fs.promises.writeFile(path.join(repo, "tracked.txt"), "base\n", "utf8");
+    await exec("git", ["-C", repo, "add", "tracked.txt"]);
+    await exec("git", ["-C", repo, "-c", "commit.gpgsign=false", "commit", "-m", "base"]);
+
+    await fs.promises.writeFile(
+      fakePi,
+      "console.log(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'done', usage: { input: 1, output: 1 } } }));",
+      "utf8",
+    );
+    process.argv[1] = fakePi;
+
+    const realRm = fs.promises.rm;
+    let worktreeRmCalls = 0;
+    fs.promises.rm = (async (target: fs.PathLike, options?: fs.RmOptions) => {
+      if (path.resolve(String(target)) === path.resolve(worktreeDir) && ++worktreeRmCalls > 1) throw new Error("injected cleanup failure");
+      return await realRm.call(fs.promises, target, options);
+    }) as typeof fs.promises.rm;
+
+    let result;
+    try {
+      result = await new WorkflowAgent().run({
+        callId: "0001",
+        runId: "wr_test",
+        cwd: repo,
+        label: "cleanup failure",
+        prompt: "succeed then fail cleanup",
+        options: { isolation: "worktree" },
+        transcriptDir,
+        signal: new AbortController().signal,
+        stallMs: 10_000,
+        stallRetries: 0,
+      });
+    } finally {
+      fs.promises.rm = realRm;
+    }
+
+    expect(result.result).toBe("done");
+    expect(result.workspace?.error).toMatch(/worktree cleanup failed: injected cleanup failure/);
+    const persisted = JSON.parse(await fs.promises.readFile(result.resultPath, "utf8"));
+    expect(persisted.workspace.error).toMatch(/worktree cleanup failed: injected cleanup failure/);
+    const transcript = JSON.parse(await fs.promises.readFile(result.transcriptPath, "utf8"));
+    expect(transcript.workspace.error).toMatch(/worktree cleanup failed: injected cleanup failure/);
   });
 
   it("captures ignored worktree outputs as bounded artifacts", async () => {
@@ -373,5 +473,25 @@ async function exists(filePath: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function rejectionMessageWithin(promise: Promise<unknown>, ms: number): Promise<string> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise.then(
+        () => {
+          throw new Error("expected promise to reject");
+        },
+        (err) => String((err as Error)?.message ?? err),
+      ),
+      new Promise<string>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`promise did not reject within ${ms}ms`)), ms);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }

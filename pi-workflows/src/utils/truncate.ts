@@ -44,6 +44,8 @@ export interface SanitizeRenderedLineOptions {
   tabWidth?: number;
 }
 
+const SGR_RESET = "\u001b[0m";
+
 export function sanitizeRenderedLine(value: unknown, maxBytes = 16_384, options: SanitizeRenderedLineOptions = {}): string {
   const tabWidth = clamp(Math.trunc(options.tabWidth ?? 4), 1, 16);
   const text = options.preserveAnsi ? stripAnsiExceptSgr(String(value ?? "")) : stripAnsiSequences(String(value ?? ""));
@@ -54,7 +56,7 @@ export function sanitizeRenderedLine(value: unknown, maxBytes = 16_384, options:
     .replace(/\t/g, " ".repeat(tabWidth))
     .replace(/\n+/g, " ↵ ");
   const truncated = truncateBytes(sanitized, maxBytes);
-  return options.preserveAnsi ? stripAnsiExceptSgr(truncated) : truncated;
+  return options.preserveAnsi ? appendSgrResetIfOpen(stripAnsiExceptSgr(truncated), maxBytes) : truncated;
 }
 
 export class BoundedTextAccumulator {
@@ -107,10 +109,10 @@ export function visibleWidth(text: string): number {
 
 export function truncateToWidth(text: string, width: number, suffix = "…"): string {
   if (width <= 0) return "";
-  if (visibleWidth(text) <= width) return text;
+  if (visibleWidth(text) <= width) return appendSgrResetIfOpen(text);
   const suffixWidth = visibleWidth(suffix);
-  if (width <= suffixWidth) return takeVisible(suffix, width);
-  return takeVisible(text, width - suffixWidth) + suffix;
+  if (width <= suffixWidth) return appendSgrResetIfOpen(takeVisible(suffix, width));
+  return appendSgrResetIfOpen(takeVisible(text, width - suffixWidth) + suffix);
 }
 
 export function padToWidth(text: string, width: number): string {
@@ -237,6 +239,55 @@ function stripAnsiExceptSgr(text: string): string {
     i += char.length;
   }
   return out;
+}
+
+function appendSgrResetIfOpen(text: string, maxBytes?: number): string {
+  if (!hasOpenSgr(text)) return text;
+  if (maxBytes === undefined || byteLength(text + SGR_RESET) <= maxBytes) return text + SGR_RESET;
+
+  const room = maxBytes - byteLength(SGR_RESET);
+  if (room <= 0) return truncateBytes(stripAnsi(text), maxBytes, "");
+
+  const clipped = stripAnsiExceptSgr(truncateBytes(text, room, ""));
+  if (!hasOpenSgr(clipped)) return clipped;
+  return clipped + SGR_RESET;
+}
+
+function hasOpenSgr(text: string): boolean {
+  let active = false;
+  for (let i = 0; i < text.length; ) {
+    if (text.charCodeAt(i) === 0x1b) {
+      const end = readAnsiSequenceEnd(text, i) ?? i + 1;
+      const sequence = text.slice(i, end);
+      if (isSafeSgrSequence(sequence)) active = applySgrSequence(active, sequence);
+      i = end;
+      continue;
+    }
+
+    const codePoint = text.codePointAt(i);
+    if (codePoint === undefined) break;
+    i += String.fromCodePoint(codePoint).length;
+  }
+  return active;
+}
+
+function applySgrSequence(active: boolean, sequence: string): boolean {
+  const body = sequence.slice(2, -1);
+  if (body === "") return false;
+
+  let next = active;
+  for (const token of body.split(/[;:]/)) {
+    if (!token) continue;
+    const code = Number(token);
+    if (!Number.isInteger(code)) continue;
+    if (code === 0) next = false;
+    else if (!isSgrResetOnlyCode(code)) next = true;
+  }
+  return next;
+}
+
+function isSgrResetOnlyCode(code: number): boolean {
+  return code === 22 || code === 23 || code === 24 || code === 25 || code === 27 || code === 28 || code === 29 || code === 39 || code === 49 || code === 59;
 }
 
 function isSafeSgrSequence(sequence: string): boolean {
