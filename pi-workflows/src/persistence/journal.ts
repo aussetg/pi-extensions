@@ -27,19 +27,30 @@ export class JsonlJournal implements JournalWriter {
   async readAll(): Promise<WorkflowJournalEvent[]> {
     let text = "";
     try {
-      text = await fs.promises.readFile(this.filePath, "utf8");
+      text = await readBoundedTextFile(this.filePath, WORKFLOW_RESOURCE_LIMITS.journalBytes);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw err;
     }
     const events: WorkflowJournalEvent[] = [];
-    for (const [index, line] of text.split("\n").entries()) {
-      if (!line.trim()) continue;
-      try {
-        events.push(JSON.parse(line) as WorkflowJournalEvent);
-      } catch (err) {
-        throw new Error(`Invalid journal JSON on line ${index + 1}: ${(err as Error).message}`);
+    let lineStart = 0;
+    let lineNumber = 1;
+    while (lineStart <= text.length) {
+      const newline = text.indexOf("\n", lineStart);
+      const lineEnd = newline === -1 ? text.length : newline;
+      const line = text.slice(lineStart, lineEnd);
+      if (byteLength(line) > WORKFLOW_RESOURCE_LIMITS.journalEventBytes) throw new Error(`Workflow journal event exceeds ${WORKFLOW_RESOURCE_LIMITS.journalEventBytes} bytes on line ${lineNumber}`);
+      if (line.trim()) {
+        if (events.length >= WORKFLOW_RESOURCE_LIMITS.journalEvents) throw new Error(`Workflow journal event count exceeds ${WORKFLOW_RESOURCE_LIMITS.journalEvents}`);
+        try {
+          events.push(JSON.parse(line) as WorkflowJournalEvent);
+        } catch (err) {
+          throw new Error(`Invalid journal JSON on line ${lineNumber}: ${(err as Error).message}`);
+        }
       }
+      if (newline === -1) break;
+      lineStart = newline + 1;
+      lineNumber++;
     }
     return events;
   }

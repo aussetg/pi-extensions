@@ -4,8 +4,8 @@ import type { AgentOptions, RunRecord, WorkflowCallProgress, WorkflowUsage } fro
 import { DEFAULT_LIMITS, WORKFLOW_ISOLATION_POLICY, WORKFLOW_RESOURCE_LIMITS } from "../constants.js";
 import { WorkflowAgent } from "../agents/workflow-agent.js";
 import { JsonlJournal, type ResumeIndex } from "../persistence/journal.js";
-import { ensureDir, relativeToRun } from "../persistence/paths.js";
-import { normalizeSafeRelativePath, readBoundedTextFile, safeResolveExistingDir, safeResolveExistingFile } from "../persistence/safe-paths.js";
+import { relativeToRun } from "../persistence/paths.js";
+import { copyOpenFile, copySafeExistingFile, normalizeSafeRelativePath, readBoundedTextFile, readSafeTextFile, safeResolveExistingDir, withSafeExistingFile } from "../persistence/safe-paths.js";
 import { sha256, stableHash } from "../utils/hashes.js";
 import { nowIso } from "../utils/ids.js";
 import { byteLength, truncateBytes } from "../utils/truncate.js";
@@ -68,27 +68,32 @@ export class WorkflowScheduler {
   private logSuppressed = false;
 
   constructor(private readonly deps: SchedulerDeps) {
-    this.limiter = new AsyncLimiter(DEFAULT_LIMITS.agentConcurrency, deps.control.signal);
+    this.limiter = new AsyncLimiter(DEFAULT_LIMITS.agentConcurrency);
     this.agentQuota = deps.agentQuota ?? new WorkflowAgentQuota(deps.maxAgents);
   }
 
-  async agentCall(prompt: unknown, opts: unknown = {}): Promise<unknown> {
+  async agentCall(prompt: unknown, opts: unknown = {}, signal?: AbortSignal): Promise<unknown> {
     if (typeof prompt !== "string" || prompt.trim() === "") throw new Error("agent(prompt, opts?) requires a non-empty string prompt");
     const normalizedOpts = normalizeAgentOptions(opts);
+    const operationSignal = linkAbortSignals(this.deps.control.signal, signal);
     this.deps.control.throwIfAborted();
-    await this.deps.control.waitIfPaused();
+    throwIfOperationAborted(operationSignal.signal);
+    await this.deps.control.waitIfPaused(operationSignal.signal);
     this.agentQuota.assertCanStart();
-    const budgetReservation = await this.deps.budget.reserveExclusive(this.deps.control.signal);
+    let budgetReservation: Awaited<ReturnType<WorkflowBudget["reserveExclusive"]>> | undefined;
     try {
-      return await this.runAgentCall(prompt, normalizedOpts);
+      budgetReservation = await this.deps.budget.reserveExclusive(operationSignal.signal);
+      return await this.runAgentCall(prompt, normalizedOpts, operationSignal.signal);
     } finally {
-      budgetReservation.release();
+      budgetReservation?.release();
+      operationSignal.cleanup();
     }
   }
 
-  private async runAgentCall(prompt: string, opts: AgentOptions): Promise<unknown> {
+  private async runAgentCall(prompt: string, opts: AgentOptions, signal?: AbortSignal): Promise<unknown> {
     this.deps.control.throwIfAborted();
-    await this.deps.control.waitIfPaused();
+    throwIfOperationAborted(signal);
+    await this.deps.control.waitIfPaused(signal);
     this.agentQuota.claim();
 
     const effectiveOpts = withoutUndefinedProperties({
@@ -122,7 +127,7 @@ export class WorkflowScheduler {
       optsHash: stableHash(effectiveOpts),
     });
 
-    const agentController = this.deps.control.registerAgent(callId);
+    const agentController = this.deps.control.registerAgent(callId, signal);
     const started = Date.now();
     try {
       call.status = "running";
@@ -142,7 +147,7 @@ export class WorkflowScheduler {
           stallMs: effectiveOpts.stallMs ?? DEFAULT_LIMITS.stallMs,
           stallRetries: DEFAULT_LIMITS.stallRetries,
         });
-      });
+      }, agentController.signal);
       const durationMs = Date.now() - started;
       const usage: WorkflowUsage = { ...result.usage, durationMs };
       call.status = "done";
@@ -396,18 +401,17 @@ const REPLAY_ARTIFACT_NAMES = {
 
 async function copyReplayFileArtifact(sourceValue: unknown, sourceCallDir: string, targetPath: string, allowedName: RegExp, maxBytes: number, errors: string[], label: string): Promise<string | undefined> {
   if (!hasArtifactPath(sourceValue)) return undefined;
-  const sourceName = replayArtifactBasename(sourceValue, allowedName);
+  const sourceName = replayArtifactBasename(sourceValue, sourceCallDir, allowedName);
   if (!sourceName) {
     errors.push(`could not materialize replayed worktree ${label} artifact: unsafe artifact path`);
     return undefined;
   }
-  const source = await safeResolveExistingFile(sourceCallDir, sourceName, { maxBytes });
-  if (!source) {
-    errors.push(`could not materialize replayed worktree ${label} artifact: missing, unsafe, or too large`);
-    return undefined;
-  }
   try {
-    await fs.promises.copyFile(source.path, targetPath);
+    const copied = await copySafeExistingFile(sourceCallDir, sourceName, targetPath, { maxBytes });
+    if (!copied) {
+      errors.push(`could not materialize replayed worktree ${label} artifact: missing, unsafe, or too large`);
+      return undefined;
+    }
     return targetPath;
   } catch (err) {
     errors.push(`could not materialize replayed worktree ${label} artifact: ${(err as Error).message}`);
@@ -417,21 +421,20 @@ async function copyReplayFileArtifact(sourceValue: unknown, sourceCallDir: strin
 
 async function materializeReplayIgnoredArtifacts(sourceWorkspace: Record<string, unknown>, sourceCallDir: string, targetCallDir: string, errors: string[]): Promise<{ ignoredManifestPath?: string; ignoredFilesDir?: string }> {
   if (!hasArtifactPath(sourceWorkspace.ignoredManifestPath)) return {};
-  const manifestName = replayArtifactBasename(sourceWorkspace.ignoredManifestPath, REPLAY_ARTIFACT_NAMES.ignoredManifest);
+  const manifestName = replayArtifactBasename(sourceWorkspace.ignoredManifestPath, sourceCallDir, REPLAY_ARTIFACT_NAMES.ignoredManifest);
   if (!manifestName) {
     errors.push("could not materialize replayed worktree ignored manifest artifact: unsafe artifact path");
     return {};
   }
 
-  const sourceManifest = await safeResolveExistingFile(sourceCallDir, manifestName, { maxBytes: WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredListBytes });
-  if (!sourceManifest) {
-    errors.push("could not materialize replayed worktree ignored manifest artifact: missing, unsafe, or too large");
-    return {};
-  }
-
   let sourceManifestValue: Record<string, unknown>;
   try {
-    sourceManifestValue = JSON.parse(await readBoundedTextFile(sourceManifest.path, WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredListBytes)) as Record<string, unknown>;
+    const sourceManifestText = await readSafeTextFile(sourceCallDir, manifestName, WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredListBytes);
+    if (sourceManifestText === undefined) {
+      errors.push("could not materialize replayed worktree ignored manifest artifact: missing, unsafe, or too large");
+      return {};
+    }
+    sourceManifestValue = JSON.parse(sourceManifestText) as Record<string, unknown>;
   } catch (err) {
     errors.push(`could not materialize replayed worktree ignored manifest artifact: ${(err as Error).message}`);
     return {};
@@ -442,7 +445,7 @@ async function materializeReplayIgnoredArtifacts(sourceWorkspace: Record<string,
     return {};
   }
 
-  const sourceFilesName = replayArtifactBasename(sourceWorkspace.ignoredFilesDir, REPLAY_ARTIFACT_NAMES.ignoredFilesDir);
+  const sourceFilesName = replayArtifactBasename(sourceWorkspace.ignoredFilesDir, sourceCallDir, REPLAY_ARTIFACT_NAMES.ignoredFilesDir);
   const sourceFilesDir = sourceFilesName ? await safeResolveExistingDir(sourceCallDir, sourceFilesName) : undefined;
   const targetManifestPath = path.join(targetCallDir, "worktree-ignored.json");
   const targetFilesDir = path.join(targetCallDir, "worktree-ignored");
@@ -504,27 +507,29 @@ async function materializeReplayIgnoredArtifacts(sourceWorkspace: Record<string,
       continue;
     }
 
-    const sourceFile = await safeResolveExistingFile(sourceFilesDir.path, artifactPath, { maxBytes: WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredFileBytes });
-    if (!sourceFile) {
-      omitReplay({ path: relativePath, reason: "replay ignored artifact missing, unsafe, or too large", bytes: declaredBytes });
-      continue;
-    }
-    if (totalBytes + sourceFile.size > WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredTotalBytes) {
-      omitReplay({ path: relativePath, reason: "replay ignored artifact total size limit", bytes: sourceFile.size });
-      continue;
-    }
-
     const targetFile = path.join(targetFilesDir, ...artifactPath.split("/"));
     try {
-      await ensureDir(path.dirname(targetFile));
-      await fs.promises.copyFile(sourceFile.path, targetFile);
+      const remainingBytes = WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredTotalBytes - totalBytes;
+      const copied = await withSafeExistingFile(sourceFilesDir.path, artifactPath, { maxBytes: WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredFileBytes }, async (sourceFile) => {
+        if (sourceFile.size > remainingBytes) return { omitted: true as const, size: sourceFile.size };
+        const copiedFile = await copyOpenFile(sourceFile, targetFile, Math.min(WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredFileBytes, remainingBytes));
+        return { omitted: false as const, size: copiedFile.size };
+      });
+      if (!copied) {
+        omitReplay({ path: relativePath, reason: "replay ignored artifact missing, unsafe, or too large", bytes: declaredBytes });
+        continue;
+      }
+      if (copied.omitted) {
+        omitReplay({ path: relativePath, reason: "replay ignored artifact total size limit", bytes: copied.size });
+        continue;
+      }
+      totalBytes += copied.size;
+      copiedFiles++;
+      outputFiles.push({ path: relativePath, type: "file", bytes: copied.size, artifactPath });
     } catch (err) {
-      omitReplay({ path: relativePath, reason: `replay ignored artifact copy failed: ${(err as Error).message}`, bytes: sourceFile.size });
+      omitReplay({ path: relativePath, reason: `replay ignored artifact copy failed: ${(err as Error).message}`, bytes: declaredBytes });
       continue;
     }
-    totalBytes += sourceFile.size;
-    copiedFiles++;
-    outputFiles.push({ path: relativePath, type: "file", bytes: sourceFile.size, artifactPath });
   }
 
   if (replayOmissions > 0) errors.push(`could not materialize ${replayOmissions} replayed worktree ignored artifact(s)`);
@@ -556,11 +561,18 @@ function hasArtifactPath(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
 }
 
-function replayArtifactBasename(value: unknown, allowedName: RegExp): string | undefined {
+function replayArtifactBasename(value: unknown, sourceCallDir: string, allowedName: RegExp): string | undefined {
   if (!hasArtifactPath(value) || value.includes("\0")) return undefined;
-  const withoutTrailingSlash = value.trim().replace(/[\\/]+$/, "");
-  const basename = withoutTrailingSlash.split(/[\\/]/).pop() ?? "";
-  return allowedName.test(basename) ? basename : undefined;
+  if (value !== value.trim() || value.includes("\\")) return undefined;
+  if (path.isAbsolute(value)) {
+    const relative = path.relative(sourceCallDir, path.resolve(value)).split(path.sep).join("/");
+    const normalized = normalizeSafeRelativePath(relative);
+    if (!normalized || normalized.includes("/")) return undefined;
+    return allowedName.test(normalized) ? normalized : undefined;
+  }
+  const normalized = normalizeSafeRelativePath(value);
+  if (!normalized || normalized !== value || normalized.includes("/")) return undefined;
+  return allowedName.test(normalized) ? normalized : undefined;
 }
 
 function isIgnoredManifest(value: Record<string, unknown>): value is Record<string, unknown> & { files: unknown[] } {
@@ -574,34 +586,132 @@ function nonNegativeInteger(value: unknown): number | undefined {
 
 class AsyncLimiter {
   private active = 0;
-  private readonly queue: Array<() => void> = [];
+  private readonly queue: AsyncLimiterWaiter[] = [];
 
-  constructor(private readonly limit: number, private readonly signal: AbortSignal) {}
+  constructor(private readonly limit: number) {}
 
-  async run<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.signal.aborted) throw new WorkflowAbortError();
-    if (this.active >= this.limit) {
-      await new Promise<void>((resolve, reject) => {
-        const wake = () => {
-          cleanup();
-          resolve();
-        };
-        const abort = () => {
-          cleanup();
-          reject(new WorkflowAbortError());
-        };
-        const cleanup = () => this.signal.removeEventListener("abort", abort);
-        this.signal.addEventListener("abort", abort, { once: true });
-        this.queue.push(wake);
-      });
-    }
-    if (this.signal.aborted) throw new WorkflowAbortError();
-    this.active++;
+  async run<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const reservation = await this.acquire(signal);
     try {
+      throwIfLimiterAborted(signal);
       return await fn();
     } finally {
-      this.active--;
-      this.queue.shift()?.();
+      reservation.release();
     }
   }
+
+  private async acquire(signal?: AbortSignal): Promise<AsyncLimiterReservation> {
+    throwIfLimiterAborted(signal);
+    if (this.active < this.limit) {
+      this.active++;
+      return this.reservation();
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const waiter: AsyncLimiterWaiter = {
+        settled: false,
+        wake: () => undefined,
+        abort: () => undefined,
+      };
+      const cleanup = () => {
+        const index = this.queue.indexOf(waiter);
+        if (index !== -1) this.queue.splice(index, 1);
+        signal?.removeEventListener("abort", waiter.abort);
+      };
+      waiter.wake = () => {
+        if (waiter.settled) return;
+        waiter.settled = true;
+        cleanup();
+        this.active++;
+        resolve();
+      };
+      waiter.abort = () => {
+        if (waiter.settled) return;
+        waiter.settled = true;
+        cleanup();
+        reject(limiterAbortError(signal));
+        this.wakeNext();
+      };
+      signal?.addEventListener("abort", waiter.abort, { once: true });
+      this.queue.push(waiter);
+      if (signal?.aborted) waiter.abort();
+    });
+
+    return this.reservation();
+  }
+
+  private reservation(): AsyncLimiterReservation {
+    let released = false;
+    return {
+      release: () => {
+        if (released) return;
+        released = true;
+        this.active = Math.max(0, this.active - 1);
+        this.wakeNext();
+      },
+    };
+  }
+
+  private wakeNext(): void {
+    while (this.active < this.limit) {
+      const waiter = this.queue.shift();
+      if (!waiter) return;
+      if (waiter.settled) continue;
+      waiter.wake();
+      return;
+    }
+  }
+}
+
+interface AsyncLimiterWaiter {
+  settled: boolean;
+  wake(): void;
+  abort(): void;
+}
+
+interface AsyncLimiterReservation {
+  release(): void;
+}
+
+interface LinkedAbortSignal {
+  signal: AbortSignal;
+  cleanup(): void;
+}
+
+function linkAbortSignals(...signals: Array<AbortSignal | undefined>): LinkedAbortSignal {
+  const active = signals.filter((signal): signal is AbortSignal => Boolean(signal));
+  if (active.length === 0) return { signal: new AbortController().signal, cleanup: () => undefined };
+  if (active.length === 1) return { signal: active[0], cleanup: () => undefined };
+  const controller = new AbortController();
+  const listeners: Array<() => void> = [];
+  const abortFrom = (source: AbortSignal) => {
+    if (!controller.signal.aborted) controller.abort(source.reason instanceof Error ? source.reason : new WorkflowAbortError());
+  };
+  for (const signal of active) {
+    if (signal.aborted) {
+      abortFrom(signal);
+      continue;
+    }
+    const listener = () => abortFrom(signal);
+    signal.addEventListener("abort", listener, { once: true });
+    listeners.push(() => signal.removeEventListener("abort", listener));
+  }
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      for (const remove of listeners.splice(0)) remove();
+    },
+  };
+}
+
+function throwIfOperationAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new WorkflowAbortError();
+}
+
+function throwIfLimiterAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw limiterAbortError(signal);
+}
+
+function limiterAbortError(signal?: AbortSignal): Error {
+  return signal?.reason instanceof Error ? signal.reason : new WorkflowAbortError();
 }

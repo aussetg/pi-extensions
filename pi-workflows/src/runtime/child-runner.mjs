@@ -7,9 +7,11 @@ const START_GLOBAL = "__piWorkflowStart";
 const FANOUT_AGENT_DEFAULT_ISOLATION = "worktree";
 
 const waiters = new Map();
+const fanoutGroups = new Map();
 const isolationContext = new AsyncLocalStorage();
 
 let nextRpcId = 1;
+let nextFanoutGroupId = 1;
 let aborted = false;
 let heartbeat;
 let budgetTotal = null;
@@ -118,6 +120,7 @@ async function runWorkflow(source, startGlobals) {
 
   await runtime.flush();
   await drainNonCritical();
+  runtime.assertNoUnhandledCriticalOperations();
 
   const critical = [...waiters.values()].filter((waiter) => waiter.critical);
   if (critical.length > 0) {
@@ -156,8 +159,26 @@ function createBridge(timers, timerErrors) {
       return isolationContext.getStore()?.defaultIsolation;
     },
 
-    withFanoutIsolation(fn) {
-      return isolationContext.run({ defaultIsolation: FANOUT_AGENT_DEFAULT_ISOLATION }, fn);
+    createFanoutGroup(kind) {
+      return createFanoutGroup(String(kind ?? "fanout"));
+    },
+
+    cancelFanoutGroup(groupId, reason) {
+      return cancelFanoutGroup(groupId, reason);
+    },
+
+    closeFanoutGroup(groupId) {
+      closeFanoutGroup(groupId);
+    },
+
+    withFanoutIsolation(groupId, fn) {
+      const current = isolationContext.getStore() ?? {};
+      const fanoutGroupIds = Number.isSafeInteger(groupId) ? [...(Array.isArray(current.fanoutGroupIds) ? current.fanoutGroupIds : []), groupId] : Array.isArray(current.fanoutGroupIds) ? current.fanoutGroupIds : [];
+      return isolationContext.run({ ...current, defaultIsolation: FANOUT_AGENT_DEFAULT_ISOLATION, fanoutGroupIds }, fn);
+    },
+
+    withoutFanoutIsolation(fn) {
+      return isolationContext.run({}, fn);
     },
 
     setTimer(fn, ms, rest) {
@@ -196,6 +217,8 @@ const BOOTSTRAP_SOURCE = String.raw`
   let budgetSpent = typeof start.budgetSpent === "number" && Number.isFinite(start.budgetSpent) ? start.budgetSpent : 0;
   const budgetTotal = typeof start.budgetTotal === "number" ? start.budgetTotal : null;
   const pipelineLimit = Number.isInteger(start.pipelineLimit) && start.pipelineLimit > 0 ? start.pipelineLimit : 50;
+  const criticalOperations = new Map();
+  let nextCriticalOperationId = 1;
 
   function vmError(name, message) {
     const err = new Error(String(message ?? name ?? "Workflow error"));
@@ -240,17 +263,73 @@ const BOOTSTRAP_SOURCE = String.raw`
     return bridge.currentIsolation();
   }
 
-  async function agent(prompt, opts = {}) {
+  function trackCriticalOperation(method, promise) {
+    const operation = { id: nextCriticalOperationId++, method, consumed: false, settled: false };
+    criticalOperations.set(operation.id, operation);
+    promise.then(
+      () => {
+        operation.settled = true;
+      },
+      () => {
+        operation.settled = true;
+      },
+    );
+    const markConsumed = () => {
+      operation.consumed = true;
+    };
+    const handle = Object.create(null);
+    Object.defineProperties(handle, {
+      then: {
+        value: (onFulfilled, onRejected) => {
+          markConsumed();
+          return promise.then(onFulfilled, onRejected);
+        },
+        enumerable: false,
+        writable: false,
+        configurable: false,
+      },
+      catch: {
+        value: (onRejected) => {
+          markConsumed();
+          return promise.catch(onRejected);
+        },
+        enumerable: false,
+        writable: false,
+        configurable: false,
+      },
+      finally: {
+        value: (onFinally) => {
+          markConsumed();
+          return promise.finally(onFinally);
+        },
+        enumerable: false,
+        writable: false,
+        configurable: false,
+      },
+    });
+    return Object.freeze(handle);
+  }
+
+  function assertNoUnhandledCriticalOperations() {
+    const unhandled = [...criticalOperations.values()].filter((operation) => !operation.consumed);
+    if (unhandled.length === 0) return;
+    const labels = unhandled.slice(0, 5).map((operation) => operation.method).join(", ");
+    const suffix = unhandled.length > 5 ? ", ..." : "";
+    throw new Error("Workflow returned with " + unhandled.length + " unawaited agent/workflow operation(s): " + labels + suffix + ". Await agent() and workflow() calls before returning.");
+  }
+
+  function agent(prompt, opts = {}) {
     if (!isRecord(opts)) throw new Error("agent(prompt, opts?) options must be an object");
     const rawOpts = toStrictJsonValue(opts, "agent opts");
     const contextualIsolation = defaultIsolation();
     const effectiveOpts = rawOpts.isolation === undefined && contextualIsolation ? { ...rawOpts, isolation: contextualIsolation } : rawOpts;
-    const payload = await hostRpc("agent", { prompt, opts: effectiveOpts }, true);
-    if (payload && typeof payload === "object" && payload.__piWorkflowRpc === "agentResult") {
-      if (typeof payload.budgetSpent === "number" && Number.isFinite(payload.budgetSpent)) budgetSpent = payload.budgetSpent;
-      return payload.result;
-    }
-    return payload;
+    return trackCriticalOperation("agent", hostRpc("agent", { prompt, opts: effectiveOpts }, true).then((payload) => {
+      if (payload && typeof payload === "object" && payload.__piWorkflowRpc === "agentResult") {
+        if (typeof payload.budgetSpent === "number" && Number.isFinite(payload.budgetSpent)) budgetSpent = payload.budgetSpent;
+        return payload.result;
+      }
+      return payload;
+    }));
   }
 
   function toStrictJsonValue(value, label, seen = new Set()) {
@@ -313,17 +392,31 @@ const BOOTSTRAP_SOURCE = String.raw`
     if (!Array.isArray(thunks) || thunks.some((thunk) => typeof thunk !== "function")) {
       throw new Error("parallel() expects an array of thunk functions, e.g. items.map(x => () => agent(...))");
     }
-    return await Promise.all(
-      thunks.map(async (thunk, index) => {
+    const groupId = bridge.createFanoutGroup("parallel");
+    let canceled = false;
+    const cancelGroup = (err) => {
+      if (canceled) return;
+      canceled = true;
+      bridge.cancelFanoutGroup(groupId, err);
+    };
+    const branches = thunks.map(async (thunk, index) => {
         try {
-          return await bridge.withFanoutIsolation(() => thunk());
+          return await bridge.withFanoutIsolation(groupId, () => thunk());
         } catch (err) {
+          cancelGroup(err);
           if (isBudgetOrAbortError(err)) throw err;
-          await logFanoutFailure("parallel branch", index, err);
+          void logFanoutFailure("parallel branch", index, err);
           throw fanoutError("parallel branch", index, err);
         }
-      }),
-    );
+      });
+    try {
+      const results = await Promise.all(branches);
+      bridge.closeFanoutGroup(groupId);
+      return results;
+    } catch (err) {
+      void Promise.allSettled(branches).then(() => bridge.closeFanoutGroup(groupId));
+      throw err;
+    }
   }
 
   async function pipeline(items, ...stages) {
@@ -332,26 +425,40 @@ const BOOTSTRAP_SOURCE = String.raw`
     const results = new Array(items.length);
     let next = 0;
     let failed = false;
+    let canceled = false;
+    const groupId = bridge.createFanoutGroup("pipeline");
+    const cancelGroup = (err) => {
+      if (canceled) return;
+      canceled = true;
+      bridge.cancelFanoutGroup(groupId, err);
+    };
 
     async function worker() {
       while (!failed && next < items.length) {
         const index = next++;
         let current = items[index];
         try {
-          for (const stage of stages) current = await bridge.withFanoutIsolation(() => stage(current, index));
+          for (const stage of stages) current = await bridge.withFanoutIsolation(groupId, () => stage(current, index));
           results[index] = current;
         } catch (err) {
           failed = true;
+          cancelGroup(err);
           if (isBudgetOrAbortError(err)) throw err;
-          await logFanoutFailure("pipeline item", index, err);
+          void logFanoutFailure("pipeline item", index, err);
           throw fanoutError("pipeline item", index, err);
         }
       }
     }
 
     const workers = Array.from({ length: Math.min(pipelineLimit, items.length) }, () => worker());
-    await Promise.all(workers);
-    return results;
+    try {
+      await Promise.all(workers);
+      bridge.closeFanoutGroup(groupId);
+      return results;
+    } catch (err) {
+      void Promise.allSettled(workers).then(() => bridge.closeFanoutGroup(groupId));
+      throw err;
+    }
   }
 
   function phase(title) {
@@ -363,13 +470,13 @@ const BOOTSTRAP_SOURCE = String.raw`
   }
 
   function workflow(nameOrRef, args) {
-    return hostRpc("workflow", { nameOrRef, args }, true).then((payload) => {
+    return trackCriticalOperation("workflow", hostRpc("workflow", { nameOrRef, args }, true).then((payload) => {
       if (payload && typeof payload === "object" && payload.__piWorkflowRpc === "workflowResult") {
         if (typeof payload.budgetSpent === "number" && Number.isFinite(payload.budgetSpent)) budgetSpent = payload.budgetSpent;
         return payload.result;
       }
       return payload;
-    });
+    }));
   }
 
   function createUiGlobal() {
@@ -542,7 +649,7 @@ const BOOTSTRAP_SOURCE = String.raw`
 
   async function logFanoutFailure(kind, index, err) {
     try {
-      await hostRpc("log", { message: kind + " " + index + " failed: " + errorMessage(err) }, false);
+      await bridge.withoutFanoutIsolation(() => hostRpc("log", { message: kind + " " + index + " failed: " + errorMessage(err) }, false));
     } catch {
       // Preserve the branch/item failure as the primary error.
     }
@@ -684,12 +791,16 @@ const BOOTSTRAP_SOURCE = String.raw`
 
   return Object.freeze({
     flush: () => ui.__flush(),
+    assertNoUnhandledCriticalOperations,
   });
 })()
 `;
 
 function rpc(method, params, { critical }) {
   if (aborted) return Promise.reject(namedError("WorkflowAbortError", "Workflow aborted"));
+  const fanoutGroupIds = currentFanoutGroupIds();
+  const canceledGroup = firstCanceledFanoutGroup(fanoutGroupIds);
+  if (canceledGroup) return Promise.reject(canceledGroup.error);
   const id = nextRpcId++;
   let resolve;
   let reject;
@@ -697,13 +808,48 @@ function rpc(method, params, { critical }) {
     resolve = res;
     reject = rej;
   });
-  waiters.set(id, { resolve, reject, critical, method, promise });
+  waiters.set(id, { resolve, reject, critical, method, promise, fanoutGroupIds });
   promise.then(
     () => waiters.delete(id),
     () => waiters.delete(id),
   );
-  send({ type: "request", id, method, critical, params: toJsonValue(params) });
+  send({ type: "request", id, method, critical, fanoutGroupIds, params: toJsonValue(params) });
   return promise;
+}
+
+function createFanoutGroup(kind) {
+  const id = nextFanoutGroupId++;
+  fanoutGroups.set(id, { id, kind, canceled: false, error: undefined });
+  return id;
+}
+
+function cancelFanoutGroup(groupId, reason) {
+  const group = fanoutGroups.get(Number(groupId));
+  if (!group || group.canceled) return false;
+  group.canceled = true;
+  group.error = namedError("WorkflowAbortError", `Workflow ${group.kind} canceled: ${reason?.message ?? String(reason ?? "fanout failed")}`);
+  for (const waiter of waiters.values()) {
+    if (waiter.fanoutGroupIds?.includes(group.id)) waiter.reject(group.error);
+  }
+  send({ type: "cancel", fanoutGroupId: group.id, reason: serializeError(group.error) });
+  return true;
+}
+
+function closeFanoutGroup(groupId) {
+  fanoutGroups.delete(Number(groupId));
+}
+
+function currentFanoutGroupIds() {
+  const ids = isolationContext.getStore()?.fanoutGroupIds;
+  return Array.isArray(ids) ? ids.filter((id) => Number.isSafeInteger(id)) : [];
+}
+
+function firstCanceledFanoutGroup(groupIds) {
+  for (const id of groupIds) {
+    const group = fanoutGroups.get(id);
+    if (group?.canceled) return group;
+  }
+  return undefined;
 }
 
 async function drainNonCritical() {

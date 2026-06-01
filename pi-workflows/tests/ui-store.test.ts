@@ -2,10 +2,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { UI_LIMITS } from "../src/constants.js";
 import { JsonlJournal } from "../src/persistence/journal.js";
 import { RunStore } from "../src/persistence/run-store.js";
 import { createWorkflowUiGlobal } from "../src/runtime/ui-global.js";
-import { WorkflowViewStore } from "../src/ui/workflow-view-store.js";
+import { loadViewSnapshot, WorkflowViewStore } from "../src/ui/workflow-view-store.js";
 import type { WorkflowViewSnapshot } from "../src/types.js";
 
 const meta = { name: "ui_store", description: "test workflow UI store" };
@@ -271,5 +272,25 @@ describe("WorkflowViewStore coalesced persistence", () => {
     await expect(fs.promises.readFile(record.uiViews[0].latestStatePath, "utf8").then(JSON.parse)).resolves.toEqual({ value: 2 });
     expect((await journal.readAll()).some((event) => event.type === "ui_closed" && event.viewId === "ephemeral")).toBe(true);
     await expect(store.update("ephemeral", { value: 3 })).rejects.toThrow(/closed/);
+  });
+
+  it("bounds persisted view snapshot reads", async () => {
+    const cwd = path.join(tmp, "project");
+    await fs.promises.mkdir(cwd, { recursive: true });
+    const runStore = new RunStore();
+    const { record } = await runStore.create({ cwd, sessionId: "s", meta, source, args: {} });
+    const journal = new JsonlJournal(record.journalPath);
+    const store = new WorkflowViewStore(record, journal, runStore);
+
+    await store.define({
+      version: 1,
+      id: "bounded",
+      title: "Bounded",
+      initialState: { value: 1 },
+      layout: { type: "metric", label: "Value", bind: "/value" },
+    });
+    await fs.promises.truncate(record.uiViews[0].specPath, UI_LIMITS.maxSpecBytes * 2 + 1);
+
+    await expect(loadViewSnapshot(record, "bounded")).rejects.toThrow(/exceeds/);
   });
 });

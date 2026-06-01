@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { WORKFLOW_RESOURCE_LIMITS } from "../src/constants.js";
 import { RunStore } from "../src/persistence/run-store.js";
 
 const meta = { name: "x", description: "test workflow" };
@@ -78,9 +79,99 @@ describe("RunStore cwd scoping", () => {
 
     expect(JSON.parse(await fs.promises.readFile(path.join(runDir, "run.json"), "utf8"))).toEqual(expect.objectContaining({ runId: record.runId, status: "running" }));
   });
+
+  it("does not trust oversized owner files when marking stale runs", async () => {
+    const cwd = path.join(tmp, "owner-huge");
+    await fs.promises.mkdir(cwd, { recursive: true });
+
+    const store = new RunStore();
+    const { record, runDir } = await store.create({ cwd, sessionId: "session-a", meta, source, args: {} });
+    await fs.promises.truncate(path.join(runDir, "owner.json"), WORKFLOW_RESOURCE_LIMITS.runOwnerBytes + 1);
+
+    await expect(store.markStaleRunsForSession(cwd)).resolves.toBe(1);
+    expect(JSON.parse(await fs.promises.readFile(path.join(runDir, "run.json"), "utf8"))).toEqual(expect.objectContaining({ runId: record.runId, status: "stale" }));
+  });
+
+  it("does not trust legacy owner files that only name a live PID", async () => {
+    const cwd = path.join(tmp, "owner-legacy");
+    await fs.promises.mkdir(cwd, { recursive: true });
+
+    const store = new RunStore();
+    const { record, runDir } = await store.create({ cwd, sessionId: "session-a", meta, source, args: {} });
+    await fs.promises.writeFile(path.join(runDir, "owner.json"), `${JSON.stringify({ runId: record.runId, sessionId: record.sessionId, pid: process.pid, updatedAt: new Date().toISOString() }, null, 2)}\n`, "utf8");
+
+    await expect(store.markStaleRunsForSession(cwd)).resolves.toBe(1);
+    expect(JSON.parse(await fs.promises.readFile(path.join(runDir, "run.json"), "utf8"))).toEqual(expect.objectContaining({ runId: record.runId, status: "stale" }));
+  });
+
+  it("does not trust owner files with mismatched process start time", async () => {
+    const cwd = path.join(tmp, "owner-start-time");
+    await fs.promises.mkdir(cwd, { recursive: true });
+
+    const store = new RunStore();
+    const { record, runDir } = await store.create({ cwd, sessionId: "session-a", meta, source, args: {} });
+    const ownerPath = path.join(runDir, "owner.json");
+    const owner = JSON.parse(await fs.promises.readFile(ownerPath, "utf8"));
+    owner.pidStartTime = owner.pidStartTime === "1" ? "2" : "1";
+    owner.updatedAt = new Date().toISOString();
+    await fs.promises.writeFile(ownerPath, `${JSON.stringify(owner, null, 2)}\n`, "utf8");
+
+    await expect(store.markStaleRunsForSession(cwd)).resolves.toBe(1);
+    expect(JSON.parse(await fs.promises.readFile(path.join(runDir, "run.json"), "utf8"))).toEqual(expect.objectContaining({ runId: record.runId, status: "stale" }));
+  });
+
+  it("does not trust owner files with mismatched boot id", async () => {
+    const cwd = path.join(tmp, "owner-boot-id");
+    await fs.promises.mkdir(cwd, { recursive: true });
+
+    const store = new RunStore();
+    const { record, runDir } = await store.create({ cwd, sessionId: "session-a", meta, source, args: {} });
+    const ownerPath = path.join(runDir, "owner.json");
+    const owner = JSON.parse(await fs.promises.readFile(ownerPath, "utf8"));
+    owner.bootId = "00000000-0000-0000-0000-000000000000";
+    owner.updatedAt = new Date().toISOString();
+    await fs.promises.writeFile(ownerPath, `${JSON.stringify(owner, null, 2)}\n`, "utf8");
+
+    await expect(store.markStaleRunsForSession(cwd)).resolves.toBe(1);
+    expect(JSON.parse(await fs.promises.readFile(path.join(runDir, "run.json"), "utf8"))).toEqual(expect.objectContaining({ runId: record.runId, status: "stale" }));
+  });
+
+  it("omits oversized args from stale-run recovery instead of reading them", async () => {
+    const cwd = path.join(tmp, "args-huge");
+    await fs.promises.mkdir(cwd, { recursive: true });
+
+    const store = new RunStore();
+    const { record, runDir } = await store.create({ cwd, sessionId: "s", meta, source, args: { q: "keep" } });
+    const runJsonPath = path.join(runDir, "run.json");
+    const raw = JSON.parse(await fs.promises.readFile(runJsonPath, "utf8"));
+    delete raw.recovery.args;
+    await fs.promises.writeFile(runJsonPath, `${JSON.stringify(raw, null, 2)}\n`, "utf8");
+    record.recovery = { scriptPath: record.scriptPath, resumeFromRunId: record.runId };
+    await fs.promises.rm(path.join(runDir, "owner.json"), { force: true });
+    await fs.promises.truncate(path.join(runDir, "args.json"), WORKFLOW_RESOURCE_LIMITS.runArgsBytes + 1);
+
+    await expect(store.markStaleRunsForSession(cwd)).resolves.toBe(1);
+    const saved = JSON.parse(await fs.promises.readFile(runJsonPath, "utf8"));
+    expect(saved.recovery).toEqual({ scriptPath: record.scriptPath, resumeFromRunId: record.runId });
+  });
 });
 
 describe("RunStore loaded record path safety", () => {
+  it("ignores persisted run records that exceed the bounded read limit", async () => {
+    const cwd = path.join(tmp, "huge-run-json");
+    await fs.promises.mkdir(cwd, { recursive: true });
+
+    const store = new RunStore();
+    const { record, runDir } = await store.create({ cwd, sessionId: "s", meta, source, args: {} });
+    await fs.promises.truncate(path.join(runDir, "run.json"), WORKFLOW_RESOURCE_LIMITS.runRecordBytes + 1);
+
+    const fresh = new RunStore();
+    await fresh.refresh(cwd);
+
+    expect(fresh.list("all")).toEqual([]);
+    expect(fresh.get(record.runId)).toBeUndefined();
+  });
+
   it("repairs unsafe persisted paths before save/delete operations", async () => {
     const cwd = path.join(tmp, "unsafe-paths");
     await fs.promises.mkdir(cwd, { recursive: true });
@@ -235,7 +326,7 @@ describe("RunStore live run lifecycle", () => {
 
     store.registerLiveRun({ runId: record.runId, sessionId: "session-a", control, donePromise: new Promise(() => undefined), notifyOnComplete: true });
 
-    await expect(store.stopLiveRunsForSession("session-a", "reload")).resolves.toBe(1);
+    await expect(store.stopLiveRunsForSession("session-a", "reload", 20)).resolves.toBe(1);
     expect(stopped).toEqual(["reload"]);
     expect(store.shouldNotifyOnComplete(record.runId)).toBe(false);
     expect(JSON.parse(await fs.promises.readFile(path.join(runDir, "run.json"), "utf8"))).toEqual(
@@ -265,10 +356,128 @@ describe("RunStore live run lifecycle", () => {
     store.registerLiveRun({ runId: a.record.runId, sessionId: "session-a", control: control("a"), donePromise: new Promise(() => undefined), notifyOnComplete: true });
     store.registerLiveRun({ runId: b.record.runId, sessionId: "session-b", control: control("b"), donePromise: new Promise(() => undefined), notifyOnComplete: true });
 
-    await expect(store.stopLiveRunsForSession("session-a")).resolves.toBe(1);
+    await expect(store.stopLiveRunsForSession("session-a", "session shutdown", 20)).resolves.toBe(1);
     expect(stopped).toEqual(["a"]);
     expect(store.shouldNotifyOnComplete(a.record.runId)).toBe(false);
     expect(store.shouldNotifyOnComplete(b.record.runId)).toBe(true);
+  });
+
+  it("waits for live run finalization before returning from session stop", async () => {
+    const cwd = path.join(tmp, "live-stop-wait");
+    await fs.promises.mkdir(cwd, { recursive: true });
+
+    const store = new RunStore();
+    const { record } = await store.create({ cwd, sessionId: "session-a", meta, source, args: {} });
+    const control = {
+      pause: () => undefined,
+      resume: () => undefined,
+      stop: () => undefined,
+      skipAgent: () => false,
+    };
+    let finish!: () => void;
+    const donePromise = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    store.registerLiveRun({ runId: record.runId, sessionId: "session-a", control, donePromise, notifyOnComplete: true });
+
+    let returned = false;
+    const stopping = store.stopLiveRunsForSession("session-a", "reload", 500).then((count) => {
+      returned = true;
+      return count;
+    });
+    await sleep(20);
+
+    expect(returned).toBe(false);
+    finish();
+    await expect(stopping).resolves.toBe(1);
+  });
+
+  it("keeps shutdown-aborted status when late live finalization saves completed", async () => {
+    const cwd = path.join(tmp, "live-stop-late-complete");
+    await fs.promises.mkdir(cwd, { recursive: true });
+
+    const store = new RunStore();
+    const { record, runDir } = await store.create({ cwd, sessionId: "session-a", meta, source, args: { q: "x" } });
+    let stopped!: () => void;
+    const stoppedPromise = new Promise<void>((resolve) => {
+      stopped = resolve;
+    });
+    const control = {
+      pause: () => undefined,
+      resume: () => undefined,
+      stop: () => stopped(),
+      skipAgent: () => false,
+    };
+    let finish!: () => Promise<void>;
+    const donePromise = new Promise<void>((resolve, reject) => {
+      finish = async () => {
+        try {
+          const outputPath = path.join(runDir, "output.json");
+          await fs.promises.writeFile(outputPath, '{"result":"late"}\n', "utf8");
+          record.status = "completed";
+          record.outputPath = outputPath;
+          record.endedAt = new Date().toISOString();
+          await store.saveNow(record);
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
+      };
+    });
+    store.registerLiveRun({ runId: record.runId, sessionId: "session-a", control, donePromise, notifyOnComplete: true });
+
+    const stopping = store.stopLiveRunsForSession("session-a", "reload", 500);
+    await stoppedPromise;
+    await finish();
+    await expect(stopping).resolves.toBe(1);
+
+    const saved = JSON.parse(await fs.promises.readFile(path.join(runDir, "run.json"), "utf8"));
+    expect(saved).toEqual(expect.objectContaining({ status: "aborted", recovery: expect.objectContaining({ args: { q: "x" } }) }));
+    expect(saved.outputPath).toBeUndefined();
+  });
+
+  it("keeps shutdown-aborted status when late live finalization saves failed", async () => {
+    const cwd = path.join(tmp, "live-stop-late-fail");
+    await fs.promises.mkdir(cwd, { recursive: true });
+
+    const store = new RunStore();
+    const { record, runDir } = await store.create({ cwd, sessionId: "session-a", meta, source, args: {} });
+    let stopped!: () => void;
+    const stoppedPromise = new Promise<void>((resolve) => {
+      stopped = resolve;
+    });
+    const control = {
+      pause: () => undefined,
+      resume: () => undefined,
+      stop: () => stopped(),
+      skipAgent: () => false,
+    };
+    let finish!: () => Promise<void>;
+    const donePromise = new Promise<void>((resolve, reject) => {
+      finish = async () => {
+        try {
+          const errorPath = path.join(runDir, "error.json");
+          await fs.promises.writeFile(errorPath, '{"error":"late"}\n', "utf8");
+          record.status = "failed";
+          record.errorPath = errorPath;
+          record.endedAt = new Date().toISOString();
+          await store.saveNow(record);
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
+      };
+    });
+    store.registerLiveRun({ runId: record.runId, sessionId: "session-a", control, donePromise, notifyOnComplete: true });
+
+    const stopping = store.stopLiveRunsForSession("session-a", "reload", 500);
+    await stoppedPromise;
+    await finish();
+    await expect(stopping).resolves.toBe(1);
+
+    const saved = JSON.parse(await fs.promises.readFile(path.join(runDir, "run.json"), "utf8"));
+    expect(saved.status).toBe("aborted");
+    expect(saved.errorPath).toBe(path.join(runDir, "error.json"));
   });
 
   it("waits for live run finalization before deleting artifacts", async () => {
@@ -304,3 +513,7 @@ describe("RunStore live run lifecycle", () => {
     expect(store.getLiveRun(record.runId)).toBeUndefined();
   });
 });
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

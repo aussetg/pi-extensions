@@ -3,10 +3,16 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkflowAgent } from "../src/agents/workflow-agent.js";
+import { DEFAULT_LIMITS } from "../src/constants.js";
+import { JsonlJournal } from "../src/persistence/journal.js";
 import { WorkflowRegistry } from "../src/persistence/registry.js";
 import { RunStore } from "../src/persistence/run-store.js";
 import { WorkflowBudget } from "../src/runtime/budget.js";
+import { WorkflowAbortError } from "../src/runtime/errors.js";
+import { RunControl } from "../src/runtime/run-control.js";
 import { WorkflowRunner } from "../src/runtime/runner.js";
+import { WorkflowScheduler } from "../src/runtime/scheduler.js";
+import type { RunRecord } from "../src/types.js";
 
 let oldAgentDir: string | undefined;
 let tmp: string;
@@ -80,6 +86,147 @@ return await parallel(lanes.map((lane) => async () => {
     const output = JSON.parse(await fs.promises.readFile(result.outputPath!, "utf8")) as { result: string[] };
     expect(output.result).toHaveLength(4);
     expect(output.result.every((value) => value.startsWith("WorkflowBudgetExceededError:"))).toBe(true);
+  });
+
+  it("does not strand later queued agents when an earlier queued agent is skipped", async () => {
+    const limit = DEFAULT_LIMITS.agentConcurrency;
+    const run = makeRun("limiter_skip_queue_test");
+    await fs.promises.mkdir(run.transcriptDir, { recursive: true });
+    const control = new RunControl();
+    const started: string[] = [];
+    const releases = new Map<string, () => void>();
+    vi.spyOn(WorkflowAgent.prototype, "run").mockImplementation(async (call) => {
+      started.push(call.callId);
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      releases.set(call.callId, release);
+      await gate;
+      return await writeMockAgentResult(call, `result ${call.callId}`, 1);
+    });
+
+    const scheduler = new WorkflowScheduler({
+      cwd,
+      run,
+      journal: new JsonlJournal(run.journalPath),
+      control,
+      budget: new WorkflowBudget(null),
+      maxAgents: limit + 2,
+      persist: () => {},
+    });
+    const calls = Array.from({ length: limit + 2 }, (_, index) => scheduler.agentCall(`agent ${index}`, { label: `agent ${index}` }));
+
+    try {
+      await waitFor(() => started.length === limit, "initial limiter slots did not fill");
+      await waitFor(() => run.progress.total === limit + 2, "queued agents were not registered");
+      const queuedIds = run.progress.calls.map((call) => call.callId).filter((callId) => !started.includes(callId)).sort();
+      expect(queuedIds).toHaveLength(2);
+      const [firstQueued, secondQueued] = queuedIds;
+      const firstQueuedCall = callPromiseById(run, calls, firstQueued);
+
+      expect(control.skipAgent(firstQueued)).toBe(true);
+      await expect(withTimeout(firstQueuedCall, 500, "skipped queued agent did not settle")).resolves.toBeNull();
+
+      releases.get(started[0])?.();
+      await waitFor(() => started.includes(secondQueued), "later queued agent did not start after one slot was released");
+    } finally {
+      for (const release of releases.values()) release();
+      await Promise.allSettled(calls);
+    }
+  });
+
+  it("cancels queued scheduler agents through request abort signals", async () => {
+    const limit = DEFAULT_LIMITS.agentConcurrency;
+    const run = makeRun("limiter_request_abort_test");
+    await fs.promises.mkdir(run.transcriptDir, { recursive: true });
+    const control = new RunControl();
+    const started: string[] = [];
+    const releases = new Map<string, () => void>();
+    vi.spyOn(WorkflowAgent.prototype, "run").mockImplementation(async (call) => {
+      started.push(call.callId);
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      releases.set(call.callId, release);
+      await gate;
+      return await writeMockAgentResult(call, `result ${call.callId}`, 1);
+    });
+
+    const scheduler = new WorkflowScheduler({
+      cwd,
+      run,
+      journal: new JsonlJournal(run.journalPath),
+      control,
+      budget: new WorkflowBudget(null),
+      maxAgents: limit + 2,
+      persist: () => {},
+    });
+    const controllers = Array.from({ length: limit + 2 }, () => new AbortController());
+    const calls = controllers.map((controller, index) => scheduler.agentCall(`agent ${index}`, { label: `agent ${index}` }, controller.signal));
+
+    try {
+      await waitFor(() => started.length === limit, "initial limiter slots did not fill");
+      await waitFor(() => run.progress.total === limit + 2, "queued agents were not registered");
+      const queuedIds = run.progress.calls.map((call) => call.callId).filter((callId) => !started.includes(callId)).sort();
+      expect(queuedIds).toHaveLength(2);
+      const [firstQueued, secondQueued] = queuedIds;
+      const firstQueuedCall = callPromiseById(run, calls, firstQueued);
+      const firstQueuedIndex = callIndexById(run, firstQueued);
+
+      controllers[firstQueuedIndex].abort(new WorkflowAbortError("request canceled"));
+      await expect(withTimeout(firstQueuedCall, 500, "aborted queued agent did not settle")).rejects.toThrow(/request canceled/);
+      expect(started).not.toContain(firstQueued);
+
+      releases.get(started[0])?.();
+      await waitFor(() => started.includes(secondQueued), "later queued agent did not start after one slot was released");
+    } finally {
+      for (const release of releases.values()) release();
+      await Promise.allSettled(calls);
+    }
+  });
+
+  it("cancels running scheduler agents through request abort signals", async () => {
+    const run = makeRun("running_request_abort_test");
+    await fs.promises.mkdir(run.transcriptDir, { recursive: true });
+    const control = new RunControl();
+    let started!: () => void;
+    const startedPromise = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let aborted!: (value: string) => void;
+    const abortedPromise = new Promise<string>((resolve) => {
+      aborted = resolve;
+    });
+    vi.spyOn(WorkflowAgent.prototype, "run").mockImplementation(async (call) => {
+      started();
+      return await new Promise((_, reject) => {
+        call.signal.addEventListener("abort", () => {
+          aborted(call.signal.reason instanceof Error ? call.signal.reason.message : "aborted");
+          reject(call.signal.reason);
+        }, { once: true });
+      });
+    });
+
+    const scheduler = new WorkflowScheduler({
+      cwd,
+      run,
+      journal: new JsonlJournal(run.journalPath),
+      control,
+      budget: new WorkflowBudget(null),
+      maxAgents: 1,
+      persist: () => {},
+    });
+    const controller = new AbortController();
+    const call = scheduler.agentCall("agent", { label: "agent 0" }, controller.signal);
+
+    await startedPromise;
+    controller.abort(new WorkflowAbortError("request canceled"));
+
+    await expect(withTimeout(call, 500, "running agent did not settle")).rejects.toThrow(/request canceled/);
+    await expect(withTimeout(abortedPromise, 500, "running agent was not aborted")).resolves.toBe("request canceled");
+    expect(run.progress.failed).toBe(1);
   });
 
   it("defaults subagent thinking one level below the launching session", async () => {
@@ -237,6 +384,47 @@ function workflowCtx(): any {
   return { cwd, hasUI: false, sessionManager: { getSessionId: () => "test-session" } };
 }
 
+function makeRun(name: string): RunRecord {
+  const runId = `wr_${name}`;
+  const runDir = path.join(tmp, runId);
+  return {
+    runId,
+    taskId: "task",
+    sessionId: "session",
+    name,
+    description: "test",
+    status: "running",
+    scriptPath: path.join(runDir, "script.js"),
+    runDir,
+    journalPath: path.join(runDir, "journal.jsonl"),
+    logsPath: path.join(runDir, "logs.jsonl"),
+    manifestPath: path.join(runDir, "manifest.json"),
+    argsPath: path.join(runDir, "args.json"),
+    transcriptDir: path.join(runDir, "subagents"),
+    startedAt: new Date(0).toISOString(),
+    argsHash: "sha256:args",
+    scriptHash: "sha256:script",
+    progress: { total: 0, running: 0, completed: 0, failed: 0, cached: 0, skipped: 0, calls: [], recentLogs: [], updatedAt: new Date(0).toISOString() },
+    usage: { agentCount: 0, subagentTokens: 0, toolUses: 0, estimated: true },
+    uiViews: [],
+  };
+}
+
+function callPromiseById(run: RunRecord, calls: Promise<unknown>[], callId: string): Promise<unknown> {
+  const call = run.progress.calls.find((entry) => entry.callId === callId);
+  if (!call) throw new Error(`unknown call id ${callId}`);
+  const index = callIndexById(run, callId);
+  const promise = calls[index];
+  if (!promise) throw new Error(`missing promise for call id ${callId}`);
+  return promise;
+}
+
+function callIndexById(run: RunRecord, callId: string): number {
+  const call = run.progress.calls.find((entry) => entry.callId === callId);
+  if (!call) throw new Error(`unknown call id ${callId}`);
+  return Number(String(call.label).replace(/^agent /, ""));
+}
+
 async function settleOrAbort<T>(promise: Promise<T>, controller: AbortController, ms: number): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
@@ -247,6 +435,29 @@ async function settleOrAbort<T>(promise: Promise<T>, controller: AbortController
           controller.abort(new Error("test timeout"));
           reject(new Error(`workflow did not settle within ${ms}ms`));
         }, ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function waitFor(predicate: () => boolean, message: string, ms = 1000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(message);
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
       }),
     ]);
   } finally {

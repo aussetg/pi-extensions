@@ -19,12 +19,221 @@ describe("workflow child sandbox", () => {
     expect(calls).toEqual([{ prompt: "hi", opts: { label: "one" } }]);
   });
 
-  it("fails when critical child operations are left unawaited", async () => {
+  it("fails when slow critical child operations are left unawaited", async () => {
     const globals = fakeGlobals({
       agent: async () => await new Promise((resolve) => setTimeout(() => resolve("late"), 250)),
     });
 
-    await expect(executeWorkflowSandbox("agent('leaked'); return 'done';", globals, new AbortController().signal)).rejects.toThrow(/pending agent\/workflow/);
+    await expect(executeWorkflowSandbox("agent('leaked'); return 'done';", globals, new AbortController().signal)).rejects.toThrow(/unawaited agent\/workflow/);
+  });
+
+  it("fails when fast-resolved critical child operations are left unawaited", async () => {
+    const calls: unknown[] = [];
+    const globals = fakeGlobals({
+      agent: async (prompt) => {
+        calls.push(prompt);
+        return "fast";
+      },
+      log: async () => {
+        await delay(5);
+      },
+    });
+
+    await expect(executeWorkflowSandbox("agent('leaked'); await log('yield'); return 'done';", globals, new AbortController().signal)).rejects.toThrow(/unawaited agent\/workflow/);
+    expect(calls).toEqual(["leaked"]);
+  });
+
+  it("treats returned critical child operations as awaited", async () => {
+    const result = await executeWorkflowSandbox("return agent('returned');", fakeGlobals(), new AbortController().signal);
+
+    expect(result).toBe("returned");
+  });
+
+  it("treats Promise.all critical child operations as awaited", async () => {
+    const result = await executeWorkflowSandbox("return await Promise.all([agent('a'), agent('b')]);", fakeGlobals(), new AbortController().signal);
+
+    expect(result).toEqual(["a", "b"]);
+  });
+
+  it("fails when child workflow operations are left unawaited", async () => {
+    const calls: unknown[] = [];
+    const globals = fakeGlobals({
+      workflow: async (nameOrRef) => {
+        calls.push(nameOrRef);
+        return "child result";
+      },
+      log: async () => {
+        await delay(5);
+      },
+    });
+
+    await expect(executeWorkflowSandbox("workflow('child'); await log('yield'); return 'done';", globals, new AbortController().signal)).rejects.toThrow(/unawaited agent\/workflow/);
+    expect(calls).toEqual(["child"]);
+  });
+
+  it("aborts in-flight host agent RPCs when the workflow is aborted", async () => {
+    const controller = new AbortController();
+    let started!: () => void;
+    const startedPromise = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let aborted!: (value: string) => void;
+    const abortedPromise = new Promise<string>((resolve) => {
+      aborted = resolve;
+    });
+    const globals = fakeGlobals({
+      agent: async (_prompt, _opts, context) => {
+        started();
+        return await new Promise((_, reject) => {
+          context?.signal.addEventListener("abort", () => {
+            aborted(context.signal.reason instanceof Error ? context.signal.reason.message : "aborted");
+            reject(context.signal.reason);
+          }, { once: true });
+        });
+      },
+    });
+
+    const run = executeWorkflowSandbox("return await agent('slow');", globals, controller.signal);
+    await startedPromise;
+    controller.abort(new Error("stop now"));
+
+    await expect(run).rejects.toThrow(/stop now/);
+    await expect(withTimeout(abortedPromise, 500, "host agent was not aborted")).resolves.toBe("stop now");
+  });
+
+  it("aborts slow sibling host RPCs after parallel fail-fast", async () => {
+    let slowStarted!: () => void;
+    const slowStartedPromise = new Promise<void>((resolve) => {
+      slowStarted = resolve;
+    });
+    let slowAborted!: (value: string) => void;
+    const slowAbortedPromise = new Promise<string>((resolve) => {
+      slowAborted = resolve;
+    });
+    const globals = fakeGlobals({
+      agent: async (prompt, _opts, context) => {
+        if (prompt === "bad") {
+          await delay(10);
+          throw new Error("boom");
+        }
+        slowStarted();
+        return await new Promise((_, reject) => {
+          context?.signal.addEventListener("abort", () => {
+            slowAborted(context.signal.reason instanceof Error ? context.signal.reason.name : "aborted");
+            reject(context.signal.reason);
+          }, { once: true });
+        });
+      },
+    });
+
+    const run = executeWorkflowSandbox("return await parallel([() => agent('slow'), () => agent('bad')]);", globals, new AbortController().signal);
+    await slowStartedPromise;
+
+    await expect(run).rejects.toThrow(/parallel branch 1 failed: boom/);
+    await expect(withTimeout(slowAbortedPromise, 500, "slow sibling was not aborted")).resolves.toBe("WorkflowAbortError");
+  });
+
+  it("cancels parallel siblings before waiting on failure logging", async () => {
+    let slowStarted!: () => void;
+    const slowStartedPromise = new Promise<void>((resolve) => {
+      slowStarted = resolve;
+    });
+    let slowAborted!: (value: string) => void;
+    const slowAbortedPromise = new Promise<string>((resolve) => {
+      slowAborted = resolve;
+    });
+    const globals = fakeGlobals({
+      agent: async (prompt, _opts, context) => {
+        if (prompt === "bad") {
+          await delay(10);
+          throw new Error("boom");
+        }
+        slowStarted();
+        return await new Promise((_, reject) => {
+          context?.signal.addEventListener("abort", () => {
+            slowAborted(context.signal.reason instanceof Error ? context.signal.reason.name : "aborted");
+            reject(context.signal.reason);
+          }, { once: true });
+        });
+      },
+      log: async () => {
+        await slowAbortedPromise;
+      },
+    });
+
+    const run = executeWorkflowSandbox("return await parallel([() => agent('slow'), () => agent('bad')]);", globals, new AbortController().signal);
+    await slowStartedPromise;
+
+    await expect(withTimeout(run, 800, "parallel failed without canceling sibling work")).rejects.toThrow(/parallel branch 1 failed: boom/);
+    await expect(withTimeout(slowAbortedPromise, 500, "slow sibling was not aborted")).resolves.toBe("WorkflowAbortError");
+  });
+
+  it("allows work after a caught parallel failure without letting canceled siblings continue", async () => {
+    let slowStarted!: () => void;
+    const slowStartedPromise = new Promise<void>((resolve) => {
+      slowStarted = resolve;
+    });
+    let slowAborted!: () => void;
+    const slowAbortedPromise = new Promise<void>((resolve) => {
+      slowAborted = resolve;
+    });
+    const prompts: unknown[] = [];
+    const globals = fakeGlobals({
+      agent: async (prompt, _opts, context) => {
+        prompts.push(prompt);
+        if (prompt === "bad") throw new Error("boom");
+        if (prompt === "slow") {
+          slowStarted();
+          return await new Promise((_, reject) => {
+            context?.signal.addEventListener("abort", () => {
+              slowAborted();
+              reject(context.signal.reason);
+            }, { once: true });
+          });
+        }
+        return prompt;
+      },
+    });
+
+    const run = executeWorkflowSandbox(`
+let caught = '';
+try { await parallel([() => agent('slow'), () => agent('bad')]); } catch (err) { caught = err.message; }
+const after = await agent('after');
+return { caught, after };
+`, globals, new AbortController().signal);
+    await slowStartedPromise;
+
+    await expect(withTimeout(run, 800, "caught parallel failure did not continue")).resolves.toEqual({ caught: "parallel branch 1 failed: boom", after: "after" });
+    await expect(withTimeout(slowAbortedPromise, 500, "canceled sibling continued after caught failure")).resolves.toBeUndefined();
+    expect(prompts).toEqual(["slow", "bad", "after"]);
+  });
+
+  it("aborts pending host RPCs when unawaited critical operations fail completion", async () => {
+    let started!: () => void;
+    const startedPromise = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let aborted!: (value: string) => void;
+    const abortedPromise = new Promise<string>((resolve) => {
+      aborted = resolve;
+    });
+    const globals = fakeGlobals({
+      agent: async (_prompt, _opts, context) => {
+        started();
+        return await new Promise((_, reject) => {
+          context?.signal.addEventListener("abort", () => {
+            aborted(context.signal.reason instanceof Error ? context.signal.reason.name : "aborted");
+            reject(context.signal.reason);
+          }, { once: true });
+        });
+      },
+    });
+
+    const run = executeWorkflowSandbox("agent('slow'); return 'done';", globals, new AbortController().signal);
+    await startedPromise;
+
+    await expect(run).rejects.toThrow(/unawaited agent\/workflow/);
+    await expect(withTimeout(abortedPromise, 500, "unawaited host RPC was not aborted")).resolves.toBe("WorkflowAbortError");
   });
 
   it("leaves direct agent isolation to the parent scheduler default", async () => {
@@ -125,6 +334,63 @@ describe("workflow child sandbox", () => {
     await expect(
       executeWorkflowSandbox("return await pipeline(['ok', 'bad'], async (item) => { if (item === 'bad') throw new Error('boom'); return item; });", fakeGlobals(), new AbortController().signal),
     ).rejects.toThrow(/pipeline item 1 failed: boom/);
+  });
+
+  it("cancels pipeline sibling items before waiting on failure logging", async () => {
+    let slowStarted!: () => void;
+    const slowStartedPromise = new Promise<void>((resolve) => {
+      slowStarted = resolve;
+    });
+    let slowAborted!: (value: string) => void;
+    const slowAbortedPromise = new Promise<string>((resolve) => {
+      slowAborted = resolve;
+    });
+    const globals = fakeGlobals({
+      agent: async (prompt, _opts, context) => {
+        if (prompt === "bad") {
+          await delay(10);
+          throw new Error("boom");
+        }
+        slowStarted();
+        return await new Promise((_, reject) => {
+          context?.signal.addEventListener("abort", () => {
+            slowAborted(context.signal.reason instanceof Error ? context.signal.reason.name : "aborted");
+            reject(context.signal.reason);
+          }, { once: true });
+        });
+      },
+      log: async () => {
+        await slowAbortedPromise;
+      },
+    });
+
+    const run = executeWorkflowSandbox("return await pipeline(['slow', 'bad'], async (item) => await agent(item));", globals, new AbortController().signal);
+    await slowStartedPromise;
+
+    await expect(withTimeout(run, 800, "pipeline failed without canceling sibling work")).rejects.toThrow(/pipeline item 1 failed: boom/);
+    await expect(withTimeout(slowAbortedPromise, 500, "slow pipeline item was not aborted")).resolves.toBe("WorkflowAbortError");
+  });
+
+  it("does not cancel best-effort parallel branches that catch their own failures", async () => {
+    const prompts: unknown[] = [];
+    const globals = fakeGlobals({
+      agent: async (prompt) => {
+        prompts.push(prompt);
+        if (prompt === "bad") throw new Error("boom");
+        await delay(5);
+        return prompt;
+      },
+    });
+
+    const result = await executeWorkflowSandbox(`
+return await parallel([
+  async () => { try { return { ok: true, value: await agent('bad') }; } catch (err) { return { ok: false, error: err.message }; } },
+  async () => ({ ok: true, value: await agent('ok') })
+]);
+`, globals, new AbortController().signal);
+
+    expect(result).toEqual([{ ok: false, error: "boom" }, { ok: true, value: "ok" }]);
+    expect(prompts.sort()).toEqual(["bad", "ok"]);
   });
 
   it("flushes UI persistence when an operation handle is awaited", async () => {
@@ -314,4 +580,18 @@ function recordingUi(calls: string[], overrides: Record<string, unknown> = {}): 
 
 async function delay(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }

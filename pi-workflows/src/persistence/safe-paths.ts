@@ -1,9 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
+import type { FileHandle } from "node:fs/promises";
 
 export interface SafeExistingFile {
   path: string;
   size: number;
+}
+
+export interface SafeOpenExistingFile extends SafeExistingFile {
+  handle: FileHandle;
 }
 
 export interface SafeExistingDir {
@@ -52,6 +57,51 @@ export async function safeResolveExistingFile(root: string, raw: unknown, option
   }
 }
 
+export async function withSafeExistingFile<T>(root: string, raw: unknown, options: { maxBytes?: number } = {}, fn: (file: SafeOpenExistingFile) => Promise<T>): Promise<T | undefined> {
+  const file = await openSafeExistingFile(root, raw, options);
+  if (!file) return undefined;
+  try {
+    return await fn(file);
+  } finally {
+    await file.handle.close().catch(() => undefined);
+  }
+}
+
+export async function readSafeTextFile(root: string, raw: unknown, maxBytes: number): Promise<string | undefined> {
+  return withSafeExistingFile(root, raw, { maxBytes }, async (file) => readOpenTextFile(file, maxBytes));
+}
+
+export async function copySafeExistingFile(root: string, raw: unknown, targetPath: string, options: { maxBytes: number }): Promise<SafeExistingFile | undefined> {
+  return withSafeExistingFile(root, raw, { maxBytes: options.maxBytes }, async (file) => copyOpenFile(file, targetPath, options.maxBytes));
+}
+
+export async function copyOpenFile(file: SafeOpenExistingFile, targetPath: string, maxBytes: number): Promise<SafeExistingFile> {
+  await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
+  const tmpPath = path.join(path.dirname(targetPath), `.${path.basename(targetPath)}.${process.pid}.${Date.now()}.${process.hrtime.bigint()}.tmp`);
+  let output: FileHandle | undefined;
+  try {
+    output = await fs.promises.open(tmpPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+    const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, Math.max(1, maxBytes + 1)));
+    let total = 0;
+    while (total <= maxBytes) {
+      const remaining = maxBytes + 1 - total;
+      const { bytesRead } = await file.handle.read(buffer, 0, Math.min(buffer.length, remaining), null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+      if (total > maxBytes) throw new Error(`file exceeds ${maxBytes} bytes: ${file.path}`);
+      await output.write(buffer, 0, bytesRead);
+    }
+    await output.close();
+    output = undefined;
+    await fs.promises.rename(tmpPath, targetPath);
+    return { path: targetPath, size: total };
+  } catch (err) {
+    await output?.close().catch(() => undefined);
+    await fs.promises.rm(tmpPath, { force: true }).catch(() => undefined);
+    throw err;
+  }
+}
+
 export async function safeResolveExistingDir(root: string, raw: unknown): Promise<SafeExistingDir | undefined> {
   const resolved = safeResolveRelative(root, raw);
   if (!resolved) return undefined;
@@ -69,11 +119,89 @@ export async function safeResolveExistingDir(root: string, raw: unknown): Promis
   }
 }
 
+async function openSafeExistingFile(root: string, raw: unknown, options: { maxBytes?: number } = {}): Promise<SafeOpenExistingFile | undefined> {
+  const resolved = safeResolveRelative(root, raw);
+  if (!resolved) return undefined;
+  let handle: FileHandle | undefined;
+  try {
+    const rootStat = await fs.promises.lstat(root);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return undefined;
+    const rootReal = await fs.promises.realpath(root);
+
+    const statBeforeOpen = await fs.promises.lstat(resolved);
+    if (!statBeforeOpen.isFile() || statBeforeOpen.isSymbolicLink()) return undefined;
+    if (options.maxBytes !== undefined && statBeforeOpen.size > options.maxBytes) return undefined;
+
+    handle = await fs.promises.open(resolved, fs.constants.O_RDONLY | noFollowFlag());
+    const stat = await handle.stat();
+    if (!stat.isFile()) return undefined;
+    if (options.maxBytes !== undefined && stat.size > options.maxBytes) return undefined;
+
+    const openedReal = await realpathOpenHandle(handle);
+    if (!openedReal || !isInside(rootReal, openedReal)) return undefined;
+
+    const file = { path: resolved, size: stat.size, handle };
+    handle = undefined;
+    return file;
+  } catch {
+    return undefined;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function realpathOpenHandle(handle: FileHandle): Promise<string | undefined> {
+  try {
+    return await fs.promises.realpath(`/proc/self/fd/${handle.fd}`);
+  } catch {
+    return undefined;
+  }
+}
+
+function noFollowFlag(): number {
+  return typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+}
+
+async function readOpenTextFile(file: SafeOpenExistingFile, maxBytes: number): Promise<string> {
+  const chunks: Buffer[] = [];
+  const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, Math.max(1, maxBytes + 1)));
+  let total = 0;
+  while (total <= maxBytes) {
+    const remaining = maxBytes + 1 - total;
+    const { bytesRead } = await file.handle.read(buffer, 0, Math.min(buffer.length, remaining), null);
+    if (bytesRead === 0) break;
+    total += bytesRead;
+    if (total > maxBytes) throw new Error(`file exceeds ${maxBytes} bytes: ${file.path}`);
+    chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
+  }
+  return Buffer.concat(chunks, total).toString("utf8");
+}
+
 export async function readBoundedTextFile(filePath: string, maxBytes: number): Promise<string> {
-  const stat = await fs.promises.lstat(filePath);
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`unsafe replay file: ${filePath}`);
-  if (stat.size > maxBytes) throw new Error(`replay file exceeds ${maxBytes} bytes: ${filePath}`);
-  const text = await fs.promises.readFile(filePath, "utf8");
-  if (Buffer.byteLength(text, "utf8") > maxBytes) throw new Error(`replay file exceeds ${maxBytes} bytes: ${filePath}`);
-  return text;
+  const before = await fs.promises.lstat(filePath);
+  if (!before.isFile() || before.isSymbolicLink()) throw new Error(`unsafe file: ${filePath}`);
+  if (before.size > maxBytes) throw new Error(`file exceeds ${maxBytes} bytes: ${filePath}`);
+
+  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | noFollow);
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error(`unsafe file: ${filePath}`);
+    if (stat.size > maxBytes) throw new Error(`file exceeds ${maxBytes} bytes: ${filePath}`);
+
+    const chunks: Buffer[] = [];
+    const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, Math.max(1, maxBytes + 1)));
+    let total = 0;
+    while (total <= maxBytes) {
+      const remaining = maxBytes + 1 - total;
+      const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, remaining), null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+      if (total > maxBytes) throw new Error(`file exceeds ${maxBytes} bytes: ${filePath}`);
+      chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
+    }
+    return Buffer.concat(chunks, total).toString("utf8");
+  } finally {
+    await handle.close();
+  }
 }

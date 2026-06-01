@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { routeWorkflowCommand } from "../src/commands/workflow-command.js";
+import { WORKFLOW_RESOURCE_LIMITS } from "../src/constants.js";
 import { workflowFilePath } from "../src/persistence/paths.js";
 import { WorkflowRegistry } from "../src/persistence/registry.js";
 import { RunStore } from "../src/persistence/run-store.js";
@@ -47,5 +48,43 @@ describe("/workflow save", () => {
     ).rejects.toThrow(/already exists/);
 
     await expect(fs.promises.readFile(target, "utf8")).resolves.toBe("existing workflow");
+  });
+});
+
+describe("/workflow resume", () => {
+  it("surfaces corrupt persisted args instead of silently resuming with empty args", async () => {
+    const cwd = path.join(tmp, "project");
+    await fs.promises.mkdir(cwd, { recursive: true });
+
+    const runStore = new RunStore();
+    const { record } = await runStore.create({ cwd, sessionId: "s", meta, source, args: { keep: true } });
+    await fs.promises.writeFile(record.argsPath, "{", "utf8");
+
+    await expect(
+      routeWorkflowCommand(
+        {} as any,
+        { action: "resume", runId: record.runId },
+        { runStore, registry: new WorkflowRegistry(), renderer: new WorkflowViewRenderer(), activation: {} as any },
+        { cwd, hasUI: false },
+      ),
+    ).rejects.toThrow(/JSON|Unexpected|position/);
+  });
+
+  it("surfaces oversized persisted args instead of reading them", async () => {
+    const cwd = path.join(tmp, "project");
+    await fs.promises.mkdir(cwd, { recursive: true });
+
+    const runStore = new RunStore();
+    const { record } = await runStore.create({ cwd, sessionId: "s", meta, source, args: { keep: true } });
+    await fs.promises.truncate(record.argsPath, WORKFLOW_RESOURCE_LIMITS.runArgsBytes + 1);
+
+    await expect(
+      routeWorkflowCommand(
+        {} as any,
+        { action: "resume", runId: record.runId },
+        { runStore, registry: new WorkflowRegistry(), renderer: new WorkflowViewRenderer(), activation: {} as any },
+        { cwd, hasUI: false },
+      ),
+    ).rejects.toThrow(/exceeds/);
   });
 });

@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { SCRIPT_MAX_BYTES } from "../constants.js";
 import { parseWorkflowScript } from "../runtime/parser.js";
 import { projectWorkflowDir, userWorkflowDir } from "./paths.js";
+import { readBoundedTextFile } from "./safe-paths.js";
 
 export interface WorkflowRef {
   name: string;
@@ -62,7 +64,7 @@ async function listJsFiles(dir: string): Promise<string[]> {
 
 async function loadRef(filePath: string, source: WorkflowRef["source"]): Promise<WorkflowRef> {
   try {
-    const text = await fs.promises.readFile(filePath, "utf8");
+    const text = await readBoundedTextFile(filePath, SCRIPT_MAX_BYTES);
     const parsed = parseWorkflowScript(text);
     return { name: parsed.meta.name, description: parsed.meta.description, path: filePath, source };
   } catch (err) {

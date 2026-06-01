@@ -6,6 +6,7 @@ import { nowIso } from "../utils/ids.js";
 import { relativeToRun } from "../persistence/paths.js";
 import { JsonlJournal } from "../persistence/journal.js";
 import { RunStore } from "../persistence/run-store.js";
+import { readBoundedTextFile } from "../persistence/safe-paths.js";
 import { WorkflowViewValidator } from "./workflow-view-validator.js";
 
 export class WorkflowViewStore {
@@ -170,8 +171,8 @@ export async function loadViewSnapshot(run: RunRecord, viewId?: string): Promise
   const view = viewId ? run.uiViews.find((v) => v.viewId === viewId) : run.uiViews[0];
   if (!view) return undefined;
   const [spec, state] = await Promise.all([
-    fs.promises.readFile(view.specPath, "utf8").then((s) => JSON.parse(s) as WorkflowViewSpec),
-    fs.promises.readFile(view.latestStatePath, "utf8").then((s) => JSON.parse(s) as JsonObject),
+    readBoundedTextFile(view.specPath, UI_LIMITS.maxSpecBytes * 2).then((s) => JSON.parse(s) as WorkflowViewSpec),
+    readBoundedTextFile(view.latestStatePath, UI_LIMITS.maxStateBytes * 2).then((s) => JSON.parse(s) as JsonObject),
   ]);
   return { spec, state, seq: 0 };
 }

@@ -1,11 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import type { RunManifest, RunRecord, RunStatus, WorkflowMeta, WorkflowProgressSnapshot } from "../types.js";
-import { EXTENSION_VERSION } from "../constants.js";
+import { EXTENSION_VERSION, WORKFLOW_RESOURCE_LIMITS } from "../constants.js";
 import { sha256, stableHash } from "../utils/hashes.js";
 import { createRunId, createTaskId, nowIso } from "../utils/ids.js";
 import { toStableJsonValue } from "../utils/stable-json.js";
 import { ensureDir, runRootForCwd } from "./paths.js";
+import { readBoundedTextFile } from "./safe-paths.js";
 
 export interface RunStoreCreateArgs {
   cwd: string;
@@ -38,15 +40,31 @@ export interface LiveRun {
 }
 
 interface RunOwnerFile {
+  version: 2;
   runId: string;
   sessionId: string;
+  ownerId: string;
   pid: number;
+  pidStartTime: string;
+  bootId: string;
+  createdAt: string;
   updatedAt: string;
+}
+
+interface RunOwnerIdentity {
+  ownerId: string;
+  createdAt: string;
+}
+
+interface ShutdownStop {
+  reason: string;
+  endedAt: string;
 }
 
 const RUN_OWNER_FILE = "owner.json";
 const RUN_OWNER_HEARTBEAT_MS = 10_000;
 const RUN_OWNER_STALE_MS = 60_000;
+const RUN_SHUTDOWN_WAIT_MS = 500;
 
 export class RunStore {
   private static readonly saveDebounceMs = 100;
@@ -59,6 +77,8 @@ export class RunStore {
   private readonly saveTimers = new Map<string, NodeJS.Timeout>();
   private readonly scheduledSaves = new Map<string, RunRecord>();
   private readonly ownerTimers = new Map<string, NodeJS.Timeout>();
+  private readonly ownerIdentities = new Map<string, RunOwnerIdentity>();
+  private readonly shutdownStops = new Map<string, ShutdownStop>();
   private currentRoot?: string;
 
   rootFor(cwd: string): string {
@@ -87,7 +107,7 @@ export class RunStore {
       if (!entry.isDirectory()) continue;
       const recordPath = path.join(root, entry.name, "run.json");
       try {
-        const record = normalizeLoadedRunRecord(JSON.parse(await fs.promises.readFile(recordPath, "utf8")), root, entry.name);
+        const record = normalizeLoadedRunRecord(JSON.parse(await readBoundedTextFile(recordPath, WORKFLOW_RESOURCE_LIMITS.runRecordBytes)), root, entry.name);
         if (this.controls.has(record.runId)) continue;
         this.runs.set(record.runId, record);
         this.runRoots.set(record.runId, root);
@@ -113,6 +133,7 @@ export class RunStore {
     const manifestPath = path.join(runDir, "manifest.json");
     const startedAt = nowIso();
     const stableArgs = toStableJsonValue(args.args) as Record<string, unknown>;
+    const stableArgsText = jsonTextWithinLimit(stableArgs, WORKFLOW_RESOURCE_LIMITS.runArgsBytes, "workflow args");
     const argsHash = stableHash(stableArgs);
     const scriptHash = sha256(args.source);
     const progress: WorkflowProgressSnapshot = {
@@ -155,10 +176,10 @@ export class RunStore {
 
     await fs.promises.writeFile(scriptPath, args.source, "utf8");
     await fs.promises.writeFile(path.join(runDir, "meta.json"), `${JSON.stringify(args.meta, null, 2)}\n`, "utf8");
-    await fs.promises.writeFile(argsPath, `${JSON.stringify(stableArgs, null, 2)}\n`, "utf8");
+    await fs.promises.writeFile(argsPath, stableArgsText, "utf8");
     await fs.promises.writeFile(journalPath, "", "utf8");
     await fs.promises.writeFile(logsPath, "", "utf8");
-    await writeRunOwner(runDir, runId, args.sessionId);
+    await writeRunOwner(runDir, runId, args.sessionId, this.ownerIdentity(runId));
     this.runs.set(runId, record);
     this.runRoots.set(runId, root);
     await this.saveNow(record);
@@ -166,6 +187,7 @@ export class RunStore {
   }
 
   upsert(record: RunRecord): void {
+    this.applyShutdownStop(record);
     this.runs.set(record.runId, record);
     this.runRoots.set(record.runId, path.dirname(record.runDir));
     this.scheduleSave(record);
@@ -187,6 +209,7 @@ export class RunStore {
   }
 
   scheduleSave(record: RunRecord, delayMs = RunStore.saveDebounceMs): void {
+    this.applyShutdownStop(record);
     this.runs.set(record.runId, record);
     this.runRoots.set(record.runId, path.dirname(record.runDir));
     this.scheduledSaves.set(record.runId, record);
@@ -217,9 +240,11 @@ export class RunStore {
   }
 
   async saveNow(record: RunRecord): Promise<void> {
+    this.applyShutdownStop(record);
     this.runs.set(record.runId, record);
     this.runRoots.set(record.runId, path.dirname(record.runDir));
     await this.enqueueSave(record.runId, async () => {
+      this.applyShutdownStop(record);
       await this.writeRunRecord(record);
       await this.writeManifest(record);
       if (isTerminalStatus(record.status)) await removeRunOwner(record.runDir).catch(() => undefined);
@@ -227,7 +252,7 @@ export class RunStore {
   }
 
   private async writeRunRecord(record: RunRecord): Promise<void> {
-    await atomicWriteJson(path.join(record.runDir, "run.json"), record);
+    await atomicWriteJson(path.join(record.runDir, "run.json"), record, WORKFLOW_RESOURCE_LIMITS.runRecordBytes, "run.json");
   }
 
   private async writeManifest(record: RunRecord): Promise<void> {
@@ -296,8 +321,12 @@ export class RunStore {
     this.controls.delete(runId);
     this.liveRuns.delete(runId);
     this.stopOwnerHeartbeat(runId);
+    this.shutdownStops.delete(runId);
     const record = this.runs.get(runId);
-    if (record && isTerminalStatus(record.status)) void removeRunOwner(record.runDir).catch(() => undefined);
+    if (record && isTerminalStatus(record.status)) {
+      this.ownerIdentities.delete(runId);
+      void removeRunOwner(record.runDir).catch(() => undefined);
+    }
   }
 
   unregisterLiveRun(runId: string): void {
@@ -323,20 +352,44 @@ export class RunStore {
     if (live) live.notifyOnComplete = false;
   }
 
-  async stopLiveRunsForSession(sessionId: string | undefined, reason = "session shutdown"): Promise<number> {
+  async stopLiveRunsForSession(sessionId: string | undefined, reason = "session shutdown", waitMs = RUN_SHUTDOWN_WAIT_MS): Promise<number> {
     const liveRuns = [...this.liveRuns.values()].filter((live) => sessionId === undefined || live.sessionId === sessionId);
+    const shutdownStops = new Map<string, ShutdownStop>();
     for (const live of liveRuns) {
       live.notifyOnComplete = false;
+      const shutdownStop = this.recordShutdownStop(live.runId, reason);
+      if (shutdownStop) shutdownStops.set(live.runId, shutdownStop);
       live.control.stop(reason);
-      const record = this.runs.get(live.runId);
-      if (!record || (record.status !== "running" && record.status !== "paused")) continue;
-      record.status = "aborted";
-      record.endedAt = nowIso();
-      record.recovery = { scriptPath: record.scriptPath, resumeFromRunId: record.runId, args: record.recovery?.args };
-      await this.flush(record.runId);
+    }
+
+    await waitForLiveRunsToSettle(liveRuns, waitMs);
+
+    for (const [runId, shutdownStop] of shutdownStops) {
+      const record = this.runs.get(runId);
+      if (!record) continue;
+      this.applyShutdownStop(record, shutdownStop);
+      await this.flush(runId);
       await this.saveNow(record);
     }
     return liveRuns.length;
+  }
+
+  private recordShutdownStop(runId: string, reason: string): ShutdownStop | undefined {
+    const record = this.runs.get(runId);
+    if (!record || (record.status !== "running" && record.status !== "paused")) return undefined;
+    const existing = this.shutdownStops.get(runId);
+    const shutdownStop = existing ?? { reason, endedAt: nowIso() };
+    this.shutdownStops.set(runId, shutdownStop);
+    this.applyShutdownStop(record, shutdownStop);
+    return shutdownStop;
+  }
+
+  private applyShutdownStop(record: RunRecord, shutdownStop = this.shutdownStops.get(record.runId)): void {
+    if (!shutdownStop) return;
+    record.status = "aborted";
+    record.endedAt = shutdownStop.endedAt;
+    record.recovery = { scriptPath: record.scriptPath, resumeFromRunId: record.runId, args: record.recovery?.args };
+    delete record.outputPath;
   }
 
   async setStatus(runId: string, status: RunStatus, extra?: Partial<RunRecord>): Promise<void> {
@@ -365,6 +418,8 @@ export class RunStore {
     this.cancelScheduledSave(runId);
     await this.flush(runId).catch(() => undefined);
     this.stopOwnerHeartbeat(runId);
+    this.ownerIdentities.delete(runId);
+    this.shutdownStops.delete(runId);
     this.controls.delete(runId);
     this.liveRuns.delete(runId);
     await fs.promises.rm(record.runDir, { recursive: true, force: true });
@@ -400,6 +455,7 @@ export class RunStore {
 
   private startOwnerHeartbeat(runId: string, sessionId: string): void {
     this.stopOwnerHeartbeat(runId);
+    this.ownerIdentity(runId);
     void this.touchOwner(runId, sessionId).catch(() => undefined);
     const timer = setInterval(() => {
       void this.touchOwner(runId, sessionId).catch(() => undefined);
@@ -417,7 +473,15 @@ export class RunStore {
   private async touchOwner(runId: string, sessionId: string): Promise<void> {
     const record = this.runs.get(runId);
     if (!record || isTerminalStatus(record.status)) return;
-    await writeRunOwner(record.runDir, runId, sessionId);
+    await writeRunOwner(record.runDir, runId, sessionId, this.ownerIdentity(runId));
+  }
+
+  private ownerIdentity(runId: string): RunOwnerIdentity {
+    const existing = this.ownerIdentities.get(runId);
+    if (existing) return existing;
+    const identity = { ownerId: randomUUID(), createdAt: nowIso() };
+    this.ownerIdentities.set(runId, identity);
+    return identity;
   }
 }
 
@@ -510,12 +574,38 @@ function isTerminalStatus(status: RunStatus): boolean {
   return status !== "running" && status !== "paused";
 }
 
-async function writeRunOwner(runDir: string, runId: string, sessionId: string): Promise<void> {
-  const owner: RunOwnerFile = { runId, sessionId, pid: process.pid, updatedAt: nowIso() };
+async function waitForLiveRunsToSettle(liveRuns: LiveRun[], waitMs: number): Promise<void> {
+  if (liveRuns.length === 0 || waitMs <= 0) return;
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, waitMs);
+    timer.unref?.();
+  });
+  try {
+    await Promise.race([Promise.allSettled(liveRuns.map((live) => live.donePromise)), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function writeRunOwner(runDir: string, runId: string, sessionId: string, identity: RunOwnerIdentity): Promise<void> {
+  const processIdentity = await currentProcessIdentity(process.pid);
+  if (!processIdentity) throw new Error("Could not determine workflow owner process identity");
+  const owner: RunOwnerFile = {
+    version: 2,
+    runId,
+    sessionId,
+    ownerId: identity.ownerId,
+    pid: process.pid,
+    pidStartTime: processIdentity.pidStartTime,
+    bootId: processIdentity.bootId,
+    createdAt: identity.createdAt,
+    updatedAt: nowIso(),
+  };
   const filePath = runOwnerPath(runDir);
   const tmpPath = path.join(runDir, `.${RUN_OWNER_FILE}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`);
   try {
-    await fs.promises.writeFile(tmpPath, `${JSON.stringify(owner, null, 2)}\n`, "utf8");
+    await fs.promises.writeFile(tmpPath, jsonTextWithinLimit(owner, WORKFLOW_RESOURCE_LIMITS.runOwnerBytes, RUN_OWNER_FILE), "utf8");
     await fs.promises.rename(tmpPath, filePath);
   } catch (err) {
     await fs.promises.rm(tmpPath, { force: true }).catch(() => undefined);
@@ -529,17 +619,21 @@ async function removeRunOwner(runDir: string): Promise<void> {
 
 async function hasLiveOwner(run: RunRecord): Promise<boolean> {
   const owner = await readRunOwner(run.runDir);
-  if (!owner || owner.runId !== run.runId || !Number.isInteger(owner.pid) || owner.pid <= 0) return false;
+  if (!owner || owner.runId !== run.runId || owner.sessionId !== run.sessionId || !Number.isInteger(owner.pid) || owner.pid <= 0) return false;
+  if (typeof owner.ownerId !== "string" || owner.ownerId.trim() === "") return false;
   const updatedAt = Date.parse(owner.updatedAt);
   if (!Number.isFinite(updatedAt) || Date.now() - updatedAt > RUN_OWNER_STALE_MS) return false;
+  const processIdentity = await currentProcessIdentity(owner.pid);
+  if (!processIdentity || processIdentity.bootId !== owner.bootId || processIdentity.pidStartTime !== owner.pidStartTime) return false;
   return processIsAlive(owner.pid);
 }
 
 async function readRunOwner(runDir: string): Promise<RunOwnerFile | undefined> {
   try {
-    const parsed = JSON.parse(await fs.promises.readFile(runOwnerPath(runDir), "utf8")) as unknown;
-    if (!isRecord(parsed)) return undefined;
-    if (typeof parsed.runId !== "string" || typeof parsed.sessionId !== "string" || typeof parsed.pid !== "number" || typeof parsed.updatedAt !== "string") return undefined;
+    const parsed = JSON.parse(await readBoundedTextFile(runOwnerPath(runDir), WORKFLOW_RESOURCE_LIMITS.runOwnerBytes)) as unknown;
+    if (!isRecord(parsed) || parsed.version !== 2) return undefined;
+    if (typeof parsed.runId !== "string" || typeof parsed.sessionId !== "string" || typeof parsed.ownerId !== "string" || typeof parsed.pid !== "number") return undefined;
+    if (typeof parsed.pidStartTime !== "string" || typeof parsed.bootId !== "string" || typeof parsed.createdAt !== "string" || typeof parsed.updatedAt !== "string") return undefined;
     return parsed as unknown as RunOwnerFile;
   } catch {
     return undefined;
@@ -555,6 +649,33 @@ function processIsAlive(pid: number): boolean {
   }
 }
 
+async function currentProcessIdentity(pid: number): Promise<{ bootId: string; pidStartTime: string } | undefined> {
+  const [bootId, pidStartTime] = await Promise.all([readBootId(), readPidStartTime(pid)]);
+  return bootId && pidStartTime ? { bootId, pidStartTime } : undefined;
+}
+
+async function readBootId(): Promise<string | undefined> {
+  try {
+    const bootId = (await readBoundedTextFile("/proc/sys/kernel/random/boot_id", 128)).trim();
+    return bootId ? bootId : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readPidStartTime(pid: number): Promise<string | undefined> {
+  try {
+    const stat = await readBoundedTextFile(`/proc/${pid}/stat`, 4096);
+    const endOfCommand = stat.lastIndexOf(")");
+    if (endOfCommand === -1) return undefined;
+    const fields = stat.slice(endOfCommand + 1).trim().split(/\s+/);
+    const startTime = fields[19];
+    return /^\d+$/.test(startTime) ? startTime : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function recoveryForRun(run: RunRecord): Promise<RunRecord["recovery"]> {
   const args = run.recovery?.args ?? (await readArgsFile(run.argsPath));
   return { scriptPath: run.scriptPath, resumeFromRunId: run.runId, ...(args ? { args } : {}) };
@@ -562,7 +683,7 @@ async function recoveryForRun(run: RunRecord): Promise<RunRecord["recovery"]> {
 
 async function readArgsFile(argsPath: string): Promise<Record<string, unknown> | undefined> {
   try {
-    const parsed = JSON.parse(await fs.promises.readFile(argsPath, "utf8")) as unknown;
+    const parsed = JSON.parse(await readBoundedTextFile(argsPath, WORKFLOW_RESOURCE_LIMITS.runArgsBytes)) as unknown;
     return isRecord(parsed) ? (parsed as Record<string, unknown>) : undefined;
   } catch {
     return undefined;
@@ -573,14 +694,22 @@ function runOwnerPath(runDir: string): string {
   return path.join(runDir, RUN_OWNER_FILE);
 }
 
-async function atomicWriteJson(filePath: string, value: unknown): Promise<void> {
+async function atomicWriteJson(filePath: string, value: unknown, maxBytes?: number, label = path.basename(filePath)): Promise<void> {
   await ensureDir(path.dirname(filePath));
   const tmpPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`);
   try {
-    await fs.promises.writeFile(tmpPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    const text = maxBytes === undefined ? `${JSON.stringify(value, null, 2)}\n` : jsonTextWithinLimit(value, maxBytes, label);
+    await fs.promises.writeFile(tmpPath, text, "utf8");
     await fs.promises.rename(tmpPath, filePath);
   } catch (err) {
     await fs.promises.rm(tmpPath, { force: true }).catch(() => undefined);
     throw err;
   }
+}
+
+function jsonTextWithinLimit(value: unknown, maxBytes: number, label: string): string {
+  const text = `${JSON.stringify(value, null, 2)}\n`;
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
+  return text;
 }

@@ -2,8 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { RunRecord, WorkflowInput, WorkflowViewSnapshot } from "../types.js";
-import { RENDER_LIMITS } from "../constants.js";
+import { RENDER_LIMITS, SCRIPT_MAX_BYTES, WORKFLOW_RESOURCE_LIMITS } from "../constants.js";
 import { workflowFilePath } from "../persistence/paths.js";
+import { readBoundedTextFile } from "../persistence/safe-paths.js";
 import type { RunStore } from "../persistence/run-store.js";
 import type { WorkflowRegistry } from "../persistence/registry.js";
 import { WorkflowRunner } from "../runtime/runner.js";
@@ -107,7 +108,7 @@ async function runWorkflow(pi: ExtensionAPI, deps: WorkflowCommandDeps, ctx: any
 
 async function resumeWorkflow(pi: ExtensionAPI, deps: WorkflowCommandDeps, ctx: any, runId: string, scriptPath?: string, args?: Record<string, unknown>, mode?: "await" | "async"): Promise<void> {
   const run = requireRun(deps.runStore.get(runId), runId);
-  const loadedArgs = args ?? (await readJsonMaybe(run.argsPath)) ?? {};
+  const loadedArgs = args ?? (await readJsonMaybe(run.argsPath, WORKFLOW_RESOURCE_LIMITS.runArgsBytes)) ?? {};
   await runWorkflow(pi, deps, ctx, { scriptPath: scriptPath ?? run.scriptPath, args: loadedArgs, resumeFromRunId: runId, mode });
 }
 
@@ -155,7 +156,7 @@ async function openArtifact(deps: WorkflowCommandDeps, ctx: any, runId: string, 
     return;
   }
   const file = artifactPath(run, target);
-  const text = target === "transcripts" ? await listTranscripts(run) : await fs.promises.readFile(file, "utf8");
+  const text = target === "transcripts" ? await listTranscripts(run) : await readBoundedTextFile(file, artifactReadLimit(target, file));
   if (ctx.hasUI) showCommandWidget(ctx, `${runId} ${target}`, new PagerComponent(`${runId} ${target}`, text.split("\n")).render(100).slice(2), `Artifact: ${file}`);
   else console.log(truncateForChat(text, 50_000));
 }
@@ -227,6 +228,13 @@ function artifactPath(run: RunRecord, target: "result" | "script" | "journal" | 
   return run.outputPath ?? run.errorPath ?? path.join(run.runDir, "run.json");
 }
 
+function artifactReadLimit(target: "result" | "script" | "journal", filePath: string): number {
+  if (target === "journal") return WORKFLOW_RESOURCE_LIMITS.journalBytes;
+  if (target === "script") return SCRIPT_MAX_BYTES;
+  if (path.basename(filePath) === "run.json") return WORKFLOW_RESOURCE_LIMITS.runRecordBytes;
+  return WORKFLOW_RESOURCE_LIMITS.workflowOutputBytes;
+}
+
 async function listTranscripts(run: RunRecord): Promise<string> {
   const entries = await fs.promises.readdir(run.transcriptDir, { withFileTypes: true }).catch(() => []);
   return entries.filter((e: any) => e.isDirectory()).map((e: any) => path.join(run.transcriptDir, e.name)).join("\n") || "No subagent transcripts.";
@@ -242,10 +250,11 @@ async function printOrNotify(ctx: any, text: string): Promise<void> {
   else console.log(text || workflowHelpText());
 }
 
-async function readJsonMaybe(filePath: string): Promise<Record<string, unknown> | undefined> {
+async function readJsonMaybe(filePath: string, maxBytes: number): Promise<Record<string, unknown> | undefined> {
   try {
-    return JSON.parse(await fs.promises.readFile(filePath, "utf8")) as Record<string, unknown>;
-  } catch {
-    return undefined;
+    return JSON.parse(await readBoundedTextFile(filePath, maxBytes)) as Record<string, unknown>;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw err;
   }
 }

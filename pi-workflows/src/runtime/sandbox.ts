@@ -12,7 +12,8 @@ export { type SandboxGlobals } from "./sandbox-types.js";
 
 type ProtocolMessage =
   | { type: "heartbeat" }
-  | { type: "request"; id: number; method: string; params?: unknown; critical?: boolean }
+  | { type: "request"; id: number; method: string; params?: unknown; critical?: boolean; fanoutGroupIds?: unknown }
+  | { type: "cancel"; fanoutGroupId?: unknown; reason?: { name?: unknown; message?: unknown } }
   | { type: "done"; result?: unknown }
   | { type: "failed"; error?: string; name?: string; stack?: string };
 
@@ -20,6 +21,8 @@ interface PendingRequest {
   method: string;
   critical: boolean;
   startedAt: number;
+  controller: AbortController;
+  fanoutGroupIds: number[];
 }
 
 export async function executeWorkflowSandbox(source: string, globals: SandboxGlobals, signal: AbortSignal): Promise<unknown> {
@@ -39,6 +42,8 @@ export async function executeWorkflowSandbox(source: string, globals: SandboxGlo
     const finish = (err: unknown, value?: unknown) => {
       if (settled) return;
       settled = true;
+      const pendingAbortReason = signal.aborted && err instanceof Error ? err : err instanceof WorkflowAbortError ? err : new WorkflowAbortError("Workflow RPC canceled");
+      abortPendingRequests(pending, pendingAbortReason);
       cleanup();
       terminateWorkflowChild(child, unitName, err instanceof WorkflowAbortError ? "abort" : "finish");
       if (err) reject(err);
@@ -199,44 +204,49 @@ function handleProtocolLine(line: string, globals: SandboxGlobals, child: ChildP
     if (msg.stack) err.stack = msg.stack;
     return finish(err);
   }
+  if (msg.type === "cancel") {
+    abortFanoutGroupRequests(pending, msg.fanoutGroupId, protocolAbortError(msg.reason));
+    return;
+  }
   if (msg.type === "request") {
-    pending.set(msg.id, { method: msg.method, critical: Boolean(msg.critical), startedAt: Date.now() });
-    void dispatchRequest(globals, msg.method, msg.params)
+    const controller = new AbortController();
+    pending.set(msg.id, { method: msg.method, critical: Boolean(msg.critical), startedAt: Date.now(), controller, fanoutGroupIds: normalizeFanoutGroupIds(msg.fanoutGroupIds) });
+    void dispatchRequest(globals, msg.method, msg.params, { signal: controller.signal })
       .then((result) => writeOkReply(child, msg.id, result))
       .catch((err) => writeErrorReply(child, msg.id, err))
       .finally(() => pending.delete(msg.id));
   }
 }
 
-async function dispatchRequest(globals: SandboxGlobals, method: string, params: unknown): Promise<unknown> {
+async function dispatchRequest(globals: SandboxGlobals, method: string, params: unknown, context: { signal: AbortSignal }): Promise<unknown> {
   const p = params && typeof params === "object" ? (params as Record<string, unknown>) : {};
   switch (method) {
     case "agent": {
-      const result = await globals.agent(p.prompt, p.opts);
+      const result = await abortable(Promise.resolve().then(() => globals.agent(p.prompt, p.opts, context)), context.signal);
       return { __piWorkflowRpc: "agentResult", result, budgetSpent: readBudgetSpent(globals.budget) };
     }
     case "workflow": {
-      const result = await globals.workflow(p.nameOrRef, p.args);
+      const result = await abortable(Promise.resolve().then(() => globals.workflow(p.nameOrRef, p.args, context)), context.signal);
       return { __piWorkflowRpc: "workflowResult", result, budgetSpent: readBudgetSpent(globals.budget) };
     }
     case "phase":
-      return globals.phase(String(p.title ?? ""));
+      return await abortable(Promise.resolve().then(() => globals.phase(String(p.title ?? ""))), context.signal);
     case "log":
-      return await globals.log(String(p.message ?? ""));
+      return await abortable(Promise.resolve().then(() => globals.log(String(p.message ?? ""))), context.signal);
     case "ui.define":
-      return await (globals.ui as any).define(p.spec);
+      return await abortable(Promise.resolve().then(() => (globals.ui as any).define(p.spec)), context.signal);
     case "ui.update":
-      return Object.prototype.hasOwnProperty.call(p, "state") ? await (globals.ui as any).update(String(p.viewId ?? ""), p.state) : await (globals.ui as any).update(p.viewId);
+      return await abortable(Promise.resolve().then(() => Object.prototype.hasOwnProperty.call(p, "state") ? (globals.ui as any).update(String(p.viewId ?? ""), p.state) : (globals.ui as any).update(p.viewId)), context.signal);
     case "ui.dashboard":
-      return await (globals.ui as any).dashboard(p.doc);
+      return await abortable(Promise.resolve().then(() => (globals.ui as any).dashboard(p.doc)), context.signal);
     case "ui.patch":
-      return await (globals.ui as any).patch(String(p.viewId ?? ""), p.patch);
+      return await abortable(Promise.resolve().then(() => (globals.ui as any).patch(String(p.viewId ?? ""), p.patch)), context.signal);
     case "ui.close":
-      return await (globals.ui as any).close(String(p.viewId ?? ""));
+      return await abortable(Promise.resolve().then(() => (globals.ui as any).close(String(p.viewId ?? ""))), context.signal);
     case "ui.flush": {
       const ui = globals.ui as any;
-      if (typeof ui.flush === "function") return await ui.flush();
-      if (typeof ui.__flush === "function") return await ui.__flush();
+      if (typeof ui.flush === "function") return await abortable(Promise.resolve().then(() => ui.flush()), context.signal);
+      if (typeof ui.__flush === "function") return await abortable(Promise.resolve().then(() => ui.__flush()), context.signal);
       return undefined;
     }
     case "budget.spent":
@@ -255,6 +265,46 @@ function writeOkReply(child: ChildProcessWithoutNullStreams, id: number, result:
 
 function writeErrorReply(child: ChildProcessWithoutNullStreams, id: number, err: unknown): void {
   writeMessage(child, { type: "reply", id, ok: false, error: serializeError(err) });
+}
+
+function abortPendingRequests(pending: Map<number, PendingRequest>, reason: Error): void {
+  for (const request of pending.values()) {
+    if (!request.controller.signal.aborted) request.controller.abort(reason);
+  }
+}
+
+function abortFanoutGroupRequests(pending: Map<number, PendingRequest>, rawGroupId: unknown, reason: Error): void {
+  if (typeof rawGroupId !== "number" || !Number.isSafeInteger(rawGroupId)) return;
+  for (const request of pending.values()) {
+    if (request.fanoutGroupIds.includes(rawGroupId) && !request.controller.signal.aborted) request.controller.abort(reason);
+  }
+}
+
+function normalizeFanoutGroupIds(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((id): id is number => typeof id === "number" && Number.isSafeInteger(id));
+}
+
+function protocolAbortError(reason: { name?: unknown; message?: unknown } | undefined): Error {
+  const message = typeof reason?.message === "string" && reason.message.trim() ? reason.message : "Workflow fanout canceled";
+  return new WorkflowAbortError(message);
+}
+
+async function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new WorkflowAbortError("Workflow RPC aborted");
+  let abort: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        abort = () => reject(signal.reason instanceof Error ? signal.reason : new WorkflowAbortError("Workflow RPC aborted"));
+        signal.addEventListener("abort", abort, { once: true });
+        if (signal.aborted) abort();
+      }),
+    ]);
+  } finally {
+    if (abort) signal.removeEventListener("abort", abort);
+  }
 }
 
 function writeMessage(child: ChildProcessWithoutNullStreams, message: unknown): boolean {

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkflowAgent } from "../src/agents/workflow-agent.js";
 import { WORKFLOW_RESOURCE_LIMITS } from "../src/constants.js";
 import { JsonlJournal, ResumeIndex } from "../src/persistence/journal.js";
+import { copyOpenFile, withSafeExistingFile } from "../src/persistence/safe-paths.js";
 import { WorkflowBudget } from "../src/runtime/budget.js";
 import { RunControl } from "../src/runtime/run-control.js";
 import { WorkflowScheduler } from "../src/runtime/scheduler.js";
@@ -15,6 +16,60 @@ afterEach(() => {
 });
 
 describe("workflow resume cache", () => {
+  it("copies replay artifacts from the opened file even if the source path is swapped", async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-workflow-copy-opened-artifact-"));
+    const sourcePath = path.join(root, "worktree.patch");
+    const outsidePath = path.join(root, "secret.patch");
+    const targetPath = path.join(root, "target.patch");
+    await fs.promises.writeFile(sourcePath, "original patch\n", "utf8");
+    await fs.promises.writeFile(outsidePath, "secret patch\n", "utf8");
+
+    const copied = await withSafeExistingFile(root, "worktree.patch", { maxBytes: 100 }, async (source) => {
+      await fs.promises.rm(sourcePath);
+      await fs.promises.symlink(outsidePath, sourcePath);
+      return copyOpenFile(source, targetPath, 100);
+    });
+
+    expect(copied?.size).toBe(Buffer.byteLength("original patch\n"));
+    await expect(fs.promises.readFile(targetPath, "utf8")).resolves.toBe("original patch\n");
+    await expect(fs.promises.readFile(sourcePath, "utf8")).resolves.toBe("secret patch\n");
+  });
+
+  it("rejects hostile journals that exceed the bounded read limit", async () => {
+    const runDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-workflow-huge-journal-"));
+    const journalPath = path.join(runDir, "journal.jsonl");
+    await fs.promises.writeFile(journalPath, "", "utf8");
+    await fs.promises.truncate(journalPath, WORKFLOW_RESOURCE_LIMITS.journalBytes + 1);
+
+    await expect(new JsonlJournal(journalPath).readAll()).rejects.toThrow(/exceeds/);
+  });
+
+  it("does not build a resume index from journals that exceed the bounded read limit", async () => {
+    const runDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-workflow-huge-resume-index-journal-"));
+    const journalPath = path.join(runDir, "journal.jsonl");
+    await fs.promises.writeFile(journalPath, "", "utf8");
+    await fs.promises.truncate(journalPath, WORKFLOW_RESOURCE_LIMITS.journalBytes + 1);
+
+    await expect(ResumeIndex.fromRun(runDir, journalPath)).rejects.toThrow(/exceeds/);
+  });
+
+  it("rejects hostile journals with oversized events", async () => {
+    const runDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-workflow-huge-journal-event-"));
+    const journalPath = path.join(runDir, "journal.jsonl");
+    await fs.promises.writeFile(journalPath, `${"x".repeat(WORKFLOW_RESOURCE_LIMITS.journalEventBytes + 1)}\n`, "utf8");
+
+    await expect(new JsonlJournal(journalPath).readAll()).rejects.toThrow(/journal event exceeds/i);
+  });
+
+  it("rejects hostile journals with too many events", async () => {
+    const runDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-workflow-many-journal-events-"));
+    const journalPath = path.join(runDir, "journal.jsonl");
+    const line = `${JSON.stringify({ type: "log", runId: "wr_source", time: new Date(0).toISOString(), message: "" })}\n`;
+    await fs.promises.writeFile(journalPath, line.repeat(WORKFLOW_RESOURCE_LIMITS.journalEvents + 1), "utf8");
+
+    await expect(new JsonlJournal(journalPath).readAll()).rejects.toThrow(/event count exceeds/);
+  });
+
   it("indexes cached journal entries", async () => {
     const runDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-workflow-resume-index-"));
     const resultPath = path.join(runDir, "subagents", "0001", "result.json");
@@ -188,7 +243,8 @@ describe("workflow resume cache", () => {
     const outsideDir = path.join(root, "outside");
     await fs.promises.mkdir(sourceCallDir, { recursive: true });
     await fs.promises.mkdir(outsideDir, { recursive: true });
-    await fs.promises.writeFile(path.join(outsideDir, "secret.patch"), "secret\n", "utf8");
+    await fs.promises.writeFile(path.join(outsideDir, "worktree.patch"), "secret\n", "utf8");
+    await fs.promises.writeFile(path.join(sourceCallDir, "worktree.patch"), "local bait\n", "utf8");
     const sourcePath = path.join(sourceCallDir, "result.json");
     await fs.promises.writeFile(sourcePath, `${JSON.stringify({
       status: "done",
@@ -196,7 +252,53 @@ describe("workflow resume cache", () => {
       workspace: {
         kind: "worktree",
         worktreeDir: path.join(sourceCallDir, "worktree"),
-        patchPath: "../../outside/secret.patch",
+        patchPath: "../../outside/worktree.patch",
+      },
+    })}\n`, "utf8");
+
+    const run = makeRun(path.join(root, "target"));
+    await fs.promises.mkdir(run.transcriptDir, { recursive: true });
+    const scheduler = new WorkflowScheduler({
+      cwd: root,
+      run,
+      journal: new JsonlJournal(run.journalPath),
+      control: new RunControl(),
+      budget: new WorkflowBudget(null),
+      resumeIndex: {
+        canReplay: () => true,
+        load: async () => ({ value: { cached: true }, sourcePath, status: "done" }),
+      } as any,
+      maxAgents: 10,
+      persist: async () => {},
+    });
+
+    await expect(scheduler.agentCall("use cached result", { label: "cached" })).resolves.toEqual({ cached: true });
+
+    const targetCallDir = path.join(run.transcriptDir, "0001");
+    const materialized = JSON.parse(await fs.promises.readFile(path.join(targetCallDir, "result.json"), "utf8"));
+    expect(materialized.workspace.patchPath).toBeUndefined();
+    expect(materialized.workspace.error).toMatch(/patch artifact: unsafe/);
+    await expect(fs.promises.stat(path.join(targetCallDir, "worktree.patch"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(JSON.stringify(materialized.workspace)).not.toContain(outsideDir);
+  });
+
+  it("omits replayed worktree artifacts with absolute outside paths even when the basename matches", async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-workflow-resume-artifact-absolute-escape-"));
+    const sourceCallDir = path.join(root, "source", "subagents", "0007");
+    const outsideDir = path.join(root, "outside");
+    await fs.promises.mkdir(sourceCallDir, { recursive: true });
+    await fs.promises.mkdir(outsideDir, { recursive: true });
+    const outsidePatch = path.join(outsideDir, "worktree.patch");
+    await fs.promises.writeFile(outsidePatch, "secret\n", "utf8");
+    await fs.promises.writeFile(path.join(sourceCallDir, "worktree.patch"), "local bait\n", "utf8");
+    const sourcePath = path.join(sourceCallDir, "result.json");
+    await fs.promises.writeFile(sourcePath, `${JSON.stringify({
+      status: "done",
+      result: { cached: true },
+      workspace: {
+        kind: "worktree",
+        worktreeDir: path.join(sourceCallDir, "worktree"),
+        patchPath: outsidePatch,
       },
     })}\n`, "utf8");
 

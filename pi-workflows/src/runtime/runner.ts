@@ -2,16 +2,18 @@ import fs from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { RunRecord, ToolResult, WorkflowInput, WorkflowLaunchOutput, WorkflowUsage, WorkflowViewPlacement, WorkflowViewSnapshot } from "../types.js";
-import { CHAT_PREVIEW_BYTES, DEFAULT_LIMITS, WORKFLOW_RESULT_MESSAGE } from "../constants.js";
+import { CHAT_PREVIEW_BYTES, DEFAULT_LIMITS, SCRIPT_MAX_BYTES, WORKFLOW_RESOURCE_LIMITS, WORKFLOW_RESULT_MESSAGE } from "../constants.js";
 import { WorkflowRegistry } from "../persistence/registry.js";
 import { RunStore } from "../persistence/run-store.js";
 import { JsonlJournal, ResumeIndex } from "../persistence/journal.js";
 import { resolveLocalPath } from "../persistence/paths.js";
+import { readBoundedTextFile } from "../persistence/safe-paths.js";
 import { parseWorkflowScript, type ParsedWorkflowScript } from "./parser.js";
 import { WorkflowBudget } from "./budget.js";
 import { RunControl } from "./run-control.js";
 import { WorkflowAgentQuota, WorkflowScheduler } from "./scheduler.js";
 import { executeWorkflowSandbox } from "./sandbox.js";
+import type { SandboxRpcContext } from "./sandbox-types.js";
 import { createWorkflowUiGlobal } from "./ui-global.js";
 import { WorkflowViewStore, workflowViewPlacement } from "../ui/workflow-view-store.js";
 import { WorkflowViewComponent } from "../ui/workflow-view-widget.js";
@@ -199,21 +201,26 @@ export class WorkflowRunner {
     });
 
     const globals = {
-      agent: (prompt: unknown, opts?: unknown) => scheduler.agentCall(prompt, opts === undefined ? {} : opts),
+      agent: (prompt: unknown, opts?: unknown, rpc?: SandboxRpcContext) => scheduler.agentCall(prompt, opts === undefined ? {} : opts, rpc?.signal),
       phase: (title: string) => scheduler.phase(title),
       log: (message: string) => scheduler.log(message),
-      workflow: async (nameOrRef: unknown, childArgs?: unknown) => {
+      workflow: async (nameOrRef: unknown, childArgs?: unknown, rpc?: SandboxRpcContext) => {
         if ((this.deps.childDepth ?? 0) >= 1) throw new Error("Nested child workflows are limited to one level");
         const childInput = childWorkflowInput(nameOrRef, childArgs);
         const child = new WorkflowRunner({ ...this.deps, childDepth: (this.deps.childDepth ?? 0) + 1, budget, agentQuota });
-        const output = await child.launchOrRun({ toolCallId: `${record.taskId}_child`, input: childInput, signal: control.signal, ctx });
-        addUsage(record.usage, output.usage);
-        this.deps.runStore.scheduleSave(record);
-        emitProgress();
-        if (output.status === "failed") throw childWorkflowError(output);
-        if (!output.outputPath) return output;
-        const parsed = JSON.parse(await fs.promises.readFile(output.outputPath, "utf8")) as { result?: unknown };
-        return parsed.result ?? null;
+        const childSignal = linkAbortSignals(control.signal, rpc?.signal);
+        try {
+          const output = await child.launchOrRun({ toolCallId: `${record.taskId}_child`, input: childInput, signal: childSignal.signal, ctx });
+          addUsage(record.usage, output.usage);
+          this.deps.runStore.scheduleSave(record);
+          emitProgress();
+          if (output.status === "failed") throw childWorkflowError(output);
+          if (!output.outputPath) return output;
+          const parsed = JSON.parse(await readBoundedTextFile(output.outputPath, WORKFLOW_RESOURCE_LIMITS.workflowOutputBytes)) as { result?: unknown };
+          return parsed.result ?? null;
+        } finally {
+          childSignal.cleanup();
+        }
       },
       ui,
       args: stableArgs,
@@ -223,6 +230,8 @@ export class WorkflowRunner {
 
     try {
       const result = await executeWorkflowSandbox(resolved.parsed.executableSource, globals, control.signal);
+      throwIfAborted(control.signal);
+      throwIfShutdownAborted(record);
       record.status = "completed";
       record.endedAt = nowIso();
       if (typeof (ui as any).__flush === "function") await (ui as any).__flush();
@@ -230,17 +239,20 @@ export class WorkflowRunner {
       await fs.promises.writeFile(outputPath, `${JSON.stringify({ result }, null, 2)}\n`, "utf8");
       await this.deps.runStore.flush(record.runId);
       record.outputPath = outputPath;
-      await journal.append({ type: "workflow_completed", runId: record.runId, time: nowIso(), outputPath, usage: record.usage });
       await this.deps.runStore.saveNow(record);
+      throwIfAborted(control.signal);
+      throwIfShutdownAborted(record);
+      await journal.append({ type: "workflow_completed", runId: record.runId, time: nowIso(), outputPath, usage: record.usage });
       const output = completedOutput(record, result, outputViews(viewStore, ["runPanel", "completion"]));
       stopProgressTicker();
       if (showStandardProgress) clearStandardProgress(ctx, record);
       clearLiveViews(ctx, record, viewStore, showLiveWidgets);
       return output;
     } catch (err) {
-      if (!(err instanceof WorkflowAbortError)) control.stop("workflow failed");
-      const error = err instanceof WorkflowAbortError ? "Workflow aborted" : (err as Error).message;
-      record.status = err instanceof WorkflowAbortError ? "aborted" : "failed";
+      const aborted = err instanceof WorkflowAbortError || control.signal.aborted;
+      if (!aborted) control.stop("workflow failed");
+      const error = aborted ? "Workflow aborted" : (err as Error).message;
+      record.status = aborted ? "aborted" : "failed";
       record.endedAt = nowIso();
       if (typeof (ui as any).__flush === "function") await (ui as any).__flush().catch(() => undefined);
       const errorPath = path.join(record.runDir, "error.json");
@@ -262,12 +274,12 @@ export class WorkflowRunner {
     let originalPath: string | undefined;
     if (input.scriptPath) {
       originalPath = resolveLocalPath(cwd, input.scriptPath);
-      source = await fs.promises.readFile(originalPath, "utf8");
+      source = await readBoundedTextFile(originalPath, SCRIPT_MAX_BYTES);
     } else if (input.name) {
       const ref = this.deps.registry.get(input.name);
       if (!ref) throw new Error(`Unknown workflow: ${input.name}`);
       originalPath = ref.path;
-      source = await fs.promises.readFile(ref.path, "utf8");
+      source = await readBoundedTextFile(ref.path, SCRIPT_MAX_BYTES);
     } else {
       source = input.script!;
     }
@@ -452,6 +464,46 @@ function getModelRegistryModels(ctx: any): readonly ModelRegistryModelLike[] | u
 function outputViews(store: WorkflowViewStore, placements: WorkflowViewPlacement[]): WorkflowViewSnapshot[] | undefined {
   const views = store.listByPlacement(...placements).map((snapshot) => structuredClone(snapshot) as WorkflowViewSnapshot);
   return views.length > 0 ? views : undefined;
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  throw signal.reason instanceof Error ? signal.reason : new WorkflowAbortError("Workflow aborted");
+}
+
+function throwIfShutdownAborted(record: RunRecord): void {
+  if (record.status === "aborted") throw new WorkflowAbortError("Workflow aborted");
+}
+
+interface LinkedAbortSignal {
+  signal: AbortSignal;
+  cleanup(): void;
+}
+
+function linkAbortSignals(...signals: Array<AbortSignal | undefined>): LinkedAbortSignal {
+  const active = signals.filter((signal): signal is AbortSignal => Boolean(signal));
+  if (active.length === 0) return { signal: new AbortController().signal, cleanup: () => undefined };
+  if (active.length === 1) return { signal: active[0], cleanup: () => undefined };
+  const controller = new AbortController();
+  const listeners: Array<() => void> = [];
+  const abortFrom = (source: AbortSignal) => {
+    if (!controller.signal.aborted) controller.abort(source.reason instanceof Error ? source.reason : new WorkflowAbortError("Workflow aborted"));
+  };
+  for (const signal of active) {
+    if (signal.aborted) {
+      abortFrom(signal);
+      continue;
+    }
+    const listener = () => abortFrom(signal);
+    signal.addEventListener("abort", listener, { once: true });
+    listeners.push(() => signal.removeEventListener("abort", listener));
+  }
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      for (const remove of listeners.splice(0)) remove();
+    },
+  };
 }
 
 function updateLiveView(ctx: any, run: RunRecord, snapshot: WorkflowViewSnapshot, renderer: WorkflowViewRenderer, components: Map<string, WorkflowViewComponent>): void {
