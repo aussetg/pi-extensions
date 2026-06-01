@@ -286,6 +286,7 @@ export class WorkflowScheduler {
     const effectiveThinking = replay.thinking ?? thinking;
     const call: WorkflowCallProgress = { callId, label, phase, model: replay.model, thinking: effectiveThinking, usage: replay.usage, status: replay.status === "skipped" ? "skipped" : "cached", cached: true, startedAt: nowIso(), endedAt: nowIso(), resultPath };
     this.calls.set(callId, call);
+    if (replay.usage) this.addUsage(replay.usage);
     await this.deps.journal.append({
       type: "agent_result",
       runId: this.deps.run.runId,

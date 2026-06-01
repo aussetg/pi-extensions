@@ -252,7 +252,9 @@ async function printOrNotify(ctx: any, text: string): Promise<void> {
 
 async function readJsonMaybe(filePath: string, maxBytes: number): Promise<Record<string, unknown> | undefined> {
   try {
-    return JSON.parse(await readBoundedTextFile(filePath, maxBytes)) as Record<string, unknown>;
+    const parsed = JSON.parse(await readBoundedTextFile(filePath, maxBytes)) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`Workflow args file must contain a JSON object: ${filePath}`);
+    return parsed as Record<string, unknown>;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw err;

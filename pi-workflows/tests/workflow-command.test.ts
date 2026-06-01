@@ -87,4 +87,41 @@ describe("/workflow resume", () => {
       ),
     ).rejects.toThrow(/exceeds/);
   });
+
+  it("surfaces persisted args read errors instead of resuming with empty args", async () => {
+    const cwd = path.join(tmp, "project");
+    await fs.promises.mkdir(cwd, { recursive: true });
+
+    const runStore = new RunStore();
+    const { record } = await runStore.create({ cwd, sessionId: "s", meta, source, args: { keep: true } });
+    await fs.promises.rm(record.argsPath, { force: true });
+    await fs.promises.mkdir(record.argsPath);
+
+    await expect(
+      routeWorkflowCommand(
+        {} as any,
+        { action: "resume", runId: record.runId },
+        { runStore, registry: new WorkflowRegistry(), renderer: new WorkflowViewRenderer(), activation: {} as any },
+        { cwd, hasUI: false },
+      ),
+    ).rejects.toThrow(/unsafe file|EISDIR|directory|illegal operation/i);
+  });
+
+  it("rejects persisted args that are not a JSON object", async () => {
+    const cwd = path.join(tmp, "project");
+    await fs.promises.mkdir(cwd, { recursive: true });
+
+    const runStore = new RunStore();
+    const { record } = await runStore.create({ cwd, sessionId: "s", meta, source, args: { keep: true } });
+    await fs.promises.writeFile(record.argsPath, "[]", "utf8");
+
+    await expect(
+      routeWorkflowCommand(
+        {} as any,
+        { action: "resume", runId: record.runId },
+        { runStore, registry: new WorkflowRegistry(), renderer: new WorkflowViewRenderer(), activation: {} as any },
+        { cwd, hasUI: false },
+      ),
+    ).rejects.toThrow(/JSON object/);
+  });
 });

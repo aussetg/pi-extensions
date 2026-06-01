@@ -152,6 +152,7 @@ export class WorkflowAgent {
     const tmp = await writeTempPrompt(call.callId, systemPrompt);
     args.push("--append-system-prompt", tmp.filePath);
     args.push(call.prompt);
+    const effectiveStallMs = call.options.stallMs ?? call.stallMs;
 
     let completedResult: WorkflowAgentResult | undefined;
     let primaryError: unknown;
@@ -186,7 +187,7 @@ export class WorkflowAgent {
             stalled = true;
             proc.kill("SIGTERM");
             setTimeout(() => proc.kill("SIGKILL"), 3_000).unref?.();
-          }, call.options.stallMs ?? call.stallMs);
+          }, effectiveStallMs);
           timer.unref?.();
         };
         resetTimer();
@@ -272,7 +273,7 @@ export class WorkflowAgent {
             reject(err);
             return;
           }
-          if (stalled) reject(new Error(`Subagent ${call.callId} stalled after ${call.stallMs}ms`));
+          if (stalled) reject(new Error(`Subagent ${call.callId} stalled after ${effectiveStallMs}ms`));
           else resolve(code ?? 0);
         });
       });

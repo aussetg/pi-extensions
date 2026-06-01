@@ -172,7 +172,7 @@ describe("workflow resume cache", () => {
       }),
     ]);
     expect(run.progress.calls[0]).toEqual(expect.objectContaining({ status: "cached", cached: true, resultPath: materializedPath, usage, model: "opus-test" }));
-    expect(run.usage.subagentTokens).toBe(0);
+    expect(run.usage).toEqual(expect.objectContaining({ agentCount: 1, subagentTokens: 48_700, toolUses: 9, durationMs: 28_000, estimated: true }));
   });
 
   it("copies replayed worktree artifacts into the new run and rewrites result paths", async () => {
