@@ -8,7 +8,8 @@ Highlights:
 - Pi subagents launched through `agent()`;
 - `parallel()`, `pipeline()`, `phase()`, `log()`, `args`, `budget`, `cwd`, and declarative `ui` globals;
 - journal-based resume for unchanged completed `agent()` calls;
-- `/workflow` manager, run/list/save/resume/open/pause/continue/stop/delete controls;
+- `/workflow` manager, enable/disable/status, run/list/save/resume/open, live-control,
+  `skip-agent`, preview, and delete commands;
 - the model tool is off by default; use `/workflow enable` when you want the agent to call it, and `/workflow disable` afterwards;
 - declarative UI validation and bounded renderers.
 
@@ -74,6 +75,27 @@ Preview a persisted UI snapshot without scanning transcripts or session history:
 /workflow preview-ui '{"title":"Preview","tables":[{"columns":["lane","score"],"rows":[{"lane":"ux","score":91}]}]}' --profile panel --width 140
 ```
 
+Slash command reference:
+
+```text
+/workflow                                      # open the manager
+/workflow enable|disable|toggle|status         # model tool gate; aliases: on/off
+/workflow list [--running|--completed|--all]   # alias: ls
+/workflow run <name|scriptPath> [--args <json>] [--await|--async]
+/workflow save <runId> [--scope project|user] [--name <slug>]
+/workflow resume <runId> [--script <scriptPath>] [--args <json>] [--await|--async]
+/workflow pause|continue|stop <runId>          # continue alias: cont
+/workflow skip-agent <runId> <callId>
+/workflow open <runId> [result|script|journal|transcripts|ui] [viewId] [--profile compact|panel|full] [--width <columns>]
+/workflow preview-ui <json> [--profile compact|panel|full] [--width <columns>]
+/workflow delete <runId>                       # alias: rm
+```
+
+`run` and `resume` default to async mode when Pi has a UI and await mode without UI. `open ui`
+previews the first persisted UI view unless a `viewId` is supplied. `open result`, `script`,
+`journal`, and `transcripts` are read-only artifact viewers; only UI previews accept `viewId`,
+`--profile`, and `--width`.
+
 The strict declarative API is still available for advanced layouts:
 
 ```js
@@ -133,7 +155,8 @@ the script talks to the parent through a JSON-only VM membrane: workflow-visible
 created inside the VM realm, while host objects stay behind the capability channel. The control child
 itself runs under `systemd-run --user --scope` and `bwrap`; that OS sandbox sees a tiny tmpfs
 filesystem, a private network namespace, cgroup limits, and a JSON-RPC capability channel back to the
-parent for `agent()`, `ui.*`, logging, and child workflows.
+parent for `agent()`, `ui.*`, logging, and child workflows. This sandbox is required: pi-workflows
+does not silently fall back to an unsandboxed control child.
 Subagents are still normal separate Pi child processes launched by the parent; they inherit the
 currently active tool allowlist with `workflow` removed. If no inherited non-workflow tools remain,
 the subagent is launched with `--no-tools` rather than Pi defaults. Their cwd is either the shared
@@ -162,5 +185,22 @@ usage report arrives. A single subagent can still report usage above the remaini
 is recorded and the workflow fails immediately after the over-budget usage is charged.
 
 Frame rendering is intentionally bounded: renderers consume only the current run/view snapshot and cap rows, logs, calls, node depth, and table output. They never scan Pi session history during `render(width)`.
+
+Host sandbox requirements and troubleshooting:
+
+- Required host tools: `/usr/bin/systemd-run` from systemd and `/usr/bin/bwrap` from bubblewrap.
+  On Arch/CachyOS, `sudo pacman -S systemd bubblewrap` is sufficient on a normal systemd user
+  session.
+- If `bwrap` is missing, workflow launch fails with
+  `pi-workflows requires bwrap on this machine for workflow child sandboxing`.
+- If `systemd-run` is missing, launch fails similarly for `systemd-run`. If it exists but cannot
+  create a user scope, check `systemctl --user status`, `XDG_RUNTIME_DIR`, and
+  `DBUS_SESSION_BUS_ADDRESS` in the Pi process environment.
+- If bubblewrap reports namespace or permission errors, the host/container likely disallows the
+  required user/mount/network namespaces. Enable unprivileged user namespaces for this machine or run
+  Pi outside that restricted container/session.
+- These requirements apply to the deterministic workflow control child. Subagents are separate Pi
+  child processes launched by the parent with the inherited tool allowlist and the selected workspace
+  policy.
 
 Run `npm install` in this directory after checkout, then `/reload` Pi.

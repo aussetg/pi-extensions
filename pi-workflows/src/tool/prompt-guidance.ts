@@ -6,7 +6,7 @@ export const WORKFLOW_PROMPT_GUIDELINES = [
   "Do not use workflow for ordinary sequential work, single-agent tasks, simple audits, quick reads or edits, normal implementation tasks, or anything that can be done with the regular tools in one agent thread.",
   "Workflow scripts are top-level async JavaScript and must begin with literal export const meta = {...} containing non-empty name and description. Do not use export default or wrap the script in a main() function.",
   "Workflow scripts are deterministic: do not use globalThis, Date.now(), Math.random(), argless new Date(), imports, require, process, fs, fetch, or network APIs.",
-  "The parser and child VM membrane enforce the deterministic workflow API; bwrap/systemd contain the control child at the OS boundary.",
+  "The parser and child VM membrane enforce the deterministic workflow API; bwrap/systemd-run contain the control child at the OS boundary, and launch fails rather than falling back unsandboxed if those host tools are unavailable.",
   "Direct agent() calls use the shared workspace by default. agent() calls inside parallel() and pipeline() default to isolation: 'worktree'. Explicit opts.isolation always wins.",
   "agent(prompt, opts) accepts only strict JSON options: label, phase, schema, model, thinking, isolation, agentType, and stallMs. Unknown keys or invalid values fail before launch.",
   "Worktree-isolated subagents persist patches plus bounded ignored-file artifacts for outputs created under ignored paths; writes outside the worktree are still not captured.",
