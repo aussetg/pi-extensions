@@ -49,7 +49,7 @@ export function createWorkflowTool(deps: WorkflowToolDeps): any {
     promptGuidelines: WORKFLOW_PROMPT_GUIDELINES,
     parameters: WorkflowInputSchema,
     renderCall: (args: Record<string, unknown>, theme: any) => renderWorkflowCall(args, theme),
-    renderResult: (result: any, options: any, theme: any) => renderWorkflowResult(result, options, theme),
+    renderResult: (result: any, options: any, theme: any, context: any) => renderWorkflowResult(result, options, theme, context),
     async execute(toolCallId: string, input: WorkflowInput, signal: AbortSignal, onUpdate: (partial: ToolResult<WorkflowLaunchOutput>) => void, ctx: any): Promise<ToolResult<WorkflowLaunchOutput>> {
       try {
         const runner = new WorkflowRunner(deps);

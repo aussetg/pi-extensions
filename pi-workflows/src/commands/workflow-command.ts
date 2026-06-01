@@ -29,7 +29,11 @@ export interface WorkflowCommandDeps {
 const COMMAND_WIDGET_KEY = "workflow:command-preview";
 const COMMAND_WIDGET_TTL_MS = 30_000;
 const COMMAND_WIDGET_BODY_LINES = 8;
-const commandWidgetTimers = new Map<string, NodeJS.Timeout>();
+const commandWidgetTimers = new Map<string, { token: number; timer: NodeJS.Timeout; ui: any; widgetKey: string }>();
+const commandWidgetSessionScopes = new Map<string, string>();
+const commandWidgetUiScopes = new WeakMap<object, string>();
+let commandWidgetNextScope = 0;
+let commandWidgetNextToken = 0;
 
 export function registerWorkflowCommand(pi: ExtensionAPI, deps: WorkflowCommandDeps): void {
   pi.registerCommand("workflow", {
@@ -199,16 +203,61 @@ function showCommandWidget(ctx: any, title: string, lines: string[], footer?: st
   if (body.length > visible.length) visible.push(`… ${body.length - visible.length} more line(s)`);
   if (footer) visible.push(footer);
   const safeTitle = sanitizeLine(title, 500);
-  ctx.ui.setWidget(COMMAND_WIDGET_KEY, [`◆ ${safeTitle}`, ...visible.map((line) => sanitizeRenderedLine(line, 4000))], { placement: "aboveEditor" });
+  const widgetKey = commandWidgetKey(ctx);
+  const previous = commandWidgetTimers.get(widgetKey);
+  if (previous) {
+    clearTimeout(previous.timer);
+    if (previous.ui !== ctx.ui) clearCommandWidget(previous.ui, previous.widgetKey);
+  }
+  ctx.ui.setWidget(widgetKey, [`◆ ${safeTitle}`, ...visible.map((line) => sanitizeRenderedLine(line, 4000))], { placement: "aboveEditor" });
   ctx.ui.notify(`${safeTitle} preview shown above the editor for ${COMMAND_WIDGET_TTL_MS / 1000}s. No keys captured.`, "info");
-  const previous = commandWidgetTimers.get(COMMAND_WIDGET_KEY);
-  if (previous) clearTimeout(previous);
+  const token = ++commandWidgetNextToken;
   const timer = setTimeout(() => {
-    ctx.ui?.setWidget?.(COMMAND_WIDGET_KEY, undefined);
-    commandWidgetTimers.delete(COMMAND_WIDGET_KEY);
+    const current = commandWidgetTimers.get(widgetKey);
+    if (!current || current.token !== token) return;
+    clearCommandWidget(current.ui, current.widgetKey);
+    commandWidgetTimers.delete(widgetKey);
   }, COMMAND_WIDGET_TTL_MS);
   timer.unref?.();
-  commandWidgetTimers.set(COMMAND_WIDGET_KEY, timer);
+  commandWidgetTimers.set(widgetKey, { token, timer, ui: ctx.ui, widgetKey });
+}
+
+function commandWidgetKey(ctx: any): string {
+  return `${COMMAND_WIDGET_KEY}:${commandWidgetScope(ctx)}`;
+}
+
+function commandWidgetScope(ctx: any): string {
+  const sessionId = ctx?.sessionManager?.getSessionId?.() ?? ctx?.sessionManager?.getHeader?.()?.id;
+  if (typeof sessionId === "string" && sessionId.trim()) {
+    const trimmed = sessionId.trim();
+    let scope = commandWidgetSessionScopes.get(trimmed);
+    if (!scope) {
+      scope = `session:${++commandWidgetNextScope}`;
+      commandWidgetSessionScopes.set(trimmed, scope);
+    }
+    return scope;
+  }
+
+  const ui = ctx?.ui;
+  if (ui && (typeof ui === "object" || typeof ui === "function")) {
+    const key = ui as object;
+    let scope = commandWidgetUiScopes.get(key);
+    if (!scope) {
+      scope = `ui:${++commandWidgetNextScope}`;
+      commandWidgetUiScopes.set(key, scope);
+    }
+    return scope;
+  }
+
+  return "global";
+}
+
+function clearCommandWidget(ui: any, widgetKey: string): void {
+  try {
+    ui?.setWidget?.(widgetKey, undefined);
+  } catch {
+    // Timer cleanup is best-effort; command output should not crash the host UI loop.
+  }
 }
 
 async function deleteRun(deps: WorkflowCommandDeps, ctx: any, runId: string): Promise<void> {
