@@ -1,7 +1,9 @@
 import * as os from "node:os";
 import * as path from "node:path";
 
-// Errors thrown by the diff parser/application are surfaced to the model as tool failures.
+// Errors thrown by top-level argument parsing and entirely failed patches are
+// surfaced as tool failures. Per-operation errors remain in apply_patch results
+// when independent operations can still be applied.
 export class DiffError extends Error {
   constructor(message: string) {
     super(message);
@@ -70,6 +72,31 @@ export function shortenPathForDisplay(p: string): string {
   if (p === home) return "~";
   if (p.startsWith(home + path.sep)) return "~" + p.slice(home.length);
   return p;
+}
+
+export function relativePathFromCwd(filePath: string, cwd?: string): string | undefined {
+  if (!cwd) return undefined;
+  const normalizedFile = normalizeAbsolutePath(filePath);
+  const normalizedCwd = normalizeAbsolutePath(cwd);
+  if (!normalizedFile || !normalizedCwd) return undefined;
+  const prefix = normalizedCwd.endsWith("/") ? normalizedCwd : `${normalizedCwd}/`;
+  if (!normalizedFile.startsWith(prefix)) return undefined;
+  const relative = normalizedFile.slice(prefix.length);
+  return relative || undefined;
+}
+
+function normalizeAbsolutePath(value: string): string | undefined {
+  if (!value.startsWith("/")) return undefined;
+  const parts: string[] = [];
+  for (const part of value.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
+  return `/${parts.join("/")}`;
 }
 
 export function isNotFoundError(err: unknown): boolean {

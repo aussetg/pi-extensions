@@ -113,11 +113,14 @@ export function tryNormalizeUpdateDiffEnvelope(
 }
 
 function markerText(line: string): string {
-  return line.trimStart();
+  // Envelope markers are structural only at column zero. A leading space is
+  // the unified-diff context prefix, so trimming it can turn file content such
+  // as "*** Update File: ..." into a new operation.
+  return line.trimEnd();
 }
 
 function isMarkerLine(line: string, marker: string): boolean {
-  return line.trim() === marker;
+  return markerText(line) === marker;
 }
 
 function isEnvelopeOperationMarker(line: string): boolean {

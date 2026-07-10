@@ -135,21 +135,34 @@ export function registerApplyPatchTool(pi: ExtensionAPI): void {
         })
         .join("\n");
 
-      if (failed.length > 0) {
-        const completedCount = results.filter((r) => r.status === "completed").length;
-        const baseError = summaryLines
-          ? `${completedCount > 0 ? "Patch partially applied:" : "Patch was not applied:"}\n${summaryLines}`
-          : `${failed.length} operation(s) failed`;
-        throw new DiffError(
-          warningText
-            ? `${warningText}\n${baseError}`
-            : baseError,
-        );
-      }
-
+      const completedCount = results.filter(
+        (r) => r.status === "completed",
+      ).length;
+      const prefix =
+        failed.length === 0
+          ? undefined
+          : completedCount > 0
+            ? "Patch partially applied:"
+            : "Patch was not applied:";
+      const bodyText = [
+        prefix,
+        summaryLines || (failed.length === 0 ? "✓" : ""),
+      ]
+        .filter(
+          (line): line is string =>
+            typeof line === "string" && line.length > 0,
+        )
+        .join("\n");
       const contentText = warningText
-        ? `${summaryLines || "✓"}\n${warningText}`
-        : summaryLines || "✓";
+        ? `${bodyText || "✓"}\n${warningText}`
+        : bodyText || "✓";
+
+      // Pi only marks a tool result as an error when execute() throws. Keep
+      // partial application as a normal result, but do not report an
+      // entirely failed patch as a successful tool execution.
+      if (completedCount === 0 && failed.length > 0) {
+        throw new DiffError(contentText);
+      }
 
       return {
         content: [{ type: "text", text: contentText }],

@@ -3,12 +3,12 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import {
-  isRecord,
-  relativePathFromCwd,
-  shortenPathForDisplay,
-  type ThemeLike,
-} from "./util.ts";
+import { relativePathFromCwd, shortenPathForDisplay } from "./util.ts";
+
+type ThemeLike = {
+  fg: (color: string, text: string) => string;
+  bold: (text: string) => string;
+};
 
 const CODE_FEEDBACK_DETAILS_KEY = "piCodeFeedback";
 
@@ -57,8 +57,10 @@ export function renderCodeFeedbackFromDetails(
 
 class CodeFeedbackPanel implements CodeFeedbackBlock {
   private readonly content: string[];
+  private readonly theme: ThemeLike;
 
-  constructor(lines: string[], private readonly theme: ThemeLike) {
+  constructor(lines: string[], theme: ThemeLike) {
+    this.theme = theme;
     this.content = [lines[0]!, ...lines.slice(1).map((line) => line.replace(/^  /, ""))];
   }
 
@@ -346,6 +348,10 @@ function filePathFromUri(uri: string | undefined): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function isRecord(value: unknown): value is CodeFeedbackRecord {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function recordProp(record: CodeFeedbackRecord, key: string): CodeFeedbackRecord | undefined {

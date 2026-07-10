@@ -291,6 +291,8 @@ interface PlannedApplyTask {
 export interface PrepareApplyTasksResult {
   tasks: PreparedApplyTask[];
   presetResults: Array<ApplyOperationResult | undefined>;
+  /** Validated paths for operations that failed before normal preflight. */
+  failedTouchedPaths: string[][];
 }
 
 export function prepareApplyTasks(
@@ -301,6 +303,7 @@ export function prepareApplyTasks(
   const presetResults: Array<ApplyOperationResult | undefined> = new Array(
     operations.length,
   );
+  const failedTouchedPaths: string[][] = [];
 
   for (let i = 0; i < operations.length; i++) {
     const op = operations[i]!;
@@ -333,19 +336,6 @@ export function prepareApplyTasks(
     };
 
     if (
-      (type === "create_file" || type === "update_file") &&
-      typeof task.diff !== "string"
-    ) {
-      presetResults[i] = {
-        type,
-        path: rel,
-        status: "failed",
-        output: `${type} missing diff for ${rel}`,
-      };
-      continue;
-    }
-
-    if (
       type === "update_file" &&
       typeof op.move_path === "string" &&
       op.move_path.length > 0
@@ -361,14 +351,29 @@ export function prepareApplyTasks(
           status: "failed",
           output: err instanceof Error ? err.message : String(err),
         };
+        failedTouchedPaths.push(task.touchedPaths);
         continue;
       }
+    }
+
+    if (
+      (type === "create_file" || type === "update_file") &&
+      typeof task.diff !== "string"
+    ) {
+      presetResults[i] = {
+        type,
+        path: rel,
+        status: "failed",
+        output: `${type} missing diff for ${rel}`,
+      };
+      failedTouchedPaths.push(task.touchedPaths);
+      continue;
     }
 
     tasks.push(task);
   }
 
-  return { tasks, presetResults };
+  return { tasks, presetResults, failedTouchedPaths };
 }
 
 function errorMessage(err: unknown): string {
@@ -432,11 +437,12 @@ function updateChangeFromNumberedDiff(options: {
   });
 }
 
-// Preflight every operation against a virtual filesystem state before committing
-// any writes. This avoids partially applying a multi-file patch when an earlier
-// operation is valid but a later operation has a conflict, missing file, or path
-// collision. I/O errors can still happen during commit, so commit reporting
-// explicitly marks completed/failed/skipped operations.
+// Preflight operations against a virtual filesystem state before committing any
+// writes. Preflight failures are isolated by path: an invalid edit for one file
+// should not waste the rest of a multi-file patch, but later operations touching
+// that same path are skipped to avoid applying dependent edits out of order. I/O
+// errors can still happen during commit, so commit reporting explicitly marks
+// completed/failed/skipped operations.
 export async function applyOperations(
   operations: ApplyPatchOperation[],
   cwd: string,
@@ -450,10 +456,14 @@ export async function applyOperations(
   results: ApplyOperationResult[];
   warnings: string[];
 }> {
-  const { tasks, presetResults } = prepareApplyTasks(operations, cwd);
+  const { tasks, presetResults, failedTouchedPaths } = prepareApplyTasks(
+    operations,
+    cwd,
+  );
   const results: Array<ApplyOperationResult | undefined> = presetResults;
   const planned: PlannedApplyTask[] = [];
   const virtualFiles = new Map<string, VirtualFileState>();
+  const blockedPreflightPaths = new Set<string>(failedTouchedPaths.flat());
 
   const finalizeResults = (): ApplyOperationResult[] =>
     results.map((res, i): ApplyOperationResult => {
@@ -466,12 +476,6 @@ export async function applyOperations(
         output: "Internal error: missing result",
       };
     });
-
-  const skipUnresolvedTasks = (message: string) => {
-    for (const task of tasks) {
-      if (!results[task.index]) results[task.index] = skippedResult(task, message);
-    }
-  };
 
   const getVirtualState = async (
     abs: string,
@@ -507,15 +511,25 @@ export async function applyOperations(
     }
   };
 
-  if (results.some((res) => res?.status === "failed")) {
-    skipUnresolvedTasks("Skipped because preflight failed; no files were modified.");
-    return { fuzz: 0, results: finalizeResults(), warnings: [] };
-  }
-
   onProgress?.(`Preflighting ${operations.length} operation(s)...`);
 
   for (const task of tasks) {
     if (signal?.aborted) throw new Error("Aborted");
+
+    if (
+      task.touchedPaths.some((touchedPath) =>
+        blockedPreflightPaths.has(touchedPath),
+      )
+    ) {
+      results[task.index] = skippedResult(
+        task,
+        "Skipped because an earlier operation on the same path failed preflight.",
+      );
+      for (const touchedPath of task.touchedPaths) {
+        blockedPreflightPaths.add(touchedPath);
+      }
+      continue;
+    }
 
     const stepPreview =
       task.type === "update_file" &&
@@ -715,8 +729,9 @@ export async function applyOperations(
         status: "failed",
         output: errorMessage(err),
       };
-      skipUnresolvedTasks("Skipped because preflight failed; no files were modified.");
-      return { fuzz: 0, results: finalizeResults(), warnings: [] };
+      for (const touchedPath of task.touchedPaths) {
+        blockedPreflightPaths.add(touchedPath);
+      }
     }
   }
 

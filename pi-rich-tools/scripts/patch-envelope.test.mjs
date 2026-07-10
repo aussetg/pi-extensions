@@ -86,3 +86,31 @@ test("direct file sections are accepted with an envelope repair warning", () => 
     /without '\*\*\* Begin Patch'\/\'\*\*\* End Patch'/,
   );
 });
+
+test("file-header text in a context line is not parsed as another operation", () => {
+  const parsed = parsePatchEnvelopeDetailed(
+    "*** Begin Patch\n*** Update File: a.md\n@@\n *** Update File: b.md\n-old\n+new\n*** End Patch\n",
+  );
+
+  assert.deepEqual(parsed?.operations, [
+    {
+      type: "update_file",
+      path: "a.md",
+      diff: "@@\n *** Update File: b.md\n-old\n+new",
+    },
+  ]);
+});
+
+test("end-marker text in a context line does not terminate the envelope", () => {
+  const parsed = parsePatchEnvelopeDetailed(
+    "*** Begin Patch\n*** Update File: a.md\n@@\n *** End Patch\n-old\n+new\n*** End Patch\n",
+  );
+
+  assert.deepEqual(parsed?.operations, [
+    {
+      type: "update_file",
+      path: "a.md",
+      diff: "@@\n *** End Patch\n-old\n+new",
+    },
+  ]);
+});
