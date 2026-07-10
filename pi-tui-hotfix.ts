@@ -1,12 +1,7 @@
 // @ts-ignore The pi runtime provides this package to extensions.
-import { Box, TUI } from "@earendil-works/pi-tui";
+import { Box } from "@earendil-works/pi-tui";
 
 const BOX_RENDER_PATCH = Symbol.for("pi-tui-hotfix.box-render-cache");
-
-// Old versions of this extension traced TUI renders by default. Keep these
-// symbols so a reload can undo those monkey patches in the current process.
-const REQUEST_RENDER_PATCH = Symbol.for("pi-tui-hotfix.request-render-trace");
-const DO_RENDER_PATCH = Symbol.for("pi-tui-hotfix.do-render-trace");
 
 type BoxLike = {
 	children: Array<{ render(width: number): string[] }>;
@@ -25,28 +20,7 @@ type BoxLike = {
 };
 
 export default function (_pi: any): void {
-	restorePreviousTracingPatches();
 	patchBoxRenderCache();
-}
-
-function restorePreviousTracingPatches(): void {
-	const proto = (TUI as any)?.prototype;
-	if (!proto) return;
-	restorePatchedMethod(proto, REQUEST_RENDER_PATCH, "requestRender");
-	restorePatchedMethod(proto, DO_RENDER_PATCH, "doRender");
-}
-
-function restorePatchedMethod(proto: any, marker: symbol, methodName: string): void {
-	const original = proto[marker]?.original;
-	const current = proto[methodName];
-	if (
-		typeof original === "function" &&
-		typeof current === "function" &&
-		current !== original &&
-		current.name.startsWith("piTuiHotfix")
-	) {
-		proto[methodName] = original;
-	}
 }
 
 function patchBoxRenderCache(): void {
