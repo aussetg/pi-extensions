@@ -19,6 +19,7 @@ interface RenderOptionsLike {
 interface RenderContextLike {
   args?: Record<string, unknown>;
   invalidate?: () => void;
+  isError?: boolean;
 }
 
 interface ComponentLike {
@@ -48,7 +49,7 @@ export function renderLspToolResult(result: ToolResultLike, options: RenderOptio
   const method = typeof details?.method === "string" ? details.method : displayMethod(context.args ?? {});
   const truncation = details?.truncation as LspToolTruncation | undefined;
 
-  if (result.isError || details?.ok === false || parseJson(text)?.ok === false) return renderError(text, theme, options.expanded === true, details);
+  if (context.isError || result.isError || details?.ok === false || parseJson(text)?.ok === false) return renderError(text, theme, options.expanded === true, details);
   if (details?.raw === true) return renderRawPayload(method, text, theme, options.expanded === true, truncation);
 
   switch (method) {

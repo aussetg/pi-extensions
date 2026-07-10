@@ -63,6 +63,41 @@ test("lsp tool preserves trusted roots when reconfiguring services", async () =>
   }
 });
 
+test("lsp tool blocks project-local LSP work when Pi project trust is declined", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-untrusted-"));
+  const runtime = createRuntime(createDefaultConfig());
+  setProjectRoot(runtime, root);
+
+  let hoverCalled = false;
+  const lspService = {
+    configure() {},
+    getStatus() { return { activeClients: 0, clients: [], unavailableServers: [], diagnosticRefreshes: { active: 0, queued: 0 } }; },
+    hover() { hoverCalled = true; throw new Error("hover should not run"); },
+  };
+
+  let tool;
+  registerLspTool({
+    registerTool(definition) { tool = definition; },
+    registerCommand() {},
+  }, runtime, lspService);
+
+  try {
+    const result = await tool.execute("lsp-untrusted", {
+      method: "textDocument/hover",
+      path: "probe.py",
+      line: 1,
+      column: 1,
+    }, undefined, undefined, { cwd: root, isProjectTrusted: () => false });
+
+    assert.equal(hoverCalled, false);
+    assert.equal(result.isError, true);
+    assert.equal(result.details.ok, false);
+    assert.match(result.content[0].text, /Project is not trusted/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("lsp code actions return stable ids and apply by id", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-actions-"));
   const filePath = path.join(root, "probe.py");

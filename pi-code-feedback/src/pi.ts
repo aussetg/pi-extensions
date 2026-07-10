@@ -19,10 +19,12 @@ export interface PiCommandContext {
   ui: PiUi;
   sessionManager?: PiSessionManager;
   reload?: () => Promise<void>;
+  isProjectTrusted?: () => boolean;
 }
 
 export interface PiToolContext {
   cwd?: string;
+  isProjectTrusted?: () => boolean;
 }
 
 export interface PiCommandDefinition {

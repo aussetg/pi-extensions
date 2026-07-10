@@ -19,6 +19,7 @@ export function renderStatus(runtime: CodeFeedbackRuntime, lspStatus?: LspServic
     `  inline diagnostics: ${config.diagnostics.inline}`,
     `  auto format: ${config.autoFormat ? config.formatMode : "disabled"}`,
     `  strict: ${config.strict ? "enabled" : "disabled"}`,
+    `  project trust: ${runtime.projectTrusted ? "trusted" : "not trusted — LSP/formatting paused"}`,
     `  project root: ${runtime.projectRoot}`,
     `  trusted external roots: ${formatTrustedEnvironmentRoots(runtime)}`,
     `  clients: ${formatClientSummary(lspStatus)}`,
@@ -243,6 +244,7 @@ export function renderFooterStatus(runtime: CodeFeedbackRuntime, theme?: FooterT
 
 function footerStatusText(runtime: CodeFeedbackRuntime, lspStatus?: LspServiceStatus): string {
   const trusted = formatFooterTrustedRoots(runtime);
+  if (!runtime.projectTrusted) return `lsp: untrusted${trusted}`;
   if (!runtime.config.enabled || !runtime.config.lsp.enabled) return `lsp: off${trusted}`;
 
   const clients = (lspStatus?.clients ?? [])

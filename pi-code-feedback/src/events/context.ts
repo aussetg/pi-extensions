@@ -11,6 +11,7 @@ export interface ContextResult {
 
 export function handleContext(event: ContextEvent, runtime: CodeFeedbackRuntime): ContextResult | void {
   if (!runtime.config.enabled || !runtime.config.lsp.enabled) return;
+  if (!runtime.projectTrusted) return;
 
   const delayed = consumeDelayedFeedback(runtime, 3);
   if (delayed.length === 0) return;

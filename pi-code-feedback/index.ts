@@ -9,7 +9,7 @@ import { createLspService } from "./src/lsp/service.ts";
 import { registerLspTool } from "./src/lsp/tool.ts";
 import { asPiApi } from "./src/pi.ts";
 import { renderFooterStatus } from "./src/render.ts";
-import { beginTurn, createRuntime, refreshRuntimeConfig, setProjectRoot } from "./src/runtime.ts";
+import { beginTurn, createRuntime, refreshRuntimeConfig, setProjectRoot, setProjectTrust } from "./src/runtime.ts";
 
 export default function (piValue: unknown) {
   const pi = asPiApi(piValue);
@@ -35,6 +35,7 @@ export default function (piValue: unknown) {
   pi.on?.("session_start", async (_event, ctx) => {
     refreshRuntimeConfig(runtime, resolveConfig(pi));
     setProjectRoot(runtime, ctx.cwd);
+    setProjectTrust(runtime, ctx);
     restoreTrustedEnvironmentRoots(runtime, ctx);
     lspService.configure({
       projectRoot: runtime.projectRoot,
@@ -48,13 +49,16 @@ export default function (piValue: unknown) {
       formatterOverrides: runtime.config.formatters,
       trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
     });
+    if (!runtime.projectTrusted) await lspService.shutdownAll();
     ctx.ui?.setStatus?.("pi-code-feedback-lsp", renderFooterStatus(runtime, ctx.ui?.theme, lspService.getStatus()));
   });
 
   pi.on?.("session_tree", async (_event, ctx) => {
     setProjectRoot(runtime, ctx.cwd);
+    setProjectTrust(runtime, ctx);
     const changed = restoreTrustedEnvironmentRoots(runtime, ctx);
     await reconfigureTrustedEnvironmentServices(runtime, lspService, formatService, changed ? "trusted external roots restored from branch" : undefined);
+    if (!runtime.projectTrusted) await lspService.shutdownAll();
     ctx.ui?.setStatus?.("pi-code-feedback-lsp", renderFooterStatus(runtime, ctx.ui?.theme, lspService.getStatus()));
   });
 
@@ -63,10 +67,12 @@ export default function (piValue: unknown) {
   });
 
   pi.on?.("tool_call", async (event, ctx) => {
+    setProjectTrust(runtime, ctx);
     await handleToolCall(event as Parameters<typeof handleToolCall>[0], ctx, runtime, lspService);
   });
 
   pi.on?.("tool_result", async (event, ctx) => {
+    setProjectTrust(runtime, ctx);
     const result = await handleToolResult(event as Parameters<typeof handleToolResult>[0], ctx, runtime, lspService, formatService);
     ctx.ui?.setStatus?.("pi-code-feedback-lsp", renderFooterStatus(runtime, ctx.ui?.theme, lspService.getStatus()));
     return result;

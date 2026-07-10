@@ -200,7 +200,7 @@ async function reconfigureAfterTrustChange(
 function renderTrustStatus(runtime: CodeFeedbackRuntime): string {
   const lines = [
     "pi-code-feedback / trusted roots",
-    `  project root: ${runtime.projectRoot} (always trusted)`,
+    `  project root: ${runtime.projectRoot} (${runtime.projectTrusted ? "trusted" : "not trusted by Pi project trust"})`,
   ];
   if (runtime.trustedEnvironmentRoots.length === 0) {
     lines.push("  external roots: none");

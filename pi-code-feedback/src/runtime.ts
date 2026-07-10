@@ -10,6 +10,7 @@ export interface CodeFeedbackRuntime {
   lastLspRestartAt?: number;
   lastReloadReason?: string;
   lastError?: string;
+  projectTrusted: boolean;
   trustedEnvironmentRoots: string[];
   pendingEdits: Map<string, PendingEdit>;
   completedEdits: CompletedEdit[];
@@ -23,6 +24,7 @@ export function createRuntime(config: FeedbackConfig): CodeFeedbackRuntime {
     turnIndex: 0,
     writeIndex: 0,
     lspRestartCount: 0,
+    projectTrusted: true,
     trustedEnvironmentRoots: [],
     pendingEdits: new Map(),
     completedEdits: [],
@@ -36,6 +38,11 @@ export function refreshRuntimeConfig(runtime: CodeFeedbackRuntime, config: Feedb
 
 export function setProjectRoot(runtime: CodeFeedbackRuntime, cwd: string | undefined): void {
   runtime.projectRoot = path.resolve(cwd || fallbackCwd());
+}
+
+export function setProjectTrust(runtime: CodeFeedbackRuntime, ctx: { isProjectTrusted?: unknown } | undefined): void {
+  const isProjectTrusted = ctx?.isProjectTrusted;
+  runtime.projectTrusted = typeof isProjectTrusted === "function" ? isProjectTrusted.call(ctx) === true : true;
 }
 
 export function beginTurn(runtime: CodeFeedbackRuntime): void {

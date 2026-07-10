@@ -5,7 +5,7 @@ import type { FormatService } from "../format/service.ts";
 import { readUtf8IfExists } from "../fs.ts";
 import type { LspService } from "./service.ts";
 import { displayPathFromRoot, normalizeToolPath } from "../paths.ts";
-import { restartLsp, setProjectRoot, type CodeFeedbackRuntime } from "../runtime.ts";
+import { restartLsp, setProjectRoot, setProjectTrust, type CodeFeedbackRuntime } from "../runtime.ts";
 import { LSP_ACTIONS, LSP_METHODS, LSP_RESULT_SERVER_ID_KEY, type LspAction, type LspMethod } from "../types.ts";
 import type { PiApi, PiToolResult } from "../pi.ts";
 import { renderCodeActionApplySelectionError, renderLspActionResult, renderWorkspaceEditApplyResult } from "./render.ts";
@@ -75,6 +75,12 @@ export function registerLspTool(pi: PiApi, runtime: CodeFeedbackRuntime, lspServ
     codeActions: new Map(),
   };
 
+  pi.on?.("tool_result", (event: unknown) => {
+    if (!isRecord(event) || event.toolName !== "lsp") return undefined;
+    if (isLspErrorDetails(event.details)) return { isError: true };
+    return undefined;
+  });
+
   pi.registerTool({
     name: "lsp",
     label: "LSP",
@@ -96,6 +102,7 @@ export function registerLspTool(pi: PiApi, runtime: CodeFeedbackRuntime, lspServ
     },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       setProjectRoot(runtime, ctx?.cwd);
+      setProjectTrust(runtime, ctx);
       lspService.configure({
         projectRoot: runtime.projectRoot,
         serverOverrides: runtime.config.lsp.servers,
@@ -126,10 +133,14 @@ export function registerLspTool(pi: PiApi, runtime: CodeFeedbackRuntime, lspServ
         return textResult("pi-code-feedback LSP clients are disabled for this session. Use /lsp enable to turn them back on.", true, statusDetails(runtime, lspService, formatService));
       }
 
+      if (!runtime.projectTrusted && methodRequiresProjectTrust(method)) {
+        return errorResult(method, "Project is not trusted; pi-code-feedback LSP/formatting is paused until project trust is approved.", statusDetails(runtime, lspService, formatService));
+      }
+
       try {
         switch (method) {
         case "server/status":
-          return textResult(renderStatus(runtime, lspService.getStatus(), formatService?.getStatus()), false, statusDetails(runtime, lspService, formatService));
+          return textResult(renderStatus(runtime, lspService.getStatus(), runtime.projectTrusted ? formatService?.getStatus() : undefined), false, statusDetails(runtime, lspService, formatService));
 
         case "server/capabilities":
           return textResult(renderCapabilities(runtime, lspService.getStatus(), await lspService.capabilities(readPath(params))), false, {
@@ -303,8 +314,18 @@ function textResult(text: string, isError = false, details?: unknown): PiToolRes
   return {
     content: [{ type: "text", text: limited.text }],
     isError: isError || undefined,
-    details: withTruncationDetails(details, limited.truncation),
+    details: withTruncationDetails(isError ? markErrorDetails(details) : details, limited.truncation),
   };
+}
+
+function markErrorDetails(details: unknown): unknown {
+  if (isRecord(details)) return { ...details, ok: false };
+  if (details === undefined) return { ok: false };
+  return { ok: false, details };
+}
+
+function isLspErrorDetails(details: unknown): boolean {
+  return isRecord(details) && details.ok === false;
 }
 
 function errorResult(method: LspMethod | undefined, error: string, details?: unknown, hint?: string): PiToolResult {
@@ -381,6 +402,7 @@ function statusDetails(runtime: CodeFeedbackRuntime, lspService: LspService, for
     diagnosticRefreshes: serviceStatus.diagnosticRefreshes,
     autoFormat: runtime.config.autoFormat,
     strict: runtime.config.strict,
+    projectTrusted: runtime.projectTrusted,
     projectRoot: runtime.projectRoot,
     clientSummary: serviceStatus.clients.length === 0 ? "none yet — starts lazily when you query a source file" : `${serviceStatus.clients.length} client(s)`,
     clients: serviceStatus.clients,
@@ -390,7 +412,7 @@ function statusDetails(runtime: CodeFeedbackRuntime, lspService: LspService, for
     capturedEdits: runtime.completedEdits.length,
     pendingEdits: runtime.pendingEdits.size,
     delayedFeedback: runtime.delayedFeedback.length,
-    format: formatService?.getStatus(),
+    format: runtime.projectTrusted ? formatService?.getStatus() : undefined,
   };
 }
 
@@ -416,6 +438,10 @@ function methodRequiresEnabledLsp(method: LspMethod, params: Record<string, unkn
     default:
       return true;
   }
+}
+
+function methodRequiresProjectTrust(method: LspMethod): boolean {
+  return method !== "server/status" && method !== "workspace/diagnostic";
 }
 
 function requirePath(params: Record<string, unknown>): string {

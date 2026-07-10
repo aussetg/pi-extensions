@@ -47,6 +47,7 @@ export async function handleToolResult(
   formatService?: FormatService,
 ): Promise<PiToolResult | void> {
   if (!runtime.config.enabled) return;
+  if (!runtime.projectTrusted) return;
   if (event.toolName === "apply_patch") {
     return handleApplyPatchToolResult(event, ctx, runtime, lspService, formatService);
   }

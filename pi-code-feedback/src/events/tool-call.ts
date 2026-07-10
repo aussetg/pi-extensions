@@ -18,6 +18,7 @@ export interface ToolCallContext {
 
 export async function handleToolCall(event: ToolCallEvent, ctx: ToolCallContext, runtime: CodeFeedbackRuntime, lspService?: LspService): Promise<void> {
   if (!runtime.config.enabled) return;
+  if (!runtime.projectTrusted) return;
   if (event.toolName === "apply_patch") {
     await handleApplyPatchToolCall(event, ctx, runtime, lspService);
     return;

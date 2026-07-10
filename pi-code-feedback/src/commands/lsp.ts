@@ -2,7 +2,7 @@ import { renderCapabilities, renderDiagnosticsStatus, renderFooterStatus, render
 import type { FormatService } from "../format/service.ts";
 import type { LspService } from "../lsp/service.ts";
 import { normalizeToolPath } from "../paths.ts";
-import { restartLsp, setLspEnabled, setProjectRoot, type CodeFeedbackRuntime } from "../runtime.ts";
+import { restartLsp, setLspEnabled, setProjectRoot, setProjectTrust, type CodeFeedbackRuntime } from "../runtime.ts";
 import type { PiApi, PiCommandContext } from "../pi.ts";
 import { handleTrustCommand, trustArgumentCompletions } from "./trust.ts";
 
@@ -21,6 +21,7 @@ export function registerLspCommand(pi: PiApi, runtime: CodeFeedbackRuntime, lspS
     },
     handler: async (args, ctx) => {
       setProjectRoot(runtime, ctx.cwd);
+      setProjectTrust(runtime, ctx);
       lspService.configure({
         projectRoot: runtime.projectRoot,
         serverOverrides: runtime.config.lsp.servers,
@@ -37,7 +38,7 @@ export function registerLspCommand(pi: PiApi, runtime: CodeFeedbackRuntime, lspS
 
       switch (subcommand.toLowerCase()) {
         case "status":
-          notify(ctx, renderStatus(runtime, lspService.getStatus(), formatService?.getStatus()), "info");
+          notify(ctx, renderStatus(runtime, lspService.getStatus(), runtime.projectTrusted ? formatService?.getStatus() : undefined), "info");
           return;
 
         case "enable":
@@ -65,6 +66,12 @@ export function registerLspCommand(pi: PiApi, runtime: CodeFeedbackRuntime, lspS
             notify(ctx, "pi-code-feedback is disabled for this session; LSP clients will not be restarted.", "warning");
             return;
           }
+          if (!runtime.projectTrusted) {
+            await lspService.shutdownAll();
+            setFooterStatus(ctx, runtime, lspService);
+            notify(ctx, "Project is not trusted; LSP clients are paused until project trust is approved.", "warning");
+            return;
+          }
           restartLsp(runtime, "human command");
           await lspService.restart();
           setFooterStatus(ctx, runtime, lspService);
@@ -74,6 +81,10 @@ export function registerLspCommand(pi: PiApi, runtime: CodeFeedbackRuntime, lspS
         case "capabilities":
           if (!runtime.config.enabled || !runtime.config.lsp.enabled) {
             notify(ctx, renderCapabilities(runtime, lspService.getStatus()), "warning");
+            return;
+          }
+          if (!runtime.projectTrusted) {
+            notify(ctx, "Project is not trusted; LSP capabilities are unavailable until project trust is approved.", "warning");
             return;
           }
           notify(ctx, renderCapabilities(runtime, lspService.getStatus(), await lspService.capabilities(normalizeOptionalPath(rest[0]))), "info");
