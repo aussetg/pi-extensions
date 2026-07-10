@@ -1,8 +1,10 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { complete, type Message } from "@mariozechner/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+// @ts-ignore The pi runtime provides the compat entrypoint to extensions.
+import { complete, type Message } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
-import { Text } from "@mariozechner/pi-tui";
+import { Text } from "@earendil-works/pi-tui";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 declare const Buffer: any;
@@ -16,7 +18,7 @@ type BinaryBuffer = any;
  * 1. Activates the `read_image` tool (deactivates it when vision is available)
  * 2. Intercepts `read` tool results containing images and tells the model to use `read_image`
  *
- * Configuration via ~/.pi/agent/vision-config.json:
+ * Configuration via $PI_CODING_AGENT_DIR/vision-config.json (default: ~/.pi/agent/vision-config.json):
  * {
  *   "model": "GLM-5V",           // Vision model ID to use
  *   "provider": "zai",          // Provider (optional, inferred from model)
@@ -83,6 +85,8 @@ interface ToolResultEvent {
 }
 
 interface ReadImageDetails {
+  ok?: boolean;
+  error?: string;
   visionModel: string;
   visionProvider: string;
   imagePath: string;
@@ -99,7 +103,7 @@ interface ReadImageDetails {
 }
 
 const TOOL_NAME = "read_image";
-const CONFIG_FILE = "~/.pi/agent/vision-config.json";
+const CONFIG_FILE_NAME = "vision-config.json";
 const DEFAULT_LOCAL_IMAGE_PRESET: LocalImagePreset = "high";
 const RAW_IMAGE_HARD_LIMIT_BYTES = 100 * 1024 * 1024;
 const VISION_IMAGE_PAYLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
@@ -110,7 +114,7 @@ let cachedImageMagickCommand: string | null | undefined;
 
 function loadConfig(): VisionConfig {
   try {
-    const configPath = CONFIG_FILE.replace("~", process.env.HOME || "");
+    const configPath = visionConfigPath();
     const stat = fs.statSync(configPath);
     if (!stat.isFile()) return {};
     if (cachedConfig?.path === configPath && cachedConfig.mtimeMs === stat.mtimeMs) return cachedConfig.config;
@@ -122,6 +126,10 @@ function loadConfig(): VisionConfig {
     // Ignore errors, fall back to defaults
   }
   return {};
+}
+
+function visionConfigPath(): string {
+  return path.join(process.env.PI_CODING_AGENT_DIR || process.env.PI_AGENT_DIR || path.join(os.homedir(), ".pi", "agent"), CONFIG_FILE_NAME);
 }
 
 function resolveImageConfig(config: VisionConfig): ResolvedImageConfig {
@@ -468,6 +476,18 @@ function imageDetails(base: ReadImageDetails, image?: PreparedImage): ReadImageD
   };
 }
 
+function readImageErrorResult(text: string, details: Omit<ReadImageDetails, "ok" | "error">) {
+  return {
+    content: [{ type: "text" as const, text }],
+    details: { ...details, ok: false, error: text } as ReadImageDetails,
+    isError: true,
+  };
+}
+
+function isReadImageErrorDetails(details: unknown): details is ReadImageDetails & { ok: false } {
+  return Boolean(details && typeof details === "object" && (details as { ok?: unknown }).ok === false);
+}
+
 function imagePreparationSummary(details: ReadImageDetails | undefined): string {
   if (!details) return "";
   const localPreset = details.imagePreset ?? legacyLocalPreset(details.detail);
@@ -551,37 +571,27 @@ export default function (pi: ExtensionAPI) {
       const visionConfig = await findVisionModel(ctx);
 
       if (!visionConfig) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "No vision-capable model available. Configure a vision model in ~/.pi/agent/vision-config.json or switch to a model that supports images using /model.",
-            },
-          ],
-          details: {
+        return readImageErrorResult(
+          `No vision-capable model available. Configure a vision model in ${visionConfigPath()} or switch to a model that supports images using /model.`,
+          {
             visionModel: "none",
             visionProvider: "none",
             imagePath: params.path,
             prompt: params.prompt,
-          } as ReadImageDetails,
-          isError: true,
-        };
+          },
+        );
       }
 
       const { provider, model: visionModelId } = visionConfig;
       const model = ctx.modelRegistry.find(provider, visionModelId);
 
       if (!model) {
-        return {
-          content: [{ type: "text", text: `Vision model ${provider}/${visionModelId} not found in registry.` }],
-          details: {
-            visionModel: visionModelId,
-            visionProvider: provider,
-            imagePath: params.path,
-            prompt: params.prompt,
-          } as ReadImageDetails,
-          isError: true,
-        };
+        return readImageErrorResult(`Vision model ${provider}/${visionModelId} not found in registry.`, {
+          visionModel: visionModelId,
+          visionProvider: provider,
+          imagePath: params.path,
+          prompt: params.prompt,
+        });
       }
 
       // Resolve path
@@ -590,38 +600,28 @@ export default function (pi: ExtensionAPI) {
 
       // Check file exists
       if (!fs.existsSync(absolutePath)) {
-        return {
-          content: [{ type: "text", text: `Image file not found: ${params.path}` }],
-          details: {
-            visionModel: visionModelId,
-            visionProvider: provider,
-            imagePath: params.path,
-            prompt: params.prompt,
-          } as ReadImageDetails,
-          isError: true,
-        };
+        return readImageErrorResult(`Image file not found: ${params.path}`, {
+          visionModel: visionModelId,
+          visionProvider: provider,
+          imagePath: params.path,
+          prompt: params.prompt,
+        });
       }
 
       // Get API key & headers before doing potentially expensive local resize work.
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
       if (!auth.ok || !auth.apiKey) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: auth.ok
-                ? `No API key available for vision model ${provider}/${visionModelId}. Run /login or set the appropriate environment variable.`
-                : `Auth error for vision model ${provider}/${visionModelId}: ${auth.error}`,
-            },
-          ],
-          details: {
+        return readImageErrorResult(
+          auth.ok
+            ? `No API key available for vision model ${provider}/${visionModelId}. Run /login or set the appropriate environment variable.`
+            : `Auth error for vision model ${provider}/${visionModelId}: ${auth.error}`,
+          {
             visionModel: visionModelId,
             visionProvider: provider,
             imagePath: params.path,
             prompt: params.prompt,
-          } as ReadImageDetails,
-          isError: true,
-        };
+          },
+        );
       }
 
       // Prepare image payload. The model would resize server-side, but doing the
@@ -631,16 +631,12 @@ export default function (pi: ExtensionAPI) {
       try {
         preparedImage = await prepareImageForVision(absolutePath, loadConfig(), signal);
       } catch (err) {
-        return {
-          content: [{ type: "text", text: `Failed to prepare image: ${err instanceof Error ? err.message : String(err)}` }],
-          details: {
-            visionModel: visionModelId,
-            visionProvider: provider,
-            imagePath: params.path,
-            prompt: params.prompt,
-          } as ReadImageDetails,
-          isError: true,
-        };
+        return readImageErrorResult(`Failed to prepare image: ${err instanceof Error ? err.message : String(err)}`, {
+          visionModel: visionModelId,
+          visionProvider: provider,
+          imagePath: params.path,
+          prompt: params.prompt,
+        });
       }
 
       const imageBuffer = preparedImage.buffer;
@@ -681,16 +677,12 @@ export default function (pi: ExtensionAPI) {
         // Handle error stop reason
         if (response.stopReason === "error") {
           const errorMsg = response.errorMessage || "Unknown error from vision model";
-          return {
-            content: [{ type: "text", text: `Vision model error: ${errorMsg}` }],
-            details: imageDetails({
-              visionModel: visionModelId,
-              visionProvider: provider,
-              imagePath: params.path,
-              prompt: params.prompt,
-            }, preparedImage) as ReadImageDetails,
-            isError: true,
-          };
+          return readImageErrorResult(`Vision model error: ${errorMsg}`, imageDetails({
+            visionModel: visionModelId,
+            visionProvider: provider,
+            imagePath: params.path,
+            prompt: params.prompt,
+          }, preparedImage));
         }
 
         // Extract text response
@@ -710,16 +702,12 @@ export default function (pi: ExtensionAPI) {
         };
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
-        return {
-          content: [{ type: "text", text: `Vision model error: ${errorMsg}` }],
-          details: imageDetails({
-            visionModel: visionModelId,
-            visionProvider: provider,
-            imagePath: params.path,
-            prompt: params.prompt,
-          }, preparedImage) as ReadImageDetails,
-          isError: true,
-        };
+        return readImageErrorResult(`Vision model error: ${errorMsg}`, imageDetails({
+          visionModel: visionModelId,
+          visionProvider: provider,
+          imagePath: params.path,
+          prompt: params.prompt,
+        }, preparedImage));
       }
     },
 
@@ -736,11 +724,11 @@ export default function (pi: ExtensionAPI) {
       );
     },
 
-    renderResult(result, { expanded }, theme) {
+    renderResult(result, { expanded }, theme, context) {
       const details = result.details as ReadImageDetails | undefined;
       const text = result.content[0]?.type === "text" ? result.content[0].text : "(no output)";
 
-      if (result.isError) {
+      if (context?.isError || result.isError || isReadImageErrorDetails(details)) {
         return new Text(theme.fg("error", "✗ ") + theme.fg("toolOutput", text), 0, 0);
       }
 
@@ -802,6 +790,8 @@ export default function (pi: ExtensionAPI) {
 
   // Intercept read tool results with images
   pi.on("tool_result", async (event: ToolResultEvent, ctx: ExtensionContext) => {
+    if (event.toolName === TOOL_NAME && isReadImageErrorDetails(event.details)) return { isError: true };
+
     // Only interested in read tool results
     if (event.toolName !== "read") return;
 

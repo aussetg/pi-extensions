@@ -40,13 +40,18 @@ function visibleModels(models: Model[]): Model[] {
 
 function readAuthKey(provider: string): string | undefined {
 	try {
-		const authPath = path.join(os.homedir(), ".pi", "agent", "auth.json");
+		const authPath = path.join(agentDir(), "auth.json");
 		const auth = JSON.parse(fs.readFileSync(authPath, "utf8")) as Record<string, { type?: string; key?: string }>;
 		const key = auth[provider]?.key;
 		return typeof key === "string" && key.length > 0 ? key : undefined;
 	} catch {
 		return undefined;
 	}
+}
+
+function agentDir(): string {
+	const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+	return env?.PI_CODING_AGENT_DIR || env?.PI_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
 }
 
 function providerApiKey(provider: string): string {

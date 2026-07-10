@@ -61,7 +61,7 @@ type CpuSample = {
 	cpuPercent: number;
 };
 
-const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || process.env.PI_AGENT_DIR || join(homedir(), ".pi", "agent");
 const EXTENSIONS_DIR = join(AGENT_DIR, "extensions");
 const CONFIG_PATH = join(AGENT_DIR, "pi-profiler.json");
 const PROFILER_FILE = "pi-profiler.ts";
@@ -106,8 +106,8 @@ const DEFAULT_CONFIG: ProfilerConfig = {
 	measureCpu: true,
 	maxSamples: 500,
 	maxDurationsPerLabel: 512,
-	logFile: "~/.pi/agent/pi-profiler.jsonl",
-	reportFile: "~/.pi/agent/pi-profiler-report.md",
+	logFile: "pi-profiler.jsonl",
+	reportFile: "pi-profiler-report.md",
 	reportOnShutdown: true,
 	statusLine: true,
 	instrument: {
@@ -858,8 +858,8 @@ export default function (pi: any) {
 		const clampedSeconds = Math.max(1, Math.min(120, Math.round(seconds)));
 		const clampedIntervalUs = Math.max(50, Math.min(100_000, Math.round(intervalUs)));
 		const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-		const textFile = expandPath(`~/.pi/agent/pi-profiler-jsc-${stamp}.txt`);
-		const jsonFile = expandPath(`~/.pi/agent/pi-profiler-jsc-${stamp}.json`);
+		const textFile = expandPath(`pi-profiler-jsc-${stamp}.txt`);
+		const jsonFile = expandPath(`pi-profiler-jsc-${stamp}.json`);
 
 		const result = await (jsc as any).profile(
 			async function piProfilerJscSampleWindow() {
