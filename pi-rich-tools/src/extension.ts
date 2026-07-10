@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { registerKagiWebTools } from "./kagi-web-tools.ts";
 import { reloadPierreRendererConfig } from "./pierre/config.ts";
 import { resetPierreRendererState } from "./pierre/reset.ts";
 import { registerRichToolRenderers } from "./rich-tools/extension.ts";
@@ -14,6 +15,7 @@ export function registerRichToolsExtension(pi: ExtensionAPI): void {
     resetRichToolsState();
   });
 
+  registerKagiWebTools(pi);
   registerToolProfileTools(pi);
   registerRichToolRenderers(pi);
 }
