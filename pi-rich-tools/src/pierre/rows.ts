@@ -1,5 +1,7 @@
 import type { FileDiffMetadata } from "../../node_modules/@pierre/diffs/dist/types.js";
 import { diffWordsWithSpace } from "diff";
+import { ByteLruCache, type ByteLruCacheStats } from "../byte-lru.ts";
+import { estimateCacheEntryBytes } from "./cache-size.ts";
 import { cleanDiffLine, flattenHighlightedLine } from "./highlight.ts";
 import {
   fileDiffMetadataContentKey,
@@ -9,11 +11,13 @@ import type { DiffRow, DiffSpan, HighlightedDiffCode } from "./types.ts";
 import type { PierreTerminalPalette } from "./theme.ts";
 import type { PierreRendererConfig } from "./config.ts";
 
-const ROW_CACHE_LIMIT = 512;
+const ROW_CACHE_MAX_ENTRIES = 512;
+const ROW_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+const ROW_CACHE_MAX_BYTES_ENV = "PI_RICH_TOOLS_PIERRE_ROW_CACHE_MAX_BYTES";
 const GLOBAL_PIERRE_ROW_CACHE_KEY = "__piRichToolsPierreRowCache";
 
 type PierreRowCacheState = {
-  rows: Map<string, DiffRow[]>;
+  rows: ByteLruCache<DiffRow[]>;
   highlightedCodeIds: WeakMap<object, number>;
   nextHighlightedCodeId: number;
 };
@@ -27,19 +31,29 @@ function rowCacheState(): PierreRowCacheState {
   const scope = globalThis as typeof globalThis & {
     [GLOBAL_PIERRE_ROW_CACHE_KEY]?: PierreRowCacheState;
   };
-  scope[GLOBAL_PIERRE_ROW_CACHE_KEY] ??= {
-    rows: new Map<string, DiffRow[]>(),
-    highlightedCodeIds: new WeakMap<object, number>(),
-    nextHighlightedCodeId: 1,
-  };
+  const current = scope[GLOBAL_PIERRE_ROW_CACHE_KEY];
+  if (!current || typeof current.rows?.stats !== "function") {
+    scope[GLOBAL_PIERRE_ROW_CACHE_KEY] = {
+      rows: new ByteLruCache<DiffRow[]>({
+        maxEntries: ROW_CACHE_MAX_ENTRIES,
+        maxBytes: cacheMaxBytes(ROW_CACHE_MAX_BYTES_ENV, ROW_CACHE_MAX_BYTES),
+      }),
+      highlightedCodeIds: new WeakMap<object, number>(),
+      nextHighlightedCodeId: 1,
+    };
+  }
   return scope[GLOBAL_PIERRE_ROW_CACHE_KEY];
 }
 
 export function resetPierreRowCache(): void {
-  const state = rowCacheState();
-  state.rows.clear();
-  state.highlightedCodeIds = new WeakMap<object, number>();
-  state.nextHighlightedCodeId = 1;
+  const scope = globalThis as typeof globalThis & {
+    [GLOBAL_PIERRE_ROW_CACHE_KEY]?: PierreRowCacheState;
+  };
+  delete scope[GLOBAL_PIERRE_ROW_CACHE_KEY];
+}
+
+export function pierreRowCacheStats(): ByteLruCacheStats {
+  return rowCacheState().rows.stats();
 }
 
 export function buildDiffRows(
@@ -237,12 +251,14 @@ export function buildCachedDiffRows(
   if (cached) return cached;
 
   const rows = buildDiffRows(metadata, highlighted, palette, config, options);
-  rowCache.set(key, rows);
-  if (rowCache.size > ROW_CACHE_LIMIT) {
-    const oldestKey = rowCache.keys().next().value;
-    if (typeof oldestKey === "string") rowCache.delete(oldestKey);
-  }
+  rowCache.set(key, rows, estimateCacheEntryBytes(key, rows));
   return rows;
+}
+
+function cacheMaxBytes(name: string, fallback: number): number {
+  const raw = process.env[name];
+  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function diffRowsCacheKey(
@@ -336,10 +352,6 @@ export function lineNumberWidthFor(
   return Math.max(minWidth, String(maxLine).length);
 }
 
-function plainSpans(text: string) {
-  return text.length > 0 ? [{ text }] : [];
-}
-
 function pushContextRows(
   rows: DiffRow[],
   metadata: FileDiffMetadata,
@@ -354,24 +366,42 @@ function pushContextRows(
 
   for (let offset = 0; offset < count; offset += 1) {
     const index = safeStartIndex + offset;
-    const line = cleanDiffLine(
-      metadata.additionLines[index] ?? metadata.deletionLines[index],
-    );
-    rows.push({
-      kind: "line",
-      lineType: "context",
-      lineNumber: safeStartLineNumber + offset,
-      spans: highlightedSpans(
-        highlighted.additionLines[index] ?? highlighted.deletionLines[index],
-        line,
+    rows.push(
+      buildContextDiffRow(
+        metadata,
+        highlighted,
         palette,
-        palette.contextRowBg,
+        index,
+        safeStartLineNumber + offset,
       ),
-      rowFg: palette.contextFg,
-      rowBg: palette.contextRowBg,
-      lineNumberFg: palette.lineNumberFg,
-    });
+    );
   }
+}
+
+export function buildContextDiffRow(
+  metadata: FileDiffMetadata,
+  highlighted: HighlightedDiffCode,
+  palette: PierreTerminalPalette,
+  index: number,
+  lineNumber: number,
+): Extract<DiffRow, { kind: "line" }> {
+  const line = cleanDiffLine(
+    metadata.additionLines[index] ?? metadata.deletionLines[index],
+  );
+  return {
+    kind: "line",
+    lineType: "context",
+    lineNumber,
+    spans: highlightedSpans(
+      highlighted.additionLines[index] ?? highlighted.deletionLines[index],
+      line,
+      palette,
+      palette.contextRowBg,
+    ),
+    rowFg: palette.contextFg,
+    rowBg: palette.contextRowBg,
+    lineNumberFg: palette.lineNumberFg,
+  };
 }
 
 function highlightedSpans(

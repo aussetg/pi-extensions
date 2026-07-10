@@ -183,10 +183,10 @@ const batchWorker = measure(
   () => workerBatchCaptures("typescript", workerJobs),
   workerIterations,
 );
-await forceTreeSitterWorker(() => loadHighlightedDiff(workerMetadata, config));
+await loadHighlightedDiff(workerMetadata, config);
 const persistentWorker = await measureAsync(
-  "persistent async worker",
-  () => forceTreeSitterWorker(() => loadHighlightedDiff(workerMetadata, config)),
+  "persistent highlighter worker",
+  () => loadHighlightedDiff(workerMetadata, config),
   workerIterations,
 );
 
@@ -270,17 +270,6 @@ async function measureAsync(name, fn, count = iterations) {
     cpuMs: (cpu.user + cpu.system) / 1000,
     heapMiB: (heapAfter - heapBefore) / 1024 / 1024,
   };
-}
-
-async function forceTreeSitterWorker(fn) {
-  const previous = process.env.PI_TREE_SITTER_FORCE_WORKER;
-  process.env.PI_TREE_SITTER_FORCE_WORKER = "1";
-  try {
-    return await fn();
-  } finally {
-    if (previous === undefined) delete process.env.PI_TREE_SITTER_FORCE_WORKER;
-    else process.env.PI_TREE_SITTER_FORCE_WORKER = previous;
-  }
 }
 
 function workerCaptures(languageKey, lines, indexes) {

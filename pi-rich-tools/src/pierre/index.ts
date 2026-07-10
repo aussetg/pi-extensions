@@ -2,6 +2,7 @@ export {
   PierreInlineDiffComponent,
   PierreStatusComponent,
   type PierreInlineDiffOptions,
+  type PierreLimitedRenderResult,
 } from "./component.ts";
 export { resetPierreHighlightCache } from "./highlight-cache.ts";
 export {

@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
+const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || process.env.PI_AGENT_DIR || join(homedir(), ".pi", "agent");
+
 export type PierreColorValue =
   | string
   | {
@@ -96,9 +98,7 @@ export interface PierreRendererConfig {
 }
 
 export const PIERRE_CONFIG_PATH = join(
-  homedir(),
-  ".pi",
-  "agent",
+  AGENT_DIR,
   "pi-rich-tools-pierre.json",
 );
 

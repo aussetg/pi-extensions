@@ -525,19 +525,80 @@ test("tree-sitter worker batch output matches single-job output", () => {
   );
 });
 
-test("async tree-sitter worker fallback matches direct highlighting", async () => {
+test("async highlighter worker matches direct highlighting", async () => {
   const metadata = cases[7];
-  const previous = process.env.PI_TREE_SITTER_FORCE_WORKER;
-  process.env.PI_TREE_SITTER_FORCE_WORKER = "1";
+  assert.deepEqual(
+    await loadHighlightedDiff(metadata, config),
+    buildPiHighlightedDiff(metadata, config),
+  );
+});
+
+test("async highlighter defaults to Node when Pi is a standalone binary", async () => {
+  resetPierreRendererState();
+  const previousExecPath = process.execPath;
+  const previousHighlightNode = process.env.PI_PIERRE_HIGHLIGHT_NODE;
+  const previousTreeSitterNode = process.env.PI_TREE_SITTER_NODE;
+  delete process.env.PI_PIERRE_HIGHLIGHT_NODE;
+  delete process.env.PI_TREE_SITTER_NODE;
+  process.execPath = "/bin/false";
+
   try {
-    assert.deepEqual(
-      await loadHighlightedDiff(metadata, config),
-      buildPiHighlightedDiff(metadata, config),
+    assert.equal(
+      hasHighlightedLines(
+        await loadHighlightedDiff(cases[0], config, undefined, "standalone-pi-worker"),
+      ),
+      true,
     );
   } finally {
-    if (previous === undefined) delete process.env.PI_TREE_SITTER_FORCE_WORKER;
-    else process.env.PI_TREE_SITTER_FORCE_WORKER = previous;
+    process.execPath = previousExecPath;
+    if (previousHighlightNode === undefined) delete process.env.PI_PIERRE_HIGHLIGHT_NODE;
+    else process.env.PI_PIERRE_HIGHLIGHT_NODE = previousHighlightNode;
+    if (previousTreeSitterNode === undefined) delete process.env.PI_TREE_SITTER_NODE;
+    else process.env.PI_TREE_SITTER_NODE = previousTreeSitterNode;
+    resetPierreRendererState();
   }
+});
+
+test("async highlighting never initializes tree-sitter in the renderer process", async () => {
+  resetPierreRendererState();
+  const metadata = changedFileMetadata({
+    name: "off-thread.ts",
+    lang: "typescript",
+    before: makeIncrementalTypeScriptFile(10),
+    after: makeIncrementalTypeScriptFile(11),
+    cacheKey: "off-thread-highlighting",
+  });
+
+  const pending = loadHighlightedDiff(metadata, config);
+  assert.deepEqual(sharedSyntaxServiceStats(), {
+    documents: 0,
+    fullParses: 0,
+    incrementalParses: 0,
+    reusedParses: 0,
+    evictions: 0,
+  });
+
+  assert.equal(hasHighlightedLines(await pending), true);
+  assert.deepEqual(sharedSyntaxServiceStats(), {
+    documents: 0,
+    fullParses: 0,
+    incrementalParses: 0,
+    reusedParses: 0,
+    evictions: 0,
+  });
+});
+
+test("async highlighting coalesces duplicate work and cancels deferred requests on reset", async () => {
+  resetPierreRendererState();
+  const metadata = cases[0];
+  const first = loadHighlightedDiff(metadata, config, undefined, "coalesced-highlight");
+  const second = loadHighlightedDiff(metadata, config, undefined, "coalesced-highlight");
+  assert.strictEqual(second, first);
+  assert.equal(hasHighlightedLines(await first), true);
+
+  const cancelled = loadHighlightedDiff(metadata, config, undefined, "cancelled-highlight");
+  resetPierreRendererState();
+  assert.equal(hasHighlightedLines(await cancelled), false);
 });
 
 test("cached diff rows match uncached rows and reuse exact row arrays", () => {
@@ -693,6 +754,49 @@ test("Pierre component snapshots caller-owned payload arrays", () => {
   const rendered = stripAnsi(component.render(240).join("\n"));
   assert.match(rendered, /new second/);
   assert.doesNotMatch(rendered, /new first/);
+});
+
+test("Pierre paints plain rows before off-thread syntax highlighting completes", async () => {
+  resetPierreRendererState();
+  const metadata = changedFileMetadata({
+    name: "component-off-thread.ts",
+    lang: "typescript",
+    before: ["export const answer: number = 41;"],
+    after: ["export const answer: number = 42;"],
+    cacheKey: "component-off-thread-highlighting",
+  });
+  let resolveInvalidation;
+  const invalidated = new Promise((resolve) => {
+    resolveInvalidation = resolve;
+  });
+  const component = new PierreInlineDiffComponent(
+    { path: metadata.name, metadata },
+    { name: "dark" },
+    { onInvalidate: resolveInvalidation },
+  );
+
+  const plainRows = component.render(120);
+  assert.equal(sharedSyntaxServiceStats().fullParses, 0);
+
+  let invalidationTimeout;
+  try {
+    await Promise.race([
+      invalidated,
+      new Promise((_, reject) => {
+        invalidationTimeout = setTimeout(
+          () => reject(new Error("highlight worker did not invalidate the component")),
+          5_000,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(invalidationTimeout);
+  }
+
+  const highlightedRows = component.render(120);
+  assert.notDeepEqual(highlightedRows, plainRows);
+  assert.equal(sharedSyntaxServiceStats().fullParses, 0);
+  resetPierreRendererState();
 });
 
 test("plain spans inside highlighted lines use syntax text foreground", () => {

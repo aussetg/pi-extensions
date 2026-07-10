@@ -17,17 +17,22 @@ import {
   lineNumberBg,
 } from "./gutter.ts";
 import {
-  buildPiHighlightedDiff,
+  cleanDiffLine,
   hasHighlightedLines,
   loadHighlightedDiff,
-  needsHighlightedDiffSupplement,
 } from "./highlight.ts";
 import {
-  globalPiHighlightCache,
+  cachedPiHighlight,
+  forgetPiHighlight,
   globalPiHighlightGeneration,
+  rememberPiHighlight,
 } from "./highlight-cache.ts";
 import { hashStringPart, hashUnknown } from "../hash.ts";
-import { buildCachedDiffRows, lineNumberWidthFor } from "./rows.ts";
+import {
+  buildCachedDiffRows,
+  buildContextDiffRow,
+  lineNumberWidthFor,
+} from "./rows.ts";
 import {
   fileDiffMetadataKeyParts,
   type FileDiffMetadataKeyParts,
@@ -47,8 +52,6 @@ import type {
   PierreDiffPayload,
 } from "./types.ts";
 import { emptyHighlightedDiffSet } from "./types.ts";
-
-const PI_HIGHLIGHT_CACHE_LIMIT = 512;
 
 interface RenderSegment {
   text: string;
@@ -71,6 +74,11 @@ export interface PierreInlineDiffOptions {
   expandCollapsedHunks?: boolean;
   suppressLeadingSpacing?: boolean;
   onInvalidate?: () => void;
+}
+
+export interface PierreLimitedRenderResult {
+  lines: string[];
+  omittedLines: number;
 }
 
 export class PierreStatusComponent implements Component {
@@ -131,11 +139,10 @@ export class PierreInlineDiffComponent implements Component {
   private suppressLeadingSpacing: boolean;
   private invalidateView: (() => void) | undefined;
   private highlightedByKey = new Map<string, HighlightedDiffSet>();
-  private piHighlightedByKey = globalPiHighlightCache();
   private piHighlightFallbacksByKey = new Set<string>();
   private piHighlightGeneration = globalPiHighlightGeneration();
   private renderedKey: string | undefined;
-  private renderedLines: string[] | undefined;
+  private renderedResult: PierreLimitedRenderResult | undefined;
 
   constructor(
     payloads: PierreDiffPayload | PierreDiffPayload[],
@@ -208,6 +215,18 @@ export class PierreInlineDiffComponent implements Component {
   }
 
   render(width: number): string[] {
+    return this.renderResult(width).lines;
+  }
+
+  renderLimited(width: number, maxContentLines: number): PierreLimitedRenderResult {
+    const limit = Math.max(0, Math.trunc(maxContentLines));
+    return this.renderResult(width, limit);
+  }
+
+  private renderResult(
+    width: number,
+    maxContentLines?: number,
+  ): PierreLimitedRenderResult {
     this.resetLocalCachesAfterPierreReset();
     const currentConfig = getPierreRendererConfig();
     if (currentConfig !== this.config) {
@@ -220,10 +239,19 @@ export class PierreInlineDiffComponent implements Component {
       );
       this.clearRenderedCache();
     }
-    const safeWidth = Math.max(20, width);
-    const renderedKey = this.renderCacheKey(safeWidth);
-    if (this.renderedKey === renderedKey && this.renderedLines) {
-      return this.renderedLines;
+    const safeWidth = normalizeRenderWidth(width);
+    const renderedKey = this.renderCacheKey(safeWidth, maxContentLines);
+    if (this.renderedKey === renderedKey && this.renderedResult) {
+      return this.renderedResult;
+    }
+
+    if (maxContentLines !== undefined) {
+      const limited = this.renderContextOnlyLimited(safeWidth, maxContentLines);
+      if (limited) {
+        this.renderedKey = renderedKey;
+        this.renderedResult = limited;
+        return limited;
+      }
     }
 
     const lines: string[] = [];
@@ -267,9 +295,27 @@ export class PierreInlineDiffComponent implements Component {
       lines.push(renderBlankLine(safeWidth, this.palette.editorBg));
     }
 
+    let result: PierreLimitedRenderResult = { lines, omittedLines: 0 };
+    if (maxContentLines !== undefined) {
+      const trailingBlankCount = Math.min(
+        Math.max(0, this.config.spacing.afterDiff),
+        lines.length,
+      );
+      const contentEnd = lines.length - trailingBlankCount;
+      if (contentEnd > maxContentLines) {
+        result = {
+          lines: [
+            ...lines.slice(0, maxContentLines),
+            ...lines.slice(contentEnd),
+          ],
+          omittedLines: contentEnd - maxContentLines,
+        };
+      }
+    }
+
     this.renderedKey = renderedKey;
-    this.renderedLines = lines;
-    return lines;
+    this.renderedResult = result;
+    return result;
   }
 
   invalidate(): void {
@@ -278,7 +324,7 @@ export class PierreInlineDiffComponent implements Component {
 
   private clearRenderedCache(): void {
     this.renderedKey = undefined;
-    this.renderedLines = undefined;
+    this.renderedResult = undefined;
   }
 
   private resetLocalCachesAfterPierreReset(): void {
@@ -286,7 +332,6 @@ export class PierreInlineDiffComponent implements Component {
     if (this.piHighlightGeneration === generation) return;
 
     this.piHighlightGeneration = generation;
-    this.piHighlightedByKey = globalPiHighlightCache();
     this.highlightedByKey.clear();
     this.piHighlightFallbacksByKey.clear();
     this.clearRenderedCache();
@@ -295,9 +340,11 @@ export class PierreInlineDiffComponent implements Component {
 
   private renderCacheKey(
     width: number,
+    maxContentLines?: number,
   ): string {
     return [
       width,
+      maxContentLines === undefined ? "full" : `limit:${maxContentLines}`,
       this.showFileHeaders ? "headers" : "no-headers",
       this.expandCollapsedHunks ? "expanded" : "collapsed",
       this.suppressLeadingSpacing ? "tight" : "spaced",
@@ -305,6 +352,134 @@ export class PierreInlineDiffComponent implements Component {
       rendererConfigKey(this.config),
       this.payloadsKey,
     ].join("\u0000");
+  }
+
+  private renderContextOnlyLimited(
+    width: number,
+    maxContentLines: number,
+  ): PierreLimitedRenderResult | undefined {
+    const ranges = this.preparedPayloads.map((prepared) =>
+      contextOnlyRange(prepared.payload.metadata)
+    );
+    if (ranges.some((range) => range === undefined)) return undefined;
+
+    const lines: string[] = [];
+    let totalContentLines = 0;
+
+    const emitFixedLine = (render: () => string): void => {
+      if (totalContentLines < maxContentLines) lines.push(render());
+      totalContentLines += 1;
+    };
+
+    const beforeDiff = this.suppressLeadingSpacing
+      ? 0
+      : this.config.spacing.beforeDiff;
+    for (let i = 0; i < beforeDiff; i += 1) {
+      emitFixedLine(() => renderBlankLine(width, this.palette.editorBg));
+    }
+
+    for (
+      let payloadIndex = 0;
+      payloadIndex < this.preparedPayloads.length;
+      payloadIndex += 1
+    ) {
+      const prepared = this.preparedPayloads[payloadIndex]!;
+      const range = ranges[payloadIndex]!;
+      const { payload } = prepared;
+
+      if (this.showFileHeaders || this.payloads.length > 1) {
+        emitFixedLine(() => renderFileHeader(payload, this.palette, this.config, width));
+      }
+
+      const lineNumberWidth = lineNumberWidthFor(
+        payload.metadata,
+        this.config.gutter.lineNumberMinWidth,
+      );
+      const sampleRow = buildContextDiffRow(
+        payload.metadata,
+        emptyHighlightedDiffSet()[this.palette.appearance],
+        this.palette,
+        range.startIndex,
+        range.startLineNumber,
+      );
+      const contentWidth = Math.max(
+        8,
+        width - visibleWidth(linePrefixText(sampleRow, lineNumberWidth, this.config)),
+      );
+
+      let payloadContentLines = 0;
+      let sourceRowsToRender = 0;
+      for (let offset = 0; offset < range.count; offset += 1) {
+        const index = range.startIndex + offset;
+        const rawLine = cleanDiffLine(
+          payload.metadata.additionLines[index] ?? payload.metadata.deletionLines[index],
+        );
+        const wrappedLineCount = wrappedPlainLineCount(rawLine, contentWidth);
+        if (totalContentLines + payloadContentLines < maxContentLines) {
+          sourceRowsToRender = offset + 1;
+        }
+        payloadContentLines += wrappedLineCount;
+      }
+
+      const highlighted = sourceRowsToRender > 0
+        ? this.highlightedForContextPrefix(prepared, range, sourceRowsToRender)
+        : emptyHighlightedDiffSet()[this.palette.appearance];
+      for (let offset = 0; offset < sourceRowsToRender; offset += 1) {
+        const available = Math.max(0, maxContentLines - lines.length);
+        if (available === 0) break;
+        const row = buildContextDiffRow(
+          payload.metadata,
+          highlighted,
+          this.palette,
+          range.startIndex + offset,
+          range.startLineNumber + offset,
+        );
+        const rendered = this.renderRow(row, width, lineNumberWidth);
+        lines.push(...rendered.slice(0, available));
+      }
+
+      totalContentLines += payloadContentLines;
+    }
+
+    for (let i = 0; i < this.config.spacing.afterDiff; i += 1) {
+      lines.push(renderBlankLine(width, this.palette.editorBg));
+    }
+
+    return {
+      lines,
+      omittedLines: Math.max(0, totalContentLines - maxContentLines),
+    };
+  }
+
+  private highlightedForContextPrefix(
+    prepared: PreparedPierrePayload,
+    range: ContextOnlyRange,
+    sourceRowCount: number,
+  ): HighlightedDiffSet["dark"] {
+    if (sourceRowCount >= range.count) {
+      return this.highlightedFor(prepared)[this.palette.appearance];
+    }
+    if (!this.config.syntaxHighlight.enabled) {
+      return emptyHighlightedDiffSet()[this.palette.appearance];
+    }
+
+    const stored = prepared.payload.highlighted;
+    if (stored && hasHighlightedLines(stored)) return stored[this.palette.appearance];
+
+    const piKey = [
+      prepared.digest.payloadKey,
+      `context-prefix:${sourceRowCount}`,
+      this.config.syntaxHighlight.maxLines,
+      this.config.syntaxHighlight.maxLineLength,
+    ].join("\u0000");
+    const cached = cachedPiHighlight(piKey);
+    if (cached && hasHighlightedLines(cached)) return cached[this.palette.appearance];
+
+    this.scheduleAsyncHighlightFallback(
+      piKey,
+      contextPrefixPayload(prepared.payload, range, sourceRowCount),
+    );
+    return emptyHighlightedDiffSet()[this.palette.appearance];
   }
 
   private renderRow(
@@ -380,31 +555,13 @@ export class PierreInlineDiffComponent implements Component {
       this.config.syntaxHighlight.maxLines,
       this.config.syntaxHighlight.maxLineLength,
     ].join("\u0000");
-    let piHighlighted = this.piHighlightedByKey.get(piKey);
+    let piHighlighted = cachedPiHighlight(piKey);
     if (piHighlighted && !hasHighlightedLines(piHighlighted)) {
-      this.piHighlightedByKey.delete(piKey);
+      forgetPiHighlight(piKey);
       piHighlighted = undefined;
     }
 
-    if (!piHighlighted) {
-      const directHighlighted = buildPiHighlightedDiff(
-        payload.metadata,
-        this.config,
-        this.theme,
-      );
-      if (hasHighlightedLines(directHighlighted)) {
-        piHighlighted = directHighlighted;
-        this.piHighlightedByKey.set(piKey, piHighlighted);
-        if (this.piHighlightedByKey.size > PI_HIGHLIGHT_CACHE_LIMIT) {
-          const oldestKey = this.piHighlightedByKey.keys().next().value;
-          if (typeof oldestKey === "string") this.piHighlightedByKey.delete(oldestKey);
-        }
-      }
-    }
     if (piHighlighted && hasHighlightedLines(piHighlighted)) {
-      if (needsHighlightedDiffSupplement(payload.metadata, piHighlighted, this.config)) {
-        this.scheduleAsyncHighlightFallback(piKey, payload);
-      }
       return piHighlighted;
     }
 
@@ -420,10 +577,10 @@ export class PierreInlineDiffComponent implements Component {
     if (this.piHighlightFallbacksByKey.has(piKey)) return;
     this.piHighlightFallbacksByKey.add(piKey);
 
-    void loadHighlightedDiff(payload.metadata, this.config, this.theme)
+    void loadHighlightedDiff(payload.metadata, this.config, this.theme, piKey)
       .then((highlighted) => {
         if (!hasHighlightedLines(highlighted)) return;
-        this.piHighlightedByKey.set(piKey, highlighted);
+        rememberPiHighlight(piKey, highlighted);
         this.clearRenderedCache();
         this.invalidateView?.();
       })
@@ -459,6 +616,148 @@ function renderFileHeader(
 
 function renderBlankLine(width: number, bg: string): string {
   return renderFullWidthLine([], width, { bg });
+}
+
+type ContextOnlyRange = {
+  startIndex: number;
+  startLineNumber: number;
+  count: number;
+};
+
+function contextOnlyRange(
+  metadata: PierreDiffPayload["metadata"],
+): ContextOnlyRange | undefined {
+  if (metadata.hunks.length !== 1 || !metadata.isPartial) return undefined;
+  const hunk = metadata.hunks[0]!;
+  if (
+    hunk.collapsedBefore !== 0 ||
+    hunk.additionLineIndex !== 0 ||
+    hunk.deletionLineIndex !== 0 ||
+    hunk.noEOFCRDeletions ||
+    hunk.noEOFCRAdditions ||
+    hunk.hunkContent.length !== 1
+  ) {
+    return undefined;
+  }
+
+  const content = hunk.hunkContent[0]!;
+  if (content.type !== "context" || content.lines <= 0) return undefined;
+  return {
+    startIndex: Math.max(0, hunk.additionLineIndex),
+    startLineNumber: Math.max(1, hunk.additionStart),
+    count: content.lines,
+  };
+}
+
+function contextPrefixPayload(
+  payload: PierreDiffPayload,
+  range: ContextOnlyRange,
+  sourceRowCount: number,
+): PierreDiffPayload {
+  const count = Math.max(1, Math.min(range.count, sourceRowCount));
+  const metadata = payload.metadata;
+  const hunk = metadata.hunks[0]!;
+  const content = hunk.hunkContent[0]!;
+  if (content.type !== "context") return payload;
+  const additionLines = metadata.additionLines.slice(0, count);
+  const deletionLines = metadata.deletionLines.slice(0, count);
+  return {
+    path: payload.path,
+    metadata: {
+      ...metadata,
+      additionLines,
+      deletionLines,
+      splitLineCount: count,
+      unifiedLineCount: count,
+      cacheKey: `${metadata.cacheKey ?? payload.path}:context-prefix:${count}`,
+      hunks: [{
+        ...hunk,
+        additionCount: count,
+        deletionCount: count,
+        splitLineCount: count,
+        unifiedLineCount: count,
+        hunkContent: [{ ...content, lines: count }],
+      }],
+    },
+  };
+}
+
+const plainGraphemeSegmenter = new Intl.Segmenter(undefined, {
+  granularity: "grapheme",
+});
+const CJK_BREAK_REGEX = /[\p{Script_Extensions=Han}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script_Extensions=Hangul}\p{Script_Extensions=Bopomofo}]/u;
+
+function wrappedPlainLineCount(text: string, width: number): number {
+  if (!text || visibleWidth(text) <= width) return 1;
+
+  let wrappedLines = 0;
+  let currentWidth = 0;
+  let hasCurrent = false;
+  let tokenKind: "space" | "word" | undefined;
+  let tokenWidth = 0;
+  let tokenWhitespace = true;
+  let tokenGraphemeWidths: number[] = [];
+
+  const flushToken = (): void => {
+    if (tokenKind === undefined) return;
+
+    if (tokenWidth > width && !tokenWhitespace) {
+      if (hasCurrent) {
+        wrappedLines += 1;
+        currentWidth = 0;
+        hasCurrent = false;
+      }
+      for (const graphemeWidth of tokenGraphemeWidths) {
+        if (hasCurrent && currentWidth + graphemeWidth > width) {
+          wrappedLines += 1;
+          currentWidth = 0;
+          hasCurrent = false;
+        }
+        currentWidth += graphemeWidth;
+        hasCurrent = true;
+      }
+    } else if (hasCurrent && currentWidth + tokenWidth > width) {
+      wrappedLines += 1;
+      if (tokenWhitespace) {
+        currentWidth = 0;
+        hasCurrent = false;
+      } else {
+        currentWidth = tokenWidth;
+        hasCurrent = true;
+      }
+    } else {
+      currentWidth += tokenWidth;
+      hasCurrent = true;
+    }
+
+    tokenKind = undefined;
+    tokenWidth = 0;
+    tokenWhitespace = true;
+    tokenGraphemeWidths = [];
+  };
+
+  for (const { segment } of plainGraphemeSegmenter.segment(text)) {
+    const segmentWidth = visibleWidth(segment);
+    if (segment !== " " && CJK_BREAK_REGEX.test(segment)) {
+      flushToken();
+      tokenKind = "word";
+      tokenWidth = segmentWidth;
+      tokenWhitespace = segment.trim() === "";
+      tokenGraphemeWidths.push(segmentWidth);
+      flushToken();
+      continue;
+    }
+
+    const nextKind = segment === " " ? "space" : "word";
+    if (tokenKind !== undefined && tokenKind !== nextKind) flushToken();
+    tokenKind = nextKind;
+    tokenWidth += segmentWidth;
+    tokenWhitespace &&= segment.trim() === "";
+    tokenGraphemeWidths.push(segmentWidth);
+  }
+
+  flushToken();
+  return Math.max(1, wrappedLines + (hasCurrent ? 1 : 0));
 }
 
 function renderMetadataLine(
@@ -595,7 +894,7 @@ function renderFullWidthLine(
   width: number,
   base: { fg?: string; bg?: string; bold?: boolean },
 ): string {
-  const safeWidth = Math.max(1, width);
+  const safeWidth = normalizeRenderWidth(width);
   const rendered = renderSegments(segments, base);
   return padRenderedLine(truncateToWidth(rendered, safeWidth), safeWidth, base);
 }
@@ -605,11 +904,15 @@ function padRenderedLine(
   width: number,
   base: { fg?: string; bg?: string; bold?: boolean },
 ): string {
-  const safeWidth = Math.max(1, width);
+  const safeWidth = normalizeRenderWidth(width);
   const clipped =
     visibleWidth(line) > safeWidth ? truncateToWidth(line, safeWidth, "") : line;
   const padding = Math.max(0, safeWidth - visibleWidth(clipped));
   return `${clipped}${openAnsi(base)}${" ".repeat(padding)}${ANSI_RESET}`;
+}
+
+function normalizeRenderWidth(width: number): number {
+  return Number.isFinite(width) ? Math.max(1, Math.trunc(width)) : 1;
 }
 
 function normalizePayloads(

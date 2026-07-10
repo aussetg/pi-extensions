@@ -27,6 +27,12 @@ export type SharedSyntaxServiceStats = {
   evictions: number;
 };
 
+/** Convert node-tree-sitter's UTF-16 Point.column to a safe JS string index. */
+export function treeSitterColumnToStringIndex(line: string, column: number): number {
+  if (column <= 0) return 0;
+  return avoidSplitSurrogate(line, Math.min(Math.trunc(column), line.length));
+}
+
 type TreeSitterLanguage = unknown;
 type TreeSitterEdit = {
   startIndex: number;

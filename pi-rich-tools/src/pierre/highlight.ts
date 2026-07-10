@@ -15,6 +15,7 @@ import type {
 import { emptyHighlightedDiffSet } from "./types.ts";
 import {
   querySharedSyntaxCaptures,
+  treeSitterColumnToStringIndex,
   treeSitterLanguageKey,
   type TreeSitterCapture,
   type TreeSitterNode,
@@ -24,13 +25,26 @@ import {
   queryTextMateSyntaxSpans,
   type TextMateSyntaxSpan,
 } from "./textmate-service.ts";
+import {
+  requestHighlightedDiff,
+  resetHighlightWorker,
+} from "./highlight-worker-client.ts";
 
-export async function loadHighlightedDiff(
+export function loadHighlightedDiff(
   metadata: FileDiffMetadata,
   config: PierreRendererConfig,
-  theme?: PiThemeLike,
+  _theme?: PiThemeLike,
+  requestKey?: string,
 ): Promise<HighlightedDiffSet> {
-  return buildPiHighlightedDiffAsync(metadata, config, theme);
+  return requestHighlightedDiff(metadata, config, requestKey);
+}
+
+/** Runs inside highlight-worker.mjs. Keep heavy syntax work out of Pi's process. */
+export async function buildPiHighlightedDiffInWorker(
+  metadata: FileDiffMetadata,
+  config: PierreRendererConfig,
+): Promise<HighlightedDiffSet> {
+  return buildPiHighlightedDiffAsync(metadata, config);
 }
 
 export function buildPiHighlightedDiff(
@@ -324,9 +338,10 @@ function treeSitterWorkerState(): TreeSitterWorkerState {
 }
 
 export function resetPierreHighlighter(): void {
-  const client = treeSitterWorkerState().client;
-  if (!client) return;
-  restartTreeSitterWorker(client);
+  resetHighlightWorker();
+
+  const treeSitterClient = treeSitterWorkerState().client;
+  if (treeSitterClient) restartTreeSitterWorker(treeSitterClient);
 }
 
 function buildTreeSitterHighlightedDiff(
@@ -1121,25 +1136,6 @@ function paintCapture(
     const end = row === endRow ? treeSitterColumnToStringIndex(line, node.endPosition.column) : line.length;
     for (let i = start; i < end; i++) styles[i] = category;
   }
-}
-
-function treeSitterColumnToStringIndex(line: string, column: number): number {
-  // node-tree-sitter parses JavaScript strings as UTF-16, so Point.column is
-  // already a JS string index, not a UTF-8 byte offset.
-  if (column <= 0) return 0;
-  return avoidSplitSurrogateColumn(line, Math.min(column, line.length));
-}
-
-function avoidSplitSurrogateColumn(line: string, index: number): number {
-  if (index <= 0 || index >= line.length) return index;
-  const previous = line.charCodeAt(index - 1);
-  const current = line.charCodeAt(index);
-  return previous >= 0xd800 &&
-    previous <= 0xdbff &&
-    current >= 0xdc00 &&
-    current <= 0xdfff
-    ? index - 1
-    : index;
 }
 
 function spansFromLineStyles(
