@@ -57,6 +57,48 @@ test("classifies searches while dropping tiny pipeline formatters", () => {
   ]);
 });
 
+test("drops only bounded, stdin-only pipeline formatters", () => {
+  assert.deepEqual(parseShellCommand("cat input | wc -l"), [
+    { type: "read", cmd: "cat input", name: "input", path: "input" },
+  ]);
+  assert.deepEqual(parseShellCommand("rg foo | cut -d : -f 1 | sort -u | uniq | column -t | tail -n 10"), [
+    { type: "search", cmd: "rg foo", query: "foo" },
+  ]);
+  assert.deepEqual(parseShellCommand("rg foo | sed 's/foo/bar/g'"), [
+    { type: "search", cmd: "rg foo", query: "foo" },
+  ]);
+});
+
+test("keeps side-effecting, unbounded, and non-stdin formatters conservative", () => {
+  const commands = [
+    "cat input | sort -o output",
+    "cat input | sort --output output",
+    "cat input | sort --output=output",
+    "cat input | sort --compress-program=touch",
+    "cat input | uniq - output",
+    "cat input | uniq --output=output",
+    "cat input | sed -i 's/a/b/' output",
+    "cat input | sed 's/a/b/w output'",
+    "cat input | sed 'w output'",
+    "cat input | sed 'e touch output'",
+    "rg --files | yes",
+    "rg --files | xargs yes",
+    "rg foo | tail -f",
+    "rg foo | tail -F",
+    "rg foo | tail --follow=name",
+    "rg foo | printf done",
+    "rg foo | sort other.txt",
+    "rg foo | cut -f 1 other.txt",
+    "rg foo | wc /dev/zero",
+  ];
+
+  for (const command of commands) {
+    assert.deepEqual(parseShellCommand(command), [
+      { type: "unknown", cmd: command },
+    ], command);
+  }
+});
+
 test("search summaries use shell argv semantics for double quoted backslashes", () => {
   const doubleQuoted = parseShellCommand(String.raw`rg -n "join\(\"\\n\"\)" src`);
   assert.equal(doubleQuoted[0]?.type, "search");

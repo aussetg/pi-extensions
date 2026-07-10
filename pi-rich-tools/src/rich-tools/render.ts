@@ -20,12 +20,17 @@ import type { PierreDiffPayload } from "../pierre/types.ts";
 import {
   renderCodeFeedbackFromDetails,
   type CodeFeedbackRender,
-} from "./code-feedback.ts";
+} from "../code-feedback.ts";
 import {
   editPreviewPayload,
   readPreviewPayload,
   writePreviewPayload,
 } from "./payloads.ts";
+import {
+  reconcileInlineImageComponents,
+  type InlineReadImage,
+  type InlineReadImageComponent,
+} from "./read-image-cache.ts";
 import {
   compactReadClassification,
   countLines,
@@ -43,7 +48,6 @@ import {
 
 type RenderOptions = { expanded: boolean; isPartial: boolean };
 type FooterPart = CodeFeedbackRender;
-type InlineReadImage = { data: string; mimeType: string };
 const COLLAPSED_MAX_LINES = 10;
 const ANSI_ESCAPE_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 const suppressedDefaultReadImageArrays = new WeakMap<unknown[], unknown[]>();
@@ -231,9 +235,10 @@ class RichTextResultComponent implements Component {
 
 class RichReadImageResultComponent implements Component {
   private parts: FooterPart[] = [];
-  private imageComponents: Image[] = [];
+  private imageComponents: InlineReadImageComponent[] = [];
   private background: ((text: string) => string) | undefined;
   private footerLines = getPierreRendererConfig().spacing.afterDiff;
+  private theme: ThemeLike;
 
   constructor(
     parts: FooterPart[],
@@ -241,6 +246,7 @@ class RichReadImageResultComponent implements Component {
     theme: ThemeLike,
     context?: ShellContextLike,
   ) {
+    this.theme = theme;
     this.update(parts, images, theme, context);
   }
 
@@ -250,17 +256,28 @@ class RichReadImageResultComponent implements Component {
     theme: ThemeLike,
     context?: ShellContextLike,
   ): void {
+    const themeChanged = this.theme !== theme;
+    this.theme = theme;
     this.parts = parts;
     this.background = toolBackground(theme, context);
     this.footerLines = getPierreRendererConfig().spacing.afterDiff;
-    this.imageComponents = images.map((image) =>
-      new Image(
-        image.data,
-        image.mimeType,
-        { fallbackColor: (text: string) => theme.fg("toolOutput", text) },
-        { maxWidthCells: 60 },
-      ),
+    this.imageComponents = reconcileInlineImageComponents(
+      this.imageComponents,
+      images,
+      (image) => ({
+        ...image,
+        component: new Image(
+          image.data,
+          image.mimeType,
+          { fallbackColor: (text: string) => this.theme.fg("toolOutput", text) },
+          { maxWidthCells: 60 },
+        ),
+      }),
     );
+
+    if (themeChanged) {
+      for (const image of this.imageComponents) image.component.invalidate();
+    }
   }
 
   render(width: number): string[] {
@@ -274,7 +291,7 @@ class RichReadImageResultComponent implements Component {
 
     const imageWidth = Math.max(1, safeWidth - 2);
     for (let i = 0; i < this.imageComponents.length; i += 1) {
-      const imageLines = this.imageComponents[i]!.render(imageWidth);
+      const imageLines = this.imageComponents[i]!.component.render(imageWidth);
       for (const line of imageLines) {
         lines.push(paintInlineImageLine(line, safeWidth, this.background));
       }
@@ -290,7 +307,7 @@ class RichReadImageResultComponent implements Component {
   }
 
   invalidate(): void {
-    for (const image of this.imageComponents) image.invalidate();
+    for (const image of this.imageComponents) image.component.invalidate();
   }
 }
 
@@ -356,9 +373,13 @@ class RichReadPierreResultComponent implements Component {
   }
 
   render(width: number): string[] {
-    const rendered = collapseRenderedReadLines(this.diff.render(width), this.expanded);
+    const rendered = this.expanded
+      ? { lines: this.diff.render(width), omittedLines: 0 }
+      : this.diff.renderLimited(width, COLLAPSED_MAX_LINES);
     const footerPartsValue = footerParts([
-      rendered.collapsed ? collapseNotice(rendered.collapsed, this.theme, false) : undefined,
+      rendered.omittedLines > 0
+        ? collapseNotice({ remaining: rendered.omittedLines }, this.theme, false)
+        : undefined,
       ...this.footerParts,
     ]);
     if (footerPartsValue.length === 0) return rendered.lines;
@@ -532,29 +553,6 @@ function collapseTextForDisplay(
       remaining: lines.length - COLLAPSED_MAX_LINES,
       totalLines: includeTotal ? lines.length : undefined,
     },
-  };
-}
-
-function collapseRenderedReadLines(
-  lines: string[],
-  expanded: boolean,
-): { lines: string[]; collapsed?: { remaining: number } } {
-  if (expanded) return { lines };
-
-  const trailingBlankCount = Math.min(
-    Math.max(0, getPierreRendererConfig().spacing.afterDiff),
-    lines.length,
-  );
-  const contentEnd = lines.length - trailingBlankCount;
-  const contentLines = lines.slice(0, contentEnd);
-  if (contentLines.length <= COLLAPSED_MAX_LINES) return { lines };
-
-  return {
-    lines: [
-      ...contentLines.slice(0, COLLAPSED_MAX_LINES),
-      ...lines.slice(contentEnd),
-    ],
-    collapsed: { remaining: contentLines.length - COLLAPSED_MAX_LINES },
   };
 }
 

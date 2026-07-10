@@ -35,16 +35,7 @@ export function registerViewImageTool(pi: ExtensionAPI): void {
       const imagePath = typeof params.path === "string" ? params.path : "";
       const extension = path.extname(imagePath).toLowerCase();
       if (!IMAGE_EXTENSIONS.has(extension)) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "view_image only supports image files with .png, .jpg, .jpeg, .gif, or .webp extensions.",
-            },
-          ],
-          details: { path: imagePath },
-          isError: true,
-        };
+        throw new Error("view_image only supports image files with .png, .jpg, .jpeg, .gif, or .webp extensions.");
       }
 
       const read = createReadToolDefinition(ctx.cwd);

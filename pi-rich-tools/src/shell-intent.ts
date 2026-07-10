@@ -124,7 +124,7 @@ function parseShellCommandImpl(command: string): ParsedShellCommand[] {
     return [{ type: "unknown", cmd: command.trim() || command }];
   }
 
-  const commands = dropSmallFormattingCommands(wordCommands);
+  const commands = dropSafeFormattingCommands(wordCommands);
   if (commands.length === 0) {
     return [{ type: "unknown", cmd: command.trim() || command }];
   }
@@ -845,17 +845,235 @@ function hasFindSideEffectAction(args: string[]): boolean {
   return args.some((arg) => sideEffectActions.has(arg));
 }
 
-function isSmallFormattingCommand(tokens: string[]): boolean {
+function isSafeFormattingCommand(tokens: string[]): boolean {
   const [head, ...tail] = tokens;
   if (!head) return false;
-  if (["wc", "tr", "cut", "sort", "uniq", "column", "yes", "printf"].includes(head)) return true;
+  // A discarded stage must be a finite stdin filter. Otherwise the command
+  // would incorrectly inherit the preceding read/search classification.
+  if (head === "wc") return isStdinOnlyFilter(tail, [], ["--files0-from"]);
+  if (head === "tr") return true;
+  if (head === "cut") {
+    return isStdinOnlyFilter(tail, [
+      "-b",
+      "-c",
+      "-d",
+      "-f",
+      "--bytes",
+      "--characters",
+      "--delimiter",
+      "--fields",
+      "--output-delimiter",
+    ]);
+  }
+  if (head === "sort") return isSafeSortFilter(tail);
+  if (head === "uniq") return isSafeUniqFilter(tail);
+  if (head === "column") {
+    return isStdinOnlyFilter(tail, [
+      "-c",
+      "-C",
+      "-E",
+      "-H",
+      "-n",
+      "-N",
+      "-o",
+      "-O",
+      "-R",
+      "-s",
+      "-T",
+      "--output-width",
+      "--table-column",
+      "--table-columns",
+      "--table-hide",
+      "--table-name",
+      "--table-noextreme",
+      "--table-order",
+      "--table-right",
+      "--table-truncate",
+      "--output-separator",
+      "--separator",
+    ]);
+  }
   if (head === "tee") return !teeHasFileOperands(tail);
   if (head === "awk") return isSafeAwkFormatter(tail);
-  if (head === "sed") return sedReadPath(tail) === undefined;
-  if (head === "head") return headTailReadPath(tail, false) === undefined;
-  if (head === "tail") return headTailReadPath(tail, true) === undefined;
+  if (head === "sed") return isSafeSedFormatter(tail);
+  if (head === "head") return isSafeHeadTailFormatter(tail, false);
+  if (head === "tail") return isSafeHeadTailFormatter(tail, true);
   if (head === "xargs") return isSafeXargsFormattingCommand(tokens);
   return false;
+}
+
+function isStdinOnlyFilter(
+  args: string[],
+  flagsWithValues: string[],
+  rejectedLongOptions: string[] = [],
+): boolean {
+  if (args.some((arg) => rejectedLongOptions.some((option) => isLongOption(arg, option)))) {
+    return false;
+  }
+  return positionalOperands(args, flagsWithValues).every((arg) => arg === "-");
+}
+
+function isSafeSortFilter(args: string[]): boolean {
+  let afterDoubleDash = false;
+  for (const arg of args) {
+    if (arg === "--") {
+      afterDoubleDash = true;
+      continue;
+    }
+    if (afterDoubleDash) continue;
+    if (isLongOption(arg, "--output") || isLongOption(arg, "--compress-program")) return false;
+    if (/^-[^-]*o/.test(arg)) return false;
+  }
+
+  return isStdinOnlyFilter(args, [
+    "-k",
+    "-S",
+    "-T",
+    "-t",
+    "--batch-size",
+    "--buffer-size",
+    "--field-separator",
+    "--key",
+    "--parallel",
+    "--random-source",
+    "--temporary-directory",
+  ]);
+}
+
+function isSafeUniqFilter(args: string[]): boolean {
+  if (args.some((arg) => isLongOption(arg, "--output"))) return false;
+  if (args.some((arg) => /^-[^-]*o/.test(arg))) return false;
+  return isStdinOnlyFilter(args, [
+    "-f",
+    "-s",
+    "-w",
+    "--check-chars",
+    "--skip-chars",
+    "--skip-fields",
+  ]);
+}
+
+function isLongOption(arg: string, option: string): boolean {
+  const name = arg.split("=", 1)[0]!;
+  return name.startsWith("--") && name.length > 2 && option.startsWith(name);
+}
+
+function isSafeSedFormatter(args: string[]): boolean {
+  const scripts: string[] = [];
+  let sawScript = false;
+  let afterDoubleDash = false;
+
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i]!;
+    if (arg === "--") {
+      afterDoubleDash = true;
+      continue;
+    }
+
+    if (afterDoubleDash) {
+      if (!sawScript) {
+        scripts.push(arg);
+        sawScript = true;
+      } else if (arg !== "-") {
+        return false;
+      }
+      continue;
+    }
+
+    if (arg === "-i" || arg.startsWith("-i") || isLongOption(arg, "--in-place")) return false;
+    if (arg === "-f" || arg.startsWith("-f") || isLongOption(arg, "--file")) return false;
+
+    if (arg === "-e" || arg === "--expression") {
+      const script = args[i + 1];
+      if (script === undefined) return false;
+      scripts.push(script);
+      sawScript = true;
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("-e") && arg.length > 2) {
+      scripts.push(arg.slice(2));
+      sawScript = true;
+      continue;
+    }
+    if (arg.startsWith("--expression=")) {
+      scripts.push(arg.slice("--expression=".length));
+      sawScript = true;
+      continue;
+    }
+
+    if (
+      arg === "-n"
+      || arg === "--quiet"
+      || arg === "--silent"
+      || arg === "--regexp-extended"
+      || arg === "--separate"
+      || arg === "--unbuffered"
+      || arg === "--null-data"
+      || arg === "--sandbox"
+      || isSedShortFlagCluster(arg)
+    ) {
+      continue;
+    }
+    if (arg.startsWith("-")) return false;
+
+    if (!sawScript) {
+      scripts.push(arg);
+      sawScript = true;
+    } else {
+      return false;
+    }
+  }
+
+  return scripts.length > 0 && scripts.every(isSafeSedFilterScript);
+}
+
+function isSafeSedFilterScript(script: string): boolean {
+  const source = script.trim();
+  return isValidSedPrintScript(source) || isSafeSedSubstitution(source);
+}
+
+function isSafeSedSubstitution(script: string): boolean {
+  if (script.length < 4 || script[0] !== "s") return false;
+  const delimiter = script[1]!;
+  if (/^[A-Za-z0-9\\\s]$/.test(delimiter)) return false;
+
+  const patternEnd = nextUnescapedDelimiter(script, delimiter, 2);
+  if (patternEnd === -1) return false;
+  const replacementEnd = nextUnescapedDelimiter(script, delimiter, patternEnd + 1);
+  if (replacementEnd === -1) return false;
+
+  const flags = script.slice(replacementEnd + 1).trim();
+  return /^[0-9giIpMm]*$/.test(flags);
+}
+
+function nextUnescapedDelimiter(source: string, delimiter: string, start: number): number {
+  for (let i = start; i < source.length; i += 1) {
+    if (source[i] === "\\") {
+      i += 1;
+      continue;
+    }
+    if (source[i] === delimiter) return i;
+  }
+  return -1;
+}
+
+function isSafeHeadTailFormatter(args: string[], tail: boolean): boolean {
+  if (tail && args.some(isTailFollowOption)) return false;
+  return isStdinOnlyFilter(args, [
+    "-c",
+    "-n",
+    "--bytes",
+    "--lines",
+    ...(tail
+      ? ["-s", "--max-unchanged-stats", "--pid", "--sleep-interval"]
+      : []),
+  ]);
+}
+
+function isTailFollowOption(arg: string): boolean {
+  if (isLongOption(arg, "--follow")) return true;
+  return /^-[^-]*[fF]/.test(arg);
 }
 
 function teeHasFileOperands(args: string[]): boolean {
@@ -894,8 +1112,8 @@ function xargsSubcommand(tokens: string[]): string[] | undefined {
   return undefined;
 }
 
-function dropSmallFormattingCommands(commands: string[][]): string[][] {
-  return commands.filter((tokens) => !isSmallFormattingCommand(tokens));
+function dropSafeFormattingCommands(commands: string[][]): string[][] {
+  return commands.filter((tokens) => !isSafeFormattingCommand(tokens));
 }
 
 function simplifyParsedCommands(commands: ParsedShellCommand[]): ParsedShellCommand[] {

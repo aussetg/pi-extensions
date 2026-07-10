@@ -1,7 +1,11 @@
 import path from "node:path";
 import { DEFAULT_MAX_BYTES, formatSize, keyHint } from "@earendil-works/pi-coding-agent";
 import { Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
-import { querySharedSyntaxCaptures, type TreeSitterCapture } from "../pierre/syntax-service.ts";
+import {
+  querySharedSyntaxCaptures,
+  treeSitterColumnToStringIndex,
+  type TreeSitterCapture,
+} from "../pierre/syntax-service.ts";
 import { parseShellCommand, type ParsedShellCommand } from "../shell-intent.ts";
 import {
   binaryBashLineNotice,
@@ -10,6 +14,7 @@ import {
   stripBashModelExitStatusForDisplay,
   visualizeShellControlChars,
 } from "./bash-model-output.ts";
+import { ansiEscapePattern, stripAnsiEscapes } from "./shell-ansi.ts";
 import {
   isRecord,
   isToolError,
@@ -33,6 +38,7 @@ type PlainCommandCallLine = {
   type: "plain_command";
   command: string;
   active: boolean;
+  documentId?: string;
 };
 type SyntaxCategory =
   | "constant"
@@ -54,7 +60,6 @@ const BASH_OUTPUT_SKIPPED_COUNT_MAX_CHARS = 256 * 1024;
 const MAX_REMEMBERED_ANSI_OUTPUTS = 200;
 const MAX_REMEMBERED_BASH_CALLS = 500;
 const rememberedAnsiOutputByToolCallId = new Map<string, string>();
-const HIDDEN_BASH_CONTINUATION = Symbol.for("pi-rich-tools.hidden-bash-continuation");
 
 // Pure UI bookkeeping for live-session coalescing. These maps never modify the
 // persisted session, tool results, or model context; they only let later bash
@@ -126,14 +131,6 @@ export function rememberBashAnsiOutput(toolCallId: string, output: string | unde
   }
 }
 
-export function hasAnsiEscapes(text: string): boolean {
-  return ansiEscapePattern().test(text);
-}
-
-export function stripAnsiEscapes(text: string): string {
-  return text.replace(ansiEscapePattern(), "");
-}
-
 export function clearBashCoalescingState(): void {
   activeBashGroupId = undefined;
   currentAssistantStartGroupId = undefined;
@@ -144,16 +141,16 @@ export function clearBashCoalescingState(): void {
 }
 
 export function startBashCoalescingRun(): void {
-  activeBashGroupId = undefined;
+  closeActiveBashGroup();
   currentAssistantStartGroupId = undefined;
   bashCoalescingActive = true;
   bashCoalescingGeneration += 1;
 }
 
 export function endBashCoalescingRun(): void {
-  activeBashGroupId = undefined;
   currentAssistantStartGroupId = undefined;
   bashCoalescingActive = false;
+  closeActiveBashGroup();
 }
 
 export function beginBashCoalescingAssistantMessage(): void {
@@ -163,7 +160,17 @@ export function beginBashCoalescingAssistantMessage(): void {
 export function syncBashCoalescingAssistantMessage(message: unknown, finalized = false): void {
   if (!bashCoalescingActive || !isAssistantMessage(message)) return;
   const startGroupId = currentAssistantStartGroupId;
-  activeBashGroupId = scanAssistantBashCoalescing(message.content, startGroupId, bashCoalescingGeneration);
+  const previousGroupId = activeBashGroupId;
+  activeBashGroupId = scanAssistantBashCoalescing(
+    message.content,
+    startGroupId,
+    bashCoalescingGeneration,
+    false,
+    finalized,
+  );
+  if (previousGroupId && previousGroupId !== activeBashGroupId) {
+    bashCallGroupById.get(previousGroupId)?.invalidate?.();
+  }
   if (finalized) currentAssistantStartGroupId = undefined;
 }
 
@@ -204,13 +211,9 @@ export function restoreBashCoalescingGroupsFromMessages(messages: unknown[]): vo
   trimBashCoalescingState();
 }
 
-export function isHiddenBashContinuationComponent(component: unknown): boolean {
-  return Boolean(component && typeof component === "object" && (component as Record<PropertyKey, unknown>)[HIDDEN_BASH_CONTINUATION]);
-}
-
 export function rememberToolExecutionStart(toolName: string, toolCallId: string, args: unknown): void {
   if (toolName !== "bash") {
-    activeBashGroupId = undefined;
+    closeActiveBashGroup();
     return;
   }
 
@@ -227,7 +230,7 @@ export function rememberToolExecutionStart(toolName: string, toolCallId: string,
     if (!summary.exploratory) {
       if (existing.groupId) removeBashRecordFromGroup(existing.toolCallId, bashCallGroupById.get(existing.groupId));
       existing.groupId = undefined;
-      activeBashGroupId = undefined;
+      closeActiveBashGroup();
       return;
     }
     const group = existing.groupId ? bashCallGroupById.get(existing.groupId) : undefined;
@@ -237,7 +240,7 @@ export function rememberToolExecutionStart(toolName: string, toolCallId: string,
 
   if (!summary.exploratory) {
     upsertBashCallRecord(toolCallId, args, summary, undefined, bashCoalescingGeneration);
-    activeBashGroupId = undefined;
+    closeActiveBashGroup();
     return;
   }
 
@@ -262,10 +265,18 @@ export function rememberToolExecutionEnd(toolName: string, toolCallId: string, i
 }
 
 export function renderBashCall(args: unknown, theme: ThemeLike, context?: ShellContextLike): Component {
-  if (shouldDelayBashCallRendering(args, context)) return HIDDEN_BASH_CONTINUATION_COMPONENT;
+  if (shouldDelayBashCallRendering(args, context)) {
+    // Once a streamed command has produced a stable exploratory summary, keep
+    // that frame while the next quote, pipe, or subcommand is incomplete.
+    // Replacing it with an empty component made the whole box disappear and
+    // reappear repeatedly as tool-call arguments arrived token by token.
+    return context?.lastComponent instanceof BashCallComponent
+      ? context.lastComponent
+      : EMPTY_COMPONENT;
+  }
 
   const state = bashCallRenderState(args, context, theme);
-  if (state.hidden) return HIDDEN_BASH_CONTINUATION_COMPONENT;
+  if (state.hidden) return EMPTY_COMPONENT;
 
   const component = context?.lastComponent instanceof BashCallComponent
     ? context.lastComponent
@@ -294,25 +305,29 @@ class BashResultComponent implements Component {
   private options: RenderOptions = { expanded: false, isPartial: false };
   private theme: ThemeLike | undefined;
   private context: ShellContextLike | undefined;
+  private cachedWidth: number | undefined;
+  private cachedLines: string[] | undefined;
 
   update(result: ToolResultLike, options: RenderOptions, theme: ThemeLike, context?: ShellContextLike): void {
     this.result = result;
     this.options = options;
     this.theme = theme;
     this.context = context;
+    this.clearRenderCache();
   }
 
   render(width: number): string[] {
     if (!this.theme) return [];
+    const safeWidth = Math.max(1, Math.trunc(width));
+    if (this.cachedLines && this.cachedWidth === safeWidth) return this.cachedLines;
 
     const rawOutput = stripBashModelExitStatusForDisplay(
       normalizeLineEndings(rememberedBashAnsiOutput(this.context) ?? textContent(this.result) ?? ""),
     );
     const output = stripPiBashTruncationFooterForDisplay(rawOutput, this.result.details).trim();
     const warning = bashTruncationNotice(this.result.details, this.theme);
-    if (!output && !warning) return [];
+    if (!output && !warning) return this.rememberRender(safeWidth, []);
 
-    const safeWidth = Math.max(1, Math.trunc(width));
     const contentWidth = Math.max(1, safeWidth - 2);
     const color = isToolError(this.result, this.context) ? "error" : "toolOutput";
     const bodyLines = output
@@ -324,49 +339,80 @@ class BashResultComponent implements Component {
       bodyLines.push(warning);
     }
 
-    if (bodyLines.length === 0) return [];
+    if (bodyLines.length === 0) return this.rememberRender(safeWidth, []);
 
     const background = toolBackground(this.theme, this.context);
-    return [
+    return this.rememberRender(safeWidth, [
       ...new Text(bodyLines.join("\n"), 1, 0, background).render(safeWidth),
       backgroundBlankLine(safeWidth, background),
-    ];
+    ]);
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    this.clearRenderCache();
+  }
+
+  private rememberRender(width: number, lines: string[]): string[] {
+    this.cachedWidth = width;
+    this.cachedLines = lines;
+    return lines;
+  }
+
+  private clearRenderCache(): void {
+    this.cachedWidth = undefined;
+    this.cachedLines = undefined;
+  }
 }
 
 class BashCallComponent implements Component {
   private lines: BashCallLine[] = [];
   private theme: ThemeLike | undefined;
   private context: ShellContextLike | undefined;
+  private cachedWidth: number | undefined;
+  private cachedLines: string[] | undefined;
 
   update(lines: BashCallLine[], theme: ThemeLike, context?: ShellContextLike): void {
     this.lines = lines;
     this.theme = theme;
     this.context = context;
+    this.clearRenderCache();
   }
 
   render(width: number): string[] {
     if (!this.theme) return [];
     const safeWidth = Math.max(1, Math.trunc(width));
+    if (this.cachedLines && this.cachedWidth === safeWidth) return this.cachedLines;
+
     const contentWidth = Math.max(1, safeWidth - 2);
     const background = toolBackground(this.theme, this.context);
     const lines = wrapBashCallLines(this.lines, contentWidth, this.theme, this.context);
     if (!lines.some((line) => line.backgroundColor)) {
-      return new Text(lines.map((line) => line.text).join("\n"), 1, 1, background).render(safeWidth);
+      return this.rememberRender(
+        safeWidth,
+        new Text(lines.map((line) => line.text).join("\n"), 1, 1, background).render(safeWidth),
+      );
     }
-    return renderPaddedBashCallLines(lines, safeWidth, background, this.theme);
+    return this.rememberRender(
+      safeWidth,
+      renderPaddedBashCallLines(lines, safeWidth, background, this.theme),
+    );
   }
 
-  invalidate(): void {}
-}
+  invalidate(): void {
+    this.clearRenderCache();
+  }
 
-const HIDDEN_BASH_CONTINUATION_COMPONENT: Component = {
-  [HIDDEN_BASH_CONTINUATION]: true,
-  render: () => [],
-  invalidate: () => {},
-} as Component;
+  private rememberRender(width: number, lines: string[]): string[] {
+    this.cachedWidth = width;
+    this.cachedLines = lines;
+    return lines;
+  }
+
+  private clearRenderCache(): void {
+    this.cachedWidth = undefined;
+    this.cachedLines = undefined;
+  }
+}
 
 function bashCallRenderState(
   args: unknown,
@@ -384,11 +430,17 @@ function bashCallRenderState(
       .map((id) => bashCallRecordById.get(id))
       .filter((item): item is BashCallRecord => item !== undefined);
     const actions = records.flatMap((item) => exploringActions(item.parsed, item.isError));
-    const active = records.some((item) => !item.done) || context?.isPartial === true;
+    // Keep one visual state for the lifetime of an open coalesced group. If we
+    // briefly settle between adjacent calls, the background flips success →
+    // pending when the next row arrives and the whole box visibly flashes.
+    const active = records.some((item) => !item.done)
+      || context?.isPartial === true
+      || (bashCoalescingActive && activeBashGroupId === group.id);
+    const allFailed = records.length > 0 && records.every((item) => item.done && item.isError);
     return {
       hidden: false,
       lines: renderExploringCallLines(actions, active, theme, context),
-      context: { ...context, isPartial: active, isError: false },
+      context: { ...context, isPartial: active, isError: allFailed },
     };
   }
 
@@ -397,8 +449,12 @@ function bashCallRenderState(
   const exploratoryError = record?.isError === true || context?.isError === true;
   const lines = summary.exploratory
     ? renderExploringCallLines(exploringActions(summary.parsed, exploratoryError), active, theme, context)
-    : renderPlainCommandCallLines(summary.command, active);
-  return { hidden: false, lines, context: summary.exploratory ? { ...context, isError: false } : context };
+    : renderPlainCommandCallLines(summary.command, active, context?.toolCallId);
+  return {
+    hidden: false,
+    lines,
+    context: summary.exploratory ? { ...context, isError: exploratoryError } : context,
+  };
 }
 
 function bashOutputPreviewLines(
@@ -582,7 +638,7 @@ function wrapPlainCommandCallLine(
   const status = line.active ? "Running" : "Ran";
   const prefix = `${theme.fg("muted", "•")} ${theme.fg("toolTitle", theme.bold(status))} `;
   const preview = shellInputPreview(line.command, context?.expanded === true);
-  const highlightedLines = highlightBashCommand(preview.text, theme).split("\n");
+  const highlightedLines = highlightBashCommand(preview.text, theme, line.documentId).split("\n");
   const visualLines = highlightedLines.flatMap((commandLine, index) =>
     wrapStyledLine(index === 0 ? `${prefix}${commandLine}` : commandLine, width)
   );
@@ -687,10 +743,6 @@ function visualizeShellControlCharsPreservingSgr(text: string): string {
   return out;
 }
 
-function ansiEscapePattern(): RegExp {
-  return /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b[=>]|\x1b[@-_]/g;
-}
-
 function rememberedBashAnsiOutput(context?: ShellContextLike): string | undefined {
   return context?.toolCallId ? rememberedAnsiOutputByToolCallId.get(context.toolCallId) : undefined;
 }
@@ -700,6 +752,7 @@ function scanAssistantBashCoalescing(
   startGroupId: string | undefined,
   generation: number,
   markDone = false,
+  argsComplete = markDone,
 ): string | undefined {
   let group = groupForGeneration(startGroupId, generation);
 
@@ -718,6 +771,17 @@ function scanAssistantBashCoalescing(
     }
 
     const summary = summarizeBashArgs(item.arguments, item.id);
+    if (!argsComplete && shouldDelayBashCallRendering(item.arguments, {
+      isPartial: true,
+      argsComplete: false,
+      executionStarted: false,
+      toolCallId: item.id,
+    })) {
+      // A streamed command such as `c` may still become `cat`. Do not close
+      // the preceding group until enough arguments exist to classify it;
+      // success → pending transitions here make the growing box flash.
+      continue;
+    }
     if (summary.command.trim() === "" || !summary.exploratory) {
       upsertBashCallRecord(item.id, item.arguments, summary, undefined, generation, markDone, false);
       group = undefined;
@@ -746,6 +810,12 @@ function groupForGeneration(groupId: string | undefined, generation: number): Ba
   if (!groupId) return undefined;
   const group = bashCallGroupById.get(groupId);
   return group?.generation === generation ? group : undefined;
+}
+
+function closeActiveBashGroup(): void {
+  const groupId = activeBashGroupId;
+  activeBashGroupId = undefined;
+  if (groupId) bashCallGroupById.get(groupId)?.invalidate?.();
 }
 
 function summarizeBashArgs(args: unknown, toolCallId?: string): BashSummary {
@@ -830,7 +900,7 @@ function updateBashCallRecordFromRender(args: unknown, context?: ShellContextLik
   } else if (!summary.exploratory) {
     if (record.groupId) removeBashRecordFromGroup(record.toolCallId, bashCallGroupById.get(record.groupId));
     record.groupId = undefined;
-    activeBashGroupId = undefined;
+    closeActiveBashGroup();
   }
 
   const group = record.groupId ? bashCallGroupById.get(record.groupId) : undefined;
@@ -985,8 +1055,8 @@ function renderExploringCallLines(
   return lines;
 }
 
-function renderPlainCommandCallLines(command: string, active: boolean): BashCallLine[] {
-  return [{ type: "plain_command", command, active }];
+function renderPlainCommandCallLines(command: string, active: boolean, documentId?: string): BashCallLine[] {
+  return [{ type: "plain_command", command, active, documentId }];
 }
 
 function bulletLine(label: string, theme: ThemeLike): string {
@@ -1130,12 +1200,16 @@ function bashCommandArg(args: unknown): string {
   return typeof command === "string" ? command : "";
 }
 
-function highlightBashCommand(command: string, theme: ThemeLike): string {
+function highlightBashCommand(command: string, theme: ThemeLike, documentId?: string): string {
   if (!command) return theme.fg("toolOutput", "...");
 
   const lines = command.split("\n");
   const styles = lines.map((line) => new Array<SyntaxCategory | undefined>(line.length));
-  const captures = querySharedSyntaxCaptures({ languageKey: "bash", text: command });
+  const captures = querySharedSyntaxCaptures({
+    documentId: documentId ? `bash-call:${documentId}` : undefined,
+    languageKey: "bash",
+    text: command,
+  });
   for (const capture of sortedSyntaxCaptures(captures ?? [])) {
     const category = syntaxCategoryForCapture(capture.name);
     if (!category) continue;
@@ -1169,8 +1243,8 @@ function paintSyntaxCapture(
     const lineStyles = styles[row];
     if (line === undefined || !lineStyles) continue;
 
-    const start = row === startRow ? byteColumnToStringIndex(line, capture.node.startPosition.column) : 0;
-    const end = row === endRow ? byteColumnToStringIndex(line, capture.node.endPosition.column) : line.length;
+    const start = row === startRow ? treeSitterColumnToStringIndex(line, capture.node.startPosition.column) : 0;
+    const end = row === endRow ? treeSitterColumnToStringIndex(line, capture.node.endPosition.column) : line.length;
     for (let offset = start; offset < end && offset < lineStyles.length; offset += 1) {
       if (overwrite || lineStyles[offset] === undefined) lineStyles[offset] = category;
     }
@@ -1400,23 +1474,6 @@ function syntaxThemeColor(category: SyntaxCategory): string {
     case "punctuation":
       return "syntaxPunctuation";
   }
-}
-
-function byteColumnToStringIndex(line: string, column: number): number {
-  if (column <= 0) return 0;
-
-  let bytes = 0;
-  for (let index = 0; index < line.length;) {
-    const codePoint = line.codePointAt(index);
-    if (codePoint === undefined) break;
-    const width = codePoint > 0xffff ? 2 : 1;
-    const byteWidth = Buffer.byteLength(line.slice(index, index + width), "utf8");
-    if (bytes + byteWidth > column) return index;
-    bytes += byteWidth;
-    index += width;
-  }
-
-  return line.length;
 }
 
 function bashTruncationNotice(details: unknown, theme: ThemeLike): string | undefined {

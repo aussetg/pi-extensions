@@ -14,9 +14,25 @@ declare module "@earendil-works/pi-coding-agent" {
   export const createEditTool: any;
   export const DEFAULT_MAX_BYTES: number;
   export const DEFAULT_MAX_LINES: number;
+  export interface TruncationResult {
+    content: string;
+    truncated: boolean;
+    totalLines: number;
+    totalBytes: number;
+    outputLines: number;
+    outputBytes: number;
+  }
   export function formatSize(bytes: number): string;
   export function keyHint(keybinding: string, description: string): string;
   export function keyText(keybinding: string): string;
+  export function truncateHead(
+    text: string,
+    options?: { maxLines?: number; maxBytes?: number },
+  ): TruncationResult;
+  export function withFileMutationQueue<T>(
+    path: string,
+    mutation: () => T | Promise<T>,
+  ): Promise<T>;
 }
 
 declare module "@earendil-works/pi-tui" {

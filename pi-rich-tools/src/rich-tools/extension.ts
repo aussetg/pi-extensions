@@ -1,8 +1,4 @@
-import { createReadStream, createWriteStream, existsSync } from "node:fs";
-import { rename, rm } from "node:fs/promises";
-import { Transform } from "node:stream";
-import { pipeline } from "node:stream/promises";
-import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
+import { existsSync } from "node:fs";
 import {
   createBashTool,
   createEditToolDefinition,
@@ -10,12 +6,11 @@ import {
   createWriteToolDefinition,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
+import { parseShellCommand } from "../shell-intent.ts";
 import {
   beginBashCoalescingAssistantMessage,
   clearBashCoalescingState,
   endBashCoalescingRun,
-  hasAnsiEscapes,
-  isHiddenBashContinuationComponent,
   rememberBashAnsiOutput,
   rememberToolExecutionEnd,
   rememberToolExecutionStart,
@@ -24,7 +19,6 @@ import {
   restoreBashCoalescingGroupsFromMessages,
   startBashCoalescingRun,
   syncBashCoalescingAssistantMessage,
-  stripAnsiEscapes,
 } from "./bash-render.ts";
 import { captureWriteSnapshot } from "./payloads.ts";
 import {
@@ -37,18 +31,19 @@ import {
 } from "./render.ts";
 import {
   bashModelContextText,
-  cleanShellPtyArtifacts,
-  safeBashModelText,
   withInferredSuccessfulBashExitCode,
 } from "./bash-model-output.ts";
+import { hasAnsiEscapes } from "./shell-ansi.ts";
+import {
+  cleanShellFullOutputFile,
+  contextShellText,
+} from "./shell-full-output.ts";
 import { isRecord, type ShellContextLike, type ThemeLike, type ToolResultLike } from "./util.ts";
 
 type RenderOptions = { expanded: boolean; isPartial: boolean };
 const DEFAULT_BASH = "/bin/bash";
-const SHELL_CLEANING_CARRY_CHARS = 4096;
 
 export function registerRichToolRenderers(pi: ExtensionAPI): void {
-  installHiddenToolRowPatch();
   registerDelegatingBuiltInToolOverrides(pi);
   registerWriteSnapshotCapture(pi);
   registerBashAnsiSanitizer(pi);
@@ -64,10 +59,11 @@ function registerDelegatingBuiltInToolOverrides(pi: ExtensionAPI): void {
 
   const bash = createBashTool(cwd, {
     spawnHook(context: BashSpawnContextLike): BashSpawnContextLike {
+      const useColorPty = shouldUseColorPty(context.command);
       return {
         ...context,
-        command: colorPtyCommand(context.command),
-        env: colorShellEnv(context.env),
+        command: useColorPty ? colorPtyCommand(context.command) : bashShellCommand(context.command),
+        env: useColorPty ? colorShellEnv(context.env) : plainShellEnv(context.env),
       };
     },
   }) as DelegatingToolDefinition;
@@ -202,22 +198,6 @@ function registerBashCoalescing(pi: ExtensionAPI): void {
   });
 }
 
-function installHiddenToolRowPatch(): void {
-  const ToolExecutionComponent = (PiCodingAgent as Record<string, unknown>).ToolExecutionComponent;
-  const componentClass = ToolExecutionComponent as unknown as { prototype?: Record<string, unknown> } | undefined;
-  const proto = componentClass?.prototype;
-  if (!proto || proto.__piRichToolsHiddenToolPatch === true) return;
-
-  const originalRender = proto.render;
-  if (typeof originalRender !== "function") return;
-
-  proto.__piRichToolsHiddenToolPatch = true;
-  proto.render = function patchedToolExecutionRender(this: Record<string, unknown>, width: number): string[] {
-    if (isHiddenBashContinuationComponent(this.callRendererComponent)) return [];
-    return (originalRender as (this: Record<string, unknown>, width: number) => string[]).call(this, width);
-  };
-}
-
 function sessionMessages(ctx: unknown): unknown[] {
   if (!isRecord(ctx)) return [];
   const manager = ctx.sessionManager;
@@ -271,6 +251,16 @@ function colorPtyCommand(command: string): string {
   return `/usr/bin/script -qefc ${shellSingleQuote(forcedBashCommand)} /dev/null`;
 }
 
+function shouldUseColorPty(command: string): boolean {
+  const mode = process.env.PI_RICH_TOOLS_COLOR_PTY;
+  if (process.env.PI_RICH_TOOLS_DISABLE_COLOR_PTY === "1" || mode === "never") return false;
+  if (mode === "always") return existsSync("/usr/bin/script");
+  if (!existsSync("/usr/bin/script")) return false;
+
+  const parsed = parseShellCommand(command);
+  return parsed.length > 0 && parsed.every((item) => item.type === "read" || item.type === "list_files" || item.type === "search");
+}
+
 function colorShellEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
   return {
     ...env,
@@ -290,6 +280,28 @@ function colorShellEnv(env: Record<string, string | undefined>): Record<string, 
     npm_config_color: env.npm_config_color ?? "always",
     PY_COLORS: env.PY_COLORS ?? "1",
     NO_COLOR: undefined,
+  };
+}
+
+function plainShellEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
+  return {
+    ...env,
+    SHELL: DEFAULT_BASH,
+    TERM: "dumb",
+    PAGER: "cat",
+    GIT_PAGER: "cat",
+    DELTA_PAGER: "cat",
+    BAT_PAGER: "cat",
+    GH_PAGER: "cat",
+    SYSTEMD_PAGER: "cat",
+    MANPAGER: "cat",
+    LESS: "-FRX",
+    CI: env.CI ?? "1",
+    NO_COLOR: env.NO_COLOR ?? "1",
+    FORCE_COLOR: "0",
+    CLICOLOR_FORCE: "0",
+    npm_config_color: "false",
+    PY_COLORS: "0",
   };
 }
 
@@ -320,57 +332,6 @@ function replaceFirstTextContent(content: unknown, text: string): unknown {
     return item;
   });
   return replaced ? next : [{ type: "text", text }, ...next];
-}
-
-async function cleanShellFullOutputFile(details: unknown): Promise<void> {
-  if (!isRecord(details) || typeof details.fullOutputPath !== "string") return;
-  const outputPath = details.fullOutputPath;
-  const tempPath = `${outputPath}.pi-rich-tools-cleaning-${process.pid}-${Date.now()}`;
-  let changed = false;
-  let carry = "";
-
-  try {
-    await pipeline(
-      createReadStream(outputPath, { encoding: "utf8" }),
-      new Transform({
-        decodeStrings: false,
-        transform(chunk, _encoding, callback) {
-          const text = carry + String(chunk);
-          let emitLength = Math.max(0, text.length - SHELL_CLEANING_CARRY_CHARS);
-          if (emitLength > 0 && text[emitLength - 1] === "\r") emitLength -= 1;
-          if (emitLength === 0) {
-            carry = text;
-            callback();
-            return;
-          }
-
-          const raw = text.slice(0, emitLength);
-          carry = text.slice(emitLength);
-          const cleaned = contextShellText(raw);
-          if (cleaned !== raw) changed = true;
-          callback(null, cleaned);
-        },
-        flush(callback) {
-          const cleaned = contextShellText(carry);
-          if (cleaned !== carry) changed = true;
-          callback(null, cleaned);
-        },
-      }),
-      createWriteStream(tempPath, { encoding: "utf8" }),
-    );
-
-    if (changed) await rename(tempPath, outputPath);
-    else await rm(tempPath, { force: true });
-  } catch {
-    await rm(tempPath, { force: true }).catch(() => {});
-    // Best effort. The tool result content is still stripped for model context.
-  }
-}
-
-function contextShellText(rawText: string): string {
-  return safeBashModelText(
-    stripAnsiEscapes(cleanShellPtyArtifacts(rawText)).replace(/\r\n/g, "\n").replace(/\r/g, "\n"),
-  );
 }
 
 function isWriteParams(value: unknown): value is { path: string; content: string } {
