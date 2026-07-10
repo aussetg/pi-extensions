@@ -18,7 +18,7 @@ export class WorkflowRegistry {
   private refs = new Map<string, WorkflowRef>();
   private invalid: WorkflowRef[] = [];
 
-  async refresh(cwd: string): Promise<void> {
+  async refresh(cwd: string, options: { includeProject?: boolean } = {}): Promise<void> {
     const refs = new Map<string, WorkflowRef>();
     const invalid: WorkflowRef[] = [];
     const addDir = async (dir: string, source: WorkflowRef["source"]) => {
@@ -32,7 +32,7 @@ export class WorkflowRegistry {
     await addDir(builtinsDir(), "built-in");
     await addDir(packageWorkflowDir(), "package");
     await addDir(userWorkflowDir(), "user");
-    await addDir(projectWorkflowDir(cwd), "project");
+    if (options.includeProject !== false) await addDir(projectWorkflowDir(cwd), "project");
 
     this.refs = refs;
     this.invalid = invalid;

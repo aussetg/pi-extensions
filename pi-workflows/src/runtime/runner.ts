@@ -5,6 +5,7 @@ import type { RunRecord, ToolResult, WorkflowInput, WorkflowLaunchOutput, Workfl
 import { CHAT_PREVIEW_BYTES, DEFAULT_LIMITS, SCRIPT_MAX_BYTES, WORKFLOW_RESOURCE_LIMITS, WORKFLOW_RESULT_MESSAGE } from "../constants.js";
 import { WorkflowRegistry } from "../persistence/registry.js";
 import { RunStore } from "../persistence/run-store.js";
+import { registryRefreshOptions } from "../persistence/trust.js";
 import { JsonlJournal, ResumeIndex } from "../persistence/journal.js";
 import { resolveLocalPath } from "../persistence/paths.js";
 import { readBoundedTextFile } from "../persistence/safe-paths.js";
@@ -59,7 +60,7 @@ export class WorkflowRunner {
   async launchOrRun(args: LaunchArgs): Promise<WorkflowLaunchOutput> {
     validateInput(args.input);
     const ctx = args.ctx;
-    await this.deps.registry.refresh(ctx.cwd);
+    await this.deps.registry.refresh(ctx.cwd, registryRefreshOptions(ctx));
     await this.deps.runStore.refresh(ctx.cwd);
     const resolved = await this.resolveSource(args.input, ctx.cwd);
     const stableArgs = (args.input.args ? toStableJsonValue(args.input.args) : {}) as Record<string, unknown>;

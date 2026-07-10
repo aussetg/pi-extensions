@@ -4,6 +4,7 @@ import { registerWorkflowCommand } from "./commands/workflow-command.js";
 import { createWorkflowAutocomplete } from "./commands/workflow-autocomplete.js";
 import { WorkflowRegistry } from "./persistence/registry.js";
 import { RunStore } from "./persistence/run-store.js";
+import { registryRefreshOptions } from "./persistence/trust.js";
 import { WorkflowViewRenderer } from "./ui/workflow-view-renderer.js";
 import { renderWorkflowResultMessage } from "./ui/messages.js";
 import { createWorkflowActivation } from "./tool/workflow-activation.js";
@@ -26,7 +27,7 @@ export function createWorkflowExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", async (_event: any, ctx: any) => {
-    await registry.refresh(ctx.cwd);
+    await registry.refresh(ctx.cwd, registryRefreshOptions(ctx));
     activation.reset(ctx);
     const stale = await runStore.markStaleRunsForSession(ctx.cwd);
     ctx.ui?.addAutocompleteProvider?.(createWorkflowAutocomplete(registry, runStore));

@@ -4,6 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { RunRecord, WorkflowInput, WorkflowViewSnapshot } from "../types.js";
 import { RENDER_LIMITS, SCRIPT_MAX_BYTES, WORKFLOW_RESOURCE_LIMITS } from "../constants.js";
 import { workflowFilePath } from "../persistence/paths.js";
+import { registryRefreshOptions } from "../persistence/trust.js";
 import { readBoundedTextFile } from "../persistence/safe-paths.js";
 import type { RunStore } from "../persistence/run-store.js";
 import type { WorkflowRegistry } from "../persistence/registry.js";
@@ -69,7 +70,7 @@ export async function routeWorkflowCommand(pi: ExtensionAPI, command: WorkflowCo
 
   if (command.action === "preview-ui") return previewUi(deps, ctx, command.json, command.profile, command.width);
 
-  await deps.registry.refresh(ctx.cwd);
+  await deps.registry.refresh(ctx.cwd, registryRefreshOptions(ctx));
   await deps.runStore.refresh(ctx.cwd);
   switch (command.action) {
     case "manager":
@@ -126,7 +127,7 @@ async function saveWorkflow(deps: WorkflowCommandDeps, ctx: any, runId: string, 
     if ((err as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`Workflow file already exists: ${target}`);
     throw err;
   }
-  await deps.registry.refresh(ctx.cwd);
+  await deps.registry.refresh(ctx.cwd, registryRefreshOptions(ctx));
   await printOrNotify(ctx, `Saved workflow ${run.name} to ${target}`);
 }
 
