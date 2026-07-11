@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { createDiagnosticSnapshot } from "../diagnostics/snapshots.ts";
 import { mergeProcessEnv } from "../language-environments.ts";
 import type { DiagnosticRefreshResult, DiagnosticSnapshot, LspClientState, LspClientStatus, LspDiagnostic, LspServerLog, LspServerLogLevel, RelatedLocation, SemanticToken, SemanticTokenLegend, SemanticTokenOverlay } from "../types.ts";
+import { abortError, isCancellation, throwIfAborted, waitWithSignal } from "./cancellation.ts";
 import { filePathToUri, isLspUInteger, lspRangeToExternal, type LspRange } from "./positions.ts";
 import type { LanguageServerDefinition } from "./servers.ts";
 
@@ -33,6 +34,8 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
+  signal?: AbortSignal;
+  onAbort?: () => void;
 }
 
 interface OpenDocument {
@@ -123,6 +126,7 @@ export interface TouchDocumentOptions {
   timeoutMs: number;
   settleMs: number;
   snapshotScope?: DiagnosticSnapshotScope;
+  signal?: AbortSignal;
 }
 
 export type DiagnosticSnapshotScope = "file" | "workspace";
@@ -131,6 +135,7 @@ export interface SemanticTokensOverlayOptions {
   waitMs?: number;
   timeoutMs?: number;
   forceRefresh?: boolean;
+  signal?: AbortSignal;
 }
 
 const SEMANTIC_TOKEN_TYPES = [
@@ -214,14 +219,15 @@ export class LspClient {
   }
 
   async touchDocumentDetailed(filePath: string, content: string, options: TouchDocumentOptions): Promise<DiagnosticRefreshResult> {
-    await this.ensureStarted();
+    await this.ensureStarted(options.signal);
+    throwIfAborted(options.signal);
 
     const touchedAt = Date.now();
     const document = this.syncDocument(filePath, content);
 
     this.notify("textDocument/didSave", textDocumentDidSaveParams(document.uri, content, this.capabilities));
 
-    const fresh = await this.waitForDiagnostics(document.uri, document.version, touchedAt, options.timeoutMs, options.settleMs);
+    const fresh = await this.waitForDiagnostics(document.uri, document.version, touchedAt, options.timeoutMs, options.settleMs, options.signal);
     const completedAt = Date.now();
     this.lastDiagnosticDurationMs = completedAt - touchedAt;
     this.lastDiagnosticTimedOut = !fresh;
@@ -234,13 +240,14 @@ export class LspClient {
     };
   }
 
-  async ensureDocument(filePath: string, content: string): Promise<void> {
-    await this.ensureStarted();
+  async ensureDocument(filePath: string, content: string, signal?: AbortSignal): Promise<void> {
+    await this.ensureStarted(signal);
+    throwIfAborted(signal);
     this.syncDocument(filePath, content);
   }
 
-  async start(): Promise<void> {
-    await this.ensureStarted();
+  async start(signal?: AbortSignal): Promise<void> {
+    await this.ensureStarted(signal);
   }
 
   snapshot(): DiagnosticSnapshot {
@@ -275,18 +282,19 @@ export class LspClient {
     this.semanticTokens.delete(uri);
   }
 
-  async request(method: string, params?: unknown, timeoutMs = 10_000): Promise<unknown> {
-    await this.ensureStarted();
-    return this.sendRequest(method, params, timeoutMs);
+  async request(method: string, params?: unknown, timeoutMs = 10_000, signal?: AbortSignal): Promise<unknown> {
+    await this.ensureStarted(signal);
+    return this.sendRequest(method, params, timeoutMs, signal);
   }
 
-  async requestForDocument(filePath: string, content: string, method: string, params: Record<string, unknown>, timeoutMs = 10_000): Promise<unknown> {
-    await this.ensureDocument(filePath, content);
-    return this.request(method, params, timeoutMs);
+  async requestForDocument(filePath: string, content: string, method: string, params: Record<string, unknown>, timeoutMs = 10_000, signal?: AbortSignal): Promise<unknown> {
+    await this.ensureDocument(filePath, content, signal);
+    return this.sendRequest(method, params, timeoutMs, signal);
   }
 
   async semanticTokensOverlay(filePath: string, content: string, options: SemanticTokensOverlayOptions = {}): Promise<SemanticTokenOverlay> {
-    await this.ensureStarted();
+    await this.ensureStarted(options.signal);
+    throwIfAborted(options.signal);
 
     const document = this.syncDocument(filePath, content);
     const provider = semanticTokensProvider(this.capabilities);
@@ -306,17 +314,15 @@ export class LspClient {
       return semanticTokenOverlayFromCache(cached, "ready", false);
     }
 
-    const refresh = this.startSemanticTokensRefresh(
-      document,
-      provider,
-      options.timeoutMs ?? DEFAULT_SEMANTIC_TOKEN_TIMEOUT_MS,
-    );
     const waitMs = Math.max(0, options.waitMs ?? DEFAULT_SEMANTIC_TOKEN_WAIT_MS);
+    const refresh = waitMs > 0 && options.signal
+      ? this.fetchSemanticTokens(document, provider, options.timeoutMs ?? DEFAULT_SEMANTIC_TOKEN_TIMEOUT_MS, options.signal)
+      : this.startSemanticTokensRefresh(document, provider, options.timeoutMs ?? DEFAULT_SEMANTIC_TOKEN_TIMEOUT_MS);
     if (waitMs > 0) {
-      const fresh = await Promise.race([
+      const fresh = await waitWithSignal(Promise.race([
         refresh,
         sleep(waitMs).then(() => undefined),
-      ]);
+      ]), options.signal);
       if (fresh) return fresh;
     }
 
@@ -370,7 +376,7 @@ export class LspClient {
     };
   }
 
-  async shutdown(): Promise<void> {
+  async shutdown(signal?: AbortSignal): Promise<void> {
     this.finishDiagnosticWaiters(false);
     const child = this.process;
     const generation = this.launchGeneration;
@@ -381,7 +387,7 @@ export class LspClient {
 
     if (this.state === "ready") {
       try {
-        await this.sendRequest("shutdown", undefined, 1500);
+        await this.sendRequest("shutdown", undefined, 1500, signal);
         if (this.isActiveLaunch(child, generation)) this.notify("exit");
       } catch {
         // Fall through to killing the process.
@@ -394,12 +400,13 @@ export class LspClient {
     terminateProcess(child);
   }
 
-  private async ensureStarted(): Promise<void> {
+  private async ensureStarted(signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
     if (this.state === "ready") return;
-    if (this.initializePromise) return this.initializePromise;
+    if (this.initializePromise) return waitWithSignal(this.initializePromise, signal);
 
     this.state = "starting";
-    const attempt = this.startAndInitialize();
+    const attempt = this.startAndInitialize(signal);
     this.initializePromise = attempt;
     attempt.then(
       () => {
@@ -412,7 +419,7 @@ export class LspClient {
     return attempt;
   }
 
-  private async startAndInitialize(): Promise<void> {
+  private async startAndInitialize(signal?: AbortSignal): Promise<void> {
     const generation = ++this.launchGeneration;
     let child: ChildProcessWithoutNullStreams;
     try {
@@ -460,7 +467,7 @@ export class LspClient {
     });
 
     try {
-      const initializeResult = await this.sendRequest("initialize", this.initializeParams(), this.initializeTimeoutMs);
+      const initializeResult = await this.sendRequest("initialize", this.initializeParams(), this.initializeTimeoutMs, signal);
       if (!this.isActiveLaunch(child, generation)) throw new Error(`LSP initialization was superseded: ${this.id}`);
       this.capabilities = readServerCapabilities(initializeResult);
       this.notify("initialized", {});
@@ -627,6 +634,7 @@ export class LspClient {
     document: OpenDocument,
     provider: SemanticTokensProviderInfo,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<SemanticTokenOverlay> {
     const requestedAt = Date.now();
     const requestedVersion = document.version;
@@ -635,6 +643,7 @@ export class LspClient {
         "textDocument/semanticTokens/full",
         { textDocument: { uri: document.uri } },
         timeoutMs,
+        signal,
       ));
       const receivedAt = Date.now();
       if (!result) throw new Error("semantic token response contained malformed token data");
@@ -655,6 +664,7 @@ export class LspClient {
       if (!stale) this.semanticTokens.set(document.uri, entry);
       return semanticTokenOverlayFromCache(entry, stale ? "refreshing" : "ready", stale);
     } catch (error) {
+      if (isCancellation(error, signal)) throw error;
       this.lastError = error instanceof Error ? error.message : String(error);
       return {
         serverId: this.id,
@@ -671,23 +681,31 @@ export class LspClient {
     }
   }
 
-  private sendRequest(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
+  private sendRequest(method: string, params: unknown, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
+    throwIfAborted(signal);
     const id = this.nextRequestId++;
     const message: JsonRpcRequest = params === undefined ? { jsonrpc: "2.0", id, method } : { jsonrpc: "2.0", id, method, params };
 
     return new Promise((resolve, reject) => {
+      let pending: PendingRequest;
       const timeout = setTimeout(() => {
-        if (!this.pending.delete(id)) return;
+        if (!this.removePending(id, pending)) return;
         this.cancelRequest(id);
         reject(new Error(`LSP request timed out: ${method}`));
       }, timeoutMs);
       timeout.unref?.();
-      this.pending.set(id, { method, resolve, reject, timeout });
+      const onAbort = signal ? () => {
+        if (!this.removePending(id, pending)) return;
+        this.cancelRequest(id);
+        reject(abortError(signal));
+      } : undefined;
+      pending = { method, resolve, reject, timeout, signal, onAbort };
+      this.pending.set(id, pending);
+      if (onAbort) signal!.addEventListener("abort", onAbort, { once: true });
       try {
         this.send(message);
       } catch (error) {
-        clearTimeout(timeout);
-        this.pending.delete(id);
+        this.removePending(id, pending);
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
@@ -748,8 +766,7 @@ export class LspClient {
       if (message.id === null) return;
       const pending = this.pending.get(message.id);
       if (!pending) return;
-      this.pending.delete(message.id);
-      clearTimeout(pending.timeout);
+      this.removePending(message.id, pending);
       if (message.error) {
         pending.reject(new Error(`${pending.method}: ${message.error.message}`));
       } else {
@@ -819,15 +836,34 @@ export class LspClient {
     this.notifyDiagnosticWaiters(entry);
   }
 
-  private waitForDiagnostics(uri: string, minVersion: number, touchedAt: number, timeoutMs: number, settleMs: number): Promise<boolean> {
+  private waitForDiagnostics(
+    uri: string,
+    minVersion: number,
+    touchedAt: number,
+    timeoutMs: number,
+    settleMs: number,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    throwIfAborted(signal);
     const existing = this.diagnostics.get(uri);
     if (existing && diagnosticsAreFresh(existing, minVersion, touchedAt)) {
-      return settleDiagnostics(settleMs);
+      return settleDiagnostics(settleMs, signal);
     }
 
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       let settled = false;
       let timeout: NodeJS.Timeout | undefined;
+      const cleanup = () => {
+        if (timeout) clearTimeout(timeout);
+        signal?.removeEventListener("abort", onAbort);
+        this.removeDiagnosticWaiter(uri, waiter);
+      };
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(abortError(signal));
+      };
 
       const waiter: DiagnosticWaiter = {
         minVersion,
@@ -835,10 +871,9 @@ export class LspClient {
         finish: (fresh) => {
           if (settled) return;
           settled = true;
-          if (timeout) clearTimeout(timeout);
-          this.removeDiagnosticWaiter(uri, waiter);
+          cleanup();
           if (fresh) {
-            void settleDiagnostics(settleMs).then(resolve);
+            void settleDiagnostics(settleMs, signal).then(resolve, reject);
           } else {
             resolve(false);
           }
@@ -848,6 +883,7 @@ export class LspClient {
       timeout = setTimeout(() => waiter.finish(false), Math.max(0, timeoutMs));
       timeout.unref?.();
       this.addDiagnosticWaiter(uri, waiter);
+      signal?.addEventListener("abort", onAbort, { once: true });
 
       const current = this.diagnostics.get(uri);
       if (current && diagnosticsAreFresh(current, minVersion, touchedAt)) {
@@ -906,11 +942,18 @@ export class LspClient {
   }
 
   private rejectPending(error: Error): void {
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timeout);
+    for (const [id, pending] of this.pending) {
+      this.removePending(id, pending);
       pending.reject(error);
     }
-    this.pending.clear();
+  }
+
+  private removePending(id: number | string, pending: PendingRequest): boolean {
+    if (this.pending.get(id) !== pending) return false;
+    this.pending.delete(id);
+    clearTimeout(pending.timeout);
+    if (pending.signal && pending.onAbort) pending.signal.removeEventListener("abort", pending.onAbort);
+    return true;
   }
 }
 
@@ -919,8 +962,9 @@ function diagnosticsAreFresh(entry: DiagnosticEntry, minVersion: number, touched
   return entry.receivedAt >= touchedAt;
 }
 
-async function settleDiagnostics(settleMs: number): Promise<boolean> {
-  if (settleMs > 0) await sleep(settleMs);
+async function settleDiagnostics(settleMs: number, signal?: AbortSignal): Promise<boolean> {
+  if (settleMs > 0) await waitWithSignal(sleep(settleMs), signal);
+  else throwIfAborted(signal);
   return true;
 }
 

@@ -16,6 +16,7 @@ import {
   type LspToolTruncation,
 } from "./tool-output.ts";
 import { renderLspToolCall, renderLspToolResult } from "./tool-renderer.ts";
+import { isCancellation, throwIfAborted } from "./cancellation.ts";
 import {
   applyWorkspaceEdit,
   canResolveCodeActionOnApply,
@@ -111,7 +112,8 @@ export function registerLspTool(
     renderResult(result, options, theme, context) {
       return renderLspToolResult(result, options, theme, context);
     },
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      throwIfAborted(signal);
       setProjectRoot(runtime, ctx?.cwd);
       setProjectTrust(runtime, ctx);
       lspService.configure({
@@ -154,7 +156,7 @@ export function registerLspTool(
           return textResult(renderStatus(runtime, lspService.getStatus(), runtime.projectTrusted ? formatService?.getStatus() : undefined), false, statusDetails(runtime, lspService, formatService));
 
         case "server/capabilities":
-          return textResult(renderCapabilities(runtime, lspService.getStatus(), await lspService.capabilities(readPath(params))), false, {
+          return textResult(renderCapabilities(runtime, lspService.getStatus(), await lspService.capabilities(readPath(params), signal)), false, {
             clients: lspService.getStatus().clients,
             implementedMethods: LSP_METHODS,
             legacyActions: LSP_ACTIONS,
@@ -162,7 +164,7 @@ export function registerLspTool(
 
         case "textDocument/diagnostic":
         case "workspace/diagnostic":
-          return textResult(renderDiagnosticsStatus(runtime, diagnosticsTarget(method, params), await diagnosticsSnapshot(method, params, runtime, lspService)), false, {
+          return textResult(renderDiagnosticsStatus(runtime, diagnosticsTarget(method, params), await diagnosticsSnapshot(method, params, runtime, lspService, signal)), false, {
             implemented: true,
             diagnosticSnapshots: true,
             hint: "workspace/diagnostic returns cached diagnostics for files the LSP already knows. Use textDocument/diagnostic with path to refresh one file.",
@@ -177,50 +179,52 @@ export function registerLspTool(
 
         case "server/reload":
           restartLsp(runtime, "lsp tool");
-          await lspService.restart();
+          await lspService.restart(signal);
           return textResult("pi-code-feedback LSP clients restarted and will be relaunched on demand.", false, statusDetails(runtime, lspService, formatService));
 
         case "textDocument/hover":
-          return rawOrPretty(method, params, await lspService.hover(requirePath(params), params.line, readColumn(params)), runtime.projectRoot);
+          return rawOrPretty(method, params, await lspService.hover(requirePath(params), params.line, readColumn(params), signal), runtime.projectRoot);
 
         case "textDocument/definition":
-          return rawOrPretty(method, params, await lspService.definition(requirePath(params), params.line, readColumn(params)), runtime.projectRoot);
+          return rawOrPretty(method, params, await lspService.definition(requirePath(params), params.line, readColumn(params), signal), runtime.projectRoot);
 
         case "textDocument/references":
-          return rawOrPretty(method, params, await lspService.references(requirePath(params), params.line, readColumn(params)), runtime.projectRoot);
+          return rawOrPretty(method, params, await lspService.references(requirePath(params), params.line, readColumn(params), signal), runtime.projectRoot);
 
         case "textDocument/implementation":
-          return rawOrPretty(method, params, await lspService.implementation(requirePath(params), params.line, readColumn(params)), runtime.projectRoot);
+          return rawOrPretty(method, params, await lspService.implementation(requirePath(params), params.line, readColumn(params), signal), runtime.projectRoot);
 
         case "textDocument/typeDefinition":
-          return rawOrPretty(method, params, await lspService.typeDefinition(requirePath(params), params.line, readColumn(params)), runtime.projectRoot);
+          return rawOrPretty(method, params, await lspService.typeDefinition(requirePath(params), params.line, readColumn(params), signal), runtime.projectRoot);
 
         case "textDocument/documentSymbol":
-          return rawOrPretty(method, params, await lspService.documentSymbols(requirePath(params)), runtime.projectRoot);
+          return rawOrPretty(method, params, await lspService.documentSymbols(requirePath(params), signal), runtime.projectRoot);
 
         case "workspace/symbol":
-          return rawOrPretty(method, params, await lspService.workspaceSymbols(params.query, readPath(params)), runtime.projectRoot);
+          return rawOrPretty(method, params, await lspService.workspaceSymbols(params.query, readPath(params), signal), runtime.projectRoot);
 
         case "textDocument/semanticTokens":
           return rawOrPretty(method, params, await lspService.semanticTokens(requirePath(params), {
             waitMs: readNonNegativeNumber(params.waitMs),
             timeoutMs: readNonNegativeNumber(params.timeoutMs),
             forceRefresh: params.refresh === true,
+            signal,
           }), runtime.projectRoot);
 
         case "textDocument/codeAction":
-          return await handleCodeActions(method, params, runtime, lspService, toolState, mutationQueue);
+          return await handleCodeActions(method, params, runtime, lspService, toolState, mutationQueue, signal);
 
         case "codeAction/apply":
-          return await handleCodeActionApply(method, params, runtime, lspService, toolState, mutationQueue);
+          return await handleCodeActionApply(method, params, runtime, lspService, toolState, mutationQueue, signal);
 
         case "textDocument/rename":
-          return await handleRename(params, runtime, lspService, mutationQueue);
+          return await handleRename(params, runtime, lspService, mutationQueue, signal);
 
         case "raw/request":
-          return rawOrPretty(method, params, await lspService.rawRequest(readPath(params), params.request, params.params), runtime.projectRoot);
+          return rawOrPretty(method, params, await lspService.rawRequest(readPath(params), params.request, params.params, signal), runtime.projectRoot);
         }
       } catch (error) {
+        if (isCancellation(error, signal)) throw error;
         const message = error instanceof Error ? error.message : String(error);
         const displayMessage = projectRelativeErrorMessage(message, runtime.projectRoot);
         return errorResult(method, `lsp ${method} failed: ${displayMessage}`, statusDetails(runtime, lspService, formatService), hintForError(message));
@@ -392,11 +396,22 @@ function attachDetailsTruncation(details: unknown, truncation: LspToolDetailsTru
   return { value: details, detailsTruncation: truncation };
 }
 
-async function diagnosticsSnapshot(method: LspMethod, params: Record<string, unknown>, runtime: CodeFeedbackRuntime, lspService: LspService) {
+async function diagnosticsSnapshot(
+  method: LspMethod,
+  params: Record<string, unknown>,
+  runtime: CodeFeedbackRuntime,
+  lspService: LspService,
+  signal?: AbortSignal,
+) {
   if (method === "workspace/diagnostic" || params.all === true) return lspService.cachedDiagnostics("all");
   const filePath = requirePath(params);
   if (!runtime.config.enabled || !runtime.config.lsp.enabled) return lspService.cachedDiagnostics(filePath);
-  return (await lspService.diagnosticsForFile(filePath, undefined, { timeoutMs: 1200, settleMs: 100, snapshotScope: "file" })) ?? lspService.cachedDiagnostics(filePath);
+  return (await lspService.diagnosticsForFile(filePath, undefined, {
+    timeoutMs: 1200,
+    settleMs: 100,
+    snapshotScope: "file",
+    signal,
+  })) ?? lspService.cachedDiagnostics(filePath);
 }
 
 function diagnosticsTarget(method: LspMethod, params: Record<string, unknown>): string {
@@ -522,7 +537,9 @@ async function handleCodeActions(
   lspService: LspService,
   state: LspToolState,
   mutationQueue: FileMutationQueue | undefined,
+  signal?: AbortSignal,
 ): Promise<PiToolResult> {
+  throwIfAborted(signal);
   if (params.apply === true) {
     const pendingGuard = rejectApplyDuringPendingEdits(runtime, "code action");
     if (pendingGuard) return pendingGuard;
@@ -531,7 +548,8 @@ async function handleCodeActions(
   const filePath = requirePath(params);
   const requestFileStateBefore = readCachedFileState(path.resolve(runtime.projectRoot, filePath));
   const column = readColumn(params);
-  const result = await lspService.codeActions(filePath, params.line, column);
+  const result = await lspService.codeActions(filePath, params.line, column, signal);
+  throwIfAborted(signal);
   const requestFileStateAfter = readCachedFileState(path.resolve(runtime.projectRoot, filePath));
   if (!sameCachedFileState(requestFileStateBefore, requestFileStateAfter)) {
     return errorResult(method, `File changed while collecting code actions: ${relativePath(runtime.projectRoot, requestFileStateAfter.filePath)}`, {
@@ -570,15 +588,15 @@ async function handleCodeActions(
     });
   }
 
-  const prepared = await prepareCodeActionForApply(selection.action, filePath, runtime, lspService, "selected code action");
+  const prepared = await prepareCodeActionForApply(selection.action, filePath, runtime, lspService, "selected code action", signal);
   if (!prepared.ok) return errorResult(method, prepared.error, prepared.details, prepared.hint);
 
   const applyResult = await applyWorkspaceEdit(
     prepared.action.edit,
     runtime.projectRoot,
-    workspaceEditApplyOptions(prepared.action.edit, prepared.action, [requestFileStateAfter], runtime, lspService, mutationQueue),
+    workspaceEditApplyOptions(prepared.action.edit, prepared.action, [requestFileStateAfter], runtime, lspService, mutationQueue, signal),
   );
-  if (applyResult.changedFiles.length > 0) await resyncChangedFiles(lspService, applyResult.changedFiles, runtime);
+  if (applyResult.changedFiles.length > 0) await resyncChangedFiles(lspService, applyResult.changedFiles, runtime, signal);
   const title = prepared.title;
   return textResult(renderWorkspaceEditApplyResult(applyResult, runtime.projectRoot, `code action "${title}"`), !applyResult.applied, {
     action: prepared.action,
@@ -593,7 +611,9 @@ async function handleCodeActionApply(
   lspService: LspService,
   state: LspToolState,
   mutationQueue: FileMutationQueue | undefined,
+  signal?: AbortSignal,
 ): Promise<PiToolResult> {
+  throwIfAborted(signal);
   const pendingGuard = rejectApplyDuringPendingEdits(runtime, "code action");
   if (pendingGuard) return pendingGuard;
 
@@ -616,7 +636,7 @@ async function handleCodeActionApply(
     }, "Call textDocument/codeAction again and apply one of the fresh ids.");
   }
 
-  const prepared = await prepareCodeActionForApply(cached.action, cached.requestFile.filePath, runtime, lspService, `Code action id ${id}`);
+  const prepared = await prepareCodeActionForApply(cached.action, cached.requestFile.filePath, runtime, lspService, `Code action id ${id}`, signal);
   if (!prepared.ok) {
     return errorResult(method, prepared.error, {
       id,
@@ -636,9 +656,10 @@ async function handleCodeActionApply(
       runtime,
       lspService,
       mutationQueue,
+      signal,
     ),
   );
-  if (applyResult.changedFiles.length > 0) await resyncChangedFiles(lspService, applyResult.changedFiles, runtime);
+  if (applyResult.changedFiles.length > 0) await resyncChangedFiles(lspService, applyResult.changedFiles, runtime, signal);
 
   const payload = {
     ok: applyResult.applied,
@@ -662,7 +683,9 @@ async function handleRename(
   runtime: CodeFeedbackRuntime,
   lspService: LspService,
   mutationQueue: FileMutationQueue | undefined,
+  signal?: AbortSignal,
 ): Promise<PiToolResult> {
+  throwIfAborted(signal);
   if (params.apply === true) {
     const pendingGuard = rejectApplyDuringPendingEdits(runtime, "rename");
     if (pendingGuard) return pendingGuard;
@@ -670,7 +693,8 @@ async function handleRename(
 
   const requestPath = requirePath(params);
   const requestFileBefore = readCachedFileState(path.resolve(runtime.projectRoot, requestPath));
-  const result = await lspService.rename(requestPath, params.line, readColumn(params), params.newName);
+  const result = await lspService.rename(requestPath, params.line, readColumn(params), params.newName, signal);
+  throwIfAborted(signal);
   const requestFileAfter = readCachedFileState(path.resolve(runtime.projectRoot, requestPath));
   if (!sameCachedFileState(requestFileBefore, requestFileAfter)) {
     return errorResult("textDocument/rename", `File changed while collecting rename edits: ${relativePath(runtime.projectRoot, requestFileAfter.filePath)}`, {
@@ -683,9 +707,9 @@ async function handleRename(
   const applyResult = await applyWorkspaceEdit(
     result,
     runtime.projectRoot,
-    workspaceEditApplyOptions(result, isRecord(result) ? result : {}, [requestFileAfter], runtime, lspService, mutationQueue),
+    workspaceEditApplyOptions(result, isRecord(result) ? result : {}, [requestFileAfter], runtime, lspService, mutationQueue, signal),
   );
-  if (applyResult.changedFiles.length > 0) await resyncChangedFiles(lspService, applyResult.changedFiles, runtime);
+  if (applyResult.changedFiles.length > 0) await resyncChangedFiles(lspService, applyResult.changedFiles, runtime, signal);
 
   const payload = {
     ok: applyResult.applied,
@@ -741,7 +765,9 @@ async function prepareCodeActionForApply(
   runtime: CodeFeedbackRuntime,
   lspService: LspService,
   label: string,
+  signal?: AbortSignal,
 ): Promise<PreparedCodeActionForApply> {
+  throwIfAborted(signal);
   let resolvedAction = action;
   const needsResolve = canResolveCodeActionOnApply(action);
 
@@ -759,7 +785,7 @@ async function prepareCodeActionForApply(
 
   if (needsResolve) {
     try {
-      const resolved = await lspService.resolveCodeAction(requestFilePath, action);
+      const resolved = await lspService.resolveCodeAction(requestFilePath, action, signal);
       if (!isRecord(resolved)) {
         return {
           ok: false,
@@ -770,6 +796,7 @@ async function prepareCodeActionForApply(
       }
       resolvedAction = resolved;
     } catch (error) {
+      if (isCancellation(error, signal)) throw error;
       return {
         ok: false,
         error: `${label} could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
@@ -862,6 +889,7 @@ function workspaceEditApplyOptions(
   runtime: CodeFeedbackRuntime,
   lspService: LspService,
   mutationQueue: FileMutationQueue | undefined,
+  signal?: AbortSignal,
 ): WorkspaceEditApplyOptions {
   const targetFiles = workspaceEditTargetFiles(edit, runtime.projectRoot);
   const expectedByPath = new Map<string, CachedFileState>();
@@ -879,6 +907,7 @@ function workspaceEditApplyOptions(
     expectedFileStates: [...expectedByPath.values()],
     getDocumentVersion: (filePath) => lspService.documentVersion(filePath, serverId, serverSessionId),
     mutationQueue,
+    signal,
   };
 }
 
@@ -923,11 +952,20 @@ function rejectApplyDuringPendingEdits(runtime: CodeFeedbackRuntime, label: stri
   );
 }
 
-async function resyncChangedFiles(lspService: LspService, changedFiles: string[], runtime: CodeFeedbackRuntime): Promise<void> {
+async function resyncChangedFiles(
+  lspService: LspService,
+  changedFiles: string[],
+  runtime: CodeFeedbackRuntime,
+  signal?: AbortSignal,
+): Promise<void> {
   await Promise.all(changedFiles.slice(0, 20).map((filePath) => lspService.diagnosticsForFile(filePath, undefined, {
     timeoutMs: runtime.config.diagnostics.timeoutMs,
     settleMs: runtime.config.diagnostics.settleMs,
-  }).catch(() => undefined)));
+    signal,
+  }).catch((error) => {
+    if (isCancellation(error, signal)) throw error;
+    return undefined;
+  })));
 }
 
 function hintForError(message: string): string | undefined {

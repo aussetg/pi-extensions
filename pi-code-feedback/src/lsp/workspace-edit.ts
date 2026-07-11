@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY } from "../types.ts";
+import { isCancellation, throwIfAborted, waitWithSignal } from "./cancellation.ts";
 import { isLspPosition, isLspRange, uriToFilePath, type LspPosition, type LspRange } from "./positions.ts";
 
 export type FileMutationQueue = <T>(filePath: string, run: () => Promise<T>) => Promise<T>;
@@ -33,6 +34,7 @@ export interface WorkspaceEditApplyOptions {
   expectedFileStates?: readonly WorkspaceEditFileState[];
   getDocumentVersion?: (filePath: string) => number | undefined;
   mutationQueue?: FileMutationQueue;
+  signal?: AbortSignal;
 }
 
 export type WorkspaceEditTargetFilesResult =
@@ -140,6 +142,7 @@ export async function applyWorkspaceEdit(
   projectRoot: string,
   options: WorkspaceEditApplyOptions = {},
 ): Promise<WorkspaceEditApplyResult> {
+  throwIfAborted(options.signal);
   const collected = collectTextEdits(value, projectRoot, { validateProjectRoot: true });
   if (!collected.ok) {
     return rejectedApply(collected.reason);
@@ -151,8 +154,13 @@ export async function applyWorkspaceEdit(
   ]);
 
   try {
-    return await withMutationQueues(lockPaths, options.mutationQueue ?? withLocalMutationQueue, () => applyCollectedWorkspaceEdit(collected, options));
+    const applying = withMutationQueues(lockPaths, options.mutationQueue ?? withLocalMutationQueue, () => {
+      throwIfAborted(options.signal);
+      return applyCollectedWorkspaceEdit(collected, options);
+    }, options.signal);
+    return await waitWithSignal(applying, options.signal);
   } catch (error) {
+    if (isCancellation(error, options.signal)) throw error;
     return rejectedApply(errorMessage(error));
   }
 }
@@ -161,6 +169,7 @@ function applyCollectedWorkspaceEdit(
   collected: CollectedWorkspaceEdit,
   options: WorkspaceEditApplyOptions,
 ): WorkspaceEditApplyResult {
+  throwIfAborted(options.signal);
   const staleReason = validateExpectedFileStates(options.expectedFileStates, collected.editsByPath.keys());
   if (staleReason) return rejectedApply(staleReason);
 
@@ -181,9 +190,16 @@ function applyCollectedWorkspaceEdit(
     }
   } catch (error) {
     cleanupStagedFiles(staged);
+    if (isCancellation(error, options.signal)) throw error;
     return rejectedApply(`Could not stage WorkspaceEdit: ${errorMessage(error)}`);
   }
 
+  try {
+    throwIfAborted(options.signal);
+  } catch (error) {
+    cleanupStagedFiles(staged);
+    throw error;
+  }
   const changedWhileStaging = planned.find((file) => !samePlannedFileState(file));
   if (changedWhileStaging) {
     cleanupStagedFiles(staged);
@@ -192,6 +208,7 @@ function applyCollectedWorkspaceEdit(
 
   const committed: StagedFileEdit[] = [];
   try {
+    throwIfAborted(options.signal);
     for (const file of staged) {
       fs.renameSync(file.tempPath, file.plan.filePath);
       committed.push(file);
@@ -235,11 +252,15 @@ async function withMutationQueues<T>(
   filePaths: string[],
   mutationQueue: FileMutationQueue,
   run: () => Promise<T> | T,
+  signal?: AbortSignal,
   index = 0,
 ): Promise<T> {
   const filePath = filePaths[index];
   if (!filePath) return run();
-  return mutationQueue(filePath, () => withMutationQueues(filePaths, mutationQueue, run, index + 1));
+  return mutationQueue(filePath, () => {
+    throwIfAborted(signal);
+    return withMutationQueues(filePaths, mutationQueue, run, signal, index + 1);
+  });
 }
 
 async function withLocalMutationQueue<T>(filePath: string, run: () => Promise<T>): Promise<T> {

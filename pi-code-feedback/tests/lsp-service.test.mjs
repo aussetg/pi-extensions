@@ -423,6 +423,85 @@ test("concurrent diagnostics refreshes for the same file are coalesced", async (
   }
 });
 
+test("diagnostic refresh cancellation stops waiting and drains the running job", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-diagnostic-cancel-"));
+  const filePath = path.join(root, "probe.py");
+  await writeFile(filePath, "value = 1\n", "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "diagnostics-delay-500"],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    await service.capabilities(filePath);
+    const controller = new AbortController();
+    const refresh = service.diagnosticsForFileDetailed(filePath, await readFile(filePath, "utf8"), {
+      timeoutMs: 1000,
+      settleMs: 0,
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 20);
+
+    await assert.rejects(refresh, (error) => error?.name === "AbortError");
+    for (let attempt = 0; attempt < 20 && service.getStatus().diagnosticRefreshes?.active !== 0; attempt += 1) {
+      await sleep(10);
+    }
+    assert.equal(service.getStatus().diagnosticRefreshes?.active, 0);
+    assert.equal(service.getStatus().diagnosticRefreshes?.queued, 0);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("cancelling one coalesced diagnostic waiter does not cancel the others", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-diagnostic-shared-cancel-"));
+  const filePath = path.join(root, "probe.py");
+  const content = "value = 1\n";
+  await writeFile(filePath, content, "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "diagnostics-delay-80"],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    await service.capabilities(filePath);
+    const controller = new AbortController();
+    const cancelled = service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 1000,
+      settleMs: 0,
+      signal: controller.signal,
+    });
+    const surviving = service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 1000,
+      settleMs: 0,
+    });
+    setTimeout(() => controller.abort(), 20);
+
+    await assert.rejects(cancelled, (error) => error?.name === "AbortError");
+    assert.equal((await surviving)?.fresh, true);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("timed out LSP requests send a cancel notification", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-cancel-"));
   const filePath = path.join(root, "probe.py");

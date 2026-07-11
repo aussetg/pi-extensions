@@ -127,6 +127,43 @@ test("workspace edit waits in the shared mutation queue before reading or writin
   }
 });
 
+test("workspace edit cancellation while queued prevents a late mutation", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-workspace-cancel-"));
+  const filePath = path.join(root, "probe.txt");
+  await writeFile(filePath, "base", "utf8");
+
+  let releaseQueue;
+  const queueGate = new Promise((resolve) => {
+    releaseQueue = resolve;
+  });
+  const enteredQueue = Promise.withResolvers();
+  const mutationQueue = async (_filePath, run) => {
+    enteredQueue.resolve();
+    await queueGate;
+    return run();
+  };
+  const controller = new AbortController();
+
+  try {
+    const applying = applyWorkspaceEdit(singleFileEdit(filePath, "changed"), root, {
+      mutationQueue,
+      signal: controller.signal,
+    });
+    await enteredQueue.promise;
+    controller.abort();
+
+    await assert.rejects(applying, (error) => error?.name === "AbortError");
+    assert.equal(await readFile(filePath, "utf8"), "base");
+
+    releaseQueue();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(await readFile(filePath, "utf8"), "base");
+  } finally {
+    releaseQueue?.();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("workspace edit rejects target changes made after preview", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-workspace-stale-"));
   const filePath = path.join(root, "probe.txt");

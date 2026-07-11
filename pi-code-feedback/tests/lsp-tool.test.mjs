@@ -511,6 +511,34 @@ test("lsp position inputs reject non-1-based values instead of clamping", async 
   }
 });
 
+test("lsp tool cancellation reaches the active language-server request", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-cancel-"));
+  const filePath = path.join(root, "probe.py");
+  const logPath = path.join(root, "lsp.jsonl");
+  await writeFile(filePath, "value = 1\n", "utf8");
+  const { tool, service } = createRegisteredTool(root, "hover-delay-500", logPath);
+
+  try {
+    await service.capabilities(filePath);
+    const controller = new AbortController();
+    const request = tool.execute("lsp-cancel", {
+      method: "textDocument/hover",
+      path: "probe.py",
+      line: 1,
+      column: 1,
+    }, controller.signal, undefined, { cwd: root });
+
+    setTimeout(() => controller.abort(), 20);
+    await assert.rejects(request, (error) => error?.name === "AbortError");
+
+    const entries = await waitForJsonLog(logPath, (items) => items.some((entry) => entry.method === "$/cancelRequest"));
+    assert.deepEqual(entries.find((entry) => entry.method === "$/cancelRequest")?.params, { id: 2 });
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("lsp error renderer handles structured JSON errors even when isError is absent", () => {
   const theme = {
     fg: (color, text) => `<${color}>${text}</${color}>`,

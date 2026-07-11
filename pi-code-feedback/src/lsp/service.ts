@@ -4,6 +4,7 @@ import { createDiagnosticSnapshot, flattenDiagnosticSnapshot } from "../diagnost
 import { readUtf8IfExists } from "../fs.ts";
 import { resolveWorkspaceRootForPath } from "../language-environments.ts";
 import { LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY, type DiagnosticRefreshResult, type DiagnosticSnapshot, type LspDiagnostic, type LspServiceStatus, type LspUnavailableServer } from "../types.ts";
+import { abortError, isCancellation, throwIfAborted } from "./cancellation.ts";
 import { LspClient, type DiagnosticSnapshotScope, type SemanticTokensOverlayOptions } from "./client.ts";
 import { normalizeDiagnosticRefreshConcurrency } from "./diagnostic-refresh.ts";
 import { externalPositionToLsp, filePathToUri, oneLineLspRange, type LspPosition } from "./positions.ts";
@@ -22,6 +23,7 @@ export interface DiagnosticsForFileOptions {
   timeoutMs: number;
   settleMs: number;
   snapshotScope?: DiagnosticSnapshotScope;
+  signal?: AbortSignal;
 }
 
 const CODE_ACTION_DIAGNOSTIC_TIMEOUT_MS = 1200;
@@ -39,14 +41,18 @@ interface DiagnosticRefreshJob {
   clients: LspClient[];
   options: DiagnosticsForFileOptions;
   waiters: Set<DiagnosticRefreshWaiter>;
+  controller: AbortController;
 }
 
 interface DiagnosticRefreshWaiter {
   requestedAt: number;
   options: DiagnosticsForFileOptions;
   resolve: (result: DiagnosticRefreshResult | undefined) => void;
+  reject: (error: Error) => void;
   settled: boolean;
   timeout?: NodeJS.Timeout;
+  signal?: AbortSignal;
+  onAbort?: () => void;
 }
 
 export class LspService {
@@ -87,6 +93,7 @@ export class LspService {
   }
 
   async diagnosticsForFileDetailed(filePath: string, content: string | undefined, options: DiagnosticsForFileOptions): Promise<DiagnosticRefreshResult | undefined> {
+    throwIfAborted(options.signal);
     const resolved = path.resolve(this.projectRoot, filePath);
     const clients = this.getOrCreateClients(resolved);
     if (clients.length === 0) return undefined;
@@ -153,7 +160,8 @@ export class LspService {
     return createDiagnosticSnapshot(diagnostics);
   }
 
-  async capabilities(filePath?: string): Promise<unknown> {
+  async capabilities(filePath?: string, signal?: AbortSignal): Promise<unknown> {
+    throwIfAborted(signal);
     if (!filePath) {
       return this.getStatus();
     }
@@ -162,58 +170,61 @@ export class LspService {
 
     const servers = await Promise.all(clients.map(async (client) => {
       try {
-        await client.start();
+        await client.start(signal);
         return { serverId: client.id, capabilities: client.getCapabilities() };
       } catch (error) {
+        if (isCancellation(error, signal)) throw error;
         return { serverId: client.id, error: error instanceof Error ? error.message : String(error) };
       }
     }));
     return servers.length === 1 && !servers[0].error ? servers[0].capabilities : { servers };
   }
 
-  async hover(filePath: string, line: unknown, character: unknown): Promise<unknown> {
+  async hover(filePath: string, line: unknown, character: unknown, signal?: AbortSignal): Promise<unknown> {
     const position = externalPositionToLsp(line, character);
     if (!position) throw new Error("hover requires 1-based line and column");
-    const results = await this.documentRequests(filePath, "textDocument/hover", { position });
+    const results = await this.documentRequests(filePath, "textDocument/hover", { position }, signal);
     return results.map((result) => result.result).find(hasHoverContent);
   }
 
-  async definition(filePath: string, line: unknown, character: unknown): Promise<unknown> {
+  async definition(filePath: string, line: unknown, character: unknown, signal?: AbortSignal): Promise<unknown> {
     const position = externalPositionToLsp(line, character);
     if (!position) throw new Error("definition requires 1-based line and column");
-    return mergeArrayLikeResults(await this.documentRequests(filePath, "textDocument/definition", { position }));
+    return mergeArrayLikeResults(await this.documentRequests(filePath, "textDocument/definition", { position }, signal));
   }
 
-  async references(filePath: string, line: unknown, character: unknown): Promise<unknown> {
+  async references(filePath: string, line: unknown, character: unknown, signal?: AbortSignal): Promise<unknown> {
     const position = externalPositionToLsp(line, character);
     if (!position) throw new Error("references requires 1-based line and column");
-    return mergeArrayLikeResults(await this.documentRequests(filePath, "textDocument/references", { position, context: { includeDeclaration: true } }));
+    return mergeArrayLikeResults(await this.documentRequests(filePath, "textDocument/references", { position, context: { includeDeclaration: true } }, signal));
   }
 
-  async implementation(filePath: string, line: unknown, character: unknown): Promise<unknown> {
+  async implementation(filePath: string, line: unknown, character: unknown, signal?: AbortSignal): Promise<unknown> {
     const position = externalPositionToLsp(line, character);
     if (!position) throw new Error("implementation requires 1-based line and column");
-    return mergeArrayLikeResults(await this.documentRequests(filePath, "textDocument/implementation", { position }));
+    return mergeArrayLikeResults(await this.documentRequests(filePath, "textDocument/implementation", { position }, signal));
   }
 
-  async typeDefinition(filePath: string, line: unknown, character: unknown): Promise<unknown> {
+  async typeDefinition(filePath: string, line: unknown, character: unknown, signal?: AbortSignal): Promise<unknown> {
     const position = externalPositionToLsp(line, character);
     if (!position) throw new Error("type_definition requires 1-based line and column");
-    return mergeArrayLikeResults(await this.documentRequests(filePath, "textDocument/typeDefinition", { position }));
+    return mergeArrayLikeResults(await this.documentRequests(filePath, "textDocument/typeDefinition", { position }, signal));
   }
 
-  async documentSymbols(filePath: string): Promise<unknown> {
-    return mergeArrayResults(await this.documentRequests(filePath, "textDocument/documentSymbol", {}));
+  async documentSymbols(filePath: string, signal?: AbortSignal): Promise<unknown> {
+    return mergeArrayResults(await this.documentRequests(filePath, "textDocument/documentSymbol", {}, signal));
   }
 
-  async workspaceSymbols(query: unknown, filePath?: string): Promise<unknown> {
+  async workspaceSymbols(query: unknown, filePath?: string, signal?: AbortSignal): Promise<unknown> {
+    throwIfAborted(signal);
     if (typeof query !== "string") throw new Error("workspace_symbols requires query");
     const clients = filePath ? this.getOrCreateClients(path.resolve(this.projectRoot, filePath)) : this.readyOrAnyClients();
     if (clients.length === 0) throw new Error("No active LSP client. Open a file with lsp diagnostics first, or pass path to choose a language server.");
-    return mergeArrayResults(await this.clientRequests(clients, "workspace/symbol", { query }));
+    return mergeArrayResults(await this.clientRequests(clients, "workspace/symbol", { query }, signal));
   }
 
   async semanticTokens(filePath: string, options: SemanticTokensOverlayOptions = {}): Promise<unknown> {
+    throwIfAborted(options.signal);
     const resolved = path.resolve(this.projectRoot, filePath);
     const content = readUtf8IfExists(resolved);
     if (content === undefined) throw new Error(`Cannot read file for LSP request: ${resolved}`);
@@ -225,6 +236,7 @@ export class LspService {
       try {
         return await client.semanticTokensOverlay(resolved, content, options);
       } catch (error) {
+        if (isCancellation(error, options.signal)) throw error;
         return {
           serverId: client.id,
           uri: filePathToUri(resolved),
@@ -241,7 +253,7 @@ export class LspService {
     return results.length === 1 ? results[0] : { servers: results };
   }
 
-  async codeActions(filePath: string, line: unknown, character: unknown): Promise<unknown> {
+  async codeActions(filePath: string, line: unknown, character: unknown, signal?: AbortSignal): Promise<unknown> {
     const position = externalPositionToLsp(line, character);
     if (!position) throw new Error("code_actions requires 1-based line and column");
     const range = oneLineLspRange(position);
@@ -253,7 +265,11 @@ export class LspService {
       timeoutMs: CODE_ACTION_DIAGNOSTIC_TIMEOUT_MS,
       settleMs: 0,
       snapshotScope: "file",
-    }).catch(() => undefined);
+      signal,
+    }).catch((error) => {
+      if (isCancellation(error, signal)) throw error;
+      return undefined;
+    });
 
     const clients = this.getOrCreateClients(resolved);
     if (clients.length === 0) throw new Error(`No language server configured for ${resolved}`);
@@ -267,12 +283,13 @@ export class LspService {
         textDocument: { uri },
         range,
         context: { diagnostics },
-      });
-    });
+      }, 10_000, signal);
+    }, signal);
     return this.mergeCodeActions(results);
   }
 
-  async resolveCodeAction(filePath: string, action: unknown): Promise<unknown> {
+  async resolveCodeAction(filePath: string, action: unknown, signal?: AbortSignal): Promise<unknown> {
+    throwIfAborted(signal);
     if (!isRecord(action) || action.edit !== undefined) return action;
     if (!canResolveCodeActionOnApply(action)) {
       throw new Error(`Code action is not resolvable by its source language server: ${path.resolve(this.projectRoot, filePath)}`);
@@ -291,16 +308,16 @@ export class LspService {
     }
 
     this.armIdleTimer();
-    const resolvedAction = await client.request("codeAction/resolve", stripCodeActionMetadata(action));
+    const resolvedAction = await client.request("codeAction/resolve", stripCodeActionMetadata(action), 10_000, signal);
     this.armIdleTimer();
     return decorateCodeAction(client, mergeCodeActionResolution(action, resolvedAction));
   }
 
-  async rename(filePath: string, line: unknown, character: unknown, newName: unknown): Promise<unknown> {
+  async rename(filePath: string, line: unknown, character: unknown, newName: unknown, signal?: AbortSignal): Promise<unknown> {
     const position = externalPositionToLsp(line, character);
     if (!position) throw new Error("rename requires 1-based line and column");
     if (typeof newName !== "string" || newName.length === 0) throw new Error("rename requires newName");
-    const { result, client } = await this.documentRequest(filePath, "textDocument/rename", { position, newName });
+    const { result, client } = await this.documentRequest(filePath, "textDocument/rename", { position, newName }, signal);
     return decorateWorkspaceEdit(client, result);
   }
 
@@ -315,11 +332,12 @@ export class LspService {
     return undefined;
   }
 
-  async rawRequest(filePath: string | undefined, method: unknown, params: unknown): Promise<unknown> {
+  async rawRequest(filePath: string | undefined, method: unknown, params: unknown, signal?: AbortSignal): Promise<unknown> {
+    throwIfAborted(signal);
     if (typeof method !== "string" || method.length === 0) throw new Error("request action requires request method");
     const client = filePath ? this.getOrCreateClient(path.resolve(this.projectRoot, filePath)) : this.firstReadyOrAnyClient();
     if (!client) throw new Error("No LSP client available for raw request");
-    return client.request(method, params);
+    return client.request(method, params, 10_000, signal);
   }
 
   getStatus(): LspServiceStatus {
@@ -337,30 +355,29 @@ export class LspService {
     };
   }
 
-  async restart(): Promise<void> {
+  async restart(signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
     const clients = [...this.clients.values()];
     this.clients.clear();
     this.unavailableServers.clear();
     this.finishDiagnosticRefreshWaiters(undefined);
-    for (const client of clients) {
-      await client.shutdown().catch(() => undefined);
-    }
+    await Promise.all(clients.map((client) => client.shutdown(signal).catch(() => undefined)));
+    throwIfAborted(signal);
     this.armIdleTimer();
   }
 
-  async shutdownAll(): Promise<void> {
+  async shutdownAll(signal?: AbortSignal): Promise<void> {
     const clients = [...this.clients.values()];
     this.clients.clear();
     this.unavailableServers.clear();
     this.finishDiagnosticRefreshWaiters(undefined);
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = undefined;
-    for (const client of clients) {
-      await client.shutdown().catch(() => undefined);
-    }
+    await Promise.all(clients.map((client) => client.shutdown(signal).catch(() => undefined)));
   }
 
-  private async documentRequest(filePath: string, method: string, extraParams: Record<string, unknown>): Promise<{ result: unknown; client: LspClient }> {
+  private async documentRequest(filePath: string, method: string, extraParams: Record<string, unknown>, signal?: AbortSignal): Promise<{ result: unknown; client: LspClient }> {
+    throwIfAborted(signal);
     const resolved = path.resolve(this.projectRoot, filePath);
     const content = readUtf8IfExists(resolved);
     if (content === undefined) throw new Error(`Cannot read file for LSP request: ${resolved}`);
@@ -373,7 +390,7 @@ export class LspService {
       textDocument: { uri },
       ...extraParams,
     };
-    const result = await client.requestForDocument(resolved, content, method, params);
+    const result = await client.requestForDocument(resolved, content, method, params, 10_000, signal);
     this.armIdleTimer();
     return { result, client };
   }
@@ -384,14 +401,17 @@ export class LspService {
     clients: LspClient[],
     options: DiagnosticsForFileOptions,
   ): Promise<DiagnosticRefreshResult | undefined> {
+    throwIfAborted(options.signal);
     const key = diagnosticRefreshKey(filePath, content);
 
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const waiter: DiagnosticRefreshWaiter = {
         requestedAt: Date.now(),
         options,
         resolve,
+        reject,
         settled: false,
+        signal: options.signal,
       };
 
       const queued = this.queuedDiagnosticRefreshes.get(key);
@@ -399,6 +419,7 @@ export class LspService {
         queued.options = mergeDiagnosticRefreshOptions(queued.options, options);
         queued.waiters.add(waiter);
         this.armDiagnosticWaiterTimeout(queued, waiter);
+        this.armDiagnosticWaiterAbort(queued, waiter);
         return;
       }
 
@@ -406,6 +427,7 @@ export class LspService {
       if (running && running.content === content && canShareRunningDiagnosticJob(running, options)) {
         running.waiters.add(waiter);
         this.armDiagnosticWaiterTimeout(running, waiter);
+        this.armDiagnosticWaiterAbort(running, waiter);
         return;
       }
 
@@ -414,12 +436,14 @@ export class LspService {
         filePath,
         content,
         clients,
-        options: { ...options },
+        options: diagnosticJobOptions(options),
         waiters: new Set([waiter]),
+        controller: new AbortController(),
       };
       this.queuedDiagnosticRefreshes.set(key, job);
       this.diagnosticQueue.push(job);
       this.armDiagnosticWaiterTimeout(job, waiter);
+      this.armDiagnosticWaiterAbort(job, waiter);
       this.scheduleDiagnosticPump();
     });
   }
@@ -478,7 +502,10 @@ export class LspService {
   private async runDiagnosticRefreshJob(job: DiagnosticRefreshJob): Promise<void> {
     let result: DiagnosticRefreshResult | undefined;
     try {
-      result = await this.performDiagnosticRefresh(job.filePath, job.content, job.clients, job.options);
+      result = await this.performDiagnosticRefresh(job.filePath, job.content, job.clients, {
+        ...job.options,
+        signal: job.controller.signal,
+      });
     } catch {
       result = undefined;
     }
@@ -498,6 +525,7 @@ export class LspService {
       try {
         return await client.touchDocumentDetailed(filePath, content, options);
       } catch (error) {
+        if (isCancellation(error, options.signal)) return undefined;
         this.markClientInstanceError(filePath, client, error);
         return undefined;
       }
@@ -523,6 +551,13 @@ export class LspService {
     waiter.timeout.unref?.();
   }
 
+  private armDiagnosticWaiterAbort(job: DiagnosticRefreshJob, waiter: DiagnosticRefreshWaiter): void {
+    if (!waiter.signal) return;
+    waiter.onAbort = () => this.rejectDiagnosticWaiter(job, waiter, abortError(waiter.signal));
+    waiter.signal.addEventListener("abort", waiter.onAbort, { once: true });
+    if (waiter.signal.aborted) waiter.onAbort();
+  }
+
   private resolveDiagnosticWaiter(
     job: DiagnosticRefreshJob,
     waiter: DiagnosticRefreshWaiter,
@@ -531,8 +566,22 @@ export class LspService {
     if (waiter.settled) return;
     waiter.settled = true;
     if (waiter.timeout) clearTimeout(waiter.timeout);
+    if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
     job.waiters.delete(waiter);
     waiter.resolve(result);
+  }
+
+  private rejectDiagnosticWaiter(job: DiagnosticRefreshJob, waiter: DiagnosticRefreshWaiter, error: Error): void {
+    if (waiter.settled) return;
+    waiter.settled = true;
+    if (waiter.timeout) clearTimeout(waiter.timeout);
+    if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+    job.waiters.delete(waiter);
+    waiter.reject(error);
+    if (job.waiters.size === 0) {
+      job.controller.abort();
+      this.scheduleDiagnosticPump();
+    }
   }
 
   private finishDiagnosticRefreshWaiters(result: DiagnosticRefreshResult | undefined): void {
@@ -548,13 +597,15 @@ export class LspService {
     this.runningDiagnosticRefreshFiles.clear();
 
     for (const job of jobs) {
+      job.controller.abort();
       for (const waiter of [...job.waiters]) {
         this.resolveDiagnosticWaiter(job, waiter, result);
       }
     }
   }
 
-  private async documentRequests(filePath: string, method: string, extraParams: Record<string, unknown>): Promise<ClientRequestResult[]> {
+  private async documentRequests(filePath: string, method: string, extraParams: Record<string, unknown>, signal?: AbortSignal): Promise<ClientRequestResult[]> {
+    throwIfAborted(signal);
     const resolved = path.resolve(this.projectRoot, filePath);
     const content = readUtf8IfExists(resolved);
     if (content === undefined) throw new Error(`Cannot read file for LSP request: ${resolved}`);
@@ -567,18 +618,25 @@ export class LspService {
       textDocument: { uri },
       ...extraParams,
     };
-    return this.runClientRequests(clients, method, (client) => client.requestForDocument(resolved, content, method, params));
+    return this.runClientRequests(clients, method, (client) => client.requestForDocument(resolved, content, method, params, 10_000, signal), signal);
   }
 
-  private async clientRequests(clients: LspClient[], method: string, params: unknown): Promise<ClientRequestResult[]> {
-    return this.runClientRequests(clients, method, (client) => client.request(method, params));
+  private async clientRequests(clients: LspClient[], method: string, params: unknown, signal?: AbortSignal): Promise<ClientRequestResult[]> {
+    return this.runClientRequests(clients, method, (client) => client.request(method, params, 10_000, signal), signal);
   }
 
-  private async runClientRequests(clients: LspClient[], method: string, run: (client: LspClient) => Promise<unknown>): Promise<ClientRequestResult[]> {
+  private async runClientRequests(
+    clients: LspClient[],
+    method: string,
+    run: (client: LspClient) => Promise<unknown>,
+    signal?: AbortSignal,
+  ): Promise<ClientRequestResult[]> {
+    throwIfAborted(signal);
     const results = await Promise.all(clients.map(async (client): Promise<ClientRequestResult> => {
       try {
         return { client, result: await run(client) };
       } catch (error) {
+        if (isCancellation(error, signal)) throw error;
         return { client, error: error instanceof Error ? error.message : String(error) };
       }
     }));
@@ -745,6 +803,14 @@ function mergeDiagnosticRefreshOptions(left: DiagnosticsForFileOptions, right: D
     timeoutMs: Math.max(left.timeoutMs, right.timeoutMs),
     settleMs: Math.max(left.settleMs, right.settleMs),
     snapshotScope: mergeDiagnosticSnapshotScope(left.snapshotScope, right.snapshotScope),
+  };
+}
+
+function diagnosticJobOptions(options: DiagnosticsForFileOptions): DiagnosticsForFileOptions {
+  return {
+    timeoutMs: options.timeoutMs,
+    settleMs: options.settleMs,
+    snapshotScope: options.snapshotScope,
   };
 }
 
