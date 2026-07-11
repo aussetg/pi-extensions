@@ -357,8 +357,48 @@ test("diagnostic refresh cancellation stops waiting and drains the running job",
     for (let attempt = 0; attempt < 20 && service.getStatus().diagnosticRefreshes?.active !== 0; attempt += 1) {
       await sleep(10);
     }
-    assert.equal(service.getStatus().diagnosticRefreshes?.active, 0);
-    assert.equal(service.getStatus().diagnosticRefreshes?.queued, 0);
+    const status = service.getStatus();
+    assert.equal(status.diagnosticRefreshes?.active, 0);
+    assert.equal(status.diagnosticRefreshes?.queued, 0);
+    assert.equal(status.clients[0]?.lastDiagnosticOutcome, "cancelled");
+    assert.equal(typeof status.clients[0]?.lastDiagnosticDurationMs, "number");
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("diagnostic refresh status distinguishes timeouts from cancellation", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-diagnostic-timeout-status-"));
+  const filePath = path.join(root, "probe.py");
+  const content = "value = 1\n";
+  await writeFile(filePath, content, "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "no-diagnostics"],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    const result = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 30,
+      settleMs: 0,
+    });
+    assert.equal(result?.timedOut, true);
+
+    for (let attempt = 0; attempt < 20 && service.getStatus().diagnosticRefreshes?.active !== 0; attempt += 1) {
+      await sleep(10);
+    }
+    const clientStatus = service.getStatus().clients[0];
+    assert.equal(clientStatus?.lastDiagnosticOutcome, "timeout");
+    assert.equal(typeof clientStatus?.lastDiagnosticDurationMs, "number");
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });
@@ -399,6 +439,7 @@ test("cancelling one coalesced diagnostic waiter does not cancel the others", as
 
     await assert.rejects(cancelled, (error) => error?.name === "AbortError");
     assert.equal((await surviving)?.fresh, true);
+    assert.equal(service.getStatus().clients[0]?.lastDiagnosticOutcome, "fresh");
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });

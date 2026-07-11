@@ -117,6 +117,7 @@ export interface DiagnosticRefreshResult {
 }
 
 export type LspClientState = "starting" | "ready" | "stopped" | "failed";
+export type LspDiagnosticOutcome = "fresh" | "timeout" | "cancelled";
 
 export type LspServerLogLevel = "info" | "warning" | "error";
 
@@ -137,7 +138,7 @@ export interface LspClientStatus {
   diagnosticFiles: number;
   lastDiagnosticsAt?: number;
   lastDiagnosticDurationMs?: number;
-  lastDiagnosticTimedOut?: boolean;
+  lastDiagnosticOutcome?: LspDiagnosticOutcome;
   lastError?: string;
   lastServerLog?: LspServerLog;
   environment?: string;

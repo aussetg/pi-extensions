@@ -34,8 +34,8 @@ test("footer shows active servers and last diagnostic latency", () => {
   const status = {
     activeClients: 2,
     clients: [
-      client({ id: "python", command: "ty", lastDiagnosticDurationMs: 120, lastDiagnosticTimedOut: false }),
-      client({ id: "python-ruff", command: "ruff", lastDiagnosticDurationMs: 32.4, lastDiagnosticTimedOut: false }),
+      client({ id: "python", command: "ty", lastDiagnosticDurationMs: 120, lastDiagnosticOutcome: "fresh" }),
+      client({ id: "python-ruff", command: "ruff", lastDiagnosticDurationMs: 32.4, lastDiagnosticOutcome: "fresh" }),
     ],
     unavailableServers: [],
   };
@@ -47,11 +47,22 @@ test("footer marks diagnostic timeouts", () => {
   const rt = runtime();
   const status = {
     activeClients: 1,
-    clients: [client({ id: "typescript", lastDiagnosticDurationMs: 98.2, lastDiagnosticTimedOut: true })],
+    clients: [client({ id: "typescript", lastDiagnosticDurationMs: 98.2, lastDiagnosticOutcome: "timeout" })],
     unavailableServers: [],
   };
 
   assert.equal(renderFooterStatus(rt, undefined, status), "lsp: typescript (timeout 98 ms)");
+});
+
+test("footer distinguishes cancelled diagnostic work from timeouts", () => {
+  const rt = runtime();
+  const status = {
+    activeClients: 1,
+    clients: [client({ id: "typescript", lastDiagnosticDurationMs: 21.6, lastDiagnosticOutcome: "cancelled" })],
+    unavailableServers: [],
+  };
+
+  assert.equal(renderFooterStatus(rt, undefined, status), "lsp: typescript (cancelled 22 ms)");
 });
 
 test("footer includes trusted external roots after LSP status", () => {
@@ -59,7 +70,7 @@ test("footer includes trusted external roots after LSP status", () => {
   rt.trustedEnvironmentRoots = ["/tmp/external-a", "/tmp/external-b"];
   const status = {
     activeClients: 1,
-    clients: [client({ id: "typescript", lastDiagnosticDurationMs: 1228, lastDiagnosticTimedOut: true })],
+    clients: [client({ id: "typescript", lastDiagnosticDurationMs: 1228, lastDiagnosticOutcome: "timeout" })],
     unavailableServers: [],
   };
 

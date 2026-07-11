@@ -16,6 +16,8 @@ LSP WorkspaceEdits are applied under Pi's shared per-file mutation queues. Targe
 
 Interactive rendering is method-aware: the tool row shows the requested LSP method and target, large results are collapsed in the UI, hover code fences are stripped to raw text, and agent-visible text is truncated to 2000 lines or 50KB with the full output saved to a temp file.
 
+LSP status distinguishes cancelled diagnostic refreshes from timeouts while retaining their measured latency.
+
 Automatic formatting is deterministic: one configured/canonical formatter per file, disclosed only when it changes the file or fails.
 
 If a language server answers after the inline tool-result timeout, linked diagnostics are queued once and injected before the next model request.

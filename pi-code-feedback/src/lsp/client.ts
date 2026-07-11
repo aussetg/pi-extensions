@@ -2,8 +2,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import * as path from "node:path";
 import { createDiagnosticSnapshot } from "../diagnostics/snapshots.ts";
 import { mergeProcessEnv } from "../language-environments.ts";
-import type { DiagnosticRefreshResult, DiagnosticSnapshot, LspClientState, LspClientStatus, LspDiagnostic, LspServerLog, LspServerLogLevel, RelatedLocation } from "../types.ts";
-import { abortError, throwIfAborted, waitWithSignal } from "./cancellation.ts";
+import type { DiagnosticRefreshResult, DiagnosticSnapshot, LspClientState, LspClientStatus, LspDiagnostic, LspDiagnosticOutcome, LspServerLog, LspServerLogLevel, RelatedLocation } from "../types.ts";
+import { abortError, isCancellation, throwIfAborted, waitWithSignal } from "./cancellation.ts";
 import { filePathToUri, lspRangeToExternal, type LspRange } from "./positions.ts";
 import type { LanguageServerDefinition } from "./servers.ts";
 
@@ -128,7 +128,7 @@ export class LspClient {
   private capabilities: unknown;
   private lastDiagnosticsAt?: number;
   private lastDiagnosticDurationMs?: number;
-  private lastDiagnosticTimedOut?: boolean;
+  private lastDiagnosticOutcome?: LspDiagnosticOutcome;
   private lastError?: string;
   private lastServerLog?: LspServerLog;
   private sessionId?: string;
@@ -151,10 +151,19 @@ export class LspClient {
 
     this.notify("textDocument/didSave", textDocumentDidSaveParams(document.uri, content, this.capabilities));
 
-    const fresh = await this.waitForDiagnostics(document.uri, document.version, touchedAt, options.timeoutMs, options.settleMs, options.signal);
+    let fresh: boolean;
+    try {
+      fresh = await this.waitForDiagnostics(document.uri, document.version, touchedAt, options.timeoutMs, options.settleMs, options.signal);
+    } catch (error) {
+      if (isCancellation(error, options.signal)) {
+        this.lastDiagnosticDurationMs = Date.now() - touchedAt;
+        this.lastDiagnosticOutcome = "cancelled";
+      }
+      throw error;
+    }
     const completedAt = Date.now();
     this.lastDiagnosticDurationMs = completedAt - touchedAt;
-    this.lastDiagnosticTimedOut = !fresh;
+    this.lastDiagnosticOutcome = fresh ? "fresh" : "timeout";
     return {
       snapshot: this.snapshotForScope(document.uri, options.snapshotScope),
       fresh,
@@ -243,7 +252,7 @@ export class LspClient {
       diagnosticFiles: this.diagnostics.size,
       lastDiagnosticsAt: this.lastDiagnosticsAt,
       lastDiagnosticDurationMs: this.lastDiagnosticDurationMs,
-      lastDiagnosticTimedOut: this.lastDiagnosticTimedOut,
+      lastDiagnosticOutcome: this.lastDiagnosticOutcome,
       lastError: this.lastError,
       lastServerLog: this.lastServerLog,
       environment: this.definition.environment?.description,

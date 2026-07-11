@@ -312,7 +312,14 @@ function compareFooterClients(left: LspServiceStatus["clients"][number], right: 
 function formatClientDiagnosticLatency(client: LspServiceStatus["clients"][number]): string | undefined {
   if (client.lastDiagnosticDurationMs === undefined) return undefined;
   const duration = `${Math.max(0, Math.round(client.lastDiagnosticDurationMs))} ms`;
-  return client.lastDiagnosticTimedOut ? `timeout ${duration}` : duration;
+  switch (client.lastDiagnosticOutcome) {
+    case "timeout":
+      return `timeout ${duration}`;
+    case "cancelled":
+      return `cancelled ${duration}`;
+    default:
+      return duration;
+  }
 }
 
 function formatTimestamp(ms: number): string {
