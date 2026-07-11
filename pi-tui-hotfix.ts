@@ -5,6 +5,7 @@ import { Box } from "@earendil-works/pi-tui";
 
 const BOX_RENDER_PATCH = Symbol.for("pi-tui-hotfix.box-render-cache");
 const GPT5_THINKING_PATCH = Symbol.for("pi-tui-hotfix.gpt5-thinking-placeholders");
+const STREAMING_ASSISTANT_MESSAGES = new WeakSet<object>();
 
 // GPT-5 occasionally emits a reasoning-summary part whose entire body is this
 // sentinel. Match Codex and drop the whole part, including its status heading.
@@ -37,9 +38,22 @@ type AssistantMessageComponentLike = {
 	lastMessage?: AssistantMessageLike;
 };
 
-export default function (_pi: any): void {
+export default function (pi: any): void {
+	trackStreamingAssistantMessages(pi);
 	patchGpt5ThinkingPlaceholders();
 	patchBoxRenderCache();
+}
+
+function trackStreamingAssistantMessages(pi: any): void {
+	pi.on("message_start", (event: { message?: AssistantMessageLike }) => {
+		if (event.message?.role === "assistant") STREAMING_ASSISTANT_MESSAGES.add(event.message);
+	});
+	pi.on("message_update", (event: { message?: AssistantMessageLike }) => {
+		if (event.message?.role === "assistant") STREAMING_ASSISTANT_MESSAGES.add(event.message);
+	});
+	pi.on("message_end", (event: { message?: AssistantMessageLike }) => {
+		if (event.message?.role === "assistant") STREAMING_ASSISTANT_MESSAGES.delete(event.message);
+	});
 }
 
 function patchGpt5ThinkingPlaceholders(): void {
@@ -80,7 +94,10 @@ function sanitizeGpt5Thinking(message: AssistantMessageLike): AssistantMessageLi
 		const thinkingBlock = block as { type?: string; thinking?: string };
 		if (thinkingBlock.type !== "thinking" || typeof thinkingBlock.thinking !== "string") return block;
 
-		const thinking = stripEmptyReasoningParts(thinkingBlock.thinking);
+		const thinking = stripEmptyReasoningParts(
+			thinkingBlock.thinking,
+			STREAMING_ASSISTANT_MESSAGES.has(message),
+		);
 		if (thinking === thinkingBlock.thinking) return block;
 		changed = true;
 		return { ...thinkingBlock, thinking };
@@ -96,9 +113,33 @@ function isGpt5Model(model: unknown): boolean {
 	return /^gpt-5(?:$|[.-])/i.test(id);
 }
 
-function stripEmptyReasoningParts(thinking: string): string {
-	const stripped = thinking.replace(EMPTY_REASONING_PART_RE, "$1");
+function stripEmptyReasoningParts(thinking: string, streaming: boolean): string {
+	let stripped = thinking.replace(EMPTY_REASONING_PART_RE, "$1");
+	if (streaming) stripped = hidePendingReasoningPart(stripped);
 	return stripped === thinking ? thinking : stripped.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function hidePendingReasoningPart(thinking: string): string {
+	const lineStart = thinking.lastIndexOf("\n*");
+	const start = lineStart >= 0 ? lineStart + 1 : thinking.startsWith("*") ? 0 : -1;
+	if (start < 0) return thinking;
+
+	const part = thinking.slice(start);
+	if (!couldBecomeEmptyReasoningPart(part)) return thinking;
+	return thinking.slice(0, start).trimEnd();
+}
+
+function couldBecomeEmptyReasoningPart(part: string): boolean {
+	if (part === "*") return true;
+	if (!part.startsWith("**")) return false;
+
+	const afterOpen = part.slice(2);
+	const close = afterOpen.indexOf("**");
+	if (close < 0) return true;
+	if (close === 0) return false;
+
+	const body = afterOpen.slice(close + 2).trim();
+	return body.length === 0 || "<!-- -->".startsWith(body);
 }
 
 function patchBoxRenderCache(): void {
