@@ -1,10 +1,9 @@
 import { spawn } from "node:child_process";
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { readUtf8IfExists } from "../fs.ts";
 import { mergeProcessEnv, resolveWorkspaceRootForPath } from "../language-environments.ts";
 import type { FormatterResult, FormatterRunRecord, FormatServiceStatus } from "../types.ts";
-import { isPythonFormatterFile, listFormatterCommandStatus, selectFormatter, type FormatterSelection, type SelectedFormatter } from "./formatters.ts";
+import { listFormatterCommandStatus, selectFormatter, type SelectedFormatter } from "./formatters.ts";
 
 export interface FormatServiceOptions {
   projectRoot: string;
@@ -21,12 +20,6 @@ interface SpawnResult {
   timedOut: boolean;
 }
 
-interface CachedFormatterSelection {
-  selection: FormatterSelection;
-  configPath?: string;
-  configMtimeMs?: number;
-}
-
 const DEFAULT_FORMAT_TIMEOUT_MS = 15_000;
 const MAX_OUTPUT_CHARS = 8_000;
 
@@ -36,7 +29,6 @@ export class FormatService {
   private trustedEnvironmentRoots: string[];
   private timeoutMs: number;
   private recentRuns: FormatterRunRecord[] = [];
-  private selectionCache = new Map<string, CachedFormatterSelection>();
 
   constructor(options: FormatServiceOptions) {
     this.projectRoot = path.resolve(options.projectRoot);
@@ -50,14 +42,13 @@ export class FormatService {
     this.formatterOverrides = options.formatterOverrides ?? {};
     this.trustedEnvironmentRoots = options.trustedEnvironmentRoots?.map((root) => path.resolve(root)) ?? [];
     this.timeoutMs = options.timeoutMs ?? this.timeoutMs;
-    this.selectionCache.clear();
   }
 
   async formatFile(filePath: string, beforeContent: string): Promise<FormatterResult> {
     const startedAt = Date.now();
     const resolved = path.resolve(this.projectRoot, filePath);
     const workspaceRoot = resolveWorkspaceRootForPath(resolved, this.projectRoot, this.trustedEnvironmentRoots);
-    const selection = this.selectFormatter(resolved, workspaceRoot);
+    const selection = selectFormatter(resolved, workspaceRoot, this.formatterOverrides, this.trustedEnvironmentRoots);
 
     if (selection.kind === "none") {
       return this.record(resolved, {
@@ -119,25 +110,6 @@ export class FormatService {
     }
     return result;
   }
-
-  private selectFormatter(filePath: string, workspaceRoot: string): FormatterSelection {
-    const cached = this.selectionCache.get(filePath);
-    if (cached && cachedSelectionIsValid(cached)) return cached.selection;
-
-    const selection = selectFormatter(filePath, workspaceRoot, this.formatterOverrides, this.trustedEnvironmentRoots);
-    if (selection.kind !== "none" && !isPythonFormatterFile(filePath)) {
-      this.selectionCache.set(filePath, {
-        selection,
-        ...(selection.kind === "selected" && selection.formatter.configPath
-          ? {
-              configPath: selection.formatter.configPath,
-              configMtimeMs: statMtimeMs(selection.formatter.configPath),
-            }
-          : {}),
-      });
-    }
-    return selection;
-  }
 }
 
 export function createFormatService(options: FormatServiceOptions): FormatService {
@@ -198,17 +170,4 @@ function formatterErrors(formatter: SelectedFormatter, result: SpawnResult): str
 function appendLimited(existing: string, extra: string): string {
   const combined = existing + extra;
   return combined.length <= MAX_OUTPUT_CHARS ? combined : combined.slice(-MAX_OUTPUT_CHARS);
-}
-
-function cachedSelectionIsValid(cached: CachedFormatterSelection): boolean {
-  if (!cached.configPath) return true;
-  return statMtimeMs(cached.configPath) === cached.configMtimeMs;
-}
-
-function statMtimeMs(filePath: string): number | undefined {
-  try {
-    return fs.statSync(filePath).mtimeMs;
-  } catch {
-    return undefined;
-  }
 }

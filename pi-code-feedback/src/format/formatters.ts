@@ -244,10 +244,6 @@ function formatterArgs(candidate: FormatterCandidate, override: FormatterOverrid
   return candidate.args(filePath);
 }
 
-export function isPythonFormatterFile(filePath: string): boolean {
-  return PYTHON_EXTENSIONS.includes(path.extname(filePath).toLowerCase());
-}
-
 function languageEnvironmentForFormatter(candidate: FormatterCandidate, filePath: string, projectRoot: string, trustedEnvironmentRoots: string[] = []): LanguageEnvironment | undefined {
   if (!candidate.extensions.some((extension) => PYTHON_EXTENSIONS.includes(extension))) return undefined;
   return resolveLanguageEnvironment("python", filePath, projectRoot, trustedEnvironmentRoots);
