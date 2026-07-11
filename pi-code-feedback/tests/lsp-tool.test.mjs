@@ -248,6 +248,69 @@ test("lsp rename apply returns structured JSON", async () => {
   }
 });
 
+test("lsp rename validates versioned WorkspaceEdits against the source client", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-rename-version-"));
+  const filePath = path.join(root, "probe.py");
+  await writeFile(filePath, "const oldName = 1;\noldName;\n", "utf8");
+  const { tool, service } = createRegisteredTool(root, "rename-versioned");
+
+  try {
+    const result = await tool.execute("lsp-1", {
+      method: "textDocument/rename",
+      path: "probe.py",
+      line: 1,
+      column: 8,
+      newName: "newName",
+      apply: true,
+    }, undefined, undefined, { cwd: root });
+
+    assert.equal(result.isError, undefined);
+    assert.equal(JSON.parse(result.content[0].text).applied, true);
+    assert.equal(await readFile(filePath, "utf8"), "const newName = 1;\nnewName;\n");
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("lsp rename revalidates files after waiting for Pi's mutation queue", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-rename-queue-"));
+  const filePath = path.join(root, "probe.py");
+  await writeFile(filePath, "const oldName = 1;\noldName;\n", "utf8");
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const mutationQueue = async (_filePath, run) => {
+    entered.resolve();
+    await release.promise;
+    return run();
+  };
+  const { tool, service } = createRegisteredTool(root, "diagnostics", undefined, mutationQueue);
+
+  try {
+    const applying = tool.execute("lsp-1", {
+      method: "textDocument/rename",
+      path: "probe.py",
+      line: 1,
+      column: 8,
+      newName: "newName",
+      apply: true,
+    }, undefined, undefined, { cwd: root });
+
+    await entered.promise;
+    await writeFile(filePath, "changed while queued\n", "utf8");
+    release.resolve();
+    const result = await applying;
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /target changed since preview/);
+    assert.equal(await readFile(filePath, "utf8"), "changed while queued\n");
+  } finally {
+    release.resolve();
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("lsp tool text is truncated and saved to a temp file", async () => {
   const huge = Array.from({ length: 2100 }, (_, index) => `line ${index + 1}`).join("\n");
   const result = limitLspToolText(huge);
@@ -557,7 +620,7 @@ async function readJsonLog(filePath) {
   }
 }
 
-function createRegisteredTool(root, mode = "actions-require-diagnostics", logPath = undefined) {
+function createRegisteredTool(root, mode = "actions-require-diagnostics", logPath = undefined, mutationQueue = undefined) {
   const runtime = createRuntime(createDefaultConfig());
   setProjectRoot(runtime, root);
   runtime.config.autoFormat = false;
@@ -581,7 +644,7 @@ function createRegisteredTool(root, mode = "actions-require-diagnostics", logPat
       tool = definition;
     },
     registerCommand() {},
-  }, runtime, service);
+  }, runtime, service, undefined, mutationQueue);
 
   assert.ok(tool);
   return { runtime, service, tool };

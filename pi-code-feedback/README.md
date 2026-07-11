@@ -12,6 +12,8 @@ The inherited pi process `PATH` is treated as trusted baseline; `/lsp trust` ext
 
 The `lsp` tool now uses an LSP-lite API: pass `method` with names such as `server/status`, `textDocument/hover`, `textDocument/diagnostic`, `workspace/symbol`, `textDocument/codeAction`, and `codeAction/apply`. Position-scoped methods require positive 1-based integers (`line`, `column`) to match file reads. The old `action` field remains as a compatibility alias.
 
+LSP WorkspaceEdits are applied under Pi's shared per-file mutation queues. Target contents and permissions are revalidated after queueing, versioned TextDocumentEdits are checked against the source LSP session, and multi-file edits are staged before atomic replacement with rollback on commit failure.
+
 Interactive rendering is method-aware: the tool row shows the requested LSP method and target, large results are collapsed in the UI, hover code fences are stripped to raw text, and agent-visible text is truncated to 2000 lines or 50KB with the full output saved to a temp file.
 
 Automatic formatting is deterministic: one configured/canonical formatter per file, disclosed only when it changes the file or fails.

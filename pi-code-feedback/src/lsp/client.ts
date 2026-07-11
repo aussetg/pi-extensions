@@ -173,6 +173,12 @@ const SEMANTIC_TOKEN_MODIFIERS = [
 
 const DEFAULT_SEMANTIC_TOKEN_WAIT_MS = 50;
 const DEFAULT_SEMANTIC_TOKEN_TIMEOUT_MS = 5_000;
+const DEFAULT_INITIALIZE_TIMEOUT_MS = 10_000;
+const PROCESS_KILL_GRACE_MS = 750;
+
+export interface LspClientOptions {
+  initializeTimeoutMs?: number;
+}
 
 export class LspClient {
   readonly id: string;
@@ -197,11 +203,14 @@ export class LspClient {
   private lastError?: string;
   private lastServerLog?: LspServerLog;
   private sessionId?: string;
+  private launchGeneration = 0;
+  private initializeTimeoutMs: number;
 
-  constructor(definition: LanguageServerDefinition, root: string) {
+  constructor(definition: LanguageServerDefinition, root: string, options: LspClientOptions = {}) {
     this.definition = definition;
     this.id = definition.id;
     this.root = path.resolve(root);
+    this.initializeTimeoutMs = Math.max(1, options.initializeTimeoutMs ?? DEFAULT_INITIALIZE_TIMEOUT_MS);
   }
 
   async touchDocumentDetailed(filePath: string, content: string, options: TouchDocumentOptions): Promise<DiagnosticRefreshResult> {
@@ -334,6 +343,10 @@ export class LspClient {
     return this.sessionId;
   }
 
+  documentVersion(filePath: string): number | undefined {
+    return this.documents.get(filePathToUri(filePath))?.version;
+  }
+
   canResolveCodeActions(): boolean {
     return codeActionResolveProvider(this.capabilities);
   }
@@ -359,33 +372,26 @@ export class LspClient {
 
   async shutdown(): Promise<void> {
     this.finishDiagnosticWaiters(false);
-    if (!this.process || this.state === "stopped") {
-      this.sessionId = undefined;
+    const child = this.process;
+    const generation = this.launchGeneration;
+    if (!child) {
+      this.resetStoppedState();
       return;
     }
 
-    try {
-      await this.sendRequest("shutdown", undefined, 1500);
-      this.notify("exit");
-    } catch {
-      // Fall through to killing the process.
+    if (this.state === "ready") {
+      try {
+        await this.sendRequest("shutdown", undefined, 1500);
+        if (this.isActiveLaunch(child, generation)) this.notify("exit");
+      } catch {
+        // Fall through to killing the process.
+      }
     }
 
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timeout);
-      pending.reject(new Error("LSP client stopped"));
-    }
-    this.pending.clear();
-
-    this.process.kill();
-    this.state = "stopped";
-    this.sessionId = undefined;
-    this.process = undefined;
-    this.initializePromise = undefined;
-    this.documents.clear();
-    this.diagnostics.clear();
-    this.semanticTokens.clear();
-    this.semanticTokenRequests.clear();
+    if (this.isActiveLaunch(child, generation)) this.detachActiveProcess(child);
+    this.rejectPending(new Error("LSP client stopped"));
+    this.resetStoppedState();
+    terminateProcess(child);
   }
 
   private async ensureStarted(): Promise<void> {
@@ -393,55 +399,117 @@ export class LspClient {
     if (this.initializePromise) return this.initializePromise;
 
     this.state = "starting";
-    this.initializePromise = this.startAndInitialize();
-    return this.initializePromise;
+    const attempt = this.startAndInitialize();
+    this.initializePromise = attempt;
+    attempt.then(
+      () => {
+        if (this.initializePromise === attempt) this.initializePromise = undefined;
+      },
+      () => {
+        if (this.initializePromise === attempt) this.initializePromise = undefined;
+      },
+    );
+    return attempt;
   }
 
   private async startAndInitialize(): Promise<void> {
+    const generation = ++this.launchGeneration;
+    let child: ChildProcessWithoutNullStreams;
     try {
-      const child = spawn(this.definition.command, this.definition.args, {
+      child = spawn(this.definition.command, this.definition.args, {
         cwd: this.root,
         env: mergeProcessEnv(this.definition.env),
         stdio: "pipe",
       });
-      this.process = child;
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      this.state = "failed";
+      this.sessionId = undefined;
+      this.lastError = failure.message;
+      this.clearServerState();
+      this.finishDiagnosticWaiters(false);
+      throw failure;
+    }
+    this.process = child;
+    this.inputBuffer = Buffer.alloc(0);
 
-      child.stdout.on("data", (chunk: Buffer) => this.handleData(chunk));
-      child.stderr.on("data", (chunk: Buffer) => {
-        const text = chunk.toString("utf8").trim();
-        if (text.length > 0) this.lastServerLog = classifyServerLog(text.slice(-1000));
-      });
-      child.on("error", (error) => {
-        this.lastError = error.message;
-        this.state = "failed";
-        this.sessionId = undefined;
-        this.rejectPending(error);
-        this.finishDiagnosticWaiters(false);
-      });
-      child.on("exit", (code, signal) => {
-        this.initializePromise = undefined;
-        if (this.state !== "stopped") {
-          this.state = code === 0 ? "stopped" : "failed";
-          this.sessionId = undefined;
-          if (code !== 0 || signal) this.lastError = `process exited code=${code ?? "null"} signal=${signal ?? "null"}`;
-          this.rejectPending(new Error(this.lastError ?? "LSP process exited"));
-          this.finishDiagnosticWaiters(false);
-        }
-      });
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (this.isActiveLaunch(child, generation)) this.handleData(chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      if (!this.isActiveLaunch(child, generation)) return;
+      const text = chunk.toString("utf8").trim();
+      if (text.length > 0) this.lastServerLog = classifyServerLog(text.slice(-1000));
+    });
+    child.on("error", (error) => {
+      if (!this.isActiveLaunch(child, generation)) return;
+      this.failActiveLaunch(child, error);
+    });
+    child.on("exit", (code, signal) => {
+      if (!this.isActiveLaunch(child, generation)) return;
+      const message = code !== 0 || signal
+        ? `process exited code=${code ?? "null"} signal=${signal ?? "null"}`
+        : "LSP process exited";
+      this.lastError = code !== 0 || signal ? message : this.lastError;
+      this.detachActiveProcess(child);
+      this.state = code === 0 ? "stopped" : "failed";
+      this.sessionId = undefined;
+      this.clearServerState();
+      this.rejectPending(new Error(message));
+      this.finishDiagnosticWaiters(false);
+    });
 
-      const initializeResult = await this.sendRequest("initialize", this.initializeParams(), 10_000);
+    try {
+      const initializeResult = await this.sendRequest("initialize", this.initializeParams(), this.initializeTimeoutMs);
+      if (!this.isActiveLaunch(child, generation)) throw new Error(`LSP initialization was superseded: ${this.id}`);
       this.capabilities = readServerCapabilities(initializeResult);
       this.notify("initialized", {});
       this.state = "ready";
       this.sessionId = createLspClientSessionId(this.id);
-      this.initializePromise = undefined;
+      this.lastError = undefined;
     } catch (error) {
-      this.state = "failed";
-      this.sessionId = undefined;
-      this.lastError = error instanceof Error ? error.message : String(error);
-      this.initializePromise = undefined;
+      if (this.isActiveLaunch(child, generation)) {
+        this.failActiveLaunch(child, error);
+      }
       throw error;
     }
+  }
+
+  private isActiveLaunch(child: ChildProcessWithoutNullStreams, generation: number): boolean {
+    return this.process === child && this.launchGeneration === generation;
+  }
+
+  private failActiveLaunch(child: ChildProcessWithoutNullStreams, error: unknown): void {
+    const failure = error instanceof Error ? error : new Error(String(error));
+    this.lastError = failure.message;
+    this.state = "failed";
+    this.sessionId = undefined;
+    this.detachActiveProcess(child);
+    this.clearServerState();
+    this.rejectPending(failure);
+    this.finishDiagnosticWaiters(false);
+    terminateProcess(child);
+  }
+
+  private detachActiveProcess(child: ChildProcessWithoutNullStreams): void {
+    if (this.process !== child) return;
+    this.process = undefined;
+    this.inputBuffer = Buffer.alloc(0);
+  }
+
+  private resetStoppedState(): void {
+    this.state = "stopped";
+    this.sessionId = undefined;
+    this.initializePromise = undefined;
+    this.clearServerState();
+  }
+
+  private clearServerState(): void {
+    this.capabilities = undefined;
+    this.documents.clear();
+    this.diagnostics.clear();
+    this.semanticTokens.clear();
+    this.semanticTokenRequests.clear();
   }
 
   private initializeParams(): Record<string, unknown> {
@@ -1106,6 +1174,17 @@ function configurationForItem(config: Record<string, unknown> | undefined, item:
 function createLspClientSessionId(serverId: string): string {
   const sequence = nextLspClientSessionId++;
   return `${serverId}:${sequence.toString(36)}`;
+}
+
+function terminateProcess(child: ChildProcessWithoutNullStreams): void {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+
+  child.kill("SIGTERM");
+  const forceKill = setTimeout(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }, PROCESS_KILL_GRACE_MS);
+  forceKill.unref?.();
+  child.once("exit", () => clearTimeout(forceKill));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

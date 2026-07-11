@@ -300,7 +300,19 @@ export class LspService {
     const position = externalPositionToLsp(line, character);
     if (!position) throw new Error("rename requires 1-based line and column");
     if (typeof newName !== "string" || newName.length === 0) throw new Error("rename requires newName");
-    return this.documentRequest(filePath, "textDocument/rename", { position, newName });
+    const { result, client } = await this.documentRequest(filePath, "textDocument/rename", { position, newName });
+    return decorateWorkspaceEdit(client, result);
+  }
+
+  documentVersion(filePath: string, serverId: string | undefined, serverSessionId: string | undefined): number | undefined {
+    if (!serverId || !serverSessionId) return undefined;
+    const resolved = path.resolve(this.projectRoot, filePath);
+    for (const client of this.clients.values()) {
+      if (client.id !== serverId || client.getSessionId() !== serverSessionId) continue;
+      const version = client.documentVersion(resolved);
+      if (version !== undefined) return version;
+    }
+    return undefined;
   }
 
   async rawRequest(filePath: string | undefined, method: unknown, params: unknown): Promise<unknown> {
@@ -348,7 +360,7 @@ export class LspService {
     }
   }
 
-  private async documentRequest(filePath: string, method: string, extraParams: Record<string, unknown>): Promise<unknown> {
+  private async documentRequest(filePath: string, method: string, extraParams: Record<string, unknown>): Promise<{ result: unknown; client: LspClient }> {
     const resolved = path.resolve(this.projectRoot, filePath);
     const content = readUtf8IfExists(resolved);
     if (content === undefined) throw new Error(`Cannot read file for LSP request: ${resolved}`);
@@ -363,7 +375,7 @@ export class LspService {
     };
     const result = await client.requestForDocument(resolved, content, method, params);
     this.armIdleTimer();
-    return result;
+    return { result, client };
   }
 
   private enqueueDiagnosticRefresh(
@@ -818,6 +830,16 @@ function decorateCodeAction(client: LspClient, action: unknown): unknown {
     [LSP_RESULT_SERVER_ID_KEY]: client.id,
     ...(sessionId ? { [LSP_RESULT_SERVER_SESSION_ID_KEY]: sessionId } : {}),
     ...(canResolve ? { [LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY]: true } : {}),
+  };
+}
+
+function decorateWorkspaceEdit(client: LspClient, edit: unknown): unknown {
+  if (!isRecord(edit)) return edit;
+  const sessionId = client.getSessionId();
+  return {
+    ...edit,
+    [LSP_RESULT_SERVER_ID_KEY]: client.id,
+    ...(sessionId ? { [LSP_RESULT_SERVER_SESSION_ID_KEY]: sessionId } : {}),
   };
 }
 

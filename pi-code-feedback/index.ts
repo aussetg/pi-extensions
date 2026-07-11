@@ -1,3 +1,4 @@
+import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { createDefaultConfig, registerFlags, resolveConfig } from "./src/config.ts";
 import { registerLspCommand } from "./src/commands/lsp.ts";
 import { reconfigureTrustedEnvironmentServices, restoreTrustedEnvironmentRoots } from "./src/commands/trust.ts";
@@ -30,7 +31,7 @@ export default function (piValue: unknown) {
   });
 
   registerLspCommand(pi, runtime, lspService, formatService);
-  registerLspTool(pi, runtime, lspService, formatService);
+  registerLspTool(pi, runtime, lspService, formatService, withFileMutationQueue);
 
   pi.on?.("session_start", async (_event, ctx) => {
     refreshRuntimeConfig(runtime, resolveConfig(pi));

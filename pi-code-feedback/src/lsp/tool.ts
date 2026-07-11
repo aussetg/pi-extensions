@@ -1,12 +1,10 @@
-import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { renderCapabilities, renderDiagnosticsStatus, renderStatus } from "../render.ts";
 import type { FormatService } from "../format/service.ts";
-import { readUtf8IfExists } from "../fs.ts";
 import type { LspService } from "./service.ts";
 import { displayPathFromRoot, normalizeToolPath } from "../paths.ts";
 import { restartLsp, setProjectRoot, setProjectTrust, type CodeFeedbackRuntime } from "../runtime.ts";
-import { LSP_ACTIONS, LSP_METHODS, LSP_RESULT_SERVER_ID_KEY, type LspAction, type LspMethod } from "../types.ts";
+import { LSP_ACTIONS, LSP_METHODS, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY, type LspAction, type LspMethod } from "../types.ts";
 import type { PiApi, PiToolResult } from "../pi.ts";
 import { renderCodeActionApplySelectionError, renderLspActionResult, renderWorkspaceEditApplyResult } from "./render.ts";
 import {
@@ -18,7 +16,19 @@ import {
   type LspToolTruncation,
 } from "./tool-output.ts";
 import { renderLspToolCall, renderLspToolResult } from "./tool-renderer.ts";
-import { applyWorkspaceEdit, canResolveCodeActionOnApply, selectCodeActionForApply, workspaceEditSummary, workspaceEditTargetFiles, type WorkspaceEditTargetFilesResult } from "./workspace-edit.ts";
+import {
+  applyWorkspaceEdit,
+  canResolveCodeActionOnApply,
+  readWorkspaceEditFileState,
+  sameWorkspaceEditFileState,
+  selectCodeActionForApply,
+  workspaceEditSummary,
+  workspaceEditTargetFiles,
+  type FileMutationQueue,
+  type WorkspaceEditApplyOptions,
+  type WorkspaceEditFileState,
+  type WorkspaceEditTargetFilesResult,
+} from "./workspace-edit.ts";
 
 interface ParsedLspMethod {
   method?: LspMethod;
@@ -41,12 +51,7 @@ interface CachedCodeAction {
   summary: CodeActionSummary;
 }
 
-interface CachedFileState {
-  filePath: string;
-  exists: boolean;
-  sha256?: string;
-  bytes?: number;
-}
+type CachedFileState = WorkspaceEditFileState;
 
 interface CodeActionSummary {
   id: string;
@@ -69,7 +74,13 @@ interface RenderedLspText {
   truncation?: LspToolJsonTruncation;
 }
 
-export function registerLspTool(pi: PiApi, runtime: CodeFeedbackRuntime, lspService: LspService, formatService?: FormatService): void {
+export function registerLspTool(
+  pi: PiApi,
+  runtime: CodeFeedbackRuntime,
+  lspService: LspService,
+  formatService?: FormatService,
+  mutationQueue?: FileMutationQueue,
+): void {
   const toolState: LspToolState = {
     nextCodeActionId: 1,
     codeActions: new Map(),
@@ -198,13 +209,13 @@ export function registerLspTool(pi: PiApi, runtime: CodeFeedbackRuntime, lspServ
           }), runtime.projectRoot);
 
         case "textDocument/codeAction":
-          return await handleCodeActions(method, params, runtime, lspService, toolState);
+          return await handleCodeActions(method, params, runtime, lspService, toolState, mutationQueue);
 
         case "codeAction/apply":
-          return await handleCodeActionApply(method, params, runtime, lspService, toolState);
+          return await handleCodeActionApply(method, params, runtime, lspService, toolState, mutationQueue);
 
         case "textDocument/rename":
-          return await handleRename(params, runtime, lspService);
+          return await handleRename(params, runtime, lspService, mutationQueue);
 
         case "raw/request":
           return rawOrPretty(method, params, await lspService.rawRequest(readPath(params), params.request, params.params), runtime.projectRoot);
@@ -504,7 +515,14 @@ function renderLspResult(action: LspAction | undefined, result: unknown, project
   return formatLspToolJson(result);
 }
 
-async function handleCodeActions(method: LspMethod, params: Record<string, unknown>, runtime: CodeFeedbackRuntime, lspService: LspService, state: LspToolState): Promise<PiToolResult> {
+async function handleCodeActions(
+  method: LspMethod,
+  params: Record<string, unknown>,
+  runtime: CodeFeedbackRuntime,
+  lspService: LspService,
+  state: LspToolState,
+  mutationQueue: FileMutationQueue | undefined,
+): Promise<PiToolResult> {
   if (params.apply === true) {
     const pendingGuard = rejectApplyDuringPendingEdits(runtime, "code action");
     if (pendingGuard) return pendingGuard;
@@ -555,8 +573,12 @@ async function handleCodeActions(method: LspMethod, params: Record<string, unkno
   const prepared = await prepareCodeActionForApply(selection.action, filePath, runtime, lspService, "selected code action");
   if (!prepared.ok) return errorResult(method, prepared.error, prepared.details, prepared.hint);
 
-  const applyResult = await applyWorkspaceEdit(prepared.action.edit, runtime.projectRoot);
-  if (applyResult.applied) await resyncChangedFiles(lspService, applyResult.changedFiles, runtime);
+  const applyResult = await applyWorkspaceEdit(
+    prepared.action.edit,
+    runtime.projectRoot,
+    workspaceEditApplyOptions(prepared.action.edit, prepared.action, [requestFileStateAfter], runtime, lspService, mutationQueue),
+  );
+  if (applyResult.changedFiles.length > 0) await resyncChangedFiles(lspService, applyResult.changedFiles, runtime);
   const title = prepared.title;
   return textResult(renderWorkspaceEditApplyResult(applyResult, runtime.projectRoot, `code action "${title}"`), !applyResult.applied, {
     action: prepared.action,
@@ -564,7 +586,14 @@ async function handleCodeActions(method: LspMethod, params: Record<string, unkno
   });
 }
 
-async function handleCodeActionApply(method: LspMethod, params: Record<string, unknown>, runtime: CodeFeedbackRuntime, lspService: LspService, state: LspToolState): Promise<PiToolResult> {
+async function handleCodeActionApply(
+  method: LspMethod,
+  params: Record<string, unknown>,
+  runtime: CodeFeedbackRuntime,
+  lspService: LspService,
+  state: LspToolState,
+  mutationQueue: FileMutationQueue | undefined,
+): Promise<PiToolResult> {
   const pendingGuard = rejectApplyDuringPendingEdits(runtime, "code action");
   if (pendingGuard) return pendingGuard;
 
@@ -597,8 +626,19 @@ async function handleCodeActionApply(method: LspMethod, params: Record<string, u
     }, prepared.hint);
   }
 
-  const applyResult = await applyWorkspaceEdit(prepared.action.edit, runtime.projectRoot);
-  if (applyResult.applied) await resyncChangedFiles(lspService, applyResult.changedFiles, runtime);
+  const applyResult = await applyWorkspaceEdit(
+    prepared.action.edit,
+    runtime.projectRoot,
+    workspaceEditApplyOptions(
+      prepared.action.edit,
+      prepared.action,
+      [cached.requestFile, ...cached.editTargets],
+      runtime,
+      lspService,
+      mutationQueue,
+    ),
+  );
+  if (applyResult.changedFiles.length > 0) await resyncChangedFiles(lspService, applyResult.changedFiles, runtime);
 
   const payload = {
     ok: applyResult.applied,
@@ -617,17 +657,35 @@ async function handleCodeActionApply(method: LspMethod, params: Record<string, u
   }, !applyResult.applied);
 }
 
-async function handleRename(params: Record<string, unknown>, runtime: CodeFeedbackRuntime, lspService: LspService): Promise<PiToolResult> {
+async function handleRename(
+  params: Record<string, unknown>,
+  runtime: CodeFeedbackRuntime,
+  lspService: LspService,
+  mutationQueue: FileMutationQueue | undefined,
+): Promise<PiToolResult> {
   if (params.apply === true) {
     const pendingGuard = rejectApplyDuringPendingEdits(runtime, "rename");
     if (pendingGuard) return pendingGuard;
   }
 
-  const result = await lspService.rename(requirePath(params), params.line, readColumn(params), params.newName);
+  const requestPath = requirePath(params);
+  const requestFileBefore = readCachedFileState(path.resolve(runtime.projectRoot, requestPath));
+  const result = await lspService.rename(requestPath, params.line, readColumn(params), params.newName);
+  const requestFileAfter = readCachedFileState(path.resolve(runtime.projectRoot, requestPath));
+  if (!sameCachedFileState(requestFileBefore, requestFileAfter)) {
+    return errorResult("textDocument/rename", `File changed while collecting rename edits: ${relativePath(runtime.projectRoot, requestFileAfter.filePath)}`, {
+      before: displayFileState(runtime.projectRoot, requestFileBefore),
+      after: displayFileState(runtime.projectRoot, requestFileAfter),
+    }, "Rerun textDocument/rename against the current file contents.");
+  }
   if (params.apply !== true) return rawOrPretty("textDocument/rename", params, result, runtime.projectRoot);
 
-  const applyResult = await applyWorkspaceEdit(result, runtime.projectRoot);
-  if (applyResult.applied) await resyncChangedFiles(lspService, applyResult.changedFiles, runtime);
+  const applyResult = await applyWorkspaceEdit(
+    result,
+    runtime.projectRoot,
+    workspaceEditApplyOptions(result, isRecord(result) ? result : {}, [requestFileAfter], runtime, lspService, mutationQueue),
+  );
+  if (applyResult.changedFiles.length > 0) await resyncChangedFiles(lspService, applyResult.changedFiles, runtime);
 
   const payload = {
     ok: applyResult.applied,
@@ -797,6 +855,33 @@ function validateCachedCodeAction(cached: CachedCodeAction, projectRoot: string)
   };
 }
 
+function workspaceEditApplyOptions(
+  edit: unknown,
+  source: Record<string, unknown>,
+  expected: CachedFileState[],
+  runtime: CodeFeedbackRuntime,
+  lspService: LspService,
+  mutationQueue: FileMutationQueue | undefined,
+): WorkspaceEditApplyOptions {
+  const targetFiles = workspaceEditTargetFiles(edit, runtime.projectRoot);
+  const expectedByPath = new Map<string, CachedFileState>();
+  for (const state of expected) expectedByPath.set(path.resolve(state.filePath), state);
+  if (targetFiles.ok) {
+    for (const filePath of targetFiles.files) {
+      const resolved = path.resolve(filePath);
+      if (!expectedByPath.has(resolved)) expectedByPath.set(resolved, readCachedFileState(resolved));
+    }
+  }
+
+  const serverId = typeof source[LSP_RESULT_SERVER_ID_KEY] === "string" ? source[LSP_RESULT_SERVER_ID_KEY] : undefined;
+  const serverSessionId = typeof source[LSP_RESULT_SERVER_SESSION_ID_KEY] === "string" ? source[LSP_RESULT_SERVER_SESSION_ID_KEY] : undefined;
+  return {
+    expectedFileStates: [...expectedByPath.values()],
+    getDocumentVersion: (filePath) => lspService.documentVersion(filePath, serverId, serverSessionId),
+    mutationQueue,
+  };
+}
+
 function dedupeFileStates(states: CachedFileState[]): CachedFileState[] {
   const byPath = new Map<string, CachedFileState>();
   for (const state of states) byPath.set(path.resolve(state.filePath), state);
@@ -804,15 +889,7 @@ function dedupeFileStates(states: CachedFileState[]): CachedFileState[] {
 }
 
 function readCachedFileState(filePath: string): CachedFileState {
-  const resolved = path.resolve(filePath);
-  const content = readUtf8IfExists(resolved);
-  if (content === undefined) return { filePath: resolved, exists: false };
-  return {
-    filePath: resolved,
-    exists: true,
-    sha256: createHash("sha256").update(content).digest("hex"),
-    bytes: Buffer.byteLength(content, "utf8"),
-  };
+  return readWorkspaceEditFileState(filePath);
 }
 
 function readEditTargetFileState(filePath: string, requestFile: CachedFileState): CachedFileState {
@@ -820,11 +897,7 @@ function readEditTargetFileState(filePath: string, requestFile: CachedFileState)
 }
 
 function sameCachedFileState(left: CachedFileState, right: CachedFileState): boolean {
-  return (
-    path.resolve(left.filePath) === path.resolve(right.filePath) &&
-    left.exists === right.exists &&
-    left.sha256 === right.sha256
-  );
+  return sameWorkspaceEditFileState(left, right);
 }
 
 function displayFileState(projectRoot: string, state: CachedFileState): Record<string, unknown> {
@@ -833,6 +906,7 @@ function displayFileState(projectRoot: string, state: CachedFileState): Record<s
     exists: state.exists,
     bytes: state.bytes,
     sha256: state.sha256 ? state.sha256.slice(0, 12) : undefined,
+    mode: state.mode === undefined ? undefined : state.mode.toString(8).padStart(3, "0"),
   };
 }
 

@@ -396,6 +396,55 @@ test("timed out LSP requests send a cancel notification", async () => {
   }
 });
 
+test("failed initialization kills the obsolete process and ignores its late events", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-initialize-retry-"));
+  const processLog = path.join(root, "processes.jsonl");
+  const client = new LspClient({
+    id: "python",
+    command: process.execPath,
+    args: [fakeServer, "py", "T100", "1", "", "initialize-delay-once-500", processLog],
+    extensions: [".py"],
+    languageId: () => "python",
+  }, root, { initializeTimeoutMs: 250 });
+
+  let firstPid;
+  try {
+    await assert.rejects(() => client.start(), /LSP request timed out: initialize/);
+
+    const firstLaunches = await waitForJsonLog(processLog, (entries) => entries.length >= 1);
+    firstPid = firstLaunches[0]?.pid;
+    assert.equal(typeof firstPid, "number");
+    assert.equal(firstLaunches[0]?.delayedInitialization, true);
+
+    await client.start();
+    const recovered = client.getStatus();
+    const recoveredSessionId = client.getSessionId();
+    assert.equal(recovered.state, "ready");
+    assert.equal(typeof recovered.pid, "number");
+    assert.notEqual(recovered.pid, firstPid);
+    assert.equal(typeof recoveredSessionId, "string");
+
+    const launches = await waitForJsonLog(processLog, (entries) => entries.length >= 2);
+    assert.equal(launches[1]?.pid, recovered.pid);
+    assert.equal(launches[1]?.delayedInitialization, false);
+
+    // The failed process ignores SIGTERM and emits a late initialize response
+    // before the forced kill. Neither event may mutate the recovered client.
+    await sleep(850);
+    assert.equal(isProcessRunning(firstPid), false);
+    assert.equal(client.getStatus().state, "ready");
+    assert.equal(client.getStatus().pid, recovered.pid);
+    assert.equal(client.getSessionId(), recoveredSessionId);
+    assert.deepEqual(await client.request("textDocument/hover", {}), {
+      contents: { kind: "plaintext", value: "py hover" },
+    });
+  } finally {
+    await client.shutdown();
+    if (typeof firstPid === "number" && isProcessRunning(firstPid)) process.kill(firstPid, "SIGKILL");
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("code actions for a Python file are merged from ty and Ruff clients", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-actions-"));
   const filePath = path.join(root, "probe.py");
@@ -574,4 +623,13 @@ async function readJsonLog(filePath) {
 
 function semanticTokenRequestCount(entries) {
   return entries.filter((entry) => entry.method === "textDocument/semanticTokens/full").length;
+}
+
+function isProcessRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
 }

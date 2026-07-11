@@ -6,6 +6,13 @@ const severity = Number.parseInt(process.argv[4] ?? "1", 10);
 const stderrMode = process.argv[5] ?? "";
 const mode = process.argv[6] ?? "diagnostics";
 const logPath = process.argv[7];
+const delayedFirstInitialization = claimDelayedFirstInitialization(mode, logPath);
+
+if (delayedFirstInitialization) {
+  // Exercise clients that must detach a failed process before its late output
+  // and forced exit events arrive. It ignores the graceful termination signal.
+  process.on("SIGTERM", () => undefined);
+}
 
 // Keep deterministic benchmark servers alive until the client sends `exit`.
 // Some Node versions do not keep a child process alive on a quiet stdin pipe.
@@ -52,7 +59,7 @@ function handleMessage(message) {
   }
 
   if (message.id !== undefined && message.method === "initialize") {
-    send({
+    const response = {
       jsonrpc: "2.0",
       id: message.id,
       result: {
@@ -72,7 +79,13 @@ function handleMessage(message) {
           } : undefined,
         },
       },
-    });
+    };
+    const delayMs = delayedFirstInitialization ? initializeDelayMs(mode) : 0;
+    if (delayMs > 0) {
+      setTimeout(() => send(response), delayMs);
+    } else {
+      send(response);
+    }
     if (mode === "configuration-log") {
       setImmediate(() => sendWorkspaceConfigurationRequest());
     }
@@ -102,7 +115,7 @@ function handleMessage(message) {
   }
 
   if (message.id !== undefined && message.method === "textDocument/rename") {
-    send({ jsonrpc: "2.0", id: message.id, result: renameEdit(message.params?.textDocument?.uri, message.params?.newName) });
+    send({ jsonrpc: "2.0", id: message.id, result: renameEdit(message.params?.textDocument?.uri, message.params?.newName, mode) });
     return;
   }
 
@@ -268,29 +281,37 @@ function editForUri(uri) {
   };
 }
 
-function renameEdit(uri, newName) {
+function renameEdit(uri, newName, serverMode) {
   if (typeof uri !== "string") return undefined;
   const text = typeof newName === "string" && newName.length > 0 ? newName : "renamed";
-  return {
-    changes: {
-      [uri]: [
-        {
-          range: {
-            start: { line: 0, character: 6 },
-            end: { line: 0, character: 13 },
-          },
-          newText: text,
-        },
-        {
-          range: {
-            start: { line: 1, character: 0 },
-            end: { line: 1, character: 7 },
-          },
-          newText: text,
-        },
-      ],
+  const edits = [
+    {
+      range: {
+        start: { line: 0, character: 6 },
+        end: { line: 0, character: 13 },
+      },
+      newText: text,
     },
-  };
+    {
+      range: {
+        start: { line: 1, character: 0 },
+        end: { line: 1, character: 7 },
+      },
+      newText: text,
+    },
+  ];
+  return serverMode === "rename-versioned"
+    ? {
+        documentChanges: [{
+          textDocument: { uri, version: 1 },
+          edits,
+        }],
+      }
+    : {
+        changes: {
+          [uri]: edits,
+        },
+      };
 }
 
 function hugeResult() {
@@ -362,6 +383,27 @@ function shouldLogSemanticTokens(value) {
 
 function shouldLogCancel(value) {
   return value === "cancel-log" || /^hover-delay-\d+$/.test(value);
+}
+
+function initializeDelayMs(value) {
+  const match = /^initialize-delay-once-(\d+)$/.exec(value);
+  return match ? Number.parseInt(match[1], 10) : 0;
+}
+
+function claimDelayedFirstInitialization(value, filePath) {
+  if (initializeDelayMs(value) <= 0 || typeof filePath !== "string" || filePath.length === 0) return false;
+
+  let first = false;
+  try {
+    const claim = fs.openSync(`${filePath}.initialize-claimed`, "wx");
+    fs.closeSync(claim);
+    first = true;
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+  }
+
+  fs.appendFileSync(filePath, `${JSON.stringify({ method: "process/start", pid: process.pid, delayedInitialization: first })}\n`, "utf8");
+  return first;
 }
 
 function send(message) {
