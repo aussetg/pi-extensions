@@ -4,7 +4,7 @@ import type { FormatService } from "../format/service.ts";
 import type { LspService } from "./service.ts";
 import { displayPathFromRoot, normalizeToolPath } from "../paths.ts";
 import { restartLsp, setProjectRoot, setProjectTrust, type CodeFeedbackRuntime } from "../runtime.ts";
-import { LSP_METHODS, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY, type LspMethod } from "../types.ts";
+import { LSP_METHODS, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY, type DiagnosticSnapshot, type LspMethod } from "../types.ts";
 import type { PiApi, PiToolResult } from "../pi.ts";
 import { renderLspMethodResult } from "./render.ts";
 import {
@@ -17,6 +17,7 @@ import {
 } from "./tool-output.ts";
 import { renderLspToolCall, renderLspToolResult } from "./tool-renderer.ts";
 import { isCancellation, throwIfAborted } from "./cancellation.ts";
+import { processAppliedLspFileMutations, type AppliedLspFileMutation } from "../events/tool-result.ts";
 import {
   applyWorkspaceEdit,
   canResolveCodeActionOnApply,
@@ -25,6 +26,7 @@ import {
   workspaceEditSummary,
   workspaceEditTargetFiles,
   type FileMutationQueue,
+  type AppliedWorkspaceEditChange,
   type WorkspaceEditApplyOptions,
   type WorkspaceEditFileState,
   type WorkspaceEditTargetFilesResult,
@@ -231,7 +233,7 @@ export function registerLspTool(
           return await handleRename(params, runtime, lspService, toolState, signal);
 
         case "workspaceEdit/apply":
-          return await handleWorkspaceEditApply(method, params, runtime, lspService, toolState, mutationQueue, signal);
+          return await handleWorkspaceEditApply(method, params, runtime, lspService, formatService, toolState, mutationQueue, signal);
 
         }
       } catch (error) {
@@ -498,6 +500,7 @@ async function handleWorkspaceEditApply(
   params: Record<string, unknown>,
   runtime: CodeFeedbackRuntime,
   lspService: LspService,
+  formatService: FormatService | undefined,
   state: LspToolState,
   mutationQueue: FileMutationQueue | undefined,
   signal?: AbortSignal,
@@ -535,20 +538,32 @@ async function handleWorkspaceEditApply(
     }, prepared.hint);
   }
 
+  const feedbackStartedAt = Date.now();
+  const targetFiles = workspaceEditTargetFiles(prepared.edit, runtime.projectRoot);
+  const beforeDiagnostics = new Map<string, DiagnosticSnapshot | undefined>();
+  if (targetFiles.ok) {
+    for (const filePath of targetFiles.files) {
+      beforeDiagnostics.set(path.resolve(filePath), lspService.cachedDiagnosticsIfKnown(filePath));
+    }
+  }
+  const appliedChanges: AppliedWorkspaceEditChange[] = [];
+
   const applyResult = await applyWorkspaceEdit(
     prepared.edit,
     runtime.projectRoot,
-    workspaceEditApplyOptions(
-      prepared.edit,
-      prepared.source,
-      [cached.requestFile, ...cached.editTargets],
-      runtime,
-      lspService,
-      mutationQueue,
-      signal,
-    ),
+    {
+      ...workspaceEditApplyOptions(
+        prepared.edit,
+        prepared.source,
+        [cached.requestFile, ...cached.editTargets],
+        runtime,
+        lspService,
+        mutationQueue,
+        signal,
+      ),
+      captureAppliedChanges: appliedChanges,
+    },
   );
-  if (applyResult.changedFiles.length > 0) await resyncChangedFiles(lspService, applyResult.changedFiles, runtime, signal);
 
   const payload = {
     ok: applyResult.applied,
@@ -561,11 +576,33 @@ async function handleWorkspaceEditApply(
     changedFiles: applyResult.changedFiles.map((filePath) => relativePath(runtime.projectRoot, filePath)),
     rejected: applyResult.rejected,
   };
-  return structuredResult(payload, {
+  const result = structuredResult(payload, {
     ...payload,
     ...prepared.details,
     applyResult,
   }, !applyResult.applied);
+  if (!applyResult.applied || appliedChanges.length === 0) return result;
+
+  const mutations: AppliedLspFileMutation[] = appliedChanges.map((change, index) => ({
+    id: `${id}:${index + 1}`,
+    filePath: change.filePath,
+    beforeContent: change.beforeContent,
+    afterAgentContent: change.afterContent,
+    beforeDiagnostics: beforeDiagnostics.get(path.resolve(change.filePath)),
+    startedAt: feedbackStartedAt,
+  }));
+  try {
+    return await processAppliedLspFileMutations(result, mutations, runtime, lspService, formatService, signal);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    runtime.lastError = message;
+    return {
+      ...result,
+      details: isRecord(result.details)
+        ? { ...result.details, codeFeedbackError: projectRelativeErrorMessage(message, runtime.projectRoot) }
+        : result.details,
+    };
+  }
 }
 
 async function handleRename(
@@ -911,22 +948,6 @@ function rejectApplyDuringPendingEdits(runtime: CodeFeedbackRuntime, label: stri
     true,
     { pendingEdits: runtime.pendingEdits.size },
   );
-}
-
-async function resyncChangedFiles(
-  lspService: LspService,
-  changedFiles: string[],
-  runtime: CodeFeedbackRuntime,
-  signal?: AbortSignal,
-): Promise<void> {
-  await Promise.all(changedFiles.slice(0, 20).map((filePath) => lspService.diagnosticsForFile(filePath, undefined, {
-    timeoutMs: runtime.config.diagnostics.timeoutMs,
-    settleMs: runtime.config.diagnostics.settleMs,
-    signal,
-  }).catch((error) => {
-    if (isCancellation(error, signal)) throw error;
-    return undefined;
-  })));
 }
 
 function hintForError(message: string): string | undefined {

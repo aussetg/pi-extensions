@@ -35,6 +35,13 @@ export interface WorkspaceEditApplyOptions {
   getDocumentVersion?: (filePath: string) => number | undefined;
   mutationQueue?: FileMutationQueue;
   signal?: AbortSignal;
+  captureAppliedChanges?: AppliedWorkspaceEditChange[];
+}
+
+export interface AppliedWorkspaceEditChange {
+  filePath: string;
+  beforeContent: string;
+  afterContent: string;
 }
 
 export type WorkspaceEditTargetFilesResult =
@@ -222,6 +229,14 @@ function applyCollectedWorkspaceEdit(
   }
 
   cleanupStagedFiles(staged);
+
+  options.captureAppliedChanges?.push(...planned
+    .filter((file) => file.changed)
+    .map((file) => ({
+      filePath: file.filePath,
+      beforeContent: file.before,
+      afterContent: file.after,
+    })));
 
   return {
     applied: true,

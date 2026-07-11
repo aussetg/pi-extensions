@@ -4,13 +4,13 @@ import { computeTouchedRanges } from "../diagnostics/ranges.ts";
 import { diagnosticSeverityRank, flattenDiagnosticSnapshot, readDiagnosticSnapshotFromDetails } from "../diagnostics/snapshots.ts";
 import { mapTouchedRangesThroughFormatting } from "../format/mapping.ts";
 import type { FormatService } from "../format/service.ts";
-import { formatBytes, readUtf8IfSmall, type ReadUtf8Result } from "../fs.ts";
+import { DEFAULT_TRACKED_FILE_MAX_BYTES, formatBytes, readUtf8IfSmall, type ReadUtf8Result } from "../fs.ts";
 import type { LspService } from "../lsp/service.ts";
 import { displayPathFromRoot, resolveInputPath, shouldTrackFile } from "../paths.ts";
 import { addTimingPhase, createTimingRecorder, type TimingRecorder } from "../perf.ts";
 import type { PiToolResult } from "../pi.ts";
 import { renderDelayedDiagnosticFeedback, renderInlineDiagnosticFeedback } from "../render.ts";
-import { discardPendingEditsForToolCall, enqueueDelayedFeedback, hasPendingEditForFile, recordCompletedEdit, takePendingEdit, takePendingEditById, type CodeFeedbackRuntime } from "../runtime.ts";
+import { discardPendingEditsForToolCall, enqueueDelayedFeedback, hasPendingEditForFile, nextWriteIndex, recordCompletedEdit, takePendingEdit, takePendingEditById, type CodeFeedbackRuntime } from "../runtime.ts";
 import {
   CODE_FEEDBACK_DETAILS_KEY,
   type CodeFeedbackEditDetails,
@@ -37,6 +37,136 @@ export interface ToolResultEvent {
 
 export interface ToolResultContext {
   cwd?: string;
+}
+
+export interface AppliedLspFileMutation {
+  id: string;
+  filePath: string;
+  beforeContent: string;
+  afterAgentContent: string;
+  beforeDiagnostics?: DiagnosticSnapshot;
+  startedAt?: number;
+}
+
+export async function processAppliedLspFileMutations(
+  result: PiToolResult,
+  mutations: readonly AppliedLspFileMutation[],
+  runtime: CodeFeedbackRuntime,
+  lspService?: LspService,
+  formatService?: FormatService,
+  signal?: AbortSignal,
+): Promise<PiToolResult> {
+  const completedEdits: CompletedEdit[] = [];
+  const timingsByEditId = new Map<string, TimingRecorder>();
+
+  for (const mutation of mutations) {
+    if (!shouldTrackFile(mutation.filePath, runtime.projectRoot)) continue;
+
+    const timing = createTimingRecorder();
+    const writeIndex = nextWriteIndex(runtime);
+    const skippedReason = appliedMutationSkippedReason(mutation);
+    if (skippedReason) {
+      lspService?.forgetFile(mutation.filePath);
+      const completed: CompletedEdit = {
+        id: mutation.id,
+        toolName: "lsp",
+        filePath: mutation.filePath,
+        beforeContent: mutation.beforeContent,
+        afterAgentContent: mutation.afterAgentContent,
+        afterContent: mutation.afterAgentContent,
+        touchedRanges: [],
+        turnIndex: runtime.turnIndex,
+        writeIndex,
+        startedAt: mutation.startedAt ?? Date.now(),
+        completedAt: Date.now(),
+        skippedReason,
+      };
+      completed.timing = timing.snapshot();
+      timing.measure("tool_result.record_completed", () => recordCompletedEdit(runtime, completed));
+      completed.timing = timing.snapshot();
+      completedEdits.push(completed);
+      timingsByEditId.set(completed.id, timing);
+      continue;
+    }
+
+    const rangeComputationResult = timing.measure("tool_result.touched_ranges", () => computeTouchedRanges({
+      filePath: mutation.filePath,
+      beforeContent: mutation.beforeContent,
+      afterContent: mutation.afterAgentContent,
+      toolName: "lsp",
+    }));
+    let touchedRanges = rangeComputationResult.ranges;
+
+    const formatter = await timing.measureAsync("tool_result.format", () => maybeFormatFile(
+      formatService,
+      runtime,
+      mutation.filePath,
+      mutation.afterAgentContent,
+      touchedRanges.length > 0,
+    ));
+    const finalContent = formatter?.finalContent ?? mutation.afterAgentContent;
+    if (formatter?.changed) {
+      touchedRanges = timing.measure("tool_result.format_map", () => mapTouchedRangesThroughFormatting(
+        mutation.filePath,
+        mutation.afterAgentContent,
+        finalContent,
+        touchedRanges,
+      ));
+    }
+
+    const completed: CompletedEdit = {
+      id: mutation.id,
+      toolName: "lsp",
+      filePath: mutation.filePath,
+      beforeContent: mutation.beforeContent,
+      afterAgentContent: mutation.afterAgentContent,
+      afterContent: finalContent,
+      touchedRanges,
+      turnIndex: runtime.turnIndex,
+      writeIndex,
+      startedAt: mutation.startedAt ?? Date.now(),
+      completedAt: Date.now(),
+      rangeComputation: rangeComputationResult.computation,
+      formatter: summarizeFormatter(formatter),
+    };
+
+    const afterRefresh = await timing.measureAsync("tool_result.after_diagnostics", () => captureAfterDiagnosticRefresh(
+      lspService,
+      mutation.filePath,
+      finalContent,
+      runtime,
+      signal,
+    ));
+    if (afterRefresh?.fresh) {
+      timing.measure("tool_result.filter_diagnostics", () => attachDiagnosticFilterFromSnapshots(
+        mutation.beforeDiagnostics,
+        completed,
+        runtime,
+        afterRefresh.snapshot,
+      ));
+    }
+    completed.timing = timing.snapshot();
+    timing.measure("tool_result.record_completed", () => recordCompletedEdit(runtime, completed));
+    completed.timing = timing.snapshot();
+    scheduleDelayedDiagnosticsIfNeeded(afterRefresh, lspService, runtime, completed, mutation.beforeDiagnostics, finalContent);
+    completedEdits.push(completed);
+    timingsByEditId.set(completed.id, timing);
+  }
+
+  return appendInlineFeedbackForEdits(result, completedEdits, runtime, timingsByEditId) ?? result;
+}
+
+function appliedMutationSkippedReason(mutation: AppliedLspFileMutation): string | undefined {
+  const beforeBytes = Buffer.byteLength(mutation.beforeContent, "utf8");
+  const afterBytes = Buffer.byteLength(mutation.afterAgentContent, "utf8");
+  const size = Math.max(beforeBytes, afterBytes);
+  if (size > DEFAULT_TRACKED_FILE_MAX_BYTES) {
+    return `skipped large file (${formatBytes(size)} > ${formatBytes(DEFAULT_TRACKED_FILE_MAX_BYTES)})`;
+  }
+  if (mutation.beforeContent.includes("\0") || mutation.afterAgentContent.includes("\0")) {
+    return "skipped binary file";
+  }
+  return undefined;
 }
 
 export async function handleToolResult(
@@ -339,6 +469,7 @@ async function captureAfterDiagnosticRefresh(
   filePath: string,
   content: string,
   runtime: CodeFeedbackRuntime,
+  signal?: AbortSignal,
 ): Promise<DiagnosticRefreshResult | undefined> {
   if (!lspService) return undefined;
   if (!runtime.config.lsp.enabled) return undefined;
@@ -346,6 +477,7 @@ async function captureAfterDiagnosticRefresh(
     timeoutMs: inlineDiagnosticTimeoutMs(runtime),
     settleMs: inlineDiagnosticSettleMs(runtime),
     snapshotScope: inlineDiagnosticSnapshotScope(runtime),
+    signal,
   });
 }
 

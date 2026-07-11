@@ -126,7 +126,7 @@ test("lsp code actions return stable ids and apply by id", async () => {
   const logPath = path.join(root, "lsp.jsonl");
   await writeFile(filePath, "import os\n", "utf8");
 
-  const { tool, service } = createRegisteredTool(root, "actions-resolve-log-require-diagnostics", logPath);
+  const { tool, service, runtime } = createRegisteredTool(root, "actions-resolve-log-require-diagnostics", logPath);
 
   try {
     const listResult = await tool.execute("lsp-1", {
@@ -158,6 +158,12 @@ test("lsp code actions return stable ids and apply by id", async () => {
     assert.equal(applyPayload.editCount, 1);
     assert.deepEqual(applyPayload.changedFiles, ["probe.py"]);
     assert.match(await readFile(filePath, "utf8"), /^# fixed by py\nimport os\n/);
+    assert.equal(runtime.completedEdits.length, 1);
+    assert.equal(runtime.completedEdits[0].toolName, "lsp");
+    assert.deepEqual(runtime.completedEdits[0].touchedRanges.map((range) => [range.startLine, range.endLine]), [[1, 1]]);
+    assert.match(applyResult.content[1].text, /touched diagnostics: 1 error/);
+    assert.match(applyResult.content[1].text, /py\/T100/);
+    assert.equal(applyResult.details.piCodeFeedback.edits[0].toolName, "lsp");
     const entries = await waitForJsonLog(logPath, (entries) => entries.some((entry) => entry.method === "codeAction/resolve"));
     assert.equal(entries.filter((entry) => entry.method === "codeAction/resolve").length, 1);
 
@@ -168,6 +174,59 @@ test("lsp code actions return stable ids and apply by id", async () => {
 
     assert.equal(secondApply.isError, true);
     assert.match(secondApply.content[0].text, /Unknown WorkspaceEdit id/);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("lsp WorkspaceEdit application runs formatting before inline diagnostics", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-format-"));
+  const filePath = path.join(root, "probe.py");
+  await writeFile(filePath, "import os\n", "utf8");
+
+  const formatService = {
+    configure() {},
+    async formatFile(target, content) {
+      const finalContent = `${content}# formatted\n`;
+      await writeFile(target, finalContent, "utf8");
+      return {
+        formatterName: "testfmt",
+        changed: true,
+        finalContent,
+        errors: [],
+        durationMs: 1,
+      };
+    },
+  };
+  const { tool, service, runtime } = createRegisteredTool(root, "actions-require-diagnostics", undefined, undefined, formatService);
+
+  try {
+    const preview = await tool.execute("lsp-1", {
+      method: "textDocument/codeAction",
+      path: "probe.py",
+      line: 1,
+      column: 1,
+    }, undefined, undefined, { cwd: root });
+    const id = JSON.parse(preview.content[0].text).actions[0].id;
+
+    const applied = await tool.execute("lsp-2", {
+      method: "workspaceEdit/apply",
+      id,
+    }, undefined, undefined, { cwd: root });
+
+    assert.equal(await readFile(filePath, "utf8"), "# fixed by py\nimport os\n# formatted\n");
+    assert.match(applied.content[1].text, /formatted: probe\.py with testfmt/);
+    assert.match(applied.content[1].text, /touched diagnostics: 1 error/);
+    assert.equal(runtime.completedEdits[0].formatter.changed, true);
+    assert.equal(runtime.completedEdits[0].afterAgentContent, "# fixed by py\nimport os\n");
+    assert.equal(runtime.completedEdits[0].afterContent, "# fixed by py\nimport os\n# formatted\n");
+    const rendered = renderLspToolResult(applied, { expanded: false }, {
+      fg: (_color, text) => text,
+      bold: (text) => text,
+    }, { args: { method: "workspaceEdit/apply" } }).render(500).join("\n");
+    assert.match(rendered, /pi-code-feedback:/);
+    assert.match(rendered, /py\/T100/);
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });
@@ -639,10 +698,10 @@ async function readJsonLog(filePath) {
   }
 }
 
-function createRegisteredTool(root, mode = "actions-require-diagnostics", logPath = undefined, mutationQueue = undefined) {
+function createRegisteredTool(root, mode = "actions-require-diagnostics", logPath = undefined, mutationQueue = undefined, formatService = undefined) {
   const runtime = createRuntime(createDefaultConfig());
   setProjectRoot(runtime, root);
-  runtime.config.autoFormat = false;
+  runtime.config.autoFormat = formatService !== undefined;
   runtime.config.lsp.servers = {
     python: {
       command: process.execPath,
@@ -663,7 +722,7 @@ function createRegisteredTool(root, mode = "actions-require-diagnostics", logPat
       tool = definition;
     },
     registerCommand() {},
-  }, runtime, service, undefined, mutationQueue);
+  }, runtime, service, formatService, mutationQueue);
 
   assert.ok(tool);
   return { runtime, service, tool };

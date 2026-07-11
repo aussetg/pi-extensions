@@ -46,40 +46,63 @@ export function renderLspToolResult(result: ToolResultLike, options: RenderOptio
   if (options.isPartial) return linesComponent([fg(theme, "warning", "LSP request running…")]);
 
   const text = textContent(result);
+  const feedback = additionalTextContent(result);
   const details = objectDetails(result.details);
   const method = typeof details?.method === "string" ? details.method : displayMethod(context.args ?? {});
   const truncation = details?.truncation as LspToolTruncation | undefined;
+  const hasCodeFeedback = objectDetails(details?.piCodeFeedback) !== undefined;
+  let rendered: ComponentLike;
 
-  if (context.isError || result.isError || details?.ok === false || parseJson(text)?.ok === false) return renderError(text, theme, options.expanded === true, details);
-  if (details?.raw === true) return renderRawPayload(method, text, theme, options.expanded === true, truncation);
-
-  switch (method) {
-    case "server/status":
-      return renderStatus(text, theme, options.expanded === true, truncation);
-    case "server/capabilities":
-      return renderCapabilities(text, theme, options.expanded === true, truncation);
-    case "textDocument/diagnostic":
-    case "workspace/diagnostic":
-      return renderDiagnostics(text, theme, options.expanded === true, truncation);
-    case "textDocument/hover":
-      return renderHover(text, theme, options.expanded === true, truncation, context);
-    case "textDocument/definition":
-    case "textDocument/references":
-    case "textDocument/implementation":
-    case "textDocument/typeDefinition":
-      return renderLocationLike(text, theme, options.expanded === true, truncation);
-    case "textDocument/documentSymbol":
-    case "workspace/symbol":
-      return renderSymbolLike(text, theme, options.expanded === true, truncation);
-    case "textDocument/codeAction":
-      return renderCodeActions(text, theme, options.expanded === true, truncation, context);
-    case "textDocument/rename":
-      return renderWorkspaceEditPreview(text, theme, options.expanded === true, truncation, context);
-    case "workspaceEdit/apply":
-      return renderApplyJson(text, theme, options.expanded === true, truncation, context);
-    default:
-      return renderGeneric(text, theme, options.expanded === true, truncation, context);
+  if (details?.ok === false || parseJson(text)?.ok === false || ((context.isError || result.isError) && !hasCodeFeedback)) {
+    rendered = renderError(text, theme, options.expanded === true, details);
+  } else if (details?.raw === true) {
+    rendered = renderRawPayload(method, text, theme, options.expanded === true, truncation);
+  } else {
+    switch (method) {
+      case "server/status":
+        rendered = renderStatus(text, theme, options.expanded === true, truncation);
+        break;
+      case "server/capabilities":
+        rendered = renderCapabilities(text, theme, options.expanded === true, truncation);
+        break;
+      case "textDocument/diagnostic":
+      case "workspace/diagnostic":
+        rendered = renderDiagnostics(text, theme, options.expanded === true, truncation);
+        break;
+      case "textDocument/hover":
+        rendered = renderHover(text, theme, options.expanded === true, truncation, context);
+        break;
+      case "textDocument/definition":
+      case "textDocument/references":
+      case "textDocument/implementation":
+      case "textDocument/typeDefinition":
+        rendered = renderLocationLike(text, theme, options.expanded === true, truncation);
+        break;
+      case "textDocument/documentSymbol":
+      case "workspace/symbol":
+        rendered = renderSymbolLike(text, theme, options.expanded === true, truncation);
+        break;
+      case "textDocument/codeAction":
+        rendered = renderCodeActions(text, theme, options.expanded === true, truncation, context);
+        break;
+      case "textDocument/rename":
+        rendered = renderWorkspaceEditPreview(text, theme, options.expanded === true, truncation, context);
+        break;
+      case "workspaceEdit/apply":
+        rendered = renderApplyJson(text, theme, options.expanded === true, truncation, context);
+        break;
+      default:
+        rendered = renderGeneric(text, theme, options.expanded === true, truncation, context);
+    }
   }
+
+  if (!feedback) return rendered;
+  return appendComponent(rendered, linesComponent(styleContentLines(
+    feedback,
+    theme,
+    undefined,
+    options.expanded ? EXPANDED_MAX_LINES : COLLAPSED_MAX_LINES,
+  )));
 }
 
 function renderStatus(text: string, theme: ThemeLike, expanded: boolean, truncation?: LspToolTruncation): ComponentLike {
@@ -302,6 +325,15 @@ function textContent(result: ToolResultLike): string {
   return first?.text ?? "";
 }
 
+function additionalTextContent(result: ToolResultLike): string | undefined {
+  const texts = result.content
+    ?.filter((entry): entry is { type: string; text: string } => entry.type === "text" && typeof entry.text === "string")
+    .slice(1)
+    .map((entry) => entry.text)
+    .filter(Boolean);
+  return texts && texts.length > 0 ? texts.join("\n\n") : undefined;
+}
+
 function objectDetails(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null ? value as Record<string, unknown> : undefined;
 }
@@ -324,5 +356,17 @@ function linesComponent(lines: string[]): ComponentLike {
       return lines.map((line) => truncateToWidth(line, Math.max(1, width), "…"));
     },
     invalidate() {},
+  };
+}
+
+function appendComponent(first: ComponentLike, second: ComponentLike): ComponentLike {
+  return {
+    render(width: number) {
+      return [...first.render(width), ...second.render(width)];
+    },
+    invalidate() {
+      first.invalidate();
+      second.invalidate();
+    },
   };
 }

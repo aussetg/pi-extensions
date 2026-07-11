@@ -65,7 +65,7 @@ export type DiagnosticLinkReason =
   | "cascade-related"
   | "all-diagnostics";
 
-export type TrackedToolName = "write" | "edit" | "apply_patch";
+export type TrackedToolName = "write" | "edit" | "apply_patch" | "lsp";
 
 export interface Position {
   line: number;      // 1-based externally
