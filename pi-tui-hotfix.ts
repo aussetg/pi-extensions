@@ -6,11 +6,14 @@ import { Box } from "@earendil-works/pi-tui";
 const BOX_RENDER_PATCH = Symbol.for("pi-tui-hotfix.box-render-cache");
 const GPT5_THINKING_PATCH = Symbol.for("pi-tui-hotfix.gpt5-thinking-placeholders");
 const STREAMING_ASSISTANT_MESSAGES = new WeakSet<object>();
+const EMPTY_REASONING_SENTINELS = ["<!-- -->", "<!-- />"] as const;
 
-// GPT-5 occasionally emits a reasoning-summary part whose entire body is this
-// sentinel. Match Codex and drop the whole part, including its status heading.
+// GPT-5 occasionally emits a reasoning-summary part whose entire body is one
+// of these empty sentinels. Match Codex and drop the whole part, including its
+// status heading. The self-closing variant is malformed HTML, but GPT-5.6 does
+// emit it in practice.
 const EMPTY_REASONING_PART_RE =
-	/(^|\n)(?:\*\*[^\r\n*][^\r\n]*?\*\*[ \t]*\r?\n(?:[ \t]*\r?\n)?)?<!-- -->[ \t]*(?=\r?\n|$)/g;
+	/(^|\n)(?:\*\*[^\r\n*][^\r\n]*?\*\*[ \t]*\r?\n(?:[ \t]*\r?\n)?)?<!-- (?:--|\/)>[ \t]*(?=\r?\n|$)/g;
 
 type BoxLike = {
 	children: Array<{ render(width: number): string[] }>;
@@ -139,7 +142,7 @@ function couldBecomeEmptyReasoningPart(part: string): boolean {
 	if (close === 0) return false;
 
 	const body = afterOpen.slice(close + 2).trim();
-	return body.length === 0 || "<!-- -->".startsWith(body);
+	return body.length === 0 || EMPTY_REASONING_SENTINELS.some((sentinel) => sentinel.startsWith(body));
 }
 
 function patchBoxRenderCache(): void {
