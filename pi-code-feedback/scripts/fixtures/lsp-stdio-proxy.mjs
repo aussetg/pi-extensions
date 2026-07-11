@@ -82,7 +82,6 @@ function summarizeMessage(direction, bodyBytes, message) {
   const textDocument = isRecord(params?.textDocument) ? params.textDocument : undefined;
   const contentChanges = Array.isArray(params?.contentChanges) ? params.contentChanges : [];
   const error = isRecord(message.error) ? message.error : undefined;
-  const result = isRecord(message.result) ? message.result : undefined;
   const id = typeof message.id === "number" || typeof message.id === "string" ? message.id : undefined;
   const method = typeof message.method === "string" ? message.method : undefined;
   const requestMethod = direction === "server-to-client" && id !== undefined ? pendingMethods.get(id) : undefined;
@@ -99,8 +98,6 @@ function summarizeMessage(direction, bodyBytes, message) {
     cancelRequestId: message.method === "$/cancelRequest" && (typeof params?.id === "number" || typeof params?.id === "string") ? params.id : undefined,
     errorCode: typeof error?.code === "number" ? error.code : undefined,
     errorMessage: typeof error?.message === "string" ? error.message : undefined,
-    resultDataCount: Array.isArray(result?.data) ? result.data.length : undefined,
-    resultId: typeof result?.resultId === "string" ? result.resultId : undefined,
     uri: typeof textDocument?.uri === "string" ? textDocument.uri : undefined,
     version: typeof textDocument?.version === "number" ? textDocument.version : undefined,
     paramsTextBytes: textBytes(params?.text),

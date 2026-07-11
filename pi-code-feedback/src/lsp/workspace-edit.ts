@@ -77,11 +77,6 @@ interface CollectedWorkspaceEdit {
 
 const localMutationQueues = new Map<string, Promise<void>>();
 
-export function isWorkspaceEdit(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  return isRecord(value.changes) || Array.isArray(value.documentChanges);
-}
-
 export function workspaceEditSummary(value: unknown): { files: number; edits: number; resourceOperations: number } {
   const grouped = collectTextEdits(value, process.cwd(), { validateProjectRoot: false });
   if (!grouped.ok) {
@@ -411,40 +406,6 @@ export function canResolveCodeActionOnApply(action: Record<string, unknown>): bo
     typeof action[LSP_RESULT_SERVER_ID_KEY] === "string" &&
     typeof action[LSP_RESULT_SERVER_SESSION_ID_KEY] === "string" &&
     action[LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY] === true;
-}
-
-export function selectCodeActionForApply(actions: unknown, query: unknown): { action?: Record<string, unknown>; error?: string; candidates: Record<string, unknown>[] } {
-  const all = Array.isArray(actions) ? actions.filter(isRecord) : [];
-  const withEdits = all.filter((action) => isWorkspaceEdit(action.edit) || canResolveCodeActionOnApply(action));
-  const queryText = typeof query === "string" ? query.trim().toLowerCase() : "";
-  const candidates = queryText.length > 0 ? withEdits.filter((action) => codeActionMatches(action, queryText)) : withEdits;
-
-  if (candidates.length === 0) {
-    return {
-      candidates: withEdits,
-      error: queryText.length > 0
-        ? `No code action with a WorkspaceEdit or resolvable edit matched query "${query}".`
-        : "No returned code action contains or can resolve a WorkspaceEdit that pi-code-feedback can apply safely.",
-    };
-  }
-
-  if (candidates.length === 1) return { action: candidates[0], candidates };
-
-  const preferred = candidates.filter((action) => action.isPreferred === true);
-  if (preferred.length === 1) return { action: preferred[0], candidates };
-
-  return {
-    candidates,
-    error: "Multiple applicable code actions matched. Pass query with part of the desired action title/kind.",
-  };
-}
-
-function codeActionMatches(action: Record<string, unknown>, query: string): boolean {
-  const haystack = [action.title, action.kind, action.command]
-    .concat(action[LSP_RESULT_SERVER_ID_KEY])
-    .map((value) => (typeof value === "string" ? value.toLowerCase() : ""))
-    .join("\n");
-  return haystack.includes(query);
 }
 
 function collectTextEdits(

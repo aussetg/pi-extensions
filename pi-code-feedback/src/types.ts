@@ -1,23 +1,3 @@
-export const LSP_ACTIONS = [
-  "status",
-  "diagnostics",
-  "hover",
-  "definition",
-  "references",
-  "implementation",
-  "type_definition",
-  "symbols",
-  "workspace_symbols",
-  "semantic_tokens",
-  "code_actions",
-  "rename",
-  "capabilities",
-  "reload",
-  "request",
-] as const;
-
-export type LspAction = (typeof LSP_ACTIONS)[number];
-
 export const LSP_METHODS = [
   "server/status",
   "server/capabilities",
@@ -31,11 +11,9 @@ export const LSP_METHODS = [
   "textDocument/typeDefinition",
   "textDocument/documentSymbol",
   "workspace/symbol",
-  "textDocument/semanticTokens",
   "textDocument/codeAction",
   "codeAction/apply",
   "textDocument/rename",
-  "raw/request",
 ] as const;
 
 export type LspMethod = (typeof LSP_METHODS)[number];
@@ -182,35 +160,6 @@ export interface LspServiceStatus {
     running: number;
     queued: number;
   };
-}
-
-export type SemanticTokenOverlayState = "ready" | "refreshing" | "unsupported" | "error";
-
-export interface SemanticTokenLegend {
-  tokenTypes: string[];
-  tokenModifiers: string[];
-}
-
-export interface SemanticToken {
-  line: number;      // 0-based, matching LSP semantic-token coordinates
-  character: number; // 0-based UTF-16 character offset
-  length: number;
-  type: string;
-  modifiers: string[];
-}
-
-export interface SemanticTokenOverlay {
-  serverId: string;
-  uri: string;
-  version: number;
-  state: SemanticTokenOverlayState;
-  stale: boolean;
-  tokens: SemanticToken[];
-  legend?: SemanticTokenLegend;
-  resultId?: string;
-  requestedAt?: number;
-  receivedAt?: number;
-  error?: string;
 }
 
 export interface LinkedDiagnostic {

@@ -69,14 +69,6 @@ function handleMessage(message) {
           codeActionProvider: codeActionProviderCapability(mode),
           hoverProvider: true,
           renameProvider: true,
-          semanticTokensProvider: semanticTokensEnabled(mode) ? {
-            legend: {
-              tokenTypes: ["variable", "class", "function"],
-              tokenModifiers: ["declaration", "readonly"],
-            },
-            full: true,
-            range: false,
-          } : undefined,
         },
       },
     };
@@ -137,37 +129,6 @@ function handleMessage(message) {
     const delayMs = hoverDelayMs(mode);
     if (delayMs > 0) setTimeout(() => send(response), delayMs);
     else send(response);
-    return;
-  }
-
-  if (message.id !== undefined && message.method === "textDocument/semanticTokens/full") {
-    if (semanticTokensEnabled(mode)) {
-      if (shouldLogSemanticTokens(mode)) log({ method: message.method, params: message.params });
-      const response = {
-        jsonrpc: "2.0",
-        id: message.id,
-        result: {
-          resultId: "fake-semantic-1",
-          data: mode === "semantic-malformed-position" ? [
-            -1, 0, 5, 0, 1,
-          ] : [
-            0, 0, 5, 0, 1,
-            0, 8, 3, 1, 0,
-            1, 2, 4, 2, 0,
-          ],
-        },
-      };
-      const delayMs = semanticTokensDelayMs(mode);
-      if (delayMs > 0) setTimeout(() => send(response), delayMs);
-      else send(response);
-      return;
-    }
-    send({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "semantic tokens disabled" } });
-    return;
-  }
-
-  if (message.id !== undefined && message.method === "fake/huge") {
-    send({ jsonrpc: "2.0", id: message.id, result: hugeResult() });
     return;
   }
 
@@ -325,17 +286,6 @@ function renameEdit(uri, newName, serverMode) {
       };
 }
 
-function hugeResult() {
-  return {
-    blob: "z".repeat(100_000),
-    items: Array.from({ length: 1000 }, (_, index) => ({
-      index,
-      label: `fake huge ${index}`,
-      text: "w".repeat(1000),
-    })),
-  };
-}
-
 function publishDiagnostics(uri, version) {
   if (typeof uri !== "string") return;
   if (mode === "no-diagnostics") return;
@@ -389,19 +339,6 @@ function diagnosticDelayMs(value) {
 function hoverDelayMs(value) {
   const match = /^hover-delay-(\d+)$/.exec(value);
   return match ? Number.parseInt(match[1], 10) : 0;
-}
-
-function semanticTokensDelayMs(value) {
-  const match = /^semantic-delay-(\d+)$/.exec(value);
-  return match ? Number.parseInt(match[1], 10) : 0;
-}
-
-function semanticTokensEnabled(value) {
-  return value === "semantic-log" || value === "semantic-malformed-position" || /^semantic-delay-\d+$/.test(value);
-}
-
-function shouldLogSemanticTokens(value) {
-  return semanticTokensEnabled(value);
 }
 
 function shouldLogCancel(value) {

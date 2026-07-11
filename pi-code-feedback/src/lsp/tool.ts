@@ -4,9 +4,9 @@ import type { FormatService } from "../format/service.ts";
 import type { LspService } from "./service.ts";
 import { displayPathFromRoot, normalizeToolPath } from "../paths.ts";
 import { restartLsp, setProjectRoot, setProjectTrust, type CodeFeedbackRuntime } from "../runtime.ts";
-import { LSP_ACTIONS, LSP_METHODS, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY, type LspAction, type LspMethod } from "../types.ts";
+import { LSP_METHODS, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY, type LspMethod } from "../types.ts";
 import type { PiApi, PiToolResult } from "../pi.ts";
-import { renderCodeActionApplySelectionError, renderLspActionResult, renderWorkspaceEditApplyResult } from "./render.ts";
+import { renderLspMethodResult } from "./render.ts";
 import {
   formatLspToolJson,
   limitLspToolDetails,
@@ -22,7 +22,6 @@ import {
   canResolveCodeActionOnApply,
   readWorkspaceEditFileState,
   sameWorkspaceEditFileState,
-  selectCodeActionForApply,
   workspaceEditSummary,
   workspaceEditTargetFiles,
   type FileMutationQueue,
@@ -97,7 +96,7 @@ export function registerLspTool(
     name: "lsp",
     label: "LSP",
     description: "LSP-lite language-server tool: real LSP method names, flat path/line/column inputs, 1-based positions. Formatting is intentionally not part of this tool.",
-    promptSnippet: "Inspect LSP status/capabilities, diagnostics, navigation, semantic tokens, code actions, and renames for source files.",
+    promptSnippet: "Inspect LSP status/capabilities, diagnostics, navigation, code actions, and renames for source files.",
     promptGuidelines: [
       "Use lsp with method=\"server/status\" when language-server feedback seems missing or stale.",
       "Use lsp with real LSP method names such as method=\"textDocument/hover\", method=\"textDocument/definition\", and method=\"workspace/symbol\"; line and column are 1-based.",
@@ -134,7 +133,6 @@ export function registerLspTool(
       if (!method) {
         return errorResult(undefined, parsed.error ?? "lsp requires method", {
           validMethods: LSP_METHODS,
-          legacyActions: LSP_ACTIONS,
         });
       }
 
@@ -159,7 +157,6 @@ export function registerLspTool(
           return textResult(renderCapabilities(runtime, lspService.getStatus(), await lspService.capabilities(readPath(params), signal)), false, {
             clients: lspService.getStatus().clients,
             implementedMethods: LSP_METHODS,
-            legacyActions: LSP_ACTIONS,
           });
 
         case "textDocument/diagnostic":
@@ -203,25 +200,15 @@ export function registerLspTool(
         case "workspace/symbol":
           return rawOrPretty(method, params, await lspService.workspaceSymbols(params.query, readPath(params), signal), runtime.projectRoot);
 
-        case "textDocument/semanticTokens":
-          return rawOrPretty(method, params, await lspService.semanticTokens(requirePath(params), {
-            waitMs: readNonNegativeNumber(params.waitMs),
-            timeoutMs: readNonNegativeNumber(params.timeoutMs),
-            forceRefresh: params.refresh === true,
-            signal,
-          }), runtime.projectRoot);
-
         case "textDocument/codeAction":
-          return await handleCodeActions(method, params, runtime, lspService, toolState, mutationQueue, signal);
+          return await handleCodeActions(method, params, runtime, lspService, toolState, signal);
 
         case "codeAction/apply":
           return await handleCodeActionApply(method, params, runtime, lspService, toolState, mutationQueue, signal);
 
         case "textDocument/rename":
-          return await handleRename(params, runtime, lspService, mutationQueue, signal);
+          return await handleRename(params, runtime, lspService, signal);
 
-        case "raw/request":
-          return rawOrPretty(method, params, await lspService.rawRequest(readPath(params), params.request, params.params, signal), runtime.projectRoot);
         }
       } catch (error) {
         if (isCancellation(error, signal)) throw error;
@@ -236,12 +223,8 @@ export function registerLspTool(
 const LspToolParameters = {
   type: "object",
   additionalProperties: false,
+  required: ["method"],
   properties: {
-    action: {
-      type: "string",
-      enum: LSP_ACTIONS,
-      description: "Deprecated compatibility alias. Prefer method with LSP names like textDocument/hover.",
-    },
     method: {
       type: "string",
       enum: LSP_METHODS,
@@ -249,25 +232,13 @@ const LspToolParameters = {
     },
     path: { type: "string", description: "File path for file-scoped LSP actions." },
     line: { type: "number", minimum: 1, multipleOf: 1, description: "1-based line for position-scoped LSP actions." },
-    column: { type: "number", minimum: 1, multipleOf: 1, description: "1-based column for position-scoped LSP actions. Preferred over legacy character." },
-    character: { type: "number", minimum: 1, multipleOf: 1, description: "Legacy 1-based column alias." },
-    query: { type: "string", description: "Search query for workspace/symbol, or legacy title/kind substring to select a code action when apply:true." },
+    column: { type: "number", minimum: 1, multipleOf: 1, description: "1-based column for position-scoped LSP actions." },
+    query: { type: "string", description: "Search query for workspace/symbol." },
     id: { type: "string", description: "Stable id returned by textDocument/codeAction; required for codeAction/apply." },
     newName: { type: "string", description: "New symbol name for rename." },
-    apply: { type: "boolean", description: "Legacy shortcut: apply safe text edits for rename or a query-selected code action. Prefer codeAction/apply with id." },
-    all: { type: "boolean", description: "Legacy diagnostics flag. Explicit diagnostic methods already return unfiltered diagnostics for the requested target." },
     raw: { type: "boolean", description: "Return raw LSP-ish payloads when useful for debugging." },
-    waitMs: { type: "number", description: "Milliseconds to wait for lazy semantic tokens before returning cached/stale overlay state." },
-    timeoutMs: { type: "number", description: "Request timeout in milliseconds for semantic token refreshes." },
-    refresh: { type: "boolean", description: "Force a semantic token refresh even when cached tokens match the current document version." },
-    request: { type: "string", description: "Raw LSP request method for method=raw/request." },
-    params: { description: "Raw LSP request params for method=raw/request." },
   },
 } satisfies Record<string, unknown>;
-
-function parseAction(value: unknown): LspAction | undefined {
-  return typeof value === "string" && (LSP_ACTIONS as readonly string[]).includes(value) ? (value as LspAction) : undefined;
-}
 
 function parseMethod(value: unknown): LspMethod | undefined {
   return typeof value === "string" && (LSP_METHODS as readonly string[]).includes(value) ? (value as LspMethod) : undefined;
@@ -280,48 +251,7 @@ function parseToolMethod(params: Record<string, unknown>): ParsedLspMethod {
     return { error: `Unknown lsp method: ${String(params.method)}` };
   }
 
-  const action = parseAction(params.action);
-  if (action) return { method: legacyActionToMethod(action, params) };
-  if (params.action !== undefined) {
-    return { error: `Unknown legacy lsp action: ${String(params.action)}` };
-  }
-
   return { error: "lsp requires method. Example: method=\"server/status\" or method=\"textDocument/hover\"." };
-}
-
-function legacyActionToMethod(action: LspAction, params: Record<string, unknown>): LspMethod {
-  switch (action) {
-    case "status":
-      return "server/status";
-    case "capabilities":
-      return "server/capabilities";
-    case "reload":
-      return "server/reload";
-    case "diagnostics":
-      return params.all === true || !readPath(params) ? "workspace/diagnostic" : "textDocument/diagnostic";
-    case "hover":
-      return "textDocument/hover";
-    case "definition":
-      return "textDocument/definition";
-    case "references":
-      return "textDocument/references";
-    case "implementation":
-      return "textDocument/implementation";
-    case "type_definition":
-      return "textDocument/typeDefinition";
-    case "symbols":
-      return "textDocument/documentSymbol";
-    case "workspace_symbols":
-      return "workspace/symbol";
-    case "semantic_tokens":
-      return "textDocument/semanticTokens";
-    case "code_actions":
-      return "textDocument/codeAction";
-    case "rename":
-      return "textDocument/rename";
-    case "request":
-      return "raw/request";
-  }
 }
 
 function textResult(text: string, isError = false, details?: unknown): PiToolResult {
@@ -403,7 +333,7 @@ async function diagnosticsSnapshot(
   lspService: LspService,
   signal?: AbortSignal,
 ) {
-  if (method === "workspace/diagnostic" || params.all === true) return lspService.cachedDiagnostics("all");
+  if (method === "workspace/diagnostic") return lspService.cachedDiagnostics("all");
   const filePath = requirePath(params);
   if (!runtime.config.enabled || !runtime.config.lsp.enabled) return lspService.cachedDiagnostics(filePath);
   return (await lspService.diagnosticsForFile(filePath, undefined, {
@@ -415,7 +345,7 @@ async function diagnosticsSnapshot(
 }
 
 function diagnosticsTarget(method: LspMethod, params: Record<string, unknown>): string {
-  if (method === "workspace/diagnostic" || params.all === true) return "all";
+  if (method === "workspace/diagnostic") return "all";
   return requirePath(params);
 }
 
@@ -449,7 +379,7 @@ function readPath(params: Record<string, unknown>): string | undefined {
 }
 
 function readColumn(params: Record<string, unknown>): unknown {
-  return params.column ?? params.character;
+  return params.column;
 }
 
 function methodRequiresEnabledLsp(method: LspMethod, params: Record<string, unknown>): boolean {
@@ -476,14 +406,9 @@ function requirePath(params: Record<string, unknown>): string {
   return filePath;
 }
 
-function readNonNegativeNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
-}
-
 function rawOrPretty(method: LspMethod, params: Record<string, unknown>, result: unknown, projectRoot: string): PiToolResult {
-  const action = methodToRenderAction(method);
   const raw = params.raw === true;
-  const rendered = raw ? formatLspToolJson(result) : renderLspResult(action, result, projectRoot);
+  const rendered = raw ? formatLspToolJson(result) : renderLspResult(method, result, projectRoot);
   const limited = limitLspToolText(rendered.text);
   return {
     content: [{ type: "text", text: limited.text }],
@@ -497,37 +422,8 @@ function rawOrPretty(method: LspMethod, params: Record<string, unknown>, result:
   };
 }
 
-function methodToRenderAction(method: LspMethod): LspAction | undefined {
-  switch (method) {
-    case "textDocument/hover":
-      return "hover";
-    case "textDocument/definition":
-      return "definition";
-    case "textDocument/references":
-      return "references";
-    case "textDocument/implementation":
-      return "implementation";
-    case "textDocument/typeDefinition":
-      return "type_definition";
-    case "textDocument/documentSymbol":
-      return "symbols";
-    case "workspace/symbol":
-      return "workspace_symbols";
-    case "textDocument/semanticTokens":
-      return "semantic_tokens";
-    case "textDocument/codeAction":
-      return "code_actions";
-    case "textDocument/rename":
-      return "rename";
-    default:
-      return undefined;
-  }
-}
-
-function renderLspResult(action: LspAction | undefined, result: unknown, projectRoot: string): RenderedLspText {
-  if (action) return { text: renderLspActionResult(action, result, projectRoot || process.cwd()) };
-  if (result === null || result === undefined) return { text: "No LSP result." };
-  return formatLspToolJson(result);
+function renderLspResult(method: LspMethod, result: unknown, projectRoot: string): RenderedLspText {
+  return { text: renderLspMethodResult(method, result, projectRoot || process.cwd()) };
 }
 
 async function handleCodeActions(
@@ -536,15 +432,9 @@ async function handleCodeActions(
   runtime: CodeFeedbackRuntime,
   lspService: LspService,
   state: LspToolState,
-  mutationQueue: FileMutationQueue | undefined,
   signal?: AbortSignal,
 ): Promise<PiToolResult> {
   throwIfAborted(signal);
-  if (params.apply === true) {
-    const pendingGuard = rejectApplyDuringPendingEdits(runtime, "code action");
-    if (pendingGuard) return pendingGuard;
-  }
-
   const filePath = requirePath(params);
   const requestFileStateBefore = readCachedFileState(path.resolve(runtime.projectRoot, filePath));
   const column = readColumn(params);
@@ -559,48 +449,23 @@ async function handleCodeActions(
   }
   if (params.raw === true) return rawOrPretty(method, params, result, runtime.projectRoot);
 
-  if (params.apply !== true) {
-    const actions = Array.isArray(result) ? result.filter(isRecord) : [];
-    const summaries = actions.map((action) => cacheCodeAction(state, runtime.projectRoot, action, requestFileStateAfter));
-    return structuredResult({
-      ok: true,
-      method,
-      path: filePath,
-      line: typeof params.line === "number" ? params.line : undefined,
-      column: typeof column === "number" ? column : undefined,
-      actions: summaries,
-      hint: summaries.some((action) => action.applyable)
-        ? "Apply one with method=\"codeAction/apply\" and id."
-        : undefined,
-    }, {
-      ok: true,
-      method,
-      actions: summaries,
-      result,
-    });
-  }
-
-  const selection = selectCodeActionForApply(result, params.query);
-  if (!selection.action) {
-    return textResult(renderCodeActionApplySelectionError(selection.error ?? "No code action selected.", selection.candidates), true, {
-      result,
-      candidates: selection.candidates,
-    });
-  }
-
-  const prepared = await prepareCodeActionForApply(selection.action, filePath, runtime, lspService, "selected code action", signal);
-  if (!prepared.ok) return errorResult(method, prepared.error, prepared.details, prepared.hint);
-
-  const applyResult = await applyWorkspaceEdit(
-    prepared.action.edit,
-    runtime.projectRoot,
-    workspaceEditApplyOptions(prepared.action.edit, prepared.action, [requestFileStateAfter], runtime, lspService, mutationQueue, signal),
-  );
-  if (applyResult.changedFiles.length > 0) await resyncChangedFiles(lspService, applyResult.changedFiles, runtime, signal);
-  const title = prepared.title;
-  return textResult(renderWorkspaceEditApplyResult(applyResult, runtime.projectRoot, `code action "${title}"`), !applyResult.applied, {
-    action: prepared.action,
-    applyResult,
+  const actions = Array.isArray(result) ? result.filter(isRecord) : [];
+  const summaries = actions.map((action) => cacheCodeAction(state, runtime.projectRoot, action, requestFileStateAfter));
+  return structuredResult({
+    ok: true,
+    method,
+    path: filePath,
+    line: typeof params.line === "number" ? params.line : undefined,
+    column: typeof column === "number" ? column : undefined,
+    actions: summaries,
+    hint: summaries.some((action) => action.applyable)
+      ? "Apply one with method=\"codeAction/apply\" and id."
+      : undefined,
+  }, {
+    ok: true,
+    method,
+    actions: summaries,
+    result,
   });
 }
 
@@ -682,15 +547,9 @@ async function handleRename(
   params: Record<string, unknown>,
   runtime: CodeFeedbackRuntime,
   lspService: LspService,
-  mutationQueue: FileMutationQueue | undefined,
   signal?: AbortSignal,
 ): Promise<PiToolResult> {
   throwIfAborted(signal);
-  if (params.apply === true) {
-    const pendingGuard = rejectApplyDuringPendingEdits(runtime, "rename");
-    if (pendingGuard) return pendingGuard;
-  }
-
   const requestPath = requirePath(params);
   const requestFileBefore = readCachedFileState(path.resolve(runtime.projectRoot, requestPath));
   const result = await lspService.rename(requestPath, params.line, readColumn(params), params.newName, signal);
@@ -702,29 +561,7 @@ async function handleRename(
       after: displayFileState(runtime.projectRoot, requestFileAfter),
     }, "Rerun textDocument/rename against the current file contents.");
   }
-  if (params.apply !== true) return rawOrPretty("textDocument/rename", params, result, runtime.projectRoot);
-
-  const applyResult = await applyWorkspaceEdit(
-    result,
-    runtime.projectRoot,
-    workspaceEditApplyOptions(result, isRecord(result) ? result : {}, [requestFileAfter], runtime, lspService, mutationQueue, signal),
-  );
-  if (applyResult.changedFiles.length > 0) await resyncChangedFiles(lspService, applyResult.changedFiles, runtime, signal);
-
-  const payload = {
-    ok: applyResult.applied,
-    method: "textDocument/rename",
-    newName: String(params.newName),
-    applied: applyResult.applied,
-    editCount: applyResult.editCount,
-    changedFiles: applyResult.changedFiles.map((filePath) => relativePath(runtime.projectRoot, filePath)),
-    rejected: applyResult.rejected,
-  };
-  return structuredResult(payload, {
-    ...payload,
-    workspaceEdit: result,
-    applyResult,
-  }, !applyResult.applied);
+  return rawOrPretty("textDocument/rename", params, result, runtime.projectRoot);
 }
 
 function cacheCodeAction(

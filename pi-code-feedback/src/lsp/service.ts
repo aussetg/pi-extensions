@@ -5,7 +5,7 @@ import { readUtf8IfExists } from "../fs.ts";
 import { resolveWorkspaceRootForPath } from "../language-environments.ts";
 import { LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY, type DiagnosticRefreshResult, type DiagnosticSnapshot, type LspDiagnostic, type LspServiceStatus, type LspUnavailableServer } from "../types.ts";
 import { abortError, isCancellation, throwIfAborted } from "./cancellation.ts";
-import { LspClient, type DiagnosticSnapshotScope, type SemanticTokensOverlayOptions } from "./client.ts";
+import { LspClient, type DiagnosticSnapshotScope } from "./client.ts";
 import { normalizeDiagnosticRefreshConcurrency } from "./diagnostic-refresh.ts";
 import { externalPositionToLsp, filePathToUri, oneLineLspRange, type LspPosition } from "./positions.ts";
 import { resolveLanguageServer, resolveLanguageServers, type LanguageServerDefinition } from "./servers.ts";
@@ -223,36 +223,6 @@ export class LspService {
     return mergeArrayResults(await this.clientRequests(clients, "workspace/symbol", { query }, signal));
   }
 
-  async semanticTokens(filePath: string, options: SemanticTokensOverlayOptions = {}): Promise<unknown> {
-    throwIfAborted(options.signal);
-    const resolved = path.resolve(this.projectRoot, filePath);
-    const content = readUtf8IfExists(resolved);
-    if (content === undefined) throw new Error(`Cannot read file for LSP request: ${resolved}`);
-
-    const clients = this.getOrCreateClients(resolved);
-    if (clients.length === 0) throw new Error(`No language server configured for ${resolved}`);
-
-    const results = await Promise.all(clients.map(async (client) => {
-      try {
-        return await client.semanticTokensOverlay(resolved, content, options);
-      } catch (error) {
-        if (isCancellation(error, options.signal)) throw error;
-        return {
-          serverId: client.id,
-          uri: filePathToUri(resolved),
-          version: 0,
-          state: "error",
-          stale: false,
-          tokens: [],
-          error: error instanceof Error ? error.message : String(error),
-        };
-      }
-    }));
-
-    this.armIdleTimer();
-    return results.length === 1 ? results[0] : { servers: results };
-  }
-
   async codeActions(filePath: string, line: unknown, character: unknown, signal?: AbortSignal): Promise<unknown> {
     const position = externalPositionToLsp(line, character);
     if (!position) throw new Error("code_actions requires 1-based line and column");
@@ -330,14 +300,6 @@ export class LspService {
       if (version !== undefined) return version;
     }
     return undefined;
-  }
-
-  async rawRequest(filePath: string | undefined, method: unknown, params: unknown, signal?: AbortSignal): Promise<unknown> {
-    throwIfAborted(signal);
-    if (typeof method !== "string" || method.length === 0) throw new Error("request action requires request method");
-    const client = filePath ? this.getOrCreateClient(path.resolve(this.projectRoot, filePath)) : this.firstReadyOrAnyClient();
-    if (!client) throw new Error("No LSP client available for raw request");
-    return client.request(method, params, 10_000, signal);
   }
 
   getStatus(): LspServiceStatus {
@@ -756,10 +718,6 @@ export class LspService {
 
   private workspaceRootForFile(filePath: string): string {
     return resolveWorkspaceRootForPath(filePath, this.projectRoot, this.trustedEnvironmentRoots);
-  }
-
-  private firstReadyOrAnyClient(): LspClient | undefined {
-    return [...this.clients.values()].find((client) => client.getStatus().state === "ready") ?? this.clients.values().next().value;
   }
 
   private readyOrAnyClients(): LspClient[] {

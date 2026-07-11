@@ -11,7 +11,7 @@ export function createDefaultConfig(): FeedbackConfig {
     diagnostics: {
       inline: "touched",
       maxInline: 8,
-      inlineTimeoutMs: 1200,
+      inlineTimeoutMs: 500,
       settleMs: 0,
       timeoutMs: 1800,
       delayedTimeoutMs: 8000,

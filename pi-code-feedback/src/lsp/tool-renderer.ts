@@ -74,12 +74,7 @@ export function renderLspToolResult(result: ToolResultLike, options: RenderOptio
     case "textDocument/codeAction":
       return renderCodeActions(text, theme, options.expanded === true, truncation, context);
     case "codeAction/apply":
-    case "textDocument/rename":
       return renderApplyJson(text, theme, options.expanded === true, truncation, context);
-    case "textDocument/semanticTokens":
-      return renderSemanticTokens(text, theme, options.expanded === true, truncation);
-    case "raw/request":
-      return renderRawRequest(text, theme, options.expanded === true, truncation);
     default:
       return renderGeneric(text, theme, options.expanded === true, truncation, context);
   }
@@ -173,18 +168,6 @@ function renderApplyJson(text: string, theme: ThemeLike, expanded: boolean, trun
   return linesComponent(out);
 }
 
-function renderSemanticTokens(text: string, theme: ThemeLike, expanded: boolean, truncation?: LspToolTruncation): ComponentLike {
-  const lines = text.split("\n");
-  const out = [fg(theme, "success", lines[0] ?? "semantic tokens")];
-  if (expanded) out.push(...styleContentLines(text, theme, truncation, EXPANDED_MAX_LINES));
-  else out.push(...lines.slice(1, 4).map((line) => fg(theme, "dim", line.trim())));
-  return linesComponent(dedupeAdjacent(out));
-}
-
-function renderRawRequest(text: string, theme: ThemeLike, expanded: boolean, truncation?: LspToolTruncation): ComponentLike {
-  return renderRawPayload("raw/request", text, theme, expanded, truncation);
-}
-
 function renderRawPayload(method: string, text: string, theme: ThemeLike, expanded: boolean, truncation?: LspToolTruncation): ComponentLike {
   const value = parseJsonValue(text);
   const objectValue = objectDetails(value);
@@ -255,40 +238,17 @@ function collapseHint(theme: ThemeLike, prefix = "…"): string {
 }
 
 function displayMethod(args: Record<string, unknown>): string {
-  if (typeof args.method === "string") return args.method;
-  if (typeof args.action === "string") return legacyActionToMethod(args.action);
-  return "server/status";
+  return typeof args.method === "string" ? args.method : "server/status";
 }
 
 function displayTarget(args: Record<string, unknown>): string | undefined {
   const parts: string[] = [];
   if (typeof args.path === "string") parts.push(args.path);
-  if (typeof args.line === "number") parts.push(`${args.line}:${typeof args.column === "number" ? args.column : typeof args.character === "number" ? args.character : "?"}`);
+  if (typeof args.line === "number") parts.push(`${args.line}:${typeof args.column === "number" ? args.column : "?"}`);
   if (typeof args.query === "string") parts.push(`“${args.query}”`);
   if (typeof args.id === "string") parts.push(args.id);
   if (typeof args.newName === "string") parts.push(`→ ${args.newName}`);
   return parts.join(" ") || undefined;
-}
-
-function legacyActionToMethod(action: string): string {
-  const map: Record<string, string> = {
-    status: "server/status",
-    capabilities: "server/capabilities",
-    reload: "server/reload",
-    diagnostics: "textDocument/diagnostic",
-    hover: "textDocument/hover",
-    definition: "textDocument/definition",
-    references: "textDocument/references",
-    implementation: "textDocument/implementation",
-    type_definition: "textDocument/typeDefinition",
-    symbols: "textDocument/documentSymbol",
-    workspace_symbols: "workspace/symbol",
-    semantic_tokens: "textDocument/semanticTokens",
-    code_actions: "textDocument/codeAction",
-    rename: "textDocument/rename",
-    request: "raw/request",
-  };
-  return map[action] ?? action;
 }
 
 function findLineValue(text: string, key: string): string | undefined {

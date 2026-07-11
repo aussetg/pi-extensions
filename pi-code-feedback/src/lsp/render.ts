@@ -1,59 +1,27 @@
 import { displayPathFromRoot } from "../paths.ts";
 import { isLspRange, lspRangeToExternal, uriToFilePath, type LspRange } from "./positions.ts";
-import { canResolveCodeActionOnApply, workspaceEditSummary, type WorkspaceEditApplyResult } from "./workspace-edit.ts";
-import { LSP_RESULT_SERVER_ID_KEY, type LspAction } from "../types.ts";
+import { canResolveCodeActionOnApply, workspaceEditSummary } from "./workspace-edit.ts";
+import { LSP_RESULT_SERVER_ID_KEY, type LspMethod } from "../types.ts";
 
-export function renderLspActionResult(action: LspAction, result: unknown, projectRoot: string): string {
-  switch (action) {
-    case "hover":
+export function renderLspMethodResult(method: LspMethod, result: unknown, projectRoot: string): string {
+  switch (method) {
+    case "textDocument/hover":
       return renderHover(result);
-    case "definition":
-    case "references":
-    case "implementation":
-    case "type_definition":
-      return renderLocations(result, projectRoot, `No ${action.replace("_", " ")} result.`);
-    case "symbols":
-    case "workspace_symbols":
+    case "textDocument/definition":
+    case "textDocument/references":
+    case "textDocument/implementation":
+    case "textDocument/typeDefinition":
+      return renderLocations(result, projectRoot, `No ${method.slice(method.lastIndexOf("/") + 1)} result.`);
+    case "textDocument/documentSymbol":
+    case "workspace/symbol":
       return renderSymbols(result, projectRoot);
-    case "semantic_tokens":
-      return renderSemanticTokens(result);
-    case "code_actions":
+    case "textDocument/codeAction":
       return renderCodeActions(result);
-    case "rename":
+    case "textDocument/rename":
       return renderWorkspaceEditPreview(result, projectRoot, "rename");
     default:
       return renderJson(result);
   }
-}
-
-export function renderWorkspaceEditApplyResult(result: WorkspaceEditApplyResult, projectRoot: string, label: string): string {
-  if (!result.applied) {
-    return `${label} was not applied: ${result.rejected ?? "unknown reason"}`;
-  }
-
-  const lines = [`${label} applied: ${result.editCount} edit${result.editCount === 1 ? "" : "s"}, ${result.changedFiles.length} changed file${result.changedFiles.length === 1 ? "" : "s"}.`];
-  for (const file of result.files) {
-    const relative = displayPathFromRoot(file.filePath, projectRoot);
-    const marker = file.changed ? "changed" : "unchanged";
-    lines.push(`  ${relative}: ${file.editCount} edit${file.editCount === 1 ? "" : "s"}, ${marker}`);
-  }
-  return lines.join("\n");
-}
-
-export function renderCodeActionApplySelectionError(error: string, candidates: Record<string, unknown>[]): string {
-  const lines = [error];
-  if (candidates.length > 0) {
-    lines.push("", "Applicable code actions:");
-    for (const action of candidates.slice(0, 20)) {
-      const title = typeof action.title === "string" ? action.title : "untitled action";
-      const server = typeof action[LSP_RESULT_SERVER_ID_KEY] === "string" ? ` (${action[LSP_RESULT_SERVER_ID_KEY]})` : "";
-      const kind = typeof action.kind === "string" ? ` [${action.kind}]` : "";
-      const preferred = action.isPreferred === true ? " preferred" : "";
-      lines.push(`  - ${title}${server}${kind}${preferred}`);
-    }
-    if (candidates.length > 20) lines.push(`  ... ${candidates.length - 20} more`);
-  }
-  return lines.join("\n");
 }
 
 function renderHover(result: unknown): string {
@@ -149,51 +117,11 @@ function renderCodeActions(result: unknown): string {
   return lines.join("\n");
 }
 
-function renderSemanticTokens(result: unknown): string {
-  const overlays = semanticTokenOverlays(result);
-  if (overlays.length === 0) return "No semantic token overlay.";
-
-  const lines = [
-    `${overlays.length} semantic token overlay${overlays.length === 1 ? "" : "s"}:`,
-  ];
-  for (const overlay of overlays) {
-    const server = typeof overlay.serverId === "string" ? overlay.serverId : "server";
-    const state = typeof overlay.state === "string" ? overlay.state : "unknown";
-    const tokenCount = Array.isArray(overlay.tokens) ? overlay.tokens.length : 0;
-    const version = typeof overlay.version === "number" ? ` version=${overlay.version}` : "";
-    const stale = overlay.stale === true ? " stale" : "";
-    const error = typeof overlay.error === "string" ? ` error=${overlay.error}` : "";
-    lines.push(`  ${server}: ${state}${stale}${version} tokens=${tokenCount}${error}`);
-    if (Array.isArray(overlay.tokens) && overlay.tokens.length > 0) {
-      const sample = overlay.tokens.slice(0, 8).map(formatSemanticToken).join(", ");
-      lines.push(`    ${sample}${overlay.tokens.length > 8 ? ", ..." : ""}`);
-    }
-  }
-
-  return lines.join("\n");
-}
-
-function semanticTokenOverlays(result: unknown): Record<string, unknown>[] {
-  if (isRecord(result) && Array.isArray(result.servers)) return result.servers.filter(isRecord);
-  return isRecord(result) ? [result] : [];
-}
-
-function formatSemanticToken(value: unknown): string {
-  if (!isRecord(value)) return "token";
-  const line = typeof value.line === "number" ? value.line + 1 : "?";
-  const character = typeof value.character === "number" ? value.character + 1 : "?";
-  const type = typeof value.type === "string" ? value.type : "token";
-  const modifiers = Array.isArray(value.modifiers) && value.modifiers.length > 0
-    ? `.${value.modifiers.filter((entry) => typeof entry === "string").join(".")}`
-    : "";
-  return `${line}:${character} ${type}${modifiers}`;
-}
-
 function renderWorkspaceEditPreview(result: unknown, _projectRoot: string, label: string): string {
   const summary = workspaceEditSummary(result);
   if (summary.edits === 0 && summary.resourceOperations === 0) return `No ${label} WorkspaceEdit.`;
   const resourceText = summary.resourceOperations > 0 ? `, ${summary.resourceOperations} resource operation${summary.resourceOperations === 1 ? "" : "s"}` : "";
-  return `${label} WorkspaceEdit: ${summary.edits} text edit${summary.edits === 1 ? "" : "s"} across ${summary.files} file${summary.files === 1 ? "" : "s"}${resourceText}. Use apply:true to apply safe text edits.`;
+  return `${label} WorkspaceEdit: ${summary.edits} text edit${summary.edits === 1 ? "" : "s"} across ${summary.files} file${summary.files === 1 ? "" : "s"}${resourceText}.`;
 }
 
 function formatUriRange(projectRoot: string, uri: string, range: LspRange): string {

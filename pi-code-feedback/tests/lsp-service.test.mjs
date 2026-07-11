@@ -7,7 +7,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { LspClient } from "../src/lsp/client.ts";
 import { createLspService } from "../src/lsp/service.ts";
-import { selectCodeActionForApply } from "../src/lsp/workspace-edit.ts";
 import { LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY } from "../src/types.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -286,138 +285,6 @@ test("document requests sync the file without forcing a save or diagnostic refre
   }
 });
 
-test("semantic tokens are exposed as a lazy cached overlay", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-semantic-overlay-"));
-  const filePath = path.join(root, "probe.py");
-  const logPath = path.join(root, "lsp.jsonl");
-  await writeFile(filePath, "value = 1\nprint(value)\n", "utf8");
-
-  const service = createLspService({
-    projectRoot: root,
-    idleTimeoutMs: 0,
-    serverOverrides: {
-      python: {
-        command: process.execPath,
-        args: [fakeServer, "py", "T100", "1", "", "semantic-delay-80", logPath],
-      },
-      "python-ruff": { disabled: true },
-    },
-  });
-
-  try {
-    const first = await service.semanticTokens(filePath, { waitMs: 0, timeoutMs: 1000 });
-    assert.equal(first.state, "refreshing");
-    assert.equal(first.stale, false);
-    assert.deepEqual(first.tokens, []);
-
-    await waitForJsonLog(logPath, (entries) => entries.some((entry) => entry.method === "textDocument/semanticTokens/full"));
-    await sleep(110);
-
-    const second = await service.semanticTokens(filePath, { waitMs: 20, timeoutMs: 1000 });
-    assert.equal(second.state, "ready");
-    assert.equal(second.stale, false);
-    assert.equal(second.tokens.length, 3);
-    assert.deepEqual(second.tokens[0], {
-      line: 0,
-      character: 0,
-      length: 5,
-      type: "variable",
-      modifiers: ["declaration"],
-    });
-
-    const countAfterFill = (await readJsonLog(logPath)).filter((entry) => entry.method === "textDocument/semanticTokens/full").length;
-    const third = await service.semanticTokens(filePath, { waitMs: 0, timeoutMs: 1000 });
-    assert.equal(third.state, "ready");
-    assert.equal(third.tokens.length, 3);
-    await sleep(30);
-    assert.equal((await readJsonLog(logPath)).filter((entry) => entry.method === "textDocument/semanticTokens/full").length, countAfterFill);
-
-    await writeFile(filePath, "value = 2\nprint(value)\n", "utf8");
-    const stale = await service.semanticTokens(filePath, { waitMs: 0, timeoutMs: 1000 });
-    assert.equal(stale.state, "refreshing");
-    assert.equal(stale.stale, true);
-    assert.equal(stale.tokens.length, 3);
-  } finally {
-    await service.shutdownAll();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("semantic token positions reject malformed encoded coordinates", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-semantic-position-"));
-  const filePath = path.join(root, "probe.py");
-  await writeFile(filePath, "value = 1\n", "utf8");
-
-  const service = createLspService({
-    projectRoot: root,
-    idleTimeoutMs: 0,
-    serverOverrides: {
-      python: {
-        command: process.execPath,
-        args: [fakeServer, "py", "T100", "1", "", "semantic-malformed-position"],
-      },
-      "python-ruff": { disabled: true },
-    },
-  });
-
-  try {
-    const result = await service.semanticTokens(filePath, { waitMs: 100, timeoutMs: 1000 });
-    assert.equal(result.state, "error");
-    assert.deepEqual(result.tokens, []);
-    assert.match(result.error, /malformed token data/);
-  } finally {
-    await service.shutdownAll();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("semantic token refresh restarts when the document changes while a request is in flight", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-semantic-restart-"));
-  const filePath = path.join(root, "probe.py");
-  const logPath = path.join(root, "lsp.jsonl");
-  await writeFile(filePath, "value = 1\nprint(value)\n", "utf8");
-
-  const service = createLspService({
-    projectRoot: root,
-    idleTimeoutMs: 0,
-    serverOverrides: {
-      python: {
-        command: process.execPath,
-        args: [fakeServer, "py", "T100", "1", "", "semantic-delay-80", logPath],
-      },
-      "python-ruff": { disabled: true },
-    },
-  });
-
-  try {
-    const first = await service.semanticTokens(filePath, { waitMs: 0, timeoutMs: 1000 });
-    assert.equal(first.state, "refreshing");
-    assert.equal(first.version, 1);
-
-    await sleep(10);
-    await writeFile(filePath, "value = 2\nprint(value)\n", "utf8");
-
-    const second = await service.semanticTokens(filePath, { waitMs: 0, timeoutMs: 1000 });
-    assert.equal(second.state, "refreshing");
-    assert.equal(second.version, 2);
-
-    const entries = await waitForJsonLog(logPath, (items) => semanticTokenRequestCount(items) >= 2);
-    assert.equal(semanticTokenRequestCount(entries), 2);
-
-    await sleep(110);
-
-    const ready = await service.semanticTokens(filePath, { waitMs: 20, timeoutMs: 1000 });
-    assert.equal(ready.state, "ready");
-    assert.equal(ready.stale, false);
-    assert.equal(ready.version, 2);
-    assert.equal(ready.tokens.length, 3);
-    assert.equal(semanticTokenRequestCount(await readJsonLog(logPath)), 2);
-  } finally {
-    await service.shutdownAll();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
 test("concurrent diagnostics refreshes for the same file are coalesced", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-diagnostic-queue-"));
   const filePath = path.join(root, "probe.py");
@@ -652,11 +519,7 @@ test("code actions for a Python file are merged from ty and Ruff clients", async
     assert.equal(deferred?.[LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY], true);
     assert.equal((await readJsonLog(logPath)).some((entry) => entry.method === "codeAction/resolve"), false);
 
-    const selection = selectCodeActionForApply(actions, "python-ruff");
-    assert.equal(selection.action?.title, "Ruff fix F401");
-    assert.equal(selection.action?.edit, undefined);
-
-    const resolved = await service.resolveCodeAction(filePath, selection.action);
+    const resolved = await service.resolveCodeAction(filePath, deferred);
     assert.ok(resolved.edit);
     const entries = await waitForJsonLog(logPath, (entries) => entries.some((entry) => entry.method === "codeAction/resolve"));
     assert.equal(entries.filter((entry) => entry.method === "codeAction/resolve").length, 1);
@@ -689,9 +552,6 @@ test("edit-less code actions are not applyable unless the source server advertis
     assert.equal(actions[0].edit, undefined);
     assert.equal(actions[0][LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY], undefined);
 
-    const selection = selectCodeActionForApply(actions, "py");
-    assert.equal(selection.action, undefined);
-    assert.match(selection.error, /WorkspaceEdit or resolvable edit/);
     await assert.rejects(
       () => service.resolveCodeAction(filePath, actions[0]),
       /not resolvable by its source language server/,
@@ -727,9 +587,6 @@ test("top-level command actions are not treated as resolvable edits", async () =
     assert.equal(actions[0].edit, undefined);
     assert.equal(actions[0][LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY], undefined);
 
-    const selection = selectCodeActionForApply(actions, "py");
-    assert.equal(selection.action, undefined);
-    assert.match(selection.error, /WorkspaceEdit or resolvable edit/);
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });
@@ -756,14 +613,14 @@ test("deferred code actions are stale after their source LSP session is gone", a
 
   try {
     const actions = await service.codeActions(filePath, 1, 1);
-    const selection = selectCodeActionForApply(actions, "py");
-    assert.equal(selection.action?.title, "py fix T100");
-    assert.equal(typeof selection.action?.[LSP_RESULT_SERVER_ID_KEY], "string");
-    assert.equal(typeof selection.action?.[LSP_RESULT_SERVER_SESSION_ID_KEY], "string");
+    const action = actions[0];
+    assert.equal(action?.title, "py fix T100");
+    assert.equal(typeof action?.[LSP_RESULT_SERVER_ID_KEY], "string");
+    assert.equal(typeof action?.[LSP_RESULT_SERVER_SESSION_ID_KEY], "string");
 
     await service.shutdownAll();
     await assert.rejects(
-      () => service.resolveCodeAction(filePath, selection.action),
+      () => service.resolveCodeAction(filePath, action),
       /source server session is no longer live/,
     );
     assert.equal(service.getStatus().clients.length, 0);
@@ -794,10 +651,6 @@ async function readJsonLog(filePath) {
   } catch {
     return [];
   }
-}
-
-function semanticTokenRequestCount(entries) {
-  return entries.filter((entry) => entry.method === "textDocument/semanticTokens/full").length;
 }
 
 function isProcessRunning(pid) {

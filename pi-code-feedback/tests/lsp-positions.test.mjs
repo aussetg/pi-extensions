@@ -7,7 +7,7 @@ import {
   lspPositionToExternal,
   lspRangeToExternal,
 } from "../src/lsp/positions.ts";
-import { renderLspActionResult } from "../src/lsp/render.ts";
+import { renderLspMethodResult } from "../src/lsp/render.ts";
 
 test("LSP position conversion rejects malformed coordinates instead of clamping", () => {
   assert.deepEqual(lspPositionToExternal({ line: 0, character: 4 }), { line: 1, character: 5 });
@@ -53,7 +53,7 @@ test("position-scoped requests reject coordinates outside the LSP uinteger range
 });
 
 test("rendering drops locations with malformed LSP ranges", () => {
-  const result = renderLspActionResult("definition", [{
+  const result = renderLspMethodResult("textDocument/definition", [{
     uri: "file:///tmp/probe.ts",
     range: {
       start: { line: -1, character: 5 },

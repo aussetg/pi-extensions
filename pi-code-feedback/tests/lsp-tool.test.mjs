@@ -30,6 +30,25 @@ test("lsp status explains lazy clients instead of exposing an ambiguous active-c
   }
 });
 
+test("lsp agent schema excludes legacy aliases and unrestricted methods", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-schema-"));
+  const { tool, service } = createRegisteredTool(root);
+
+  try {
+    const properties = tool.parameters.properties;
+    for (const removed of ["action", "character", "apply", "all", "waitMs", "timeoutMs", "refresh", "request", "params"]) {
+      assert.equal(Object.hasOwn(properties, removed), false, removed);
+    }
+    assert.equal(tool.parameters.additionalProperties, false);
+    assert.deepEqual(tool.parameters.required, ["method"]);
+    assert.equal(properties.method.enum.includes("textDocument/semanticTokens"), false);
+    assert.equal(properties.method.enum.includes("raw/request"), false);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("lsp tool preserves trusted roots when reconfiguring services", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-trust-"));
   const trusted = path.join(root, "trusted");
@@ -219,7 +238,7 @@ test("lsp code action ids are rejected when file state changes before apply", as
   }
 });
 
-test("lsp rename apply returns structured JSON", async () => {
+test("lsp rename returns a preview without mutating files", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-rename-"));
   const filePath = path.join(root, "probe.py");
   await writeFile(filePath, "const oldName = 1;\noldName;\n", "utf8");
@@ -233,80 +252,12 @@ test("lsp rename apply returns structured JSON", async () => {
       line: 1,
       column: 8,
       newName: "newName",
-      apply: true,
-    }, undefined, undefined, { cwd: root });
-
-    const payload = JSON.parse(result.content[0].text);
-    assert.equal(payload.ok, true);
-    assert.equal(payload.method, "textDocument/rename");
-    assert.equal(payload.newName, "newName");
-    assert.equal(payload.editCount, 2);
-    assert.deepEqual(payload.changedFiles, ["probe.py"]);
-    assert.equal(await readFile(filePath, "utf8"), "const newName = 1;\nnewName;\n");
-  } finally {
-    await service.shutdownAll();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("lsp rename validates versioned WorkspaceEdits against the source client", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-rename-version-"));
-  const filePath = path.join(root, "probe.py");
-  await writeFile(filePath, "const oldName = 1;\noldName;\n", "utf8");
-  const { tool, service } = createRegisteredTool(root, "rename-versioned");
-
-  try {
-    const result = await tool.execute("lsp-1", {
-      method: "textDocument/rename",
-      path: "probe.py",
-      line: 1,
-      column: 8,
-      newName: "newName",
-      apply: true,
     }, undefined, undefined, { cwd: root });
 
     assert.equal(result.isError, undefined);
-    assert.equal(JSON.parse(result.content[0].text).applied, true);
-    assert.equal(await readFile(filePath, "utf8"), "const newName = 1;\nnewName;\n");
+    assert.equal(result.content[0].text, "rename WorkspaceEdit: 2 text edits across 1 file.");
+    assert.equal(await readFile(filePath, "utf8"), "const oldName = 1;\noldName;\n");
   } finally {
-    await service.shutdownAll();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("lsp rename revalidates files after waiting for Pi's mutation queue", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-rename-queue-"));
-  const filePath = path.join(root, "probe.py");
-  await writeFile(filePath, "const oldName = 1;\noldName;\n", "utf8");
-  const entered = Promise.withResolvers();
-  const release = Promise.withResolvers();
-  const mutationQueue = async (_filePath, run) => {
-    entered.resolve();
-    await release.promise;
-    return run();
-  };
-  const { tool, service } = createRegisteredTool(root, "diagnostics", undefined, mutationQueue);
-
-  try {
-    const applying = tool.execute("lsp-1", {
-      method: "textDocument/rename",
-      path: "probe.py",
-      line: 1,
-      column: 8,
-      newName: "newName",
-      apply: true,
-    }, undefined, undefined, { cwd: root });
-
-    await entered.promise;
-    await writeFile(filePath, "changed while queued\n", "utf8");
-    release.resolve();
-    const result = await applying;
-
-    assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /target changed since preview/);
-    assert.equal(await readFile(filePath, "utf8"), "changed while queued\n");
-  } finally {
-    release.resolve();
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });
   }
@@ -327,7 +278,7 @@ test("lsp tool text is truncated and saved to a temp file", async () => {
 test("lsp tool details are summarized under a bounded budget", () => {
   const result = limitLspToolDetails({
     ok: true,
-    method: "raw/request",
+    method: "textDocument/hover",
     blob: "x".repeat(100_000),
     result: {
       items: Array.from({ length: 1000 }, (_, index) => ({
@@ -340,7 +291,7 @@ test("lsp tool details are summarized under a bounded budget", () => {
 
   assert.equal(result.truncation?.truncated, true);
   assert.equal(result.details.ok, true);
-  assert.equal(result.details.method, "raw/request");
+  assert.equal(result.details.method, "textDocument/hover");
   assert.match(result.details.blob, /truncated string/);
   assert.ok(result.details.result.items.length < 1000);
   assert.equal(result.details.result.items.at(-1).__truncated, true);
@@ -427,31 +378,6 @@ test("lsp tool details serializes invalid dates safely", () => {
   assert.equal(result.truncation, undefined);
 });
 
-test("lsp execution truncates structured details as well as visible text", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-details-limit-"));
-  await writeFile(path.join(root, "probe.py"), "value = 1\n", "utf8");
-  const { tool, service } = createRegisteredTool(root);
-
-  try {
-    const result = await tool.execute("lsp-huge", {
-      method: "raw/request",
-      path: "probe.py",
-      request: "fake/huge",
-    }, undefined, undefined, { cwd: root });
-
-    assert.equal(result.details.ok, true);
-    assert.equal(result.details.method, "raw/request");
-    assert.equal(result.details.detailsTruncation.truncated, true);
-    assert.match(result.content[0].text, /\.\.\. truncated/);
-    assert.match(result.details.result.blob, /truncated string/);
-    assert.ok(result.details.result.items.length < 1000);
-    assert.ok(Buffer.byteLength(JSON.stringify(result.details), "utf8") <= LSP_TOOL_DETAILS_MAX_BYTES + 8192);
-  } finally {
-    await service.shutdownAll();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
 test("lsp errors are concise text while keeping structured details", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-error-"));
   const { tool, service } = createRegisteredTool(root);
@@ -498,14 +424,14 @@ test("lsp position inputs reject non-1-based values instead of clamping", async 
       assert.match(result.content[0].text, /hint: Pass line and column as 1-based numbers\./, JSON.stringify(input));
     }
 
-    const legacyCharacterResult = await tool.execute("lsp-legacy-character", {
+    const removedCharacterResult = await tool.execute("lsp-removed-character", {
       method: "textDocument/hover",
       path: "probe.py",
       line: 1,
       character: 1,
     }, undefined, undefined, { cwd: root });
-    assert.equal(legacyCharacterResult.isError, undefined);
-    assert.equal(legacyCharacterResult.content[0].text, "function fakeHover(value: number): number");
+    assert.equal(removedCharacterResult.isError, true);
+    assert.match(removedCharacterResult.content[0].text, /requires 1-based line and column/);
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });
