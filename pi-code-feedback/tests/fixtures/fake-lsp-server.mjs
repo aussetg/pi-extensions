@@ -139,7 +139,9 @@ function handleMessage(message) {
         id: message.id,
         result: {
           resultId: "fake-semantic-1",
-          data: [
+          data: mode === "semantic-malformed-position" ? [
+            -1, 0, 5, 0, 1,
+          ] : [
             0, 0, 5, 0, 1,
             0, 8, 3, 1, 0,
             1, 2, 4, 2, 0,
@@ -329,6 +331,17 @@ function publishDiagnostics(uri, version) {
   if (typeof uri !== "string") return;
   if (mode === "no-diagnostics") return;
 
+  const malformedDiagnostics = mode === "malformed-diagnostic-position" ? [{
+    range: {
+      start: { line: -1, character: 4 },
+      end: { line: 0, character: 8 },
+    },
+    severity,
+    source,
+    code: `${code}-MALFORMED`,
+    message: `${source} malformed diagnostic`,
+  }] : [];
+
   const message = {
     jsonrpc: "2.0",
     method: "textDocument/publishDiagnostics",
@@ -336,6 +349,7 @@ function publishDiagnostics(uri, version) {
       uri,
       version: typeof version === "number" ? version : undefined,
       diagnostics: [
+        ...malformedDiagnostics,
         {
           range: {
             start: { line: 0, character: 0 },
@@ -374,7 +388,7 @@ function semanticTokensDelayMs(value) {
 }
 
 function semanticTokensEnabled(value) {
-  return value === "semantic-log" || /^semantic-delay-\d+$/.test(value);
+  return value === "semantic-log" || value === "semantic-malformed-position" || /^semantic-delay-\d+$/.test(value);
 }
 
 function shouldLogSemanticTokens(value) {

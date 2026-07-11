@@ -1,6 +1,5 @@
-import * as path from "node:path";
 import { displayPathFromRoot } from "../paths.ts";
-import { lspRangeToExternal, uriToFilePath, type LspRange } from "./positions.ts";
+import { isLspRange, lspRangeToExternal, uriToFilePath, type LspRange } from "./positions.ts";
 import { canResolveCodeActionOnApply, workspaceEditSummary, type WorkspaceEditApplyResult } from "./workspace-edit.ts";
 import { LSP_RESULT_SERVER_ID_KEY, type LspAction } from "../types.ts";
 
@@ -205,7 +204,7 @@ function formatUriRange(projectRoot: string, uri: string, range: LspRange): stri
 
 function formatRange(range: LspRange): string {
   const external = lspRangeToExternal(range);
-  return `${external.start.line}:${external.start.character}`;
+  return external ? `${external.start.line}:${external.start.character}` : "?:?";
 }
 
 function renderJson(result: unknown): string {
@@ -216,14 +215,6 @@ function renderJson(result: unknown): string {
 
 function truncate(text: string, maxChars: number): string {
   return text.length <= maxChars ? text : `${text.slice(0, maxChars)}\n... truncated`;
-}
-
-function isLspRange(value: unknown): value is LspRange {
-  return isRecord(value) && isLspPosition(value.start) && isLspPosition(value.end);
-}
-
-function isLspPosition(value: unknown): value is { line: number; character: number } {
-  return isRecord(value) && typeof value.line === "number" && typeof value.character === "number";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

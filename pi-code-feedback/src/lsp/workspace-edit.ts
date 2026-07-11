@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY } from "../types.ts";
-import { uriToFilePath, type LspPosition, type LspRange } from "./positions.ts";
+import { isLspPosition, isLspRange, uriToFilePath, type LspPosition, type LspRange } from "./positions.ts";
 
 export type FileMutationQueue = <T>(filePath: string, run: () => Promise<T>) => Promise<T>;
 
@@ -598,8 +598,8 @@ function resolveEdit(content: string, edit: CollectedEdit, filePath: string, ind
 }
 
 function positionToOffset(content: string, position: LspPosition): number | undefined {
-  const line = Math.max(0, Math.floor(position.line));
-  const character = Math.max(0, Math.floor(position.character));
+  if (!isLspPosition(position)) return undefined;
+  const { line, character } = position;
   let lineStart = 0;
   let currentLine = 0;
 
@@ -614,23 +614,6 @@ function positionToOffset(content: string, position: LspPosition): number | unde
   const end = lineEnd < 0 ? content.length : lineEnd;
   if (lineStart + character > end) return undefined;
   return lineStart + character;
-}
-
-function isLspRange(value: unknown): value is LspRange {
-  if (!isRecord(value)) return false;
-  return isLspPosition(value.start) && isLspPosition(value.end);
-}
-
-function isLspPosition(value: unknown): value is LspPosition {
-  if (!isRecord(value)) return false;
-  return (
-    typeof value.line === "number" &&
-    Number.isInteger(value.line) &&
-    value.line >= 0 &&
-    typeof value.character === "number" &&
-    Number.isInteger(value.character) &&
-    value.character >= 0
-  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

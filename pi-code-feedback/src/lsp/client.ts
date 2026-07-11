@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { createDiagnosticSnapshot } from "../diagnostics/snapshots.ts";
 import { mergeProcessEnv } from "../language-environments.ts";
 import type { DiagnosticRefreshResult, DiagnosticSnapshot, LspClientState, LspClientStatus, LspDiagnostic, LspServerLog, LspServerLogLevel, RelatedLocation, SemanticToken, SemanticTokenLegend, SemanticTokenOverlay } from "../types.ts";
-import { filePathToUri, lspRangeToExternal, type LspRange } from "./positions.ts";
+import { filePathToUri, isLspUInteger, lspRangeToExternal, type LspRange } from "./positions.ts";
 import type { LanguageServerDefinition } from "./servers.ts";
 
 interface JsonRpcRequest {
@@ -637,7 +637,7 @@ export class LspClient {
         timeoutMs,
       ));
       const receivedAt = Date.now();
-      if (!result) throw new Error("semantic token response did not contain token data");
+      if (!result) throw new Error("semantic token response contained malformed token data");
 
       const entry: SemanticTokenCacheEntry = {
         serverId: this.id,
@@ -885,16 +885,20 @@ export class LspClient {
   }
 
   private normalizeDiagnostics(entry: DiagnosticEntry): LspDiagnostic[] {
-    return entry.diagnostics.map((diagnostic) => ({
-      uri: entry.uri,
-      range: lspRangeToExternal(diagnostic.range),
-      severity: normalizeSeverity(diagnostic.severity),
-      message: typeof diagnostic.message === "string" ? diagnostic.message : "LSP diagnostic",
-      source: typeof diagnostic.source === "string" ? diagnostic.source : undefined,
-      code: typeof diagnostic.code === "string" || typeof diagnostic.code === "number" ? diagnostic.code : undefined,
-      relatedInformation: normalizeRelatedInformation(diagnostic.relatedInformation),
-      version: entry.version,
-    }));
+    return entry.diagnostics.flatMap((diagnostic) => {
+      const range = lspRangeToExternal(diagnostic?.range);
+      if (!range) return [];
+      return [{
+        uri: entry.uri,
+        range,
+        severity: normalizeSeverity(diagnostic.severity),
+        message: typeof diagnostic.message === "string" ? diagnostic.message : "LSP diagnostic",
+        source: typeof diagnostic.source === "string" ? diagnostic.source : undefined,
+        code: typeof diagnostic.code === "string" || typeof diagnostic.code === "number" ? diagnostic.code : undefined,
+        relatedInformation: normalizeRelatedInformation(diagnostic.relatedInformation),
+        version: entry.version,
+      }];
+    });
   }
 
   private snapshotForScope(uri: string, scope: DiagnosticSnapshotScope | undefined): DiagnosticSnapshot {
@@ -920,16 +924,17 @@ async function settleDiagnostics(settleMs: number): Promise<boolean> {
   return true;
 }
 
-function normalizeRelatedInformation(value: RawRelatedInformation[] | undefined): RelatedLocation[] | undefined {
+function normalizeRelatedInformation(value: unknown): RelatedLocation[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const related = value
     .map((entry): RelatedLocation | undefined => {
-      const uri = entry.location?.uri;
-      const range = entry.location?.range;
+      if (!isRecord(entry) || !isRecord(entry.location)) return undefined;
+      const uri = entry.location.uri;
+      const range = lspRangeToExternal(entry.location.range);
       if (typeof uri !== "string" || !range) return undefined;
       return {
         uri,
-        range: lspRangeToExternal(range),
+        range,
         message: typeof entry.message === "string" ? entry.message : undefined,
       };
     })
@@ -1014,14 +1019,11 @@ function semanticTokenOverlayFromCache(
 
 function normalizeSemanticTokensResult(value: unknown): RawSemanticTokensResult | undefined {
   if (!isRecord(value)) return undefined;
-  const data = Array.isArray(value.data)
-    ? value.data.filter((entry): entry is number => typeof entry === "number" && Number.isFinite(entry))
-    : undefined;
-  if (!data) return undefined;
+  if (!Array.isArray(value.data) || value.data.length % 5 !== 0 || !value.data.every(isLspUInteger)) return undefined;
 
   return {
     resultId: typeof value.resultId === "string" ? value.resultId : undefined,
-    data,
+    data: value.data,
   };
 }
 
@@ -1031,14 +1033,19 @@ function decodeSemanticTokens(data: number[], legend: SemanticTokenLegend): Sema
   let character = 0;
 
   for (let index = 0; index + 4 < data.length; index += 5) {
-    const deltaLine = Math.max(0, Math.trunc(data[index]!));
-    const deltaStart = Math.max(0, Math.trunc(data[index + 1]!));
-    const length = Math.max(0, Math.trunc(data[index + 2]!));
-    const tokenTypeIndex = Math.max(0, Math.trunc(data[index + 3]!));
-    const modifierBits = Math.max(0, Math.trunc(data[index + 4]!));
+    const deltaLine = data[index]!;
+    const deltaStart = data[index + 1]!;
+    const length = data[index + 2]!;
+    const tokenTypeIndex = data[index + 3]!;
+    const modifierBits = data[index + 4]!;
 
-    line += deltaLine;
-    character = deltaLine === 0 ? character + deltaStart : deltaStart;
+    const nextLine = line + deltaLine;
+    const nextCharacter = deltaLine === 0 ? character + deltaStart : deltaStart;
+    if (!isLspUInteger(nextLine) || !isLspUInteger(nextCharacter) || !isLspUInteger(nextCharacter + length)) {
+      throw new Error("semantic token position exceeds the LSP uinteger range");
+    }
+    line = nextLine;
+    character = nextCharacter;
     if (length === 0) continue;
 
     tokens.push({

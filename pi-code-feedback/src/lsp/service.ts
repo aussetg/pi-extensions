@@ -873,21 +873,14 @@ function mergeCodeActionResolution(original: Record<string, unknown>, resolved: 
 
 function diagnosticOverlapsLspRange(diagnostic: LspDiagnostic, range: { start: LspPosition; end: LspPosition }): boolean {
   const diagnosticRange = externalRangeToLsp(diagnostic.range);
+  if (!diagnosticRange) return false;
   return diagnosticRange.start.line <= range.end.line && diagnosticRange.end.line >= range.start.line;
 }
 
-function externalRangeToLsp(range: LspDiagnostic["range"]): { start: LspPosition; end: LspPosition } {
-  return {
-    start: externalPointToLsp(range.start),
-    end: externalPointToLsp(range.end),
-  };
-}
-
-function externalPointToLsp(position: LspDiagnostic["range"]["start"]): LspPosition {
-  return {
-    line: Math.max(0, Math.floor(position.line) - 1),
-    character: Math.max(0, Math.floor(position.character) - 1),
-  };
+function externalRangeToLsp(range: LspDiagnostic["range"]): { start: LspPosition; end: LspPosition } | undefined {
+  const start = externalPositionToLsp(range.start.line, range.start.character);
+  const end = externalPositionToLsp(range.end.line, range.end.character);
+  return start && end ? { start, end } : undefined;
 }
 
 function severityToLspNumber(severity: LspDiagnostic["severity"]): number {

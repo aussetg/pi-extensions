@@ -12,6 +12,8 @@ export interface LspRange {
   end: LspPosition;
 }
 
+const MAX_LSP_UINTEGER = 2_147_483_647;
+
 export function filePathToUri(filePath: string): string {
   return pathToFileURL(path.resolve(filePath)).href;
 }
@@ -36,21 +38,43 @@ export function externalPositionToLsp(line: unknown, character: unknown): LspPos
 }
 
 function readOneBasedInteger(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : undefined;
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= MAX_LSP_UINTEGER + 1
+    ? value
+    : undefined;
 }
 
-export function lspPositionToExternal(position: LspPosition): Position {
+export function lspPositionToExternal(position: unknown): Position | undefined {
+  if (!isLspPosition(position)) return undefined;
   return {
-    line: Math.max(1, Math.floor(position.line) + 1),
-    character: Math.max(1, Math.floor(position.character) + 1),
+    line: position.line + 1,
+    character: position.character + 1,
   };
 }
 
-export function lspRangeToExternal(range: LspRange): Range {
+export function lspRangeToExternal(range: unknown): Range | undefined {
+  if (!isLspRange(range)) return undefined;
   return {
-    start: lspPositionToExternal(range.start),
-    end: lspPositionToExternal(range.end),
+    start: { line: range.start.line + 1, character: range.start.character + 1 },
+    end: { line: range.end.line + 1, character: range.end.character + 1 },
   };
+}
+
+export function isLspPosition(value: unknown): value is LspPosition {
+  if (!value || typeof value !== "object") return false;
+  const position = value as { line?: unknown; character?: unknown };
+  return isLspUInteger(position.line) && isLspUInteger(position.character);
+}
+
+export function isLspRange(value: unknown): value is LspRange {
+  if (!value || typeof value !== "object") return false;
+  const range = value as { start?: unknown; end?: unknown };
+  if (!isLspPosition(range.start) || !isLspPosition(range.end)) return false;
+  return range.start.line < range.end.line ||
+    (range.start.line === range.end.line && range.start.character <= range.end.character);
+}
+
+export function isLspUInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= MAX_LSP_UINTEGER;
 }
 
 export function oneLineLspRange(position: LspPosition): LspRange {

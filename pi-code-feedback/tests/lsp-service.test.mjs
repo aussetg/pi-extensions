@@ -81,6 +81,38 @@ test("diagnostics for a Python file are merged from ty and Ruff clients", async 
   }
 });
 
+test("malformed diagnostic positions are dropped instead of clamped", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-malformed-diagnostic-"));
+  const filePath = path.join(root, "probe.py");
+  await writeFile(filePath, "value = 1\n", "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "malformed-diagnostic-position"],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    const result = await service.diagnosticsForFileDetailed(filePath, await readFile(filePath, "utf8"), {
+      timeoutMs: 1000,
+      settleMs: 0,
+    });
+    const diagnostics = [...result.snapshot.byUri.values()].flat();
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].code, "T100");
+    assert.deepEqual(diagnostics[0].range.start, { line: 1, character: 1 });
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("file diagnostic refresh snapshots only the requested URI unless workspace scope is requested", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-scope-"));
   const firstPath = path.join(root, "first.py");
@@ -269,6 +301,34 @@ test("semantic tokens are exposed as a lazy cached overlay", async () => {
     assert.equal(stale.state, "refreshing");
     assert.equal(stale.stale, true);
     assert.equal(stale.tokens.length, 3);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("semantic token positions reject malformed encoded coordinates", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-semantic-position-"));
+  const filePath = path.join(root, "probe.py");
+  await writeFile(filePath, "value = 1\n", "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "semantic-malformed-position"],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    const result = await service.semanticTokens(filePath, { waitMs: 100, timeoutMs: 1000 });
+    assert.equal(result.state, "error");
+    assert.deepEqual(result.tokens, []);
+    assert.match(result.error, /malformed token data/);
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });
