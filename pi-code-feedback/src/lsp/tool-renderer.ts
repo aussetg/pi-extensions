@@ -73,7 +73,9 @@ export function renderLspToolResult(result: ToolResultLike, options: RenderOptio
       return renderSymbolLike(text, theme, options.expanded === true, truncation);
     case "textDocument/codeAction":
       return renderCodeActions(text, theme, options.expanded === true, truncation, context);
-    case "codeAction/apply":
+    case "textDocument/rename":
+      return renderWorkspaceEditPreview(text, theme, options.expanded === true, truncation, context);
+    case "workspaceEdit/apply":
       return renderApplyJson(text, theme, options.expanded === true, truncation, context);
     default:
       return renderGeneric(text, theme, options.expanded === true, truncation, context);
@@ -152,6 +154,20 @@ function renderCodeActions(text: string, theme: ThemeLike, expanded: boolean, tr
   }
   if (!expanded && actions.length > 5) out.push(fg(theme, "dim", `… ${actions.length - 5} more`));
   if (expanded && truncation) out.push(formatTruncation(theme, truncation));
+  return linesComponent(out);
+}
+
+function renderWorkspaceEditPreview(text: string, theme: ThemeLike, expanded: boolean, truncation: LspToolTruncation | undefined, context: RenderContextLike): ComponentLike {
+  const payload = parseJson(text);
+  const preview = objectDetails(payload?.workspaceEdit);
+  if (!preview) return renderGeneric(text, theme, expanded, truncation, context);
+
+  const id = typeof preview.id === "string" ? preview.id : "?";
+  const title = typeof preview.title === "string" ? preview.title : "WorkspaceEdit";
+  const summary = typeof preview.editSummary === "string" ? preview.editSummary : "no text edits";
+  const applyable = preview.applyable === true ? "success" : "warning";
+  const out = [statusLine(theme, "WorkspaceEdit preview", `${id} · ${title} · ${summary}`, applyable)];
+  if (expanded) out.push(...styleContentLines(text, theme, truncation, EXPANDED_MAX_LINES));
   return linesComponent(out);
 }
 

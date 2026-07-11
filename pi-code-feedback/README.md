@@ -2,7 +2,7 @@
 
 Pi extension for touched-line LSP diagnostics and formatter feedback.
 
-The package currently registers `/lsp`, the `lsp` tool, footer status, touched-range capture for `write`, `edit`, and `apply_patch`, real stdio LSP clients, LSP diagnostics/navigation requests, touched-range-filtered inline diagnostic feedback, pretty LSP result rendering, safe text-edit application for selected code actions, immediate automatic formatting with touched-range remapping before diagnostics, and delayed context injection for slow LSP diagnostics.
+The package currently registers `/lsp`, the `lsp` tool, footer status, touched-range capture for `write`, `edit`, and `apply_patch`, real stdio LSP clients, LSP diagnostics/navigation requests, touched-range-filtered inline diagnostic feedback, pretty LSP result rendering, safe WorkspaceEdit preview/application for renames and selected code actions, immediate automatic formatting with touched-range remapping before diagnostics, and delayed context injection for slow LSP diagnostics.
 
 Built-in language coverage includes Haskell via `haskell-language-server-wrapper --lsp`; HLS supplies GHC/HLint diagnostics and code actions. Haskell auto-formatting is conservative for non-literate source and selects Fourmolu for `fourmolu.yaml`, Ormolu for `.ormolu`, or stylish-haskell for `.stylish-haskell.yaml` (or an explicit formatter override).
 
@@ -10,7 +10,7 @@ The intended agent-facing tool is `lsp`; the human interface is `/lsp status`, `
 
 The inherited pi process `PATH` is treated as trusted baseline; `/lsp trust` extends filesystem roots searched for language environments such as Python `.venv` / uv / conda envs, and those roots act as LSP/formatter workspaces for files inside them.
 
-The `lsp` tool uses a strict LSP-lite API: pass `method` with names such as `server/status`, `textDocument/hover`, `textDocument/diagnostic`, `workspace/symbol`, `textDocument/codeAction`, and `codeAction/apply`. Position-scoped methods require positive 1-based integers (`line`, `column`) to match file reads. Rename requests return a WorkspaceEdit preview; only cached code actions can be applied through the explicit `codeAction/apply` method.
+The `lsp` tool uses a strict LSP-lite API: pass `method` with names such as `server/status`, `textDocument/hover`, `textDocument/diagnostic`, `workspace/symbol`, `textDocument/codeAction`, and `workspaceEdit/apply`. Position-scoped methods require positive 1-based integers (`line`, `column`) to match file reads. Rename requests and code actions return session-local WorkspaceEdit preview ids; `workspaceEdit/apply` is the only apply path.
 
 LSP WorkspaceEdits are applied under Pi's shared per-file mutation queues. Target contents and permissions are revalidated after queueing, versioned TextDocumentEdits are checked against the source LSP session, and multi-file edits are staged before atomic replacement with rollback on commit failure.
 
@@ -24,5 +24,5 @@ Diagnostic refreshes are queued globally and run across different files with a d
 
 Inline feedback is appended to `result.content` for the model and mirrored as structured metadata under `result.details.piCodeFeedback` for renderers.
 
-For languages with multiple configured servers, diagnostics and read-only `/lsp` requests fan out across the matching servers; code actions are tagged with their source server and listed with session-local ids, resolving deferred edits only when `codeAction/apply` applies the selected action.
+For languages with multiple configured servers, diagnostics and read-only `/lsp` requests fan out across the matching servers; code actions are tagged with their source server and listed with session-local WorkspaceEdit ids, resolving deferred edits only when `workspaceEdit/apply` applies the selected preview.
 

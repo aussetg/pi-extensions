@@ -36,20 +36,32 @@ interface ParsedLspMethod {
 }
 
 interface LspToolState {
-  nextCodeActionId: number;
-  codeActions: Map<string, CachedCodeAction>;
+  nextWorkspaceEditId: number;
+  workspaceEdits: Map<string, CachedWorkspaceEdit>;
 }
 
-interface CachedCodeAction {
+interface CachedWorkspaceEditBase {
   id: string;
   createdAt: number;
   projectRoot: string;
   requestFile: CachedFileState;
   editTargets: CachedFileState[];
   targetResolutionError?: string;
-  action: Record<string, unknown>;
-  summary: CodeActionSummary;
+  title: string;
+  originMethod: "textDocument/codeAction" | "textDocument/rename";
 }
+
+type CachedWorkspaceEdit =
+  | (CachedWorkspaceEditBase & {
+      kind: "codeAction";
+      action: Record<string, unknown>;
+      preview: CodeActionSummary;
+    })
+  | (CachedWorkspaceEditBase & {
+      kind: "rename";
+      edit: unknown;
+      preview: WorkspaceEditPreview;
+    });
 
 type CachedFileState = WorkspaceEditFileState;
 
@@ -65,8 +77,20 @@ interface CodeActionSummary {
   editSummary?: string;
 }
 
+interface WorkspaceEditPreview {
+  id: string;
+  kind: "rename";
+  title: string;
+  applyable: boolean;
+  editSummary: string;
+}
+
 type PreparedCodeActionForApply =
   | { ok: true; action: Record<string, unknown>; title: string }
+  | { ok: false; error: string; details: Record<string, unknown>; hint?: string };
+
+type PreparedWorkspaceEditForApply =
+  | { ok: true; edit: unknown; source: Record<string, unknown>; title: string; details: Record<string, unknown> }
   | { ok: false; error: string; details: Record<string, unknown>; hint?: string };
 
 interface RenderedLspText {
@@ -82,8 +106,8 @@ export function registerLspTool(
   mutationQueue?: FileMutationQueue,
 ): void {
   const toolState: LspToolState = {
-    nextCodeActionId: 1,
-    codeActions: new Map(),
+    nextWorkspaceEditId: 1,
+    workspaceEdits: new Map(),
   };
 
   pi.on?.("tool_result", (event: unknown) => {
@@ -101,7 +125,7 @@ export function registerLspTool(
       "Use lsp with method=\"server/status\" when language-server feedback seems missing or stale.",
       "Use lsp with real LSP method names such as method=\"textDocument/hover\", method=\"textDocument/definition\", and method=\"workspace/symbol\"; line and column are 1-based.",
       "Use lsp method=\"textDocument/diagnostic\" with path to refresh one file, or method=\"workspace/diagnostic\" for cached known diagnostics; explicit diagnostics are not touched-line filtered.",
-      "Use lsp method=\"textDocument/codeAction\" with path, line, and column to list code actions, then method=\"codeAction/apply\" with the returned id to apply one safely.",
+      "Use lsp method=\"textDocument/codeAction\" or method=\"textDocument/rename\" to preview a WorkspaceEdit, then method=\"workspaceEdit/apply\" with its id to apply it safely.",
       "Do not use lsp for formatting; formatting is handled by pi-code-feedback's edit pipeline or normal shell/editor tools.",
     ],
     parameters: LspToolParameters,
@@ -203,11 +227,11 @@ export function registerLspTool(
         case "textDocument/codeAction":
           return await handleCodeActions(method, params, runtime, lspService, toolState, signal);
 
-        case "codeAction/apply":
-          return await handleCodeActionApply(method, params, runtime, lspService, toolState, mutationQueue, signal);
-
         case "textDocument/rename":
-          return await handleRename(params, runtime, lspService, signal);
+          return await handleRename(params, runtime, lspService, toolState, signal);
+
+        case "workspaceEdit/apply":
+          return await handleWorkspaceEditApply(method, params, runtime, lspService, toolState, mutationQueue, signal);
 
         }
       } catch (error) {
@@ -234,7 +258,7 @@ const LspToolParameters = {
     line: { type: "number", minimum: 1, multipleOf: 1, description: "1-based line for position-scoped LSP actions." },
     column: { type: "number", minimum: 1, multipleOf: 1, description: "1-based column for position-scoped LSP actions." },
     query: { type: "string", description: "Search query for workspace/symbol." },
-    id: { type: "string", description: "Stable id returned by textDocument/codeAction; required for codeAction/apply." },
+    id: { type: "string", description: "Stable id returned by a WorkspaceEdit preview; required for workspaceEdit/apply." },
     newName: { type: "string", description: "New symbol name for rename." },
     raw: { type: "boolean", description: "Return raw LSP-ish payloads when useful for debugging." },
   },
@@ -459,7 +483,7 @@ async function handleCodeActions(
     column: typeof column === "number" ? column : undefined,
     actions: summaries,
     hint: summaries.some((action) => action.applyable)
-      ? "Apply one with method=\"codeAction/apply\" and id."
+      ? "Apply one with method=\"workspaceEdit/apply\" and id."
       : undefined,
   }, {
     ok: true,
@@ -469,7 +493,7 @@ async function handleCodeActions(
   });
 }
 
-async function handleCodeActionApply(
+async function handleWorkspaceEditApply(
   method: LspMethod,
   params: Record<string, unknown>,
   runtime: CodeFeedbackRuntime,
@@ -479,44 +503,44 @@ async function handleCodeActionApply(
   signal?: AbortSignal,
 ): Promise<PiToolResult> {
   throwIfAborted(signal);
-  const pendingGuard = rejectApplyDuringPendingEdits(runtime, "code action");
+  const pendingGuard = rejectApplyDuringPendingEdits(runtime, "WorkspaceEdit");
   if (pendingGuard) return pendingGuard;
 
   const id = typeof params.id === "string" ? params.id.trim() : "";
-  if (!id) return errorResult(method, "codeAction/apply requires id", { cachedIds: [...state.codeActions.keys()].slice(-20) }, "Call textDocument/codeAction first and pass one returned id.");
+  if (!id) return errorResult(method, "workspaceEdit/apply requires id", { cachedIds: [...state.workspaceEdits.keys()].slice(-20) }, "Preview a rename or code action first and pass its returned id.");
 
-  const cached = state.codeActions.get(id);
-  if (!cached) return errorResult(method, `Unknown code action id: ${id}`, { cachedIds: [...state.codeActions.keys()].slice(-20) }, "Call textDocument/codeAction again; code action ids are session-local and bounded.");
-  state.codeActions.delete(id);
+  const cached = state.workspaceEdits.get(id);
+  if (!cached) return errorResult(method, `Unknown WorkspaceEdit id: ${id}`, { cachedIds: [...state.workspaceEdits.keys()].slice(-20) }, "Preview the rename or code action again; WorkspaceEdit ids are session-local and bounded.");
+  state.workspaceEdits.delete(id);
   if (path.resolve(cached.projectRoot) !== path.resolve(runtime.projectRoot)) {
-    return errorResult(method, `Code action id ${id} belongs to a different project root`, { id, actionProjectRoot: cached.projectRoot, projectRoot: runtime.projectRoot });
+    return errorResult(method, `WorkspaceEdit id ${id} belongs to a different project root`, { id, editProjectRoot: cached.projectRoot, projectRoot: runtime.projectRoot });
   }
 
-  const stale = validateCachedCodeAction(cached, runtime.projectRoot);
+  const stale = validateCachedWorkspaceEdit(cached, runtime.projectRoot);
   if (stale) {
-    return errorResult(method, `Code action id ${id} is stale: ${stale.reason}`, {
+    return errorResult(method, `WorkspaceEdit id ${id} is stale: ${stale.reason}`, {
       id,
-      action: cached.summary,
+      preview: cached.preview,
       stale,
-    }, "Call textDocument/codeAction again and apply one of the fresh ids.");
+    }, `Call ${cached.originMethod} again and apply the fresh id.`);
   }
 
-  const prepared = await prepareCodeActionForApply(cached.action, cached.requestFile.filePath, runtime, lspService, `Code action id ${id}`, signal);
+  const prepared = await prepareCachedWorkspaceEdit(cached, runtime, lspService, signal);
   if (!prepared.ok) {
     return errorResult(method, prepared.error, {
       id,
-      action: cached.summary,
+      preview: cached.preview,
       targetResolutionError: cached.targetResolutionError,
       ...prepared.details,
     }, prepared.hint);
   }
 
   const applyResult = await applyWorkspaceEdit(
-    prepared.action.edit,
+    prepared.edit,
     runtime.projectRoot,
     workspaceEditApplyOptions(
-      prepared.action.edit,
-      prepared.action,
+      prepared.edit,
+      prepared.source,
       [cached.requestFile, ...cached.editTargets],
       runtime,
       lspService,
@@ -530,6 +554,7 @@ async function handleCodeActionApply(
     ok: applyResult.applied,
     method,
     id,
+    kind: cached.kind,
     title: prepared.title,
     applied: applyResult.applied,
     editCount: applyResult.editCount,
@@ -538,7 +563,7 @@ async function handleCodeActionApply(
   };
   return structuredResult(payload, {
     ...payload,
-    action: prepared.action,
+    ...prepared.details,
     applyResult,
   }, !applyResult.applied);
 }
@@ -547,6 +572,7 @@ async function handleRename(
   params: Record<string, unknown>,
   runtime: CodeFeedbackRuntime,
   lspService: LspService,
+  state: LspToolState,
   signal?: AbortSignal,
 ): Promise<PiToolResult> {
   throwIfAborted(signal);
@@ -561,7 +587,22 @@ async function handleRename(
       after: displayFileState(runtime.projectRoot, requestFileAfter),
     }, "Rerun textDocument/rename against the current file contents.");
   }
-  return rawOrPretty("textDocument/rename", params, result, runtime.projectRoot);
+  if (params.raw === true) return rawOrPretty("textDocument/rename", params, result, runtime.projectRoot);
+
+  const preview = cacheRename(state, runtime.projectRoot, result, requestFileAfter, String(params.newName));
+  return structuredResult({
+    ok: true,
+    method: "textDocument/rename",
+    path: requestPath,
+    newName: String(params.newName),
+    workspaceEdit: preview,
+    hint: preview.applyable ? "Apply with method=\"workspaceEdit/apply\" and id." : undefined,
+  }, {
+    ok: true,
+    method: "textDocument/rename",
+    workspaceEdit: preview,
+    result,
+  });
 }
 
 function cacheCodeAction(
@@ -570,30 +611,113 @@ function cacheCodeAction(
   action: Record<string, unknown>,
   requestFile: CachedFileState,
 ): CodeActionSummary {
-  pruneCodeActionCache(state);
-  const id = `ca_${(state.nextCodeActionId++).toString(36).padStart(4, "0")}`;
+  pruneWorkspaceEditCache(state);
+  const id = nextWorkspaceEditId(state);
   const targetFiles = action.edit === undefined ? undefined : workspaceEditTargetFiles(action.edit, projectRoot);
   const summary = summarizeCodeAction(id, action, targetFiles);
-  state.codeActions.set(id, {
+  state.workspaceEdits.set(id, {
     id,
     createdAt: Date.now(),
     projectRoot,
     requestFile,
     editTargets: targetFiles?.ok ? targetFiles.files.map((filePath) => readEditTargetFileState(filePath, requestFile)) : [],
     targetResolutionError: targetFiles && !targetFiles.ok ? targetFiles.reason : undefined,
+    title: summary.title,
+    originMethod: "textDocument/codeAction",
+    kind: "codeAction",
     action,
-    summary,
+    preview: summary,
   });
   return summary;
 }
 
-function pruneCodeActionCache(state: LspToolState): void {
+function cacheRename(
+  state: LspToolState,
+  projectRoot: string,
+  edit: unknown,
+  requestFile: CachedFileState,
+  newName: string,
+): WorkspaceEditPreview {
+  pruneWorkspaceEditCache(state);
+  const id = nextWorkspaceEditId(state);
+  const targetFiles = workspaceEditTargetFiles(edit, projectRoot);
+  const summary = workspaceEditSummary(edit);
+  const preview: WorkspaceEditPreview = {
+    id,
+    kind: "rename",
+    title: `rename → ${newName}`,
+    applyable: targetFiles.ok && summary.edits > 0 && summary.resourceOperations === 0,
+    editSummary: formatWorkspaceEditSummary(summary),
+  };
+  state.workspaceEdits.set(id, {
+    id,
+    createdAt: Date.now(),
+    projectRoot,
+    requestFile,
+    editTargets: targetFiles.ok ? targetFiles.files.map((filePath) => readEditTargetFileState(filePath, requestFile)) : [],
+    targetResolutionError: targetFiles.ok ? undefined : targetFiles.reason,
+    title: preview.title,
+    originMethod: "textDocument/rename",
+    kind: "rename",
+    edit,
+    preview,
+  });
+  return preview;
+}
+
+function nextWorkspaceEditId(state: LspToolState): string {
+  return `we_${(state.nextWorkspaceEditId++).toString(36).padStart(4, "0")}`;
+}
+
+function pruneWorkspaceEditCache(state: LspToolState): void {
   const maxEntries = 200;
-  if (state.codeActions.size < maxEntries) return;
-  const stale = [...state.codeActions.values()]
+  if (state.workspaceEdits.size < maxEntries) return;
+  const stale = [...state.workspaceEdits.values()]
     .sort((left, right) => left.createdAt - right.createdAt)
-    .slice(0, Math.max(1, state.codeActions.size - maxEntries + 1));
-  for (const entry of stale) state.codeActions.delete(entry.id);
+    .slice(0, Math.max(1, state.workspaceEdits.size - maxEntries + 1));
+  for (const entry of stale) state.workspaceEdits.delete(entry.id);
+}
+
+async function prepareCachedWorkspaceEdit(
+  cached: CachedWorkspaceEdit,
+  runtime: CodeFeedbackRuntime,
+  lspService: LspService,
+  signal?: AbortSignal,
+): Promise<PreparedWorkspaceEditForApply> {
+  if (cached.kind === "codeAction") {
+    const prepared = await prepareCodeActionForApply(cached.action, cached.requestFile.filePath, runtime, lspService, `WorkspaceEdit id ${cached.id}`, signal);
+    if (!prepared.ok) return prepared;
+    return {
+      ok: true,
+      edit: prepared.action.edit,
+      source: prepared.action,
+      title: prepared.title,
+      details: { action: prepared.action },
+    };
+  }
+
+  const targetFiles = workspaceEditTargetFiles(cached.edit, runtime.projectRoot);
+  const summary = workspaceEditSummary(cached.edit);
+  if (!targetFiles.ok || summary.edits === 0 || summary.resourceOperations !== 0) {
+    return {
+      ok: false,
+      error: `WorkspaceEdit id ${cached.id} is not safely applyable`,
+      details: {
+        workspaceEdit: cached.preview,
+        targetResolutionError: targetFiles.ok ? undefined : targetFiles.reason,
+        editSummary: summary,
+      },
+      hint: `Call ${cached.originMethod} again to obtain a fresh, safe WorkspaceEdit preview.`,
+    };
+  }
+
+  return {
+    ok: true,
+    edit: cached.edit,
+    source: isRecord(cached.edit) ? cached.edit : {},
+    title: cached.title,
+    details: { workspaceEdit: cached.edit },
+  };
 }
 
 async function prepareCodeActionForApply(
@@ -701,7 +825,7 @@ function formatWorkspaceEditSummary(summary: { files: number; edits: number; res
   return parts.join(", ");
 }
 
-function validateCachedCodeAction(cached: CachedCodeAction, projectRoot: string): { reason: string; files?: Array<{ before: Record<string, unknown>; after: Record<string, unknown> }> } | undefined {
+function validateCachedWorkspaceEdit(cached: CachedWorkspaceEdit, projectRoot: string): { reason: string; files?: Array<{ before: Record<string, unknown>; after: Record<string, unknown> }> } | undefined {
   const changedFiles: Array<{ before: Record<string, unknown>; after: Record<string, unknown> }> = [];
   for (const expected of dedupeFileStates([cached.requestFile, ...cached.editTargets])) {
     const current = readCachedFileState(expected.filePath);
@@ -714,7 +838,7 @@ function validateCachedCodeAction(cached: CachedCodeAction, projectRoot: string)
 
   if (changedFiles.length === 0) return undefined;
   return {
-    reason: `file state changed since textDocument/codeAction: ${changedFiles.map((entry) => String(entry.after.path)).join(", ")}`,
+    reason: `file state changed since ${cached.originMethod}: ${changedFiles.map((entry) => String(entry.after.path)).join(", ")}`,
     files: changedFiles,
   };
 }

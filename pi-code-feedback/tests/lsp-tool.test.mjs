@@ -43,6 +43,8 @@ test("lsp agent schema excludes legacy aliases and unrestricted methods", async 
     assert.deepEqual(tool.parameters.required, ["method"]);
     assert.equal(properties.method.enum.includes("textDocument/semanticTokens"), false);
     assert.equal(properties.method.enum.includes("raw/request"), false);
+    assert.equal(properties.method.enum.includes("codeAction/apply"), false);
+    assert.equal(properties.method.enum.includes("workspaceEdit/apply"), true);
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });
@@ -138,20 +140,21 @@ test("lsp code actions return stable ids and apply by id", async () => {
     assert.equal(listPayload.ok, true);
     assert.equal(listPayload.method, "textDocument/codeAction");
     assert.equal(listPayload.actions.length, 1);
-    assert.match(listPayload.actions[0].id, /^ca_[0-9a-z]{4}$/);
+    assert.match(listPayload.actions[0].id, /^we_[0-9a-z]{4}$/);
     assert.equal(listPayload.actions[0].applyable, true);
     assert.equal(listPayload.actions[0].requiresResolve, true);
     assert.equal(listPayload.actions[0].title, "py fix T100");
     assert.equal((await readJsonLog(logPath)).some((entry) => entry.method === "codeAction/resolve"), false);
 
     const applyResult = await tool.execute("lsp-2", {
-      method: "codeAction/apply",
+      method: "workspaceEdit/apply",
       id: listPayload.actions[0].id,
     }, undefined, undefined, { cwd: root });
 
     const applyPayload = JSON.parse(applyResult.content[0].text);
     assert.equal(applyPayload.ok, true);
-    assert.equal(applyPayload.method, "codeAction/apply");
+    assert.equal(applyPayload.method, "workspaceEdit/apply");
+    assert.equal(applyPayload.kind, "codeAction");
     assert.equal(applyPayload.editCount, 1);
     assert.deepEqual(applyPayload.changedFiles, ["probe.py"]);
     assert.match(await readFile(filePath, "utf8"), /^# fixed by py\nimport os\n/);
@@ -159,12 +162,12 @@ test("lsp code actions return stable ids and apply by id", async () => {
     assert.equal(entries.filter((entry) => entry.method === "codeAction/resolve").length, 1);
 
     const secondApply = await tool.execute("lsp-3", {
-      method: "codeAction/apply",
+      method: "workspaceEdit/apply",
       id: listPayload.actions[0].id,
     }, undefined, undefined, { cwd: root });
 
     assert.equal(secondApply.isError, true);
-    assert.match(secondApply.content[0].text, /Unknown code action id/);
+    assert.match(secondApply.content[0].text, /Unknown WorkspaceEdit id/);
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });
@@ -217,7 +220,7 @@ test("lsp code action ids are rejected when file state changes before apply", as
     await writeFile(filePath, "changed\nimport os\n", "utf8");
 
     const applyResult = await tool.execute("lsp-2", {
-      method: "codeAction/apply",
+      method: "workspaceEdit/apply",
       id,
     }, undefined, undefined, { cwd: root });
 
@@ -227,18 +230,18 @@ test("lsp code action ids are rejected when file state changes before apply", as
     assert.equal(await readFile(filePath, "utf8"), "changed\nimport os\n");
 
     const secondApply = await tool.execute("lsp-3", {
-      method: "codeAction/apply",
+      method: "workspaceEdit/apply",
       id,
     }, undefined, undefined, { cwd: root });
     assert.equal(secondApply.isError, true);
-    assert.match(secondApply.content[0].text, /Unknown code action id/);
+    assert.match(secondApply.content[0].text, /Unknown WorkspaceEdit id/);
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("lsp rename returns a preview without mutating files", async () => {
+test("lsp rename previews and applies through the shared WorkspaceEdit cache", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-rename-"));
   const filePath = path.join(root, "probe.py");
   await writeFile(filePath, "const oldName = 1;\noldName;\n", "utf8");
@@ -255,8 +258,55 @@ test("lsp rename returns a preview without mutating files", async () => {
     }, undefined, undefined, { cwd: root });
 
     assert.equal(result.isError, undefined);
-    assert.equal(result.content[0].text, "rename WorkspaceEdit: 2 text edits across 1 file.");
+    const payload = JSON.parse(result.content[0].text);
+    assert.equal(payload.workspaceEdit.kind, "rename");
+    assert.equal(payload.workspaceEdit.applyable, true);
+    assert.equal(payload.workspaceEdit.editSummary, "2 text edits across 1 file");
+    assert.match(payload.workspaceEdit.id, /^we_[0-9a-z]{4}$/);
     assert.equal(await readFile(filePath, "utf8"), "const oldName = 1;\noldName;\n");
+
+    const applied = await tool.execute("lsp-2", {
+      method: "workspaceEdit/apply",
+      id: payload.workspaceEdit.id,
+    }, undefined, undefined, { cwd: root });
+
+    const appliedPayload = JSON.parse(applied.content[0].text);
+    assert.equal(appliedPayload.ok, true);
+    assert.equal(appliedPayload.kind, "rename");
+    assert.equal(appliedPayload.editCount, 2);
+    assert.deepEqual(appliedPayload.changedFiles, ["probe.py"]);
+    assert.equal(await readFile(filePath, "utf8"), "const newName = 1;\nnewName;\n");
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("lsp rename WorkspaceEdit ids reject stale targets", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-rename-stale-"));
+  const filePath = path.join(root, "probe.py");
+  await writeFile(filePath, "const oldName = 1;\noldName;\n", "utf8");
+  const { tool, service } = createRegisteredTool(root, "diagnostics");
+
+  try {
+    const preview = await tool.execute("lsp-1", {
+      method: "textDocument/rename",
+      path: "probe.py",
+      line: 1,
+      column: 8,
+      newName: "newName",
+    }, undefined, undefined, { cwd: root });
+    const id = JSON.parse(preview.content[0].text).workspaceEdit.id;
+
+    await writeFile(filePath, "changed while preview was pending\n", "utf8");
+    const applied = await tool.execute("lsp-2", {
+      method: "workspaceEdit/apply",
+      id,
+    }, undefined, undefined, { cwd: root });
+
+    assert.equal(applied.isError, true);
+    assert.match(applied.content[0].text, /stale: file state changed since textDocument\/rename: probe\.py/);
+    assert.equal(await readFile(filePath, "utf8"), "changed while preview was pending\n");
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });

@@ -12,8 +12,8 @@ export const LSP_METHODS = [
   "textDocument/documentSymbol",
   "workspace/symbol",
   "textDocument/codeAction",
-  "codeAction/apply",
   "textDocument/rename",
+  "workspaceEdit/apply",
 ] as const;
 
 export type LspMethod = (typeof LSP_METHODS)[number];
