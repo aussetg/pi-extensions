@@ -225,7 +225,7 @@ function setSearchSummaryOnRenderContext(context: RenderContext | undefined, det
   if (context.state.searchSummaryKey === key) return;
   context.state.searchSummaryKey = key;
   context.state.searchSummary = summary;
-  context.invalidate?.();
+  if (context.invalidate) queueMicrotask(context.invalidate);
 }
 
 function fetchRenderSummary(details: WebFetchDetails): FetchRenderSummary {
@@ -258,7 +258,7 @@ function setFetchSummaryOnRenderContext(context: RenderContext | undefined, deta
   if (context.state.fetchSummaryKey === key) return;
   context.state.fetchSummaryKey = key;
   context.state.fetchSummary = summary;
-  context.invalidate?.();
+  if (context.invalidate) queueMicrotask(context.invalidate);
 }
 
 function fetchResultBody(result: ToolResultLike): string {

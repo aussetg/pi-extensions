@@ -438,7 +438,7 @@ test("web_fetch enforces maxCharacters while preserving complete extracted conte
   assert.doesNotMatch(saved, /Page content truncated/);
 });
 
-test("search renderers provide stable collapsed, expanded, summary, partial, and error views", () => {
+test("search renderers provide stable collapsed, expanded, summary, partial, and error views", async () => {
   const tool = webSearchTool();
   const results = Array.from({ length: 6 }, (_, index) => ({
     category: "news",
@@ -470,9 +470,12 @@ test("search renderers provide stable collapsed, expanded, summary, partial, and
   assert.match(collapsed, /Result 4/);
   assert.doesNotMatch(collapsed, /Result 5/);
   assert.match(collapsed, /… 2 more results/);
+  assert.equal(invalidations, 0, "must not invalidate re-entrantly while rendering");
+  await Promise.resolve();
   assert.equal(invalidations, 1);
 
   tool.renderResult(result, { expanded: false, isPartial: false }, plainTheme, context);
+  await Promise.resolve();
   assert.equal(invalidations, 1);
   const expanded = tool.renderResult(result, { expanded: true, isPartial: false }, plainTheme, context).render(200).join("\n");
   assert.match(expanded, /Result 6/);
@@ -483,7 +486,7 @@ test("search renderers provide stable collapsed, expanded, summary, partial, and
   assert.match(tool.renderResult({ content: [{ type: "text", text: "bad key" }] }, { expanded: false, isPartial: false }, plainTheme, { isError: true }).render(200).join("\n"), /✗ bad key/);
 });
 
-test("fetch renderers summarize outcomes and limit only the collapsed view", () => {
+test("fetch renderers summarize outcomes and limit only the collapsed view", async () => {
   const tool = webFetchTool();
   const body = `Fetched 1 of 2 URL(s) with Kagi Extract:\n${Array.from({ length: 20 }, (_, index) => `body line ${index + 1}`).join("\n")}`;
   const result = {
@@ -507,6 +510,8 @@ test("fetch renderers summarize outcomes and limit only the collapsed view", () 
   assert.match(collapsed, /body line 1/);
   assert.doesNotMatch(collapsed, /body line 20/);
   assert.match(collapsed, /truncated:.*to expand/);
+  assert.equal(invalidations, 0, "must not invalidate re-entrantly while rendering");
+  await Promise.resolve();
   assert.equal(invalidations, 1);
 
   const expanded = tool.renderResult(result, { expanded: true, isPartial: false }, plainTheme, context).render(200).join("\n");
