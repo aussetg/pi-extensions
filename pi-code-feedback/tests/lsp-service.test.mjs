@@ -479,7 +479,7 @@ test("timed out LSP requests send a cancel notification", async () => {
   }
 });
 
-test("failed initialization kills the obsolete process and ignores its late events", async () => {
+test("hung initialization is killed and obsolete child exits cannot corrupt replacement state", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-initialize-retry-"));
   const processLog = path.join(root, "processes.jsonl");
   const client = new LspClient({

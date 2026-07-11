@@ -34,6 +34,7 @@ export interface WorkspaceEditApplyOptions {
   expectedFileStates?: readonly WorkspaceEditFileState[];
   getDocumentVersion?: (filePath: string) => number | undefined;
   mutationQueue?: FileMutationQueue;
+  renameFile?: (sourcePath: string, targetPath: string) => void;
   signal?: AbortSignal;
   captureAppliedChanges?: AppliedWorkspaceEditChange[];
 }
@@ -209,14 +210,15 @@ function applyCollectedWorkspaceEdit(
   }
 
   const committed: StagedFileEdit[] = [];
+  const renameFile = options.renameFile ?? fs.renameSync;
   try {
     throwIfAborted(options.signal);
     for (const file of staged) {
-      fs.renameSync(file.tempPath, file.plan.filePath);
+      renameFile(file.tempPath, file.plan.filePath);
       committed.push(file);
     }
   } catch (error) {
-    const rollbackFailedFiles = rollbackCommittedFiles(committed);
+    const rollbackFailedFiles = rollbackCommittedFiles(committed, renameFile);
     cleanupStagedFiles(staged);
     const rollback = rollbackFailedFiles.length > 0
       ? `; rollback failed for: ${rollbackFailedFiles.join(", ")}`
@@ -346,13 +348,16 @@ function stageFileEdit(plan: PlannedFileEdit): StagedFileEdit {
   }
 }
 
-function rollbackCommittedFiles(committed: StagedFileEdit[]): string[] {
+function rollbackCommittedFiles(
+  committed: StagedFileEdit[],
+  renameFile: NonNullable<WorkspaceEditApplyOptions["renameFile"]>,
+): string[] {
   const failed: string[] = [];
   for (const file of [...committed].reverse()) {
     let restore: StagedFileEdit | undefined;
     try {
       restore = stageFileEdit({ ...file.plan, after: file.plan.before });
-      fs.renameSync(restore.tempPath, file.plan.filePath);
+      renameFile(restore.tempPath, file.plan.filePath);
     } catch {
       failed.push(file.plan.filePath);
     } finally {

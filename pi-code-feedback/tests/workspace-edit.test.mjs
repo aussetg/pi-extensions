@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { renameSync } from "node:fs";
+import { chmod, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -164,6 +165,77 @@ test("workspace edit cancellation while queued prevents a late mutation", async 
   }
 });
 
+test("concurrent multi-file workspace edits acquire mutation queues without deadlocking", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-workspace-concurrent-"));
+  const firstPath = path.join(root, "first.txt");
+  const secondPath = path.join(root, "second.txt");
+  await writeFile(firstPath, "base", "utf8");
+  await writeFile(secondPath, "base", "utf8");
+  const mutationQueue = createMutationQueue();
+  let timeout;
+
+  try {
+    const left = applyWorkspaceEdit(multiFileEdit([
+      [firstPath, "L"],
+      [secondPath, "L"],
+    ]), root, { mutationQueue });
+    const right = applyWorkspaceEdit(multiFileEdit([
+      [secondPath, "R"],
+      [firstPath, "R"],
+    ]), root, { mutationQueue });
+
+    const results = await Promise.race([
+      Promise.all([left, right]),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("concurrent WorkspaceEdits deadlocked")), 1000);
+      }),
+    ]);
+
+    assert.deepEqual(results.map((result) => result.applied), [true, true]);
+    assert.equal(await readFile(firstPath, "utf8"), "RLbase");
+    assert.equal(await readFile(secondPath, "utf8"), "RLbase");
+  } finally {
+    clearTimeout(timeout);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("partial multi-file commit failure rolls back already replaced files", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-workspace-rollback-"));
+  const firstPath = path.join(root, "first.txt");
+  const secondPath = path.join(root, "second.txt");
+  await writeFile(firstPath, "first", "utf8");
+  await writeFile(secondPath, "second", "utf8");
+  const capturedChanges = [];
+  let renameCount = 0;
+
+  try {
+    const result = await applyWorkspaceEdit(multiFileEdit([
+      [firstPath, "changed-"],
+      [secondPath, "changed-"],
+    ]), root, {
+      captureAppliedChanges: capturedChanges,
+      renameFile(sourcePath, targetPath) {
+        renameCount += 1;
+        if (renameCount === 2) throw new Error("injected second-file commit failure");
+        renameSync(sourcePath, targetPath);
+      },
+    });
+
+    assert.equal(result.applied, false);
+    assert.match(result.rejected ?? "", /WorkspaceEdit commit failed: injected second-file commit failure; committed files were rolled back/);
+    assert.deepEqual(result.changedFiles, []);
+    assert.equal(result.rollbackFailedFiles, undefined);
+    assert.equal(renameCount, 3);
+    assert.deepEqual(capturedChanges, []);
+    assert.equal(await readFile(firstPath, "utf8"), "first");
+    assert.equal(await readFile(secondPath, "utf8"), "second");
+    assert.equal((await readdir(root)).some((name) => name.startsWith(".pi-code-feedback-")), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("workspace edit rejects target changes made after preview", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-workspace-stale-"));
   const filePath = path.join(root, "probe.txt");
@@ -259,6 +331,15 @@ function singleFileEdit(filePath, newText) {
     changes: {
       [pathToFileURL(filePath).href]: [textEdit(0, 0, 0, 0, newText)],
     },
+  };
+}
+
+function multiFileEdit(entries) {
+  return {
+    changes: Object.fromEntries(entries.map(([filePath, newText]) => [
+      pathToFileURL(filePath).href,
+      [textEdit(0, 0, 0, 0, newText)],
+    ])),
   };
 }
 
