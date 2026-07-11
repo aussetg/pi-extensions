@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { createDefaultConfig } from "../src/config.ts";
+import { DEFAULT_LSP_SOURCE_FILE_MAX_BYTES } from "../src/fs.ts";
 import { createLspService } from "../src/lsp/service.ts";
 import { renderLspToolResult } from "../src/lsp/tool-renderer.ts";
 import { registerLspTool } from "../src/lsp/tool.ts";
@@ -506,6 +507,36 @@ test("lsp errors are concise text while keeping structured details", async () =>
     assert.match(text, /hint: Check that the path exists/);
     assert.doesNotMatch(text, /^\s*\{/);
     assert.doesNotMatch(text, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit LSP operations reject oversized source files before starting a server", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-source-limit-"));
+  const filePath = path.join(root, "generated.py");
+  await writeFile(filePath, Buffer.alloc(DEFAULT_LSP_SOURCE_FILE_MAX_BYTES + 1024 * 1024, 0x61));
+  const { tool, service } = createRegisteredTool(root);
+
+  const cases = [
+    { method: "textDocument/diagnostic", path: "generated.py" },
+    { method: "textDocument/hover", path: "generated.py", line: 1, column: 1 },
+    { method: "textDocument/documentSymbol", path: "generated.py" },
+    { method: "textDocument/codeAction", path: "generated.py", line: 1, column: 1 },
+    { method: "textDocument/rename", path: "generated.py", line: 1, column: 1, newName: "renamed" },
+  ];
+
+  try {
+    for (const input of cases) {
+      const result = await tool.execute("lsp-source-limit", input, undefined, undefined, { cwd: root });
+      assert.equal(result.isError, true, input.method);
+      assert.match(result.content[0].text, /LSP source file is too large \(3\.0 MiB > 2\.0 MiB limit\): generated\.py/, input.method);
+      assert.match(result.content[0].text, /hint: Use a smaller source file or exclude generated output/, input.method);
+    }
+    const clients = service.getStatus().clients;
+    assert.equal(clients.length, 1);
+    assert.ok(clients.every((client) => client.pid === undefined && client.state === "stopped"));
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });

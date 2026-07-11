@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { createDiagnosticSnapshot, flattenDiagnosticSnapshot } from "../diagnostics/snapshots.ts";
-import { readUtf8IfExists } from "../fs.ts";
+import { DEFAULT_LSP_SOURCE_FILE_MAX_BYTES, formatBytes, readUtf8IfSmall } from "../fs.ts";
 import { resolveWorkspaceRootForPath } from "../language-environments.ts";
 import { LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY, type DiagnosticRefreshResult, type DiagnosticSnapshot, type LspDiagnostic, type LspServiceStatus, type LspUnavailableServer } from "../types.ts";
 import { abortError, isCancellation, throwIfAborted } from "./cancellation.ts";
@@ -98,7 +98,7 @@ export class LspService {
     const clients = this.getOrCreateClients(resolved);
     if (clients.length === 0) return undefined;
 
-    const finalContent = content ?? readUtf8IfExists(resolved);
+    const finalContent = content ?? readLspSourceFileIfExists(resolved);
     if (finalContent === undefined) {
       const now = Date.now();
       return {
@@ -228,8 +228,7 @@ export class LspService {
     if (!position) throw new Error("code_actions requires 1-based line and column");
     const range = oneLineLspRange(position);
     const resolved = path.resolve(this.projectRoot, filePath);
-    const content = readUtf8IfExists(resolved);
-    if (content === undefined) throw new Error(`Cannot read file for LSP request: ${resolved}`);
+    const content = readLspSourceFile(resolved);
 
     await this.diagnosticsForFileDetailed(resolved, content, {
       timeoutMs: CODE_ACTION_DIAGNOSTIC_TIMEOUT_MS,
@@ -341,8 +340,7 @@ export class LspService {
   private async documentRequest(filePath: string, method: string, extraParams: Record<string, unknown>, signal?: AbortSignal): Promise<{ result: unknown; client: LspClient }> {
     throwIfAborted(signal);
     const resolved = path.resolve(this.projectRoot, filePath);
-    const content = readUtf8IfExists(resolved);
-    if (content === undefined) throw new Error(`Cannot read file for LSP request: ${resolved}`);
+    const content = readLspSourceFile(resolved);
 
     const client = this.getOrCreateClient(resolved);
     if (!client) throw new Error(`No language server configured for ${resolved}`);
@@ -569,8 +567,7 @@ export class LspService {
   private async documentRequests(filePath: string, method: string, extraParams: Record<string, unknown>, signal?: AbortSignal): Promise<ClientRequestResult[]> {
     throwIfAborted(signal);
     const resolved = path.resolve(this.projectRoot, filePath);
-    const content = readUtf8IfExists(resolved);
-    if (content === undefined) throw new Error(`Cannot read file for LSP request: ${resolved}`);
+    const content = readLspSourceFile(resolved);
 
     const clients = this.getOrCreateClients(resolved);
     if (clients.length === 0) throw new Error(`No language server configured for ${resolved}`);
@@ -1010,6 +1007,21 @@ function markupHasText(value: unknown): boolean {
   if (!isRecord(value)) return false;
   if (typeof value.value === "string") return value.value.trim().length > 0;
   return false;
+}
+
+function readLspSourceFile(filePath: string): string {
+  const content = readLspSourceFileIfExists(filePath);
+  if (content === undefined) throw new Error(`Cannot read file for LSP request: ${filePath}`);
+  return content;
+}
+
+function readLspSourceFileIfExists(filePath: string): string | undefined {
+  const result = readUtf8IfSmall(filePath, DEFAULT_LSP_SOURCE_FILE_MAX_BYTES);
+  if (result.skippedReason === "too-large") {
+    const size = result.size === undefined ? "unknown size" : formatBytes(result.size);
+    throw new Error(`LSP source file is too large (${size} > ${formatBytes(DEFAULT_LSP_SOURCE_FILE_MAX_BYTES)} limit): ${filePath}`);
+  }
+  return result.content;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

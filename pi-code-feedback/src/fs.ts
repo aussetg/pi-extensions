@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 
 export const DEFAULT_TRACKED_FILE_MAX_BYTES = 2 * 1024 * 1024;
+export const DEFAULT_LSP_SOURCE_FILE_MAX_BYTES = 2 * 1024 * 1024;
 
 export type ReadUtf8SkippedReason = "missing" | "not-file" | "too-large" | "binary" | "read-error";
 

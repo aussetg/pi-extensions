@@ -953,6 +953,7 @@ function rejectApplyDuringPendingEdits(runtime: CodeFeedbackRuntime, label: stri
 function hintForError(message: string): string | undefined {
   if (/requires 1-based line and character|requires 1-based line and column/i.test(message)) return "Pass line and column as 1-based numbers.";
   if (/requires path/i.test(message)) return "Pass path for textDocument methods.";
+  if (/LSP source file is too large/i.test(message)) return "Use a smaller source file or exclude generated output from explicit LSP requests.";
   if (/Cannot read file for LSP request/i.test(message)) return "Check that the path exists and rerun the request against a current file.";
   if (/No language server configured/i.test(message)) return "No configured language server matched this file. Check file extension, config, and installed server commands.";
   if (/No active LSP client|No LSP client available/i.test(message)) return "Pass path to a source file to choose and lazily start a language server.";
