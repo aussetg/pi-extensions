@@ -1,7 +1,15 @@
 // @ts-ignore The pi runtime provides this package to extensions.
+import { AssistantMessageComponent } from "@earendil-works/pi-coding-agent";
+// @ts-ignore The pi runtime provides this package to extensions.
 import { Box } from "@earendil-works/pi-tui";
 
 const BOX_RENDER_PATCH = Symbol.for("pi-tui-hotfix.box-render-cache");
+const GPT5_THINKING_PATCH = Symbol.for("pi-tui-hotfix.gpt5-thinking-placeholders");
+
+// GPT-5 occasionally emits a reasoning-summary part whose entire body is this
+// sentinel. Match Codex and drop the whole part, including its status heading.
+const EMPTY_REASONING_PART_RE =
+	/(^|\n)(?:\*\*[^\r\n*][^\r\n]*?\*\*[ \t]*\r?\n(?:[ \t]*\r?\n)?)?<!-- -->[ \t]*(?=\r?\n|$)/g;
 
 type BoxLike = {
 	children: Array<{ render(width: number): string[] }>;
@@ -19,8 +27,78 @@ type BoxLike = {
 	applyBg?: (line: string, width: number) => string;
 };
 
+type AssistantMessageLike = {
+	role?: string;
+	model?: string;
+	content?: unknown[];
+};
+
+type AssistantMessageComponentLike = {
+	lastMessage?: AssistantMessageLike;
+};
+
 export default function (_pi: any): void {
+	patchGpt5ThinkingPlaceholders();
 	patchBoxRenderCache();
+}
+
+function patchGpt5ThinkingPlaceholders(): void {
+	const proto = (AssistantMessageComponent as any)?.prototype;
+	if (!proto) return;
+
+	const previousPatch = proto[GPT5_THINKING_PATCH] as { originalUpdateContent?: unknown } | undefined;
+	const originalUpdateContent =
+		typeof previousPatch?.originalUpdateContent === "function" ? previousPatch.originalUpdateContent : proto.updateContent;
+	if (typeof originalUpdateContent !== "function") return;
+
+	proto.updateContent = function piTuiHotfixGpt5Thinking(
+		this: AssistantMessageComponentLike,
+		message: AssistantMessageLike,
+	): unknown {
+		const renderedMessage = sanitizeGpt5Thinking(message);
+		const result = originalUpdateContent.call(this, renderedMessage);
+		// Keep the raw message so a later rebuild can apply a revised renderer
+		// instead of permanently inheriting this display-only transformation.
+		if (renderedMessage !== message) this.lastMessage = message;
+		return result;
+	};
+
+	if (!previousPatch) {
+		Object.defineProperty(proto, GPT5_THINKING_PATCH, {
+			value: { originalUpdateContent },
+			configurable: false,
+		});
+	}
+}
+
+function sanitizeGpt5Thinking(message: AssistantMessageLike): AssistantMessageLike {
+	if (message?.role !== "assistant" || !isGpt5Model(message.model) || !Array.isArray(message.content)) return message;
+
+	let changed = false;
+	const content = message.content.map((block) => {
+		if (!block || typeof block !== "object") return block;
+		const thinkingBlock = block as { type?: string; thinking?: string };
+		if (thinkingBlock.type !== "thinking" || typeof thinkingBlock.thinking !== "string") return block;
+
+		const thinking = stripEmptyReasoningParts(thinkingBlock.thinking);
+		if (thinking === thinkingBlock.thinking) return block;
+		changed = true;
+		return { ...thinkingBlock, thinking };
+	});
+
+	return changed ? { ...message, content } : message;
+}
+
+function isGpt5Model(model: unknown): boolean {
+	if (typeof model !== "string") return false;
+	const segments = model.trim().split("/");
+	const id = segments[segments.length - 1] ?? "";
+	return /^gpt-5(?:$|[.-])/i.test(id);
+}
+
+function stripEmptyReasoningParts(thinking: string): string {
+	const stripped = thinking.replace(EMPTY_REASONING_PART_RE, "$1");
+	return stripped === thinking ? thinking : stripped.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function patchBoxRenderCache(): void {
