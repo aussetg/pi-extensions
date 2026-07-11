@@ -81,6 +81,42 @@ test("diagnostics for a Python file are merged from ty and Ruff clients", async 
   }
 });
 
+test("service shutdown starts all client shutdowns in parallel", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-shutdown-parallel-"));
+  const filePath = path.join(root, "probe.py");
+  const logPath = path.join(root, "shutdown.jsonl");
+  const releasePath = `${logPath}.release`;
+  await writeFile(filePath, "value = 1\n", "utf8");
+
+  const server = (source) => ({
+    command: process.execPath,
+    args: [fakeServer, source, "T100", "1", "", "shutdown-gate", logPath],
+  });
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: server("python"),
+      "python-ruff": server("python-ruff"),
+    },
+  });
+  let shutdown;
+
+  try {
+    await service.capabilities(filePath);
+    shutdown = service.shutdownAll();
+    const entries = await waitForJsonLog(logPath, (items) => items.filter((entry) => entry.method === "shutdown").length === 2);
+    assert.deepEqual(entries.map((entry) => entry.source).sort(), ["python", "python-ruff"]);
+    await writeFile(releasePath, "", "utf8");
+    await shutdown;
+  } finally {
+    await writeFile(releasePath, "", "utf8").catch(() => undefined);
+    await shutdown?.catch(() => undefined);
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("malformed diagnostic positions are dropped instead of clamped", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-malformed-diagnostic-"));
   const filePath = path.join(root, "probe.py");

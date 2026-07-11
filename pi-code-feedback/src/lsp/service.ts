@@ -361,7 +361,7 @@ export class LspService {
     this.clients.clear();
     this.unavailableServers.clear();
     this.finishDiagnosticRefreshWaiters(undefined);
-    await Promise.all(clients.map((client) => client.shutdown(signal).catch(() => undefined)));
+    await Promise.allSettled(clients.map((client) => client.shutdown(signal)));
     throwIfAborted(signal);
     this.armIdleTimer();
   }
@@ -373,7 +373,7 @@ export class LspService {
     this.finishDiagnosticRefreshWaiters(undefined);
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = undefined;
-    await Promise.all(clients.map((client) => client.shutdown(signal).catch(() => undefined)));
+    await Promise.allSettled(clients.map((client) => client.shutdown(signal)));
   }
 
   private async documentRequest(filePath: string, method: string, extraParams: Record<string, unknown>, signal?: AbortSignal): Promise<{ result: unknown; client: LspClient }> {

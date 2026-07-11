@@ -93,6 +93,15 @@ function handleMessage(message) {
   }
 
   if (message.id !== undefined && message.method === "shutdown") {
+    if (mode === "shutdown-gate" && typeof logPath === "string") {
+      log({ method: "shutdown", source, pid: process.pid });
+      const interval = setInterval(() => {
+        if (!fs.existsSync(`${logPath}.release`)) return;
+        clearInterval(interval);
+        send({ jsonrpc: "2.0", id: message.id, result: null });
+      }, 5);
+      return;
+    }
     send({ jsonrpc: "2.0", id: message.id, result: null });
     return;
   }

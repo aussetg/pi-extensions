@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { createDefaultConfig } from "../src/config.ts";
 import { createLspService } from "../src/lsp/service.ts";
 import { renderLspToolResult } from "../src/lsp/tool-renderer.ts";
@@ -584,6 +585,20 @@ test("lsp hover renderer strips a single markdown code fence and renders raw tex
 
   assert.equal(rendered, `<toolOutput>${line}</toolOutput>`);
   assert.doesNotMatch(rendered, /```|textmate|syntax|code ·/);
+});
+
+test("lsp custom rendering obeys terminal width for Unicode and ANSI text", () => {
+  const theme = {
+    fg: (color, text) => `\x1b[3${color === "toolOutput" ? "2" : "6"}m${text}\x1b[0m`,
+    bold: (text) => `\x1b[1m${text}\x1b[22m`,
+  };
+  const rendered = renderLspToolResult({
+    content: [{ type: "text", text: "A👩‍💻漢字étail" }],
+  }, { expanded: false }, theme, { args: { method: "textDocument/hover" } }).render(6);
+
+  assert.equal(rendered.length, 1);
+  assert.ok(visibleWidth(rendered[0]) <= 6, `rendered width was ${visibleWidth(rendered[0])}`);
+  assert.equal(rendered[0].replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, ""), "A👩‍💻漢…");
 });
 
 test("lsp raw payload renderer does not masquerade as method-specific pretty output", () => {

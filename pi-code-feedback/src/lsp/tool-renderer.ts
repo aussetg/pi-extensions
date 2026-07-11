@@ -1,3 +1,4 @@
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { formatSize, type LspToolTruncation } from "./tool-output.ts";
 
 interface ThemeLike {
@@ -344,36 +345,8 @@ function bold(theme: ThemeLike, text: string): string {
 function linesComponent(lines: string[]): ComponentLike {
   return {
     render(width: number) {
-      return lines.map((line) => truncateVisible(line, Math.max(1, width)));
+      return lines.map((line) => truncateToWidth(line, Math.max(1, width), "…"));
     },
     invalidate() {},
   };
-}
-
-function truncateVisible(text: string, width: number): string {
-  let visible = 0;
-  let out = "";
-  for (let index = 0; index < text.length;) {
-    if (text[index] === "\x1b") {
-      const end = ansiEnd(text, index);
-      out += text.slice(index, end);
-      index = end;
-      continue;
-    }
-    if (visible >= width) return `${out.slice(0, Math.max(0, out.length - 1))}…`;
-    out += text[index];
-    visible += 1;
-    index += 1;
-  }
-  return out;
-}
-
-function ansiEnd(text: string, start: number): number {
-  if (text[start + 1] === "[") {
-    for (let index = start + 2; index < text.length; index += 1) {
-      const code = text.charCodeAt(index);
-      if (code >= 0x40 && code <= 0x7e) return index + 1;
-    }
-  }
-  return start + 1;
 }
