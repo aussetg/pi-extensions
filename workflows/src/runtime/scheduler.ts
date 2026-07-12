@@ -47,6 +47,7 @@ export interface SchedulerDeps {
   budget: WorkflowBudget;
   maxAgents: number;
   agentQuota?: WorkflowAgentQuota;
+  defaultModel?: string;
   defaultThinking?: ThinkingLevel;
   modelRegistryModels?: readonly ModelRegistryModelLike[];
   activeTools?: string[];
@@ -98,6 +99,7 @@ export class WorkflowScheduler {
     const effectiveOpts = withoutUndefinedProperties({
       ...opts,
       workspace: opts.workspace ?? DEFAULT_AGENT_WORKSPACE,
+      model: opts.model ?? this.deps.defaultModel,
       thinking: opts.thinking ?? (modelPatternDeclaresThinking(opts.model, this.deps.modelRegistryModels) ? undefined : this.deps.defaultThinking),
     });
 

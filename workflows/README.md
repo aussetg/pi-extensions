@@ -77,9 +77,9 @@ not copied into the project.
 - thinking levels `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`;
 - workspace modes `shared`, `readOnly`, and `patch`.
 
-Subagents inherit the active Pi tool allowlist with `workflow` removed. If no permitted tools remain,
-the child runs with `--no-tools`. Unless explicitly overridden, subagent thinking is one level below
-the launching session.
+Subagents inherit the launching model and the active Pi tool allowlist with `workflow` removed. If no
+permitted tools remain, the child runs with `--no-tools`. Unless explicitly overridden, subagent
+thinking is one level below the launching session.
 
 `parallel()` and `pipeline()` fail fast. Catch errors inside a branch or stage when best-effort
 behavior is intentional.

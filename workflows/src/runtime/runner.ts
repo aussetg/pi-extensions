@@ -63,6 +63,7 @@ export class WorkflowRunner {
     }
 
     const sessionId = ctx.sessionManager?.getSessionId?.() ?? ctx.sessionManager?.getHeader?.()?.id ?? "unknown-session";
+    const defaultAgentModel = defaultAgentModelFromContext(ctx);
     const defaultAgentThinking = defaultAgentThinkingFromContext(ctx);
     const modelRegistryModels = getModelRegistryModels(ctx);
     const { record } = await this.deps.runStore.create({
@@ -80,7 +81,7 @@ export class WorkflowRunner {
     this.deps.runStore.registerControl(record.runId, control);
 
     const mode = args.input.mode ?? (ctx.hasUI ? "async" : "await");
-    const execute = (onUpdate: LaunchArgs["onUpdate"] | undefined) => this.executeRun({ record, resolved, stableArgs, input: args.input, ctx, control, defaultAgentThinking, modelRegistryModels, onUpdate });
+    const execute = (onUpdate: LaunchArgs["onUpdate"] | undefined) => this.executeRun({ record, resolved, stableArgs, input: args.input, ctx, control, defaultAgentModel, defaultAgentThinking, modelRegistryModels, onUpdate });
 
     const runInBackground = mode === "async" && !args.onUpdate;
 
@@ -108,8 +109,8 @@ export class WorkflowRunner {
     }
   }
 
-  private async executeRun(args: { record: RunRecord; resolved: ResolvedWorkflowSource; stableArgs: Record<string, unknown>; input: WorkflowInput; ctx: any; control: RunControl; defaultAgentThinking?: ReturnType<typeof defaultAgentThinkingFromContext>; modelRegistryModels?: readonly ModelRegistryModelLike[]; onUpdate?: LaunchArgs["onUpdate"] }): Promise<WorkflowLaunchOutput> {
-    const { record, resolved, stableArgs, input, ctx, control, defaultAgentThinking, modelRegistryModels } = args;
+  private async executeRun(args: { record: RunRecord; resolved: ResolvedWorkflowSource; stableArgs: Record<string, unknown>; input: WorkflowInput; ctx: any; control: RunControl; defaultAgentModel?: string; defaultAgentThinking?: ReturnType<typeof defaultAgentThinkingFromContext>; modelRegistryModels?: readonly ModelRegistryModelLike[]; onUpdate?: LaunchArgs["onUpdate"] }): Promise<WorkflowLaunchOutput> {
+    const { record, resolved, stableArgs, input, ctx, control, defaultAgentModel, defaultAgentThinking, modelRegistryModels } = args;
     const journal = new JsonlJournal(record.journalPath);
     let progressComponent: WorkflowProgressComponent | undefined;
     let progressRenderTimer: NodeJS.Timeout | undefined;
@@ -171,6 +172,7 @@ export class WorkflowRunner {
         budget,
         maxAgents: agentQuota.total,
         agentQuota,
+        defaultModel: defaultAgentModel,
         defaultThinking: defaultAgentThinking,
         modelRegistryModels,
         activeTools: safeActiveTools(this.deps.pi),
@@ -438,6 +440,14 @@ function getModelRegistryModels(ctx: any): readonly ModelRegistryModelLike[] | u
   } catch {
     return undefined;
   }
+}
+
+function defaultAgentModelFromContext(ctx: any): string | undefined {
+  const provider = ctx?.model?.provider;
+  const id = ctx?.model?.id;
+  if (typeof provider !== "string" || provider.trim() === "") return undefined;
+  if (typeof id !== "string" || id.trim() === "") return undefined;
+  return `${provider}/${id}`;
 }
 
 function throwIfAborted(signal: AbortSignal): void {

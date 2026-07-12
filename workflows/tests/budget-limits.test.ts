@@ -255,6 +255,31 @@ return 'done';
     expect(seen.map((opts) => opts.thinking)).toEqual(["medium", "xhigh", undefined]);
   });
 
+  it("inherits the launching model and applies explicit per-agent overrides", async () => {
+    const seen: Array<any> = [];
+    vi.spyOn(WorkflowAgent.prototype, "run").mockImplementation(async (call) => {
+      seen.push(call.options);
+      return await writeMockAgentResult(call, `result ${seen.length}`, 10);
+    });
+
+    const result = await runner().launchOrRun({
+      toolCallId: "model-default-test",
+      input: {
+        mode: "await",
+        maxAgents: 2,
+        script: `export const meta = { name: 'model_defaults', description: 'checks model defaults' };
+await agent('inherited model');
+await agent('explicit model', { model: 'anthropic/claude-sonnet-4-5' });
+return 'done';
+`,
+      },
+      ctx: { ...workflowCtx(), model: { provider: "openai-codex", id: "gpt-5.4" } },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(seen.map((opts) => opts.model)).toEqual(["openai-codex/gpt-5.4", "anthropic/claude-sonnet-4-5"]);
+  });
+
   it("does not treat exact registered model ids ending in a thinking suffix as legacy suffixes", async () => {
     const seen: Array<any> = [];
     vi.spyOn(WorkflowAgent.prototype, "run").mockImplementation(async (call) => {
