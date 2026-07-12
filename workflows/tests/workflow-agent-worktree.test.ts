@@ -6,7 +6,6 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WORKFLOW_RESOURCE_LIMITS } from "../src/constants.js";
 import { WorkflowAgent } from "../src/agents/workflow-agent.js";
-import { JsonlJournal, ResumeIndex } from "../src/persistence/journal.js";
 
 const exec = promisify(execFile);
 
@@ -63,17 +62,16 @@ describe("WorkflowAgent worktree isolation", () => {
     expect(persisted.usage.toolUses).toBe(2);
   });
 
-  it("emits result.json that resume indexes can load", async () => {
-    const runDir = path.join(tmp, "run-replay-result");
-    const repo = path.join(tmp, "repo-replay-result");
-    const fakePi = path.join(tmp, "fake-pi-replay-result.mjs");
+  it("persists structured results with execution metadata", async () => {
+    const runDir = path.join(tmp, "run-structured-result");
+    const repo = path.join(tmp, "repo-structured-result");
+    const fakePi = path.join(tmp, "fake-pi-structured-result.mjs");
     const transcriptDir = path.join(runDir, "subagents");
-    const journalPath = path.join(runDir, "journal.jsonl");
 
     await fs.promises.mkdir(repo, { recursive: true });
     await fs.promises.writeFile(
       fakePi,
-      "console.log(JSON.stringify({ type: 'message_end', message: { role: 'assistant', model: 'replay-model', content: '{\\\"ok\\\":true}', usage: { input: 3, output: 4 } } }));",
+      "console.log(JSON.stringify({ type: 'message_end', message: { role: 'assistant', model: 'test-model', content: '{\\\"ok\\\":true}', usage: { input: 3, output: 4 } } }));",
       "utf8",
     );
     process.argv[1] = fakePi;
@@ -82,31 +80,21 @@ describe("WorkflowAgent worktree isolation", () => {
       callId: "0001",
       runId: "wr_test",
       cwd: repo,
-      label: "replay result",
-      prompt: "emit replayable result",
+      label: "structured result",
+      prompt: "emit structured result",
       options: { isolation: "shared", schema: { type: "object", additionalProperties: false, required: ["ok"], properties: { ok: { type: "boolean" } } }, thinking: "high" },
       transcriptDir,
       signal: new AbortController().signal,
       stallMs: 10_000,
       stallRetries: 0,
     });
-    await new JsonlJournal(journalPath).append({
-      type: "agent_result",
-      runId: "wr_test",
-      time: "2026-01-01T00:00:00.000Z",
-      callId: "0001",
-      chainKey: "chain-1",
-      status: "done",
-      resultPath: "subagents/0001/result.json",
-    });
-
-    const replay = await (await ResumeIndex.fromRun(runDir, journalPath)).load("chain-1");
+    const persisted = JSON.parse(await fs.promises.readFile(result.resultPath, "utf8"));
     expect(result.result).toEqual({ ok: true });
-    expect(replay).toEqual(expect.objectContaining({
-      value: { ok: true },
+    expect(persisted).toEqual(expect.objectContaining({
+      result: { ok: true },
       status: "done",
       usage: { agentCount: 1, subagentTokens: 7, toolUses: 0, estimated: false },
-      model: "replay-model",
+      model: "test-model",
       thinking: "high",
     }));
   });

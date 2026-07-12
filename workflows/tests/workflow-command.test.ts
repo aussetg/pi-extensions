@@ -199,6 +199,28 @@ describe("/workflow save", () => {
 });
 
 describe("/workflow resume", () => {
+  it("restarts from the beginning without reading prior agent results", async () => {
+    const cwd = path.join(tmp, "project");
+    await fs.promises.mkdir(cwd, { recursive: true });
+
+    const runStore = new RunStore();
+    const { record } = await runStore.create({ cwd, sessionId: "s", meta, source, args: { keep: true } });
+    await runStore.setStatus(record.runId, "failed");
+    await fs.promises.truncate(record.journalPath, WORKFLOW_RESOURCE_LIMITS.journalBytes + 1);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    await routeWorkflowCommand(
+      { getActiveTools: () => [] } as any,
+      { action: "resume", runId: record.runId, mode: "await" },
+      makeDeps(runStore),
+      noUiCtx(cwd),
+    );
+
+    const restarted = runStore.list("completed").find((run) => run.resumeFromRunId === record.runId);
+    expect(restarted?.status).toBe("completed");
+    expect(restarted?.progress.total).toBe(0);
+  });
+
   it("surfaces corrupt persisted args instead of silently resuming with empty args", async () => {
     const cwd = path.join(tmp, "project");
     await fs.promises.mkdir(cwd, { recursive: true });

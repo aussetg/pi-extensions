@@ -3,15 +3,13 @@ import fs from "node:fs";
 import type { AgentOptions, RunRecord, WorkflowCallProgress, WorkflowUsage } from "../types.js";
 import { DEFAULT_LIMITS, WORKFLOW_ISOLATION_POLICY, WORKFLOW_RESOURCE_LIMITS } from "../constants.js";
 import { WorkflowAgent } from "../agents/workflow-agent.js";
-import { JsonlJournal, type ResumeIndex } from "../persistence/journal.js";
+import { JsonlJournal } from "../persistence/journal.js";
 import { relativeToRun } from "../persistence/paths.js";
-import { copyOpenFile, copySafeExistingFile, normalizeSafeRelativePath, readBoundedTextFile, readSafeTextFile, safeResolveExistingDir, withSafeExistingFile } from "../persistence/safe-paths.js";
 import { sha256, stableHash } from "../utils/hashes.js";
 import { nowIso } from "../utils/ids.js";
 import { byteLength, truncateBytes } from "../utils/truncate.js";
 import { modelPatternDeclaresThinking, type ModelRegistryModelLike, type ThinkingLevel } from "../thinking.js";
 import { WorkflowBudget } from "./budget.js";
-import { computeAgentChainKey } from "./cache-key.js";
 import { WorkflowAgentCapError, WorkflowAbortError, WorkflowBudgetExceededError, WorkflowSkipAgentError } from "./errors.js";
 import { RunControl } from "./run-control.js";
 import { normalizeAgentOptions } from "./agent-options.js";
@@ -45,7 +43,6 @@ export interface SchedulerDeps {
   journal: JsonlJournal;
   control: RunControl;
   budget: WorkflowBudget;
-  resumeIndex?: ResumeIndex;
   maxAgents: number;
   agentQuota?: WorkflowAgentQuota;
   defaultThinking?: ThinkingLevel;
@@ -59,9 +56,7 @@ export class WorkflowScheduler {
   private readonly limiter: AsyncLimiter;
   private readonly agentQuota: WorkflowAgentQuota;
   private readonly agent = new WorkflowAgent();
-  private replayQueue: Promise<void> = Promise.resolve();
   private sequence = 0;
-  private previousChainKey: string | undefined;
   private calls = new Map<string, WorkflowCallProgress>();
   private logEntries = 0;
   private logBytes = 0;
@@ -105,12 +100,6 @@ export class WorkflowScheduler {
     const callId = String(++this.sequence).padStart(4, "0");
     const phase = effectiveOpts.phase ?? this.deps.run.phase;
     const label = effectiveOpts.label ?? `agent ${callId}`;
-    const previousChainKey = this.previousChainKey;
-    const chainKey = computeAgentChainKey({ previousChainKey, prompt, opts: { ...effectiveOpts, phase }, activeTools: this.deps.activeTools });
-    this.previousChainKey = chainKey;
-
-    const cached = await this.decideReplay(callId, chainKey, label, phase, effectiveOpts.thinking);
-    if (cached.replayed) return cached.value;
     const call: WorkflowCallProgress = { callId, label, phase, model: effectiveOpts.model, thinking: effectiveOpts.thinking, agentType: effectiveOpts.agentType, status: "pending", startedAt: nowIso() };
     this.calls.set(callId, call);
     this.refreshProgress();
@@ -119,8 +108,6 @@ export class WorkflowScheduler {
       runId: this.deps.run.runId,
       time: nowIso(),
       callId,
-      chainKey,
-      previousChainKey,
       label,
       phase,
       promptHash: sha256(prompt),
@@ -168,7 +155,6 @@ export class WorkflowScheduler {
         runId: this.deps.run.runId,
         time: nowIso(),
         callId,
-        chainKey,
         status: "done",
         resultPath: relativeToRun(this.deps.run.runDir, result.resultPath),
         usage,
@@ -190,7 +176,6 @@ export class WorkflowScheduler {
           runId: this.deps.run.runId,
           time: nowIso(),
           callId,
-          chainKey,
           status: "skipped",
           resultPath: relativeToRun(this.deps.run.runDir, resultPath),
           thinking: effectiveOpts.thinking,
@@ -207,7 +192,6 @@ export class WorkflowScheduler {
         runId: this.deps.run.runId,
         time: nowIso(),
         callId,
-        chainKey,
         status: call.status === "aborted" ? "aborted" : "error",
         error: call.error,
         thinking: effectiveOpts.thinking,
@@ -259,102 +243,13 @@ export class WorkflowScheduler {
     this.refreshProgress();
   }
 
-  private async decideReplay(callId: string, chainKey: string, label: string, phase?: string, thinking?: ThinkingLevel): Promise<{ replayed: boolean; value?: unknown }> {
-    if (!this.deps.resumeIndex) return { replayed: false };
-
-    const previous = this.replayQueue;
-    let release!: () => void;
-    this.replayQueue = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-
-    await previous;
-    try {
-      const cached = await this.tryReplay(callId, chainKey, label, phase, thinking);
-      if (!cached.replayed) this.deps.resumeIndex.disableAfterFirstMiss();
-      return cached;
-    } finally {
-      release();
-    }
-  }
-
-  private async tryReplay(callId: string, chainKey: string, label: string, phase?: string, thinking?: ThinkingLevel): Promise<{ replayed: boolean; value?: unknown }> {
-    if (!this.deps.resumeIndex?.canReplay(chainKey)) return { replayed: false };
-    const replay = await this.deps.resumeIndex.load(chainKey);
-    if (!replay) return { replayed: false };
-    const resultPath = await this.materializeReplayResult(callId, replay.sourcePath);
-    const effectiveThinking = replay.thinking ?? thinking;
-    const call: WorkflowCallProgress = { callId, label, phase, model: replay.model, thinking: effectiveThinking, usage: replay.usage, status: replay.status === "skipped" ? "skipped" : "cached", cached: true, startedAt: nowIso(), endedAt: nowIso(), resultPath };
-    this.calls.set(callId, call);
-    if (replay.usage) this.addUsage(replay.usage);
-    await this.deps.journal.append({
-      type: "agent_result",
-      runId: this.deps.run.runId,
-      time: nowIso(),
-      callId,
-      chainKey,
-      status: "cached",
-      resultPath: relativeToRun(this.deps.run.runDir, resultPath),
-      usage: replay.usage,
-      model: replay.model,
-      thinking: effectiveThinking,
-    });
-    this.refreshProgress();
-    return { replayed: true, value: replay.value };
-  }
-
-  private async materializeReplayResult(callId: string, sourcePath: string): Promise<string> {
-    const dir = path.join(this.deps.run.transcriptDir, callId);
-    await fs.promises.mkdir(dir, { recursive: true });
-    const resultPath = path.join(dir, "result.json");
-    const parsed = JSON.parse(await readBoundedTextFile(sourcePath, WORKFLOW_RESOURCE_LIMITS.workflowReplayResultBytes)) as Record<string, unknown>;
-    await this.materializeReplayWorkspace(parsed, sourcePath, dir);
-    await fs.promises.writeFile(resultPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
-    return resultPath;
-  }
-
-  private async materializeReplayWorkspace(result: Record<string, unknown>, sourceResultPath: string, targetCallDir: string): Promise<void> {
-    const workspace = result.workspace;
-    if (!workspace || typeof workspace !== "object" || Array.isArray(workspace)) return;
-    const sourceWorkspace = workspace as Record<string, unknown>;
-    if (sourceWorkspace.kind !== "worktree") return;
-
-    const replayedWorkspace: Record<string, unknown> = {
-      ...sourceWorkspace,
-      worktreeDir: path.join(targetCallDir, "worktree"),
-    };
-    const errors: string[] = [];
-    const sourceCallDir = path.dirname(sourceResultPath);
-
-    const statusPath = await copyReplayFileArtifact(sourceWorkspace.statusPath, sourceCallDir, path.join(targetCallDir, "worktree-status.txt"), REPLAY_ARTIFACT_NAMES.status, WORKFLOW_RESOURCE_LIMITS.worktreeStatusBytes, errors, "status");
-    if (statusPath) replayedWorkspace.statusPath = statusPath;
-    else delete replayedWorkspace.statusPath;
-
-    const patchPath = await copyReplayFileArtifact(sourceWorkspace.patchPath, sourceCallDir, path.join(targetCallDir, "worktree.patch"), REPLAY_ARTIFACT_NAMES.patch, WORKFLOW_RESOURCE_LIMITS.worktreePatchBytes, errors, "patch");
-    if (patchPath) replayedWorkspace.patchPath = patchPath;
-    else delete replayedWorkspace.patchPath;
-
-    const ignored = await materializeReplayIgnoredArtifacts(sourceWorkspace, sourceCallDir, targetCallDir, errors);
-    const ignoredManifestPath = ignored.ignoredManifestPath;
-    if (ignoredManifestPath) replayedWorkspace.ignoredManifestPath = ignoredManifestPath;
-    else delete replayedWorkspace.ignoredManifestPath;
-
-    const ignoredFilesDir = ignored.ignoredFilesDir;
-    if (ignoredFilesDir) replayedWorkspace.ignoredFilesDir = ignoredFilesDir;
-    else delete replayedWorkspace.ignoredFilesDir;
-
-    if (errors.length > 0) replayedWorkspace.error = [typeof replayedWorkspace.error === "string" ? replayedWorkspace.error : undefined, ...errors].filter(Boolean).join("; ");
-    result.workspace = replayedWorkspace;
-  }
-
   private refreshProgress(): void {
     const calls = [...this.calls.values()];
     this.deps.run.progress = {
       total: calls.length,
       running: calls.filter((c) => c.status === "running" || c.status === "pending").length,
-      completed: calls.filter((c) => c.status === "done" || c.status === "cached").length,
+      completed: calls.filter((c) => c.status === "done").length,
       failed: calls.filter((c) => c.status === "failed" || c.status === "aborted").length,
-      cached: calls.filter((c) => c.status === "cached").length,
       skipped: calls.filter((c) => c.status === "skipped").length,
       phase: this.deps.run.phase,
       calls,
@@ -391,198 +286,6 @@ export class WorkflowScheduler {
 
 function withoutUndefinedProperties(opts: AgentOptions): AgentOptions {
   return Object.fromEntries(Object.entries(opts).filter(([, value]) => value !== undefined)) as AgentOptions;
-}
-
-const REPLAY_ARTIFACT_NAMES = {
-  status: /^worktree-status(?:-attempt-\d+)?\.txt$/,
-  patch: /^worktree(?:-attempt-\d+)?\.patch$/,
-  ignoredManifest: /^worktree-ignored(?:-attempt-\d+)?\.json$/,
-  ignoredFilesDir: /^worktree-ignored(?:-attempt-\d+)?$/,
-} as const;
-
-async function copyReplayFileArtifact(sourceValue: unknown, sourceCallDir: string, targetPath: string, allowedName: RegExp, maxBytes: number, errors: string[], label: string): Promise<string | undefined> {
-  if (!hasArtifactPath(sourceValue)) return undefined;
-  const sourceName = replayArtifactBasename(sourceValue, sourceCallDir, allowedName);
-  if (!sourceName) {
-    errors.push(`could not materialize replayed worktree ${label} artifact: unsafe artifact path`);
-    return undefined;
-  }
-  try {
-    const copied = await copySafeExistingFile(sourceCallDir, sourceName, targetPath, { maxBytes });
-    if (!copied) {
-      errors.push(`could not materialize replayed worktree ${label} artifact: missing, unsafe, or too large`);
-      return undefined;
-    }
-    return targetPath;
-  } catch (err) {
-    errors.push(`could not materialize replayed worktree ${label} artifact: ${(err as Error).message}`);
-    return undefined;
-  }
-}
-
-async function materializeReplayIgnoredArtifacts(sourceWorkspace: Record<string, unknown>, sourceCallDir: string, targetCallDir: string, errors: string[]): Promise<{ ignoredManifestPath?: string; ignoredFilesDir?: string }> {
-  if (!hasArtifactPath(sourceWorkspace.ignoredManifestPath)) return {};
-  const manifestName = replayArtifactBasename(sourceWorkspace.ignoredManifestPath, sourceCallDir, REPLAY_ARTIFACT_NAMES.ignoredManifest);
-  if (!manifestName) {
-    errors.push("could not materialize replayed worktree ignored manifest artifact: unsafe artifact path");
-    return {};
-  }
-
-  let sourceManifestValue: Record<string, unknown>;
-  try {
-    const sourceManifestText = await readSafeTextFile(sourceCallDir, manifestName, WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredListBytes);
-    if (sourceManifestText === undefined) {
-      errors.push("could not materialize replayed worktree ignored manifest artifact: missing, unsafe, or too large");
-      return {};
-    }
-    sourceManifestValue = JSON.parse(sourceManifestText) as Record<string, unknown>;
-  } catch (err) {
-    errors.push(`could not materialize replayed worktree ignored manifest artifact: ${(err as Error).message}`);
-    return {};
-  }
-
-  if (!isIgnoredManifest(sourceManifestValue)) {
-    errors.push("could not materialize replayed worktree ignored manifest artifact: malformed manifest");
-    return {};
-  }
-
-  const sourceFilesName = replayArtifactBasename(sourceWorkspace.ignoredFilesDir, sourceCallDir, REPLAY_ARTIFACT_NAMES.ignoredFilesDir);
-  const sourceFilesDir = sourceFilesName ? await safeResolveExistingDir(sourceCallDir, sourceFilesName) : undefined;
-  const targetManifestPath = path.join(targetCallDir, "worktree-ignored.json");
-  const targetFilesDir = path.join(targetCallDir, "worktree-ignored");
-  await fs.promises.rm(targetFilesDir, { recursive: true, force: true });
-
-  const outputFiles: unknown[] = [];
-  const outputOmitted = Array.isArray(sourceManifestValue.omitted) ? [...sourceManifestValue.omitted] : [];
-  let replayOmissions = 0;
-  const omitReplay = (entry: Record<string, unknown>) => {
-    outputOmitted.push(entry);
-    replayOmissions++;
-  };
-  let totalBytes = 0;
-  let copiedFiles = 0;
-  const sourceEntries = sourceManifestValue.files;
-  const entries = sourceEntries.slice(0, WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredFiles);
-  if (sourceEntries.length > entries.length) {
-    omitReplay({ path: "*", reason: "replay file count limit", bytes: sourceEntries.length - entries.length });
-    errors.push("could not materialize all replayed worktree ignored files: file count limit");
-  }
-
-  for (const entry of entries) {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      omitReplay({ path: "*", reason: "replay malformed ignored artifact entry" });
-      continue;
-    }
-    const object = entry as Record<string, unknown>;
-    const relativePath = normalizeSafeRelativePath(object.path);
-    if (!relativePath) {
-      omitReplay({ path: typeof object.path === "string" ? object.path : "*", reason: "replay unsafe ignored artifact path" });
-      continue;
-    }
-
-    if (object.type === "symlink") {
-      const target = typeof object.target === "string" ? object.target : undefined;
-      const bytes = target === undefined ? undefined : byteLength(target);
-      if (target === undefined || bytes === undefined || bytes > WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredSymlinkBytes || totalBytes + bytes > WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredTotalBytes) {
-        omitReplay({ path: relativePath, reason: "replay unsafe ignored symlink metadata", bytes });
-        continue;
-      }
-      totalBytes += bytes;
-      outputFiles.push({ path: relativePath, type: "symlink", bytes, target });
-      continue;
-    }
-
-    if (object.type !== "file") {
-      omitReplay({ path: relativePath, reason: "replay unsupported ignored artifact type" });
-      continue;
-    }
-
-    const artifactPath = normalizeSafeRelativePath(typeof object.artifactPath === "string" ? object.artifactPath : object.path);
-    const declaredBytes = nonNegativeInteger(object.bytes);
-    if (!artifactPath || declaredBytes === undefined || declaredBytes > WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredFileBytes) {
-      omitReplay({ path: relativePath, reason: "replay unsafe ignored artifact metadata", bytes: declaredBytes });
-      continue;
-    }
-    if (!sourceFilesDir) {
-      omitReplay({ path: relativePath, reason: "replay ignored files directory missing or unsafe", bytes: declaredBytes });
-      continue;
-    }
-
-    const targetFile = path.join(targetFilesDir, ...artifactPath.split("/"));
-    try {
-      const remainingBytes = WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredTotalBytes - totalBytes;
-      const copied = await withSafeExistingFile(sourceFilesDir.path, artifactPath, { maxBytes: WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredFileBytes }, async (sourceFile) => {
-        if (sourceFile.size > remainingBytes) return { omitted: true as const, size: sourceFile.size };
-        const copiedFile = await copyOpenFile(sourceFile, targetFile, Math.min(WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredFileBytes, remainingBytes));
-        return { omitted: false as const, size: copiedFile.size };
-      });
-      if (!copied) {
-        omitReplay({ path: relativePath, reason: "replay ignored artifact missing, unsafe, or too large", bytes: declaredBytes });
-        continue;
-      }
-      if (copied.omitted) {
-        omitReplay({ path: relativePath, reason: "replay ignored artifact total size limit", bytes: copied.size });
-        continue;
-      }
-      totalBytes += copied.size;
-      copiedFiles++;
-      outputFiles.push({ path: relativePath, type: "file", bytes: copied.size, artifactPath });
-    } catch (err) {
-      omitReplay({ path: relativePath, reason: `replay ignored artifact copy failed: ${(err as Error).message}`, bytes: declaredBytes });
-      continue;
-    }
-  }
-
-  if (replayOmissions > 0) errors.push(`could not materialize ${replayOmissions} replayed worktree ignored artifact(s)`);
-
-  const outputManifest = {
-    ...sourceManifestValue,
-    version: 1,
-    kind: "worktree_ignored_files",
-    limits: {
-      maxFiles: WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredFiles,
-      maxFileBytes: WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredFileBytes,
-      maxTotalBytes: WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredTotalBytes,
-    },
-    totalBytes,
-    files: outputFiles,
-    omitted: outputOmitted,
-  };
-  const manifestText = `${JSON.stringify(outputManifest, null, 2)}\n`;
-  if (byteLength(manifestText) > WORKFLOW_RESOURCE_LIMITS.worktreeIgnoredListBytes) {
-    errors.push("could not materialize replayed worktree ignored manifest artifact: sanitized manifest too large");
-    await fs.promises.rm(targetFilesDir, { recursive: true, force: true });
-    return {};
-  }
-  await fs.promises.writeFile(targetManifestPath, manifestText, "utf8");
-  return { ignoredManifestPath: targetManifestPath, ignoredFilesDir: copiedFiles > 0 ? targetFilesDir : undefined };
-}
-
-function hasArtifactPath(value: unknown): value is string {
-  return typeof value === "string" && value.trim() !== "";
-}
-
-function replayArtifactBasename(value: unknown, sourceCallDir: string, allowedName: RegExp): string | undefined {
-  if (!hasArtifactPath(value) || value.includes("\0")) return undefined;
-  if (value !== value.trim() || value.includes("\\")) return undefined;
-  if (path.isAbsolute(value)) {
-    const relative = path.relative(sourceCallDir, path.resolve(value)).split(path.sep).join("/");
-    const normalized = normalizeSafeRelativePath(relative);
-    if (!normalized || normalized.includes("/")) return undefined;
-    return allowedName.test(normalized) ? normalized : undefined;
-  }
-  const normalized = normalizeSafeRelativePath(value);
-  if (!normalized || normalized !== value || normalized.includes("/")) return undefined;
-  return allowedName.test(normalized) ? normalized : undefined;
-}
-
-function isIgnoredManifest(value: Record<string, unknown>): value is Record<string, unknown> & { files: unknown[] } {
-  return value.kind === "worktree_ignored_files" && Array.isArray(value.files);
-}
-
-function nonNegativeInteger(value: unknown): number | undefined {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return undefined;
-  return Math.ceil(value);
 }
 
 class AsyncLimiter {

@@ -141,7 +141,6 @@ export class RunStore {
       running: 0,
       completed: 0,
       failed: 0,
-      cached: 0,
       skipped: 0,
       calls: [],
       recentLogs: [],

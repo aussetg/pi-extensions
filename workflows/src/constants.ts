@@ -51,7 +51,6 @@ export const WORKFLOW_RESOURCE_LIMITS = {
   workflowFanoutGroupDepth: 64,
   workflowProtocolErrorBytes: 8 * 1024,
   workflowOutputBytes: 2 * 1024 * 1024,
-  workflowReplayResultBytes: 8 * 1024 * 1024,
   workflowChildStderrBytes: 64 * 1024,
   subagentStdoutLineBytes: 1024 * 1024,
   subagentResultTextBytes: 512 * 1024,

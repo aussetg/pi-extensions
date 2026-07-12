@@ -138,7 +138,7 @@ function makeRun(root: string): RunRecord {
     startedAt: new Date(0).toISOString(),
     argsHash: "sha256:args",
     scriptHash: "sha256:script",
-    progress: { total: 0, running: 0, completed: 0, failed: 0, cached: 0, skipped: 0, calls: [], recentLogs: [], updatedAt: new Date(0).toISOString() },
+    progress: { total: 0, running: 0, completed: 0, failed: 0, skipped: 0, calls: [], recentLogs: [], updatedAt: new Date(0).toISOString() },
     usage: { agentCount: 0, subagentTokens: 0, toolUses: 0, estimated: true },
     uiViews: [],
   };

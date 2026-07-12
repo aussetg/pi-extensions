@@ -7,7 +7,7 @@ Highlights:
 - durable run directories under `~/.pi/agent/workflows/runs/<cwd-hash>/`;
 - Pi subagents launched through `agent()`;
 - `parallel()`, `pipeline()`, `phase()`, `log()`, `args`, `budget`, `cwd`, and declarative `ui` globals;
-- journal-based resume for unchanged completed `agent()` calls;
+- restart from a previous run's persisted script and arguments, without replaying agent results;
 - `/workflow` manager, enable/disable/status, run/list/save/resume/open, live-control,
   `skip-agent`, preview, and delete commands;
 - the model tool is off by default; use `/workflow enable` when you want the agent to call it, and `/workflow disable` afterwards;
@@ -95,6 +95,9 @@ Slash command reference:
 previews the first persisted UI view unless a `viewId` is supplied. `open result`, `script`,
 `journal`, and `transcripts` are read-only artifact viewers; only UI previews accept `viewId`,
 `--profile`, and `--width`.
+
+`resume` currently starts the workflow again from the beginning using the previous run's persisted
+script and arguments. Completed agent calls are never replayed. `resumeFromRunId` records lineage only.
 
 The strict declarative API is still available for advanced layouts:
 

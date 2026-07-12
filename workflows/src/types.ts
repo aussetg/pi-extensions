@@ -218,7 +218,7 @@ export type WorkflowDashboardRow = JsonObject & {
 };
 
 export type RunStatus = "running" | "paused" | "completed" | "failed" | "aborted" | "stale";
-export type CallStatus = "pending" | "running" | "done" | "failed" | "cached" | "skipped" | "aborted";
+export type CallStatus = "pending" | "running" | "done" | "failed" | "skipped" | "aborted";
 
 export interface WorkflowCallProgress {
   callId: string;
@@ -228,7 +228,6 @@ export interface WorkflowCallProgress {
   thinking?: ThinkingLevel;
   agentType?: string;
   status: CallStatus;
-  cached?: boolean;
   usage?: WorkflowUsage;
   startedAt?: string;
   endedAt?: string;
@@ -241,7 +240,6 @@ export interface WorkflowProgressSnapshot {
   running: number;
   completed: number;
   failed: number;
-  cached: number;
   skipped: number;
   phase?: string;
   calls: WorkflowCallProgress[];
@@ -307,8 +305,6 @@ export type WorkflowJournalEvent =
       runId: string;
       time: string;
       callId: string;
-      chainKey: string;
-      previousChainKey?: string;
       label: string;
       phase?: string;
       promptHash: string;
@@ -319,8 +315,7 @@ export type WorkflowJournalEvent =
       runId: string;
       time: string;
       callId: string;
-      chainKey: string;
-      status: "done" | "error" | "skipped" | "aborted" | "cached";
+      status: "done" | "error" | "skipped" | "aborted";
       resultPath?: string;
       error?: string;
       usage?: WorkflowUsage;

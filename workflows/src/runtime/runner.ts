@@ -6,7 +6,7 @@ import { CHAT_PREVIEW_BYTES, DEFAULT_LIMITS, SCRIPT_MAX_BYTES, WORKFLOW_RESOURCE
 import { WorkflowRegistry } from "../persistence/registry.js";
 import { RunStore } from "../persistence/run-store.js";
 import { registryRefreshOptions } from "../persistence/trust.js";
-import { JsonlJournal, ResumeIndex } from "../persistence/journal.js";
+import { JsonlJournal } from "../persistence/journal.js";
 import { resolveLocalPath } from "../persistence/paths.js";
 import { readBoundedTextFile } from "../persistence/safe-paths.js";
 import { parseWorkflowScript, type ParsedWorkflowScript } from "./parser.js";
@@ -97,10 +97,10 @@ export class WorkflowRunner {
       const donePromise = Promise.resolve()
         .then(() => execute(undefined))
         .then((result) => {
-          if (this.deps.runStore.shouldNotifyOnComplete(record.runId)) this.sendCompletion(ctx, result);
+          if (this.deps.runStore.shouldNotifyOnComplete(record.runId)) this.sendCompletion(result);
         })
         .catch((err) => {
-          if (this.deps.runStore.shouldNotifyOnComplete(record.runId)) this.sendCompletion(ctx, failedOutput(record, err));
+          if (this.deps.runStore.shouldNotifyOnComplete(record.runId)) this.sendCompletion(failedOutput(record, err));
         })
         .finally(() => this.deps.runStore.unregisterLiveRun(record.runId));
       this.deps.runStore.registerLiveRun({ runId: record.runId, sessionId, control, donePromise, notifyOnComplete: true });
@@ -121,13 +121,6 @@ export class WorkflowRunner {
     const { record, resolved, stableArgs, input, ctx, control, defaultAgentThinking, modelRegistryModels } = args;
     const journal = new JsonlJournal(record.journalPath);
     await journal.append({ type: "workflow_started", runId: record.runId, time: nowIso(), scriptHash: record.scriptHash, argsHash: record.argsHash });
-    let resumeIndex: ResumeIndex | undefined;
-    if (input.resumeFromRunId) {
-      const source = this.deps.runStore.get(input.resumeFromRunId);
-      if (!source) throw new Error(`Unknown workflow run to resume: ${input.resumeFromRunId}`);
-      resumeIndex = await ResumeIndex.fromRun(source.runDir, source.journalPath);
-    }
-
     const viewComponents = new Map<string, WorkflowViewComponent>();
     let progressComponent: WorkflowProgressComponent | undefined;
     let progressRenderTimer: NodeJS.Timeout | undefined;
@@ -191,7 +184,6 @@ export class WorkflowRunner {
       journal,
       control,
       budget,
-      resumeIndex,
       maxAgents: agentQuota.total,
       agentQuota,
       defaultThinking: defaultAgentThinking,
@@ -287,7 +279,7 @@ export class WorkflowRunner {
     return { source, originalPath, parsed: parseWorkflowScript(source) };
   }
 
-  private sendCompletion(ctx: any, result: WorkflowLaunchOutput): void {
+  private sendCompletion(result: WorkflowLaunchOutput): void {
     try {
       this.deps.pi.sendMessage?.(
         {

@@ -188,7 +188,6 @@ function workflowDetails(lastLabel: string): WorkflowLaunchOutput {
       running: 1,
       completed: 0,
       failed: 0,
-      cached: 0,
       skipped: 0,
       updatedAt: startedAt,
       calls: [{ callId: "0001", label: lastLabel, status: "running", startedAt }],

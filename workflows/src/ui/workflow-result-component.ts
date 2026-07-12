@@ -465,7 +465,7 @@ function phaseStats(progress: WorkflowProgressSnapshot, title: string, aggregate
   const calls = aggregate ? progress.calls : progress.calls.filter((call) => call.phase === title);
   return {
     total: calls.length,
-    finished: calls.filter((call) => ["done", "cached", "skipped"].includes(call.status)).length,
+    finished: calls.filter((call) => call.status === "done" || call.status === "skipped").length,
     failed: calls.filter((call) => call.status === "failed" || call.status === "aborted").length,
   };
 }
@@ -477,7 +477,7 @@ function callsForActivePhase(progress: WorkflowProgressSnapshot): WorkflowCallPr
 }
 
 function hasAgentProgress(progress: WorkflowProgressSnapshot): boolean {
-  return progress.total > 0 || progress.calls.length > 0 || progress.running > 0 || progress.completed > 0 || progress.failed > 0 || progress.cached > 0 || progress.skipped > 0;
+  return progress.total > 0 || progress.calls.length > 0 || progress.running > 0 || progress.completed > 0 || progress.failed > 0 || progress.skipped > 0;
 }
 
 function hasProgressPanel(details: WorkflowLaunchOutput, progress: WorkflowProgressSnapshot): boolean {
@@ -497,7 +497,6 @@ function statusWord(status: WorkflowLaunchOutput["status"], theme: ThemeLike): s
 function callIcon(status: CallStatus): string {
   switch (status) {
     case "done":
-    case "cached":
       return "✓";
     case "failed":
     case "aborted":
@@ -512,7 +511,7 @@ function callIcon(status: CallStatus): string {
 }
 
 function callColor(status: CallStatus): string {
-  if (status === "done" || status === "cached") return "success";
+  if (status === "done") return "success";
   if (status === "failed" || status === "aborted") return "error";
   if (status === "running") return "accent";
   return "muted";

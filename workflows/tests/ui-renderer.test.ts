@@ -523,7 +523,6 @@ describe("workflow UI", () => {
         running: 1,
         completed: 1,
         failed: 0,
-        cached: 0,
         skipped: 0,
         phase: "Migration",
         calls: [
@@ -570,7 +569,6 @@ describe("workflow UI", () => {
         running: 0,
         completed: 1,
         failed: 0,
-        cached: 0,
         skipped: 0,
         phase: "Implementation",
         calls: [{
@@ -652,7 +650,6 @@ describe("workflow UI", () => {
         running: 0,
         completed: 2,
         failed: 0,
-        cached: 0,
         skipped: 0,
         phase: "Done",
         calls: [
@@ -691,7 +688,6 @@ describe("workflow UI", () => {
         running: 0,
         completed: 0,
         failed: 0,
-        cached: 0,
         skipped: 0,
         phase: "Quiet ticker",
         calls: [],
@@ -871,7 +867,6 @@ describe("workflow UI", () => {
         running: 0,
         completed: 0,
         failed: 0,
-        cached: 0,
         skipped: 0,
         calls: [],
         recentLogs: [],
@@ -972,7 +967,6 @@ function sampleWorkflowDetails(overrides: Partial<WorkflowLaunchOutput> = {}): W
       running: status === "async_launched" ? 1 : 0,
       completed: status === "async_launched" ? 7 : 12,
       failed: status === "failed" ? 1 : 0,
-      cached: 0,
       skipped: 0,
       phase: "Migration",
       calls: Array.from({ length: 12 }, (_, i) => ({
@@ -1040,7 +1034,6 @@ function wideWorkflowProgressDetails(): WorkflowLaunchOutput {
       running: 7,
       completed: 3,
       failed: 0,
-      cached: 0,
       skipped: 0,
       phase: "Infrastructure",
       calls,

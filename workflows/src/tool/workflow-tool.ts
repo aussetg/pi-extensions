@@ -17,7 +17,7 @@ const WorkflowSourceInputProperties = {
 
 const WorkflowCommonInputProperties = {
   args: Type.Optional(Type.Unsafe<Record<string, unknown>>({ type: "object", additionalProperties: true, description: "JSON arguments exposed as the args global." })),
-  resumeFromRunId: Type.Optional(Type.String({ minLength: 1 })),
+  resumeFromRunId: Type.Optional(Type.String({ minLength: 1, description: "Prior run id to record as lineage. Agent results are never replayed." })),
   mode: Type.Optional(StringEnum(["async", "await"] as const)),
   budgetTokens: Type.Optional(Type.Integer({ minimum: 1 })),
   maxAgents: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),

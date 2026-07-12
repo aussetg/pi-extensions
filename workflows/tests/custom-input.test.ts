@@ -54,7 +54,6 @@ function run(runId: string): RunRecord {
       running: 0,
       completed: 1,
       failed: 0,
-      cached: 0,
       skipped: 0,
       calls: [],
       recentLogs: [],
