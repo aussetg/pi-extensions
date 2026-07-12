@@ -38,7 +38,9 @@ function getPiSessionId(ctx: ExtensionContext): string {
 }
 
 function getSessionBase(ctx: ExtensionContext): string {
-	const root = process.env.WL_PI_SESSION_BASE_ROOT ?? path.join(os.tmpdir(), "pi-wolfram-sessions");
+	const runtimeDir = process.env.XDG_RUNTIME_DIR;
+	const defaultRoot = path.join(runtimeDir && path.isAbsolute(runtimeDir) ? runtimeDir : os.tmpdir(), "pi-wolfram-sessions");
+	const root = process.env.WL_PI_SESSION_BASE_ROOT ?? defaultRoot;
 	return path.join(root, `pi-${sanitize(getPiSessionId(ctx))}`);
 }
 
@@ -89,7 +91,8 @@ function configureEnvironment(ctx: ExtensionContext) {
 	sessionBase = getSessionBase(ctx);
 	wlSessionScript = findWlSessionScript(ctx);
 
-	fs.mkdirSync(sessionBase, { recursive: true });
+	fs.mkdirSync(sessionBase, { recursive: true, mode: 0o700 });
+	fs.chmodSync(sessionBase, 0o700);
 	process.env.WL_SESSION_BASE = sessionBase;
 	process.env.WL_SESSION_IDLE_TTL ??= DEFAULT_IDLE_TTL_SECONDS;
 }
