@@ -6,6 +6,9 @@ import path from "node:path";
 const DEFAULT_IDLE_TTL_SECONDS = "3600";
 const DEFAULT_COMMAND_TIMEOUT_MS = 20_000;
 const STOP_TIMEOUT_PER_SESSION_MS = 11_000;
+const COMMAND_ACTIONS = ["list", "stop", "gc", "base", "help"] as const;
+
+type CommandAction = (typeof COMMAND_ACTIONS)[number];
 
 type ManagedEnvironment = {
 	previousBase: string | undefined;
@@ -15,7 +18,6 @@ type ManagedEnvironment = {
 };
 
 let sessionBase: string | undefined;
-let sessionId: string | undefined;
 let wlSessionScript: string | undefined;
 let managedEnvironment: ManagedEnvironment | undefined;
 
@@ -113,7 +115,6 @@ function configureEnvironment(ctx: ExtensionContext) {
 		appliedIdleTtl,
 	};
 
-	sessionId = nextSessionId;
 	sessionBase = nextSessionBase;
 	wlSessionScript = nextWlSessionScript;
 }
@@ -141,16 +142,40 @@ async function removeSessionArtifacts(base: string): Promise<string | undefined>
 	}
 }
 
+function commandHelp(): string {
+	return [
+		"Usage: /wolfram-sessions [list|stop|gc|base|help]",
+		"",
+		"  list  List kernels owned by this pi session (default)",
+		"  stop  Stop every owned kernel",
+		"  gc    Remove stale kernel bookkeeping",
+		"  base  Show the private session directory",
+	].join("\n");
+}
+
+function parseCommandAction(args: string): CommandAction | undefined {
+	const tokens = args.trim().split(/\s+/).filter(Boolean);
+	if (tokens.length === 0) return "list";
+	if (tokens.length !== 1) return undefined;
+	return COMMAND_ACTIONS.find((action) => action === tokens[0].toLowerCase());
+}
+
+function commandCompletions(prefix: string): Array<{ value: string; label: string }> | null {
+	const normalized = prefix.trimStart().toLowerCase();
+	if (/\s/.test(normalized)) return null;
+	const matches = COMMAND_ACTIONS.filter((action) => action.startsWith(normalized)).map((action) => ({
+		value: action,
+		label: action,
+	}));
+	return matches.length > 0 ? matches : null;
+}
+
 export default function wolframSessionsExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		configureEnvironment(ctx);
 
 		if (wlSessionScript && sessionBase) {
 			await runWlSession(pi, sessionBase, ["gc"]);
-		}
-
-		if (ctx.hasUI) {
-			ctx.ui.setStatus("wolfram-sessions", `WL sessions: ${sessionId?.slice(0, 8) ?? "scoped"}`);
 		}
 	});
 
@@ -165,9 +190,7 @@ export default function wolframSessionsExtension(pi: ExtensionAPI) {
 			if (base && (!script || result?.code === 0)) cleanupError = await removeSessionArtifacts(base);
 			restoreEnvironment();
 			sessionBase = undefined;
-			sessionId = undefined;
 			wlSessionScript = undefined;
-			if (ctx.hasUI) ctx.ui.setStatus("wolfram-sessions", undefined);
 		}
 
 		if (ctx.hasUI && result && result.code !== 0) {
@@ -178,26 +201,28 @@ export default function wolframSessionsExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("wolfram-sessions", {
-		description: "List/stop Mathematica sessions scoped to this pi session",
+		description: "Manage Wolfram kernels scoped to this pi session",
+		getArgumentCompletions: commandCompletions,
 		handler: async (args, ctx) => {
 			if (!sessionBase) configureEnvironment(ctx);
 			const base = sessionBase!;
+			const action = parseCommandAction(args);
 
-			const [action = "list", ...rest] = (args ?? "").trim().split(/\s+/).filter(Boolean);
-			const wlArgs =
-				action === "stop" || action === "stop-all"
-					? ["stop-all"]
-					: action === "gc"
-						? ["gc"]
-						: action === "base"
-							? []
-							: ["list", ...rest];
+			if (!action) {
+				if (ctx.hasUI) ctx.ui.notify(`Invalid arguments: ${args.trim()}\n\n${commandHelp()}`, "warning");
+				return;
+			}
 
+			if (action === "help") {
+				if (ctx.hasUI) ctx.ui.notify(commandHelp(), "info");
+				return;
+			}
 			if (action === "base") {
 				if (ctx.hasUI) ctx.ui.notify(base, "info");
 				return;
 			}
 
+			const wlArgs = action === "stop" ? ["stop-all"] : [action];
 			const result = await runWlSession(pi, base, wlArgs);
 			const text = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n");
 			if (ctx.hasUI) ctx.ui.notify(text || "No Wolfram sessions", result.code === 0 ? "info" : "warning");
