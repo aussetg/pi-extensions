@@ -1,799 +1,577 @@
 /**
- * LaTeX-to-Unicode converter optimized for PragmataPro Semiotics font.
+ * Loss-preserving LaTeX-math to semantic Unicode for PragmataPro.
  *
- * Handles: Greek, operators, relations, arrows, superscripts, subscripts,
- * font variants (bb, cal, bf, it, rm, frak, sf, tt), fractions, roots,
- * delimiters, and common text-mode LaTeX in markdown/code blocks.
+ * This is deliberately not a TeX engine. It handles the notation models most
+ * often put in Markdown messages and leaves unknown or malformed input intact.
+ * Code spans and fenced code blocks are never converted.
  */
 
-// ---------------------------------------------------------------------------
-// Greek letters
-// ---------------------------------------------------------------------------
-const greekLower: Record<string, string> = {
-	alpha: "α", beta: "β", gamma: "γ", delta: "δ", epsilon: "ε",
-	varepsilon: "ε", zeta: "ζ", eta: "η", theta: "θ", vartheta: "ϑ",
-	iota: "ι", kappa: "κ", lambda: "λ", mu: "μ", nu: "ν",
-	xi: "ξ", pi: "π", varpi: "ϖ", rho: "ρ", varrho: "ϱ",
-	sigma: "σ", varsigma: "ς", tau: "τ", upsilon: "υ", phi: "φ",
-	varphi: "ϕ", chi: "χ", psi: "ψ", omega: "ω",
+type StringMap = Readonly<Record<string, string>>;
+
+const greek: StringMap = {
+	alpha: "α", beta: "β", gamma: "γ", delta: "δ", epsilon: "ε", varepsilon: "ϵ",
+	zeta: "ζ", eta: "η", theta: "θ", vartheta: "ϑ", iota: "ι", kappa: "κ",
+	lambda: "λ", mu: "μ", nu: "ν", xi: "ξ", omicron: "ο", pi: "π", varpi: "ϖ",
+	rho: "ρ", varrho: "ϱ", sigma: "σ", varsigma: "ς", tau: "τ", upsilon: "υ",
+	phi: "φ", varphi: "ϕ", chi: "χ", psi: "ψ", omega: "ω", varkappa: "ϰ",
+	Gamma: "Γ", Delta: "Δ", Theta: "Θ", Lambda: "Λ", Xi: "Ξ", Pi: "Π",
+	Sigma: "Σ", Upsilon: "Υ", Phi: "Φ", Psi: "Ψ", Omega: "Ω", varTheta: "ϴ",
 };
 
-const greekUpper: Record<string, string> = {
-	Gamma: "Γ", Delta: "Δ", Theta: "Θ", Lambda: "Λ", Xi: "Ξ",
-	Pi: "Π", Sigma: "Σ", Upsilon: "Υ", Phi: "Φ", Psi: "Ψ", Omega: "Ω",
+const operators: StringMap = {
+	sum: "∑", prod: "∏", coprod: "∐", int: "∫", iint: "∬", iiint: "∭", iiiint: "⨌",
+	oint: "∮", oiint: "∯", oiiint: "∰", bigcup: "⋃", bigcap: "⋂", bigsqcup: "⨆",
+	bigvee: "⋁", bigwedge: "⋀", bigoplus: "⨁", bigotimes: "⨂", bigodot: "⨀",
+	wedge: "∧", land: "∧", vee: "∨", lor: "∨", cap: "∩", cup: "∪",
+	setminus: "∖", smallsetminus: "∖", cdot: "·", cdotp: "·", times: "×", div: "÷",
+	ast: "∗", star: "⋆", circ: "∘", bullet: "∙", diamond: "⋄", pm: "±", mp: "∓",
+	oplus: "⊕", ominus: "⊖", otimes: "⊗", oslash: "⊘", odot: "⊙", circledast: "⊛",
+	circledcirc: "⊚", circleddash: "⊝", boxplus: "⊞", boxminus: "⊟", boxtimes: "⊠",
+	boxdot: "⊡", uplus: "⊎", sqcap: "⊓", sqcup: "⊔", wr: "≀", amalg: "∐",
+	dagger: "†", ddagger: "‡", triangleleft: "◁", triangleright: "▷",
+	vartriangleleft: "⊲", vartriangleright: "⊳", lhd: "⊲", rhd: "⊳",
+	unlhd: "⊴", unrhd: "⊵", bigtriangleup: "△", bigtriangledown: "▽",
 };
 
-// ---------------------------------------------------------------------------
-// Mathematical operators
-// ---------------------------------------------------------------------------
-const operators: Record<string, string> = {
-	sum: "∑", prod: "∏", coprod: "∐", int: "∫", iint: "∬", iiint: "∭",
-	oint: "∮", bigcup: "⋃", bigcap: "⋂", bigotimes: "⨂", bigoplus: "⨁",
-	bigodot: "⨀", bigvee: "⋁", bigwedge: "⋀", wedge: "∧", vee: "∨",
-	cap: "∩", cup: "∪", setminus: "∖", cdot: "·", ast: "∗", star: "⋆",
-	circ: "∘", bullet: "∙", diamond: "⋄", times: "×", div: "÷",
-	pm: "±", mp: "∓", plusmn: "±", minus: "−", Triangleleft: "◁",
-	Triangleright: "▷", triangle: "△", Box: "□", square: "□",
-	oplus: "⊕", ominus: "⊖", otimes: "⊗", oslash: "⊘", odot: "⊙",
-	dagger: "†", ddagger: "‡", lhd: "⊲", rhd: "⊳",
-	unlhd: "⊴", unrhd: "⊵",
-	wr: "≀", amalg: "∐",
-	uplus: "⊎", sqcap: "⊓", sqcup: "⊔",
+const relations: StringMap = {
+	ne: "≠", neq: "≠", le: "≤", leq: "≤", ge: "≥", geq: "≥", ll: "≪", gg: "≫",
+	equiv: "≡", approx: "≈", approxeq: "≊", sim: "∼", simeq: "≃", cong: "≅",
+	doteq: "≐", asymp: "≍", propto: "∝", parallel: "∥", nparallel: "∦", perp: "⊥",
+	mid: "∣", nmid: "∤", in: "∈", ni: "∋", owns: "∋", notin: "∉",
+	subset: "⊂", supset: "⊃", subseteq: "⊆", supseteq: "⊇", subsetneq: "⊊",
+	supsetneq: "⊋", nsubseteq: "⊈", nsupseteq: "⊉", sqsubset: "⊏", sqsupset: "⊐",
+	sqsubseteq: "⊑", sqsupseteq: "⊒", prec: "≺", succ: "≻", preceq: "⪯",
+	succeq: "⪰", precsim: "≾", succsim: "≿", lesssim: "≲", gtrsim: "≳",
+	lessapprox: "⪅", gtrapprox: "⪆", nsim: "≁", ncong: "≇", triangleq: "≜",
+	nless: "≮", ngtr: "≯", nleq: "≰", ngeq: "≱", nprec: "⊀", nsucc: "⊁",
+	lll: "⋘", llless: "⋘", ggg: "⋙", gggtr: "⋙",
+	bowtie: "⋈", smile: "⌣", frown: "⌢", pitchfork: "⋔",
+	vdash: "⊢", dashv: "⊣", Vdash: "⊩", vDash: "⊨", Vvdash: "⊪", models: "⊨",
 };
 
-// ---------------------------------------------------------------------------
-// Relations
-// ---------------------------------------------------------------------------
-const relations: Record<string, string> = {
-	eq: "=", neq: "≠", ne: "≠", leq: "≤", le: "≤", geq: "≥", ge: "≥",
-	approx: "≈", sim: "∼", simeq: "≃", cong: "≅", equiv: "≡",
-	propto: "∝", parallel: "∥", perp: "⊥", mid: "∣", nmid: "∤",
-	precsim: "≾", succsim: "≿", prec: "≺", succ: "≻", preceq: "⪯",
-	succeq: "⪰", ll: "≪", gg: "≫", subset: "⊂", supset: "⊃",
-	subseteq: "⊆", supseteq: "⊇", sqsubset: "⊏", sqsupset: "⊐",
-	sqsubseteq: "⊑", sqsupseteq: "⊒", nsim: "≁", ncong: "≇",
-	doteq: "≐", llless: "⋘", gggtr: "⋙",
+const arrows: StringMap = {
+	leftarrow: "←", gets: "←", rightarrow: "→", to: "→", leftrightarrow: "↔",
+	Leftarrow: "⇐", Rightarrow: "⇒", Leftrightarrow: "⇔", uparrow: "↑", downarrow: "↓",
+	updownarrow: "↕", Uparrow: "⇑", Downarrow: "⇓", Updownarrow: "⇕",
+	nwarrow: "↖", nearrow: "↗", searrow: "↘", swarrow: "↙", mapsto: "↦",
+	longmapsto: "⟼", hookleftarrow: "↩", hookrightarrow: "↪", leftharpoonup: "↼",
+	leftharpoondown: "↽", rightharpoonup: "⇀", rightharpoondown: "⇁",
+	rightleftharpoons: "⇌", leftrightharpoons: "⇋", leadsto: "⇝", rightsquigarrow: "⇝",
+	leftsquigarrow: "⇜", longleftarrow: "⟵", longrightarrow: "⟶", longleftrightarrow: "⟷",
+	Longleftarrow: "⟸", Longrightarrow: "⟹", Longleftrightarrow: "⟺",
+	woheadleftarrow: "↞", twoheadrightarrow: "↠", leftleftarrows: "⇇", rightrightarrows: "⇉",
+	dashleftarrow: "⇠", dashrightarrow: "⇢", Lleftarrow: "⇚", Rrightarrow: "⇛",
 };
 
-// ---------------------------------------------------------------------------
-// Arrows
-// ---------------------------------------------------------------------------
-const arrows: Record<string, string> = {
-	leftarrow: "←", gets: "←", Leftarrow: "⇐",
-	rightarrow: "→", to: "→", Rightarrow: "⇒",
-	leftrightarrow: "↔", Leftrightarrow: "⇔",
-	uparrow: "↑", Uparrow: "⇑",
-	downarrow: "↓", Downarrow: "⇓",
-	updownarrow: "↕", Updownarrow: "⇕",
-	nwarrow: "↖", nearrow: "↗", searrow: "↘", swarrow: "↙",
-	mapsto: "↦", longmapsto: "⟼",
-	hookleftarrow: "↩", hookrightarrow: "↪",
-	rightleftharpoons: "⇌", leftrightharpoons: "⇌",
-	longleftarrow: "⟵", Longleftarrow: "⟸",
-	longrightarrow: "⟶", Longrightarrow: "⟹",
-	longleftrightarrow: "⟷", Longleftrightarrow: "⟺",
-	rightharpoonup: "⇀", rightharpoondown: "⇁",
-	leftharpoonup: "↼", leftharpoondown: "↽",
-	dashrightarrow: "⇥", dashleftarrow: "⇤",
-Rightsquigarrow: "⇝", leftsquigarrow: "⇜",
+const symbols: StringMap = {
+	infty: "∞", infinity: "∞", partial: "∂", nabla: "∇", forall: "∀", exists: "∃",
+	nexists: "∄", emptyset: "∅", varnothing: "∅", complement: "∁", aleph: "ℵ", beth: "ℶ",
+	gimel: "ℷ", daleth: "ℸ", ell: "ℓ", wp: "℘", hbar: "ℏ", imath: "ı", jmath: "ȷ",
+	Re: "ℜ", Im: "ℑ", top: "⊤", bot: "⊥", angle: "∠", measuredangle: "∡",
+	sphericalangle: "∢", therefore: "∴", because: "∵", neg: "¬", lnot: "¬",
+	checkmark: "✓", maltese: "✠", flat: "♭", natural: "♮", sharp: "♯",
+	prime: "′", dprime: "″", primes: "″", ldots: "…", dots: "…", dotsc: "…",
+	dotso: "…", cdots: "⋯", dotsb: "⋯", dotsm: "⋯", dotsi: "⋯", vdots: "⋮",
+	ddots: "⋱", colon: "∶", surd: "√", Box: "□", square: "□",
+	triangle: "△", blacktriangle: "▲", blacksquare: "■", lozenge: "◊",
+	langle: "⟨", rangle: "⟩", lceil: "⌈", rceil: "⌉", lfloor: "⌊", rfloor: "⌋",
+	lbrack: "[", rbrack: "]",
+	lbrace: "{", rbrace: "}", vert: "|", lvert: "|", rvert: "|",
+	Vert: "‖", lVert: "‖", rVert: "‖", backslash: "∖", slash: "/",
+	quad: "  ", qquad: "    ", enspace: " ", thinspace: " ", nobreakspace: " ",
+	space: " ", negthinspace: "",
 };
 
-// ---------------------------------------------------------------------------
-// Big operators / named functions
-// ---------------------------------------------------------------------------
-const namedFuncs: Record<string, string> = {
-	sin: "sin", cos: "cos", tan: "tan", cot: "cot",
-	sec: "sec", csc: "csc", arcsin: "arcsin", arccos: "arccos",
-	arctan: "arctan", sinh: "sinh", cosh: "cosh", tanh: "tanh",
-	log: "log", ln: "ln", exp: "exp", lim: "lim",
-	limsup: "lim sup", liminf: "lim inf",
-	max: "max", min: "min", sup: "sup", inf: "inf",
-	det: "det", dim: "dim", ker: "ker", hom: "hom",
-	Pr: "Pr", deg: "deg", gcd: "gcd", arg: "arg",
-	Im: "ℑ", Re: "ℜ",
-	clr: "clr", mod: "mod",
+const commandMap: StringMap = { ...greek, ...operators, ...relations, ...arrows, ...symbols };
+
+const namedFunctions: StringMap = {
+	sin: "sin", cos: "cos", tan: "tan", cot: "cot", sec: "sec", csc: "csc",
+	arcsin: "arcsin", arccos: "arccos", arctan: "arctan", sinh: "sinh", cosh: "cosh",
+	tanh: "tanh", coth: "coth", log: "log", ln: "ln", exp: "exp", lim: "lim",
+	limsup: "lim sup", liminf: "lim inf", max: "max", min: "min", sup: "sup", inf: "inf",
+	det: "det", dim: "dim", ker: "ker", hom: "hom", gcd: "gcd", deg: "deg",
+	arg: "arg", Pr: "Pr", mod: "mod", bmod: "mod",
 };
 
-// ---------------------------------------------------------------------------
-// Standalone symbols (not slash-command, but recognizable)
-// ---------------------------------------------------------------------------
-const symbols: Record<string, string> = {
-	infty: "∞", infinity: "∞", partial: "∂", nabla: "∇",
- forall: "∀", exists: "∃", nexists: "∄", emptyset: "∅",
-	varnothing: "∅", complement: "∁", aleph: "ℵ", beth: "ℶ",
-	ell: "ℓ", wp: "℘", Re: "ℜ", Im: "ℑ",
-	angledouble: "⟨", langle: "⟨", rangle: "⟩",
-	lceil: "⌈", rceil: "⌉", lfloor: "⌊", rfloor: "⌋",
-	lbrack: "[", rbrack: "]", lbrace: "{", rbrace: "}",
-	vert: "|", Vert: "‖", backslash: "∕",
-	lVert: "‖", rVert: "‖", lvert: "|", rvert: "|",
-	surd: "√", checkmark: "✓", dagger: "†", ddagger: "‡",
-	top: "⊤", bot: "⊥", models: "⊨", forces: "⊜",
-	vdash: "⊢", Vdash: "⊢", therefore: "∴", because: "∵",
-	ldots: "…", cdots: "⋯", vdots: "⋮", ddots: "⋱",
-	quad: "  ", qquad: "    ",
-	enspace: " ", thinspace: " ", negthinspace: "!", 
-	nobreakspace: " ", space: " ",
-	hbar: "ℏ",
-	neg: "¬", flat: "♭", natural: "♮", sharp: "♯",
-	primes: "″",
-	imath: "ı", jmath: "ȷ",
-	colon: "∶", percentage: "%",
-	slash: "/", smile: "⌣", frown: "⌢",
+const superscripts: StringMap = {
+	"0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶",
+	"7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽",
+	")": "⁾",
+	A: "ᴬ", B: "ᴮ", D: "ᴰ", E: "ᴱ", G: "ᴳ", H: "ᴴ", I: "ᴵ", J: "ᴶ", K: "ᴷ",
+	L: "ᴸ", M: "ᴹ", N: "ᴺ", O: "ᴼ", P: "ᴾ", R: "ᴿ", T: "ᵀ", U: "ᵁ", V: "ⱽ", W: "ᵂ",
+	a: "ᵃ", b: "ᵇ", c: "ᶜ", d: "ᵈ", e: "ᵉ", f: "ᶠ", g: "ᵍ", h: "ʰ", i: "ⁱ",
+	j: "ʲ", k: "ᵏ", l: "ˡ", m: "ᵐ", n: "ⁿ", o: "ᵒ", p: "ᵖ", r: "ʳ", s: "ˢ",
+	t: "ᵗ", u: "ᵘ", v: "ᵛ", w: "ʷ", x: "ˣ", y: "ʸ", z: "ᶻ",
 };
 
-// ---------------------------------------------------------------------------
-// Superscript and subscript characters
-// ---------------------------------------------------------------------------
-const superscripts: Record<string, string> = {
-	"0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
-	"5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
-	"+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾",
-	"n": "ⁿ", "i": "ⁱ", "j": "ʲ",
+const subscripts: StringMap = {
+	"0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆",
+	"7": "₇", "8": "₈", "9": "₉", "+": "₊", "-": "₋", "=": "₌", "(": "₍",
+	")": "₎", a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ",
+	n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ",
 };
 
-const subscripts: Record<string, string> = {
-	"0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄",
-	"5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
-	"+": "₊", "-": "₋", "=": "₌", "(": "₍", ")": "₎",
-	"a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ",
-	"k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ",
-	"p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ",
-	"v": "ᵥ", "x": "ₓ",
-};
-
-// ---------------------------------------------------------------------------
-// Mathbb (double-struck) – U+1D538..U+1D550 (bold), common ones
-// ---------------------------------------------------------------------------
-const mathbb: Record<string, string> = {
-	R: "ℝ", Z: "ℤ", N: "ℕ", Q: "ℚ", C: "ℂ",
-	P: "ℙ", H: "ℍ", F: "𝔽", K: "𝕂", E: "𝔼",
-	G: "𝔾", A: "𝔸", B: "𝔹", D: "𝔻", I: "𝕀",
-	L: "𝕃", M: "𝕄", O: "𝕆", S: "𝕊", T: "𝕋",
-	W: "𝕎", X: "𝕏", Y: "𝕐",
-	"0": "𝟘", "1": "𝟙", "2": "𝟚", "3": "𝟛", "4": "𝟜",
-	"5": "𝟝", "6": "𝟞", "7": "𝟟", "8": "𝟠", "9": "𝟡",
-};
-
-// ---------------------------------------------------------------------------
-// Mathcal (calligraphic) – U+1D49C..U+1D4B5
-// ---------------------------------------------------------------------------
-const mathcal: Record<string, string> = {
-	A: "𝒜", B: "ℬ", C: "𝒞", D: "𝒟", E: "ℰ", F: "ℱ",
-	G: "𝒢", H: "ℋ", I: "ℐ", J: "𝒥", K: "𝒦", L: "ℒ",
-	M: "ℳ", N: "𝒩", O: "𝒪", P: "𝒫", Q: "𝒬", R: "ℛ",
-	S: "𝒮", T: "𝒯", U: "𝒰", V: "𝒱", W: "𝒲", X: "𝒳",
-	Y: "𝒴", Z: "ℨ",
-};
-
-// ---------------------------------------------------------------------------
-// Mathfrak (Fraktur) – U+1D504..U+1D537
-// ---------------------------------------------------------------------------
-const mathfrakEntries: [string, number][] = [
-	["A", 0x1D504], ["B", 0x1D505], ["C", 0x1D507], ["D", 0x1D508],
-	["E", 0x1D509], ["F", 0x1D50A], ["G", 0x1D50D], ["H", 0x1D50E],
-	["I", 0x1D50F], ["J", 0x1D510], ["K", 0x1D511], ["L", 0x1D512],
-	["M", 0x1D513], ["N", 0x1D514], ["O", 0x1D515], ["P", 0x1D516],
-	["Q", 0x1D517], ["R", 0x1D518], ["S", 0x1D519], ["T", 0x1D51A],
-	["U", 0x1D51B], ["V", 0x1D51C], ["W", 0x1D51D], ["X", 0x1D51E],
-	["Y", 0x1D51F], ["Z", 0x1D520],
-	// Lowercase: U+1D51E..U+1D537
-	["a", 0x1D51E], ["b", 0x1D51F], ["c", 0x1D520], ["d", 0x1D521],
-	["e", 0x1D522], ["f", 0x1D523], ["g", 0x1D524], ["h", 0x1D525],
-	["i", 0x1D526], ["j", 0x1D527], ["k", 0x1D528], ["l", 0x1D529],
-	["m", 0x1D52A], ["n", 0x1D52B], ["o", 0x1D52C], ["p", 0x1D52D],
-	["q", 0x1D52E], ["r", 0x1D52F], ["s", 0x1D530], ["t", 0x1D531],
-	["u", 0x1D532], ["v", 0x1D533], ["w", 0x1D534], ["x", 0x1D535],
-	["y", 0x1D536], ["z", 0x1D537],
-];
-const mathfrak: Record<string, string> = Object.fromEntries(
-	mathfrakEntries.map(([ch, cp]) => [ch, String.fromCodePoint(cp)])
-);
-
-// ---------------------------------------------------------------------------
-// Mathscr (script) – U+1D4B6..U+1D4CF
-// ---------------------------------------------------------------------------
-const mathscr: Record<string, string> = {
-	A: "𝒜", B: "ℬ", C: "𝒞", D: "𝒟", E: "ℰ", F: "ℱ",
-	G: "𝒢", H: "ℋ", I: "ℐ", J: "𝒥", K: "𝒦", L: "ℒ",
-	M: "ℳ", N: "𝒩", O: "𝒪", P: "𝒫", Q: "𝒬", R: "ℛ",
-	S: "𝒮", T: "𝒯", U: "𝒰", V: "𝒱", W: "𝒲", X: "𝒳",
-	Y: "𝒴", Z: "ℨ",
-};
-
-// ---------------------------------------------------------------------------
-// Bold math letters – U+1D400..U+1D41A (A-Z), U+1D41A..U+1D433 (a-z)
-// ---------------------------------------------------------------------------
-const mathbold = (c: string): string | undefined => {
-	const base = c.toUpperCase();
-	const isUpper = c === base;
-	const offset = isUpper ? 0x1D400 : 0x1D41A;
-	const idx = base.charCodeAt(0) - 65;
-	if (idx < 0 || idx > 25) return undefined;
-	return String.fromCodePoint(offset + idx);
-};
-
-// ---------------------------------------------------------------------------
-// Italic math letters – U+1D434..U+1D44D (A-Z), U+1D44E..U+1D467 (a-z)
-// ---------------------------------------------------------------------------
-const mathitalic = (c: string): string | undefined => {
-	const base = c.toUpperCase();
-	const isUpper = c === base;
-	const offset = isUpper ? 0x1D434 : 0x1D44E;
-	const idx = base.charCodeAt(0) - 65;
-	if (idx < 0 || idx > 25) return undefined;
-	return String.fromCodePoint(offset + idx);
-};
-
-// ---------------------------------------------------------------------------
-// Monospace math – U+1D670..U+1D689 (A-Z), U+1D68A..U+1D6A3 (a-z)
-// ---------------------------------------------------------------------------
-const mathtt = (c: string): string | undefined => {
-	const base = c.toUpperCase();
-	const isUpper = c === base;
-	const offset = isUpper ? 0x1D670 : 0x1D68A;
-	const idx = base.charCodeAt(0) - 65;
-	if (idx < 0 || idx > 25) return undefined;
-	return String.fromCodePoint(offset + idx);
-};
-
-// ---------------------------------------------------------------------------
-// Sans-serif math – U+1D5A0..U+1D5B9 (A-Z), U+1D5BA..U+1D5D3 (a-z)
-// ---------------------------------------------------------------------------
-const mathsf = (c: string): string | undefined => {
-	const base = c.toUpperCase();
-	const isUpper = c === base;
-	const offset = isUpper ? 0x1D5A0 : 0x1D5BA;
-	const idx = base.charCodeAt(0) - 65;
-	if (idx < 0 || idx > 25) return undefined;
-	return String.fromCodePoint(offset + idx);
-};
-
-// ---------------------------------------------------------------------------
-// Bold italic – U+1D468..U+1D481 (A-Z), U+1D482..U+1D49B (a-z)
-// ---------------------------------------------------------------------------
-const mathbfit = (c: string): string | undefined => {
-	const base = c.toUpperCase();
-	const isUpper = c === base;
-	const offset = isUpper ? 0x1D468 : 0x1D482;
-	const idx = base.charCodeAt(0) - 65;
-	if (idx < 0 || idx > 25) return undefined;
-	return String.fromCodePoint(offset + idx);
-};
-
-// ---------------------------------------------------------------------------
-// All slash-commands → Unicode, merged lookup (longest match first)
-// ---------------------------------------------------------------------------
-const commandMap: Record<string, string> = {
-	...greekLower, ...greekUpper, ...operators, ...relations, ...arrows,
-	...symbols,
-};
-
-// Commands that take a single brace argument like \mathbb{X}
-type FontCmd = (arg: string) => string | undefined;
-const fontCommands: Record<string, FontCmd> = {
-	mathbb: (a) => mathbb[a],
-	mathcal: (a) => mathcal[a],
-	cal: (a) => mathcal[a],
-	mathfrak: (a) => mathfrak[a],
-	frak: (a) => mathfrak[a],
-	mathscr: (a) => mathscr[a],
-	scr: (a) => mathscr[a],
-	mathbf: (a) => mathbold(a),
-	bf: (a) => mathbold(a),
-	boldsymbol: (a) => mathbold(a),
-	mathit: (a) => mathitalic(a),
-	mathrm: (a) => a, // roman = just the character
-	mathtt: (a) => mathtt(a),
-	tt: (a) => mathtt(a),
-	mathsf: (a) => mathsf(a),
-	sf: (a) => mathsf(a),
-	mathbfit: (a) => mathbfit(a),
-	bfit: (a) => mathbfit(a),
-	text: (a) => a,
-	textbf: (a) => a, // can't easily bold in plain text
-	textit: (a) => a,
-	texttt: (a) => a,
-	hat: (a) => a + "\u0302",      // combining circumflex
-	bar: (a) => a + "\u0304",      // combining macron
-	vec: (a) => a + "\u20D7",      // combining right arrow above
-	tilde: (a) => a + "\u0303",    // combining tilde
-	dot: (a) => a + "\u0307",      // combining dot above
-	ddot: (a) => a + "\u0308",     // combining diaeresis
-	overline: (a) => a + "\u0305", // combining overline
-	overbrace: (a) => "⏞" + a + "⏟",
-	underbrace: (a) => "⏟" + a + "⏞",
-	overleftarrow: (a) => a + "⃖",
-	overrightarrow: (a) => a + "⃗",
-	underline: (a) => a + "\u0332",
-	widehat: (a) => a + "\u0302",
-	widetilde: (a) => a + "\u0303",
-	obsolete: (a) => a,
-	not: (a) => {
-		const neg = negations[a];
-		return neg || (a + "\u0338"); // combining long solidus overlay
-	},
-};
-
-const negations: Record<string, string> = {
-	"=": "≠", "<": "≱", ">": "≯", "≤": "≨", "≥": "≱",
-	"∈": "∉", "∋": "∌", "⊂": "⊄", "⊃": "⊅", "∥": "∦",
-	"∼": "≁", "≈": "≉", "≡": "≢", "∝": "∝̸", "∠": "∡",
-	"∨": "∤", "∧": "≯",
-};
-
-// ---------------------------------------------------------------------------
-// Helper: parse a brace group starting at position i in str
-// Returns { content: string, end: number } where end is position after '}'
-// ---------------------------------------------------------------------------
-function parseBraceGroup(str: string, i: number): { content: string; end: number } | null {
-	if (str[i] !== "{") return null;
-	let depth = 1;
-	let j = i + 1;
-	while (j < str.length && depth > 0) {
-		if (str[j] === "{") depth++;
-		else if (str[j] === "}") depth--;
-		j++;
-	}
-	if (depth !== 0) return null;
-	return { content: str.slice(i + 1, j - 1), end: j };
+interface Group {
+	content: string;
+	end: number;
 }
 
-// ---------------------------------------------------------------------------
-// Convert a single math expression string to Unicode
-// ---------------------------------------------------------------------------
-function convertMathExpr(expr: string): string {
+function parseGroup(text: string, start: number, open = "{", close = "}"): Group | null {
+	if (text[start] !== open) return null;
+	let depth = 1;
+	for (let i = start + 1; i < text.length; i += 1) {
+		if (text[i] === "\\") {
+			i += 1;
+			continue;
+		}
+		if (text[i] === open) depth += 1;
+		else if (text[i] === close && --depth === 0) {
+			return { content: text.slice(start + 1, i), end: i + 1 };
+		}
+	}
+	return null;
+}
+
+function makeAlphabet(
+	upperStart: number,
+	lowerStart: number,
+	digitStart?: number,
+	exceptions: StringMap = {},
+): (character: string) => string | undefined {
+	return (character) => {
+		if (exceptions[character]) return exceptions[character];
+		const code = character.codePointAt(0);
+		if (code === undefined) return undefined;
+		if (code >= 65 && code <= 90) return String.fromCodePoint(upperStart + code - 65);
+		if (code >= 97 && code <= 122) return String.fromCodePoint(lowerStart + code - 97);
+		if (digitStart !== undefined && code >= 48 && code <= 57) {
+			return String.fromCodePoint(digitStart + code - 48);
+		}
+		return undefined;
+	};
+}
+
+type Font = (character: string) => string | undefined;
+
+// The five styled Greek alphabets are contiguous in Unicode. The source order
+// below follows those blocks exactly, including variant symbols. PragmataPro
+// 0.903 contains every resulting glyph.
+const greekAlphabetOrder = [
+	..."ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡϴΣΤΥΦΧΨΩ∇",
+	..."αβγδεζηθικλμνξοπρςστυφχψω∂ϵϑϰϕϱϖ",
+];
+
+function addGreek(font: Font, greekStart: number): Font {
+	const styledGreek = new Map(greekAlphabetOrder.map((character, index) => [character, String.fromCodePoint(greekStart + index)]));
+	return (character) => font(character) ?? styledGreek.get(character);
+}
+
+const fonts: Readonly<Record<string, Font>> = {
+	mathbb: makeAlphabet(0x1d538, 0x1d552, 0x1d7d8, {
+		C: "ℂ", H: "ℍ", N: "ℕ", P: "ℙ", Q: "ℚ", R: "ℝ", Z: "ℤ",
+	}),
+	mathbf: addGreek(makeAlphabet(0x1d400, 0x1d41a, 0x1d7ce), 0x1d6a8),
+	boldsymbol: addGreek(makeAlphabet(0x1d400, 0x1d41a, 0x1d7ce), 0x1d6a8),
+	mathit: addGreek(makeAlphabet(0x1d434, 0x1d44e, undefined, { h: "ℎ" }), 0x1d6e2),
+	mathbfit: addGreek(makeAlphabet(0x1d468, 0x1d482), 0x1d71c),
+	mathcal: makeAlphabet(0x1d49c, 0x1d4b6, undefined, {
+		B: "ℬ", E: "ℰ", F: "ℱ", H: "ℋ", I: "ℐ", L: "ℒ", M: "ℳ", R: "ℛ",
+		e: "ℯ", g: "ℊ", o: "ℴ",
+	}),
+	mathscr: makeAlphabet(0x1d49c, 0x1d4b6, undefined, {
+		B: "ℬ", E: "ℰ", F: "ℱ", H: "ℋ", I: "ℐ", L: "ℒ", M: "ℳ", R: "ℛ",
+		e: "ℯ", g: "ℊ", o: "ℴ",
+	}),
+	mathfrak: makeAlphabet(0x1d504, 0x1d51e, undefined, {
+		C: "ℭ", H: "ℌ", I: "ℑ", R: "ℜ", Z: "ℨ",
+	}),
+	mathbffrak: makeAlphabet(0x1d56c, 0x1d586),
+	mathsf: makeAlphabet(0x1d5a0, 0x1d5ba, 0x1d7e2),
+	mathsfbf: addGreek(makeAlphabet(0x1d5d4, 0x1d5ee, 0x1d7ec), 0x1d756),
+	mathsfit: makeAlphabet(0x1d608, 0x1d622),
+	mathbfsfit: addGreek(makeAlphabet(0x1d63c, 0x1d656), 0x1d790),
+	mathtt: makeAlphabet(0x1d670, 0x1d68a, 0x1d7f6),
+};
+
+const fontAliases: StringMap = {
+	bb: "mathbb", bf: "mathbf", bfit: "mathbfit", cal: "mathcal", scr: "mathscr",
+	frak: "mathfrak", sf: "mathsf", tt: "mathtt", bm: "boldsymbol",
+	symbb: "mathbb", symbf: "mathbf", symit: "mathit", symbfit: "mathbfit",
+	symcal: "mathcal", symscr: "mathscr", symfrak: "mathfrak", symbffrak: "mathbffrak",
+	symsf: "mathsf", symsfbf: "mathsfbf", symsfit: "mathsfit", symbfsfit: "mathbfsfit",
+	symtt: "mathtt",
+};
+
+function applyFont(text: string, font: Font): string {
+	return [...text].map((character) => font(character) ?? character).join("");
+}
+
+function canMap(text: string, map: StringMap): boolean {
+	return [...text].every((character) => map[character] !== undefined);
+}
+
+function mapCharacters(text: string, map: StringMap): string {
+	return [...text].map((character) => map[character] ?? character).join("");
+}
+
+function formatScript(text: string, marker: "^" | "_"): string {
+	const map = marker === "^" ? superscripts : subscripts;
+	const characters = [...text];
+	if (characters.length <= 8 && canMap(text, map)) return mapCharacters(text, map);
+	return characters.length <= 1 ? `${marker}${text}` : `${marker}(${text})`;
+}
+
+function skipHorizontalSpace(text: string, start: number): number {
+	let i = start;
+	while (text[i] === " " || text[i] === "\t") i += 1;
+	return i;
+}
+
+function readCommand(text: string, slash: number): { name: string; end: number } {
+	let end = slash + 1;
+	while (end < text.length && /[A-Za-z]/.test(text[end]!)) end += 1;
+	return { name: text.slice(slash + 1, end), end };
+}
+
+function parenthesize(value: string): string {
+	return [...value].length <= 1 || /^\([^()]*\)$/.test(value) ? value : `(${value})`;
+}
+
+const vulgarFractions: StringMap = {
+	"1/2": "½", "1/3": "⅓", "2/3": "⅔", "1/4": "¼", "3/4": "¾", "1/5": "⅕",
+	"2/5": "⅖", "3/5": "⅗", "4/5": "⅘", "1/6": "⅙", "5/6": "⅚", "1/7": "⅐",
+	"1/8": "⅛", "3/8": "⅜", "5/8": "⅝", "7/8": "⅞", "1/9": "⅑", "1/10": "⅒",
+};
+
+const negations: StringMap = {
+	"=": "≠", "<": "≮", ">": "≯", "≤": "≰", "≥": "≱", "∈": "∉", "∋": "∌",
+	"⊂": "⊄", "⊃": "⊅", "⊆": "⊈", "⊇": "⊉", "∥": "∦", "∣": "∤", "∼": "≁",
+	"≈": "≉", "≃": "≄", "≅": "≇", "≡": "≢", "≺": "⊀", "≻": "⊁", "←": "↚",
+	"→": "↛", "↔": "↮", "⇐": "⇍", "⇒": "⇏", "⇔": "⇎", "⊢": "⊬", "⊨": "⊭",
+};
+
+const accents: StringMap = {
+	hat: "̂", widehat: "̂", bar: "̄", overline: "̅", vec: "⃗", overrightarrow: "⃗",
+	overleftarrow: "⃖", tilde: "̃", widetilde: "̃", dot: "̇", ddot: "̈", breve: "̆",
+	check: "̌", acute: "́", grave: "̀", underline: "̲",
+};
+
+const delimiterCommands = new Set([
+	"left", "right", "middle", "big", "Big", "bigg", "Bigg", "bigl", "bigr",
+	"Bigl", "Bigr", "biggl", "biggr", "Biggl", "Biggr",
+]);
+
+const ignoredLayoutCommands = new Set([
+	"displaystyle", "textstyle", "scriptstyle", "scriptscriptstyle", "limits", "nolimits",
+]);
+
+const textCommands = new Set([
+	"operatorname", "mathrm", "text", "textrm", "textnormal", "textbf", "textit", "texttt",
+]);
+
+const supportedEnvironments = new Set([
+	"cases", "aligned", "align", "alignedat", "array", "matrix", "pmatrix", "bmatrix",
+	"Bmatrix", "vmatrix", "Vmatrix", "smallmatrix",
+]);
+
+function applyAccent(text: string, accent: string): string {
+	return [...text].map((character) => /\s/.test(character) ? character : character + accent).join("");
+}
+
+function parseDelimiter(text: string, start: number): { text: string; end: number } | null {
+	const i = skipHorizontalSpace(text, start);
+	if (i >= text.length) return null;
+	if (text[i] !== "\\") {
+		return { text: text[i] === "." ? "" : text[i]!, end: i + 1 };
+	}
+	const command = readCommand(text, i);
+	if (!command.name) {
+		const escaped = text[i + 1];
+		if (escaped === undefined) return null;
+		return { text: escaped === "|" ? "‖" : escaped, end: i + 2 };
+	}
+	const delimiter = symbols[command.name];
+	if (delimiter === undefined) return null;
+	return { text: delimiter, end: command.end };
+}
+
+function splitEnvironmentRows(body: string): string[][] {
+	const rows: string[][] = [[]];
+	let cell = "";
+	let depth = 0;
+	for (let i = 0; i < body.length; i += 1) {
+		const character = body[i]!;
+		if (character === "{" && !isEscaped(body, i)) depth += 1;
+		else if (character === "}" && !isEscaped(body, i)) depth = Math.max(0, depth - 1);
+		if (depth === 0 && character === "&") {
+			rows[rows.length - 1]!.push(cell);
+			cell = "";
+			continue;
+		}
+		if (depth === 0 && character === "\\" && body[i + 1] === "\\") {
+			rows[rows.length - 1]!.push(cell);
+			rows.push([]);
+			cell = "";
+			i += 1;
+			continue;
+		}
+		cell += character;
+	}
+	rows[rows.length - 1]!.push(cell);
+	return rows;
+}
+
+function renderEnvironment(name: string, body: string): string {
+	const rows = splitEnvironmentRows(body).map((row) => row.map((cell) => convertMathExpr(cell).trim()));
+	if (name === "cases") {
+		return rows.map((row, index) => `${index === 0 ? "{ " : "  "}${row.join(", ")}`).join("\n");
+	}
+	const rendered = rows.map((row) => row.join("  ")).join("\n");
+	const wrappers: Readonly<Record<string, readonly [string, string]>> = {
+		pmatrix: ["(", ")"], bmatrix: ["[", "]"], Bmatrix: ["{", "}"],
+		vmatrix: ["|", "|"], Vmatrix: ["‖", "‖"],
+	};
+	const [left, right] = wrappers[name] ?? ["", ""];
+	return `${left}${rendered}${right}`;
+}
+
+interface CommandConversion {
+	text: string;
+	end: number;
+}
+
+function convertCommand(expression: string, slash: number): CommandConversion {
+	const command = readCommand(expression, slash);
+	if (!command.name) {
+		const escaped = expression[slash + 1];
+		if (escaped === undefined) return { text: "\\", end: slash + 1 };
+		const escapedMap: StringMap = {
+			"$": "$", "#": "#", "%": "%", "&": "&", "_": "_", "{": "{", "}": "}",
+			"~": " ", " ": " ", "|": "‖", ",": " ", ";": " ", ":": " ", "!": "",
+		};
+		return { text: escapedMap[escaped] ?? `\\${escaped}`, end: slash + 2 };
+	}
+
+	const { name } = command;
+	let argumentStart = skipHorizontalSpace(expression, command.end);
+
+	if (delimiterCommands.has(name)) {
+		const delimiter = parseDelimiter(expression, command.end);
+		return delimiter ?? { text: `\\${name}`, end: command.end };
+	}
+
+	if (ignoredLayoutCommands.has(name)) {
+		return { text: "", end: command.end };
+	}
+
+	if (name === "frac" || name === "dfrac" || name === "tfrac") {
+		const numerator = parseGroup(expression, argumentStart);
+		const denominatorStart = numerator ? skipHorizontalSpace(expression, numerator.end) : argumentStart;
+		const denominator = numerator ? parseGroup(expression, denominatorStart) : null;
+		if (!numerator) return { text: `\\${name}`, end: command.end };
+		if (!denominator) {
+			return { text: expression.slice(slash, numerator.end), end: numerator.end };
+		}
+		const top = convertMathExpr(numerator.content).trim();
+		const bottom = convertMathExpr(denominator.content).trim();
+		const vulgar = vulgarFractions[`${top}/${bottom}`];
+		return {
+			text: vulgar ?? `${parenthesize(top)}/${parenthesize(bottom)}`,
+			end: denominator.end,
+		};
+	}
+
+	if (name === "sqrt") {
+		let degree = "";
+		if (expression[argumentStart] === "[") {
+			const group = parseGroup(expression, argumentStart, "[", "]");
+			if (!group) return { text: expression.slice(slash), end: expression.length };
+			degree = convertMathExpr(group.content).trim();
+			argumentStart = skipHorizontalSpace(expression, group.end);
+		}
+		const radicand = parseGroup(expression, argumentStart);
+		if (!radicand) return { text: "\\sqrt", end: command.end };
+		const inner = convertMathExpr(radicand.content).trim();
+		const radical = degree === "3" ? "∛" : degree === "4" ? "∜" : `${degree ? formatScript(degree, "^") : ""}√`;
+		return { text: `${radical}${parenthesize(inner)}`, end: radicand.end };
+	}
+
+	if (name === "binom" || name === "tbinom" || name === "dbinom") {
+		const top = parseGroup(expression, argumentStart);
+		const bottom = top ? parseGroup(expression, skipHorizontalSpace(expression, top.end)) : null;
+		if (!top || !bottom) return { text: `\\${name}`, end: command.end };
+		return { text: `C(${convertMathExpr(top.content)}, ${convertMathExpr(bottom.content)})`, end: bottom.end };
+	}
+
+	if (name === "overset" || name === "underset" || name === "stackrel") {
+		const annotation = parseGroup(expression, argumentStart);
+		const base = annotation ? parseGroup(expression, skipHorizontalSpace(expression, annotation.end)) : null;
+		if (!annotation || !base) return { text: `\\${name}`, end: command.end };
+		const marker = name === "underset" ? "_" : "^";
+		return {
+			text: `${convertMathExpr(base.content)}${formatScript(convertMathExpr(annotation.content), marker)}`,
+			end: base.end,
+		};
+	}
+
+	if (textCommands.has(name)) {
+		if (expression[argumentStart] === "*") argumentStart = skipHorizontalSpace(expression, argumentStart + 1);
+		const group = parseGroup(expression, argumentStart);
+		if (!group) return { text: `\\${name}`, end: command.end };
+		return { text: group.content.replace(/\\([#$%&_{}])/g, "$1"), end: group.end };
+	}
+
+	if (name === "pmod" || name === "pod") {
+		const group = parseGroup(expression, argumentStart);
+		if (!group) return { text: `\\${name}`, end: command.end };
+		const content = convertMathExpr(group.content);
+		return { text: name === "pmod" ? `(mod ${content})` : `(${content})`, end: group.end };
+	}
+
+	if (name === "substack") {
+		const group = parseGroup(expression, argumentStart);
+		if (!group) return { text: "\\substack", end: command.end };
+		return { text: group.content.split(/\\\\/).map((line) => convertMathExpr(line).trim()).join(", "), end: group.end };
+	}
+
+	const canonicalFont = fonts[name] ? name : fontAliases[name];
+	if (canonicalFont) {
+		const font = fonts[canonicalFont]!;
+		const group = parseGroup(expression, argumentStart);
+		if (group) {
+			return { text: applyFont(convertMathExpr(group.content), font), end: group.end };
+		}
+		const character = expression[argumentStart];
+		if (character && /[A-Za-z0-9]/.test(character)) {
+			return { text: font(character) ?? character, end: argumentStart + 1 };
+		}
+		return { text: `\\${name}`, end: command.end };
+	}
+
+	if (accents[name]) {
+		const group = parseGroup(expression, argumentStart);
+		if (!group) return { text: `\\${name}`, end: command.end };
+		return { text: applyAccent(convertMathExpr(group.content), accents[name]!), end: group.end };
+	}
+
+	if (name === "overbrace" || name === "underbrace") {
+		const group = parseGroup(expression, argumentStart);
+		if (!group) return { text: `\\${name}`, end: command.end };
+		const body = convertMathExpr(group.content);
+		return { text: name === "overbrace" ? `⏞${body}⏟` : `⏟${body}⏞`, end: group.end };
+	}
+
+	if (name === "not") {
+		const targetStart = skipHorizontalSpace(expression, command.end);
+		let targetText = expression[targetStart] ?? "";
+		let targetEnd = targetStart + (targetText ? 1 : 0);
+		if (targetText === "\\") {
+			const target = readCommand(expression, targetStart);
+			const mapped = commandMap[target.name];
+			if (mapped !== undefined) {
+				targetText = mapped;
+				targetEnd = target.end;
+			} else {
+				return { text: "\\not", end: command.end };
+			}
+		}
+		if (!targetText) return { text: "\\not", end: command.end };
+		return { text: negations[targetText] ?? `${targetText}̸`, end: targetEnd };
+	}
+
+	if (name === "begin") {
+		const environment = parseGroup(expression, argumentStart);
+		if (!environment) return { text: "\\begin", end: command.end };
+		if (!supportedEnvironments.has(environment.content)) return { text: "\\begin", end: command.end };
+		let bodyStart = environment.end;
+		if (environment.content === "array") {
+			const columns = parseGroup(expression, skipHorizontalSpace(expression, bodyStart));
+			if (columns) bodyStart = columns.end;
+		}
+		const endMarker = `\\end{${environment.content}}`;
+		const end = expression.indexOf(endMarker, bodyStart);
+		if (end === -1) return { text: "\\begin", end: command.end };
+		return {
+			text: renderEnvironment(environment.content, expression.slice(bodyStart, end)),
+			end: end + endMarker.length,
+		};
+	}
+
+	if (name === "color" || name === "textcolor" || name === "colorbox") {
+		const color = parseGroup(expression, argumentStart);
+		const body = color ? parseGroup(expression, skipHorizontalSpace(expression, color.end)) : null;
+		if (!color || !body) return { text: `\\${name}`, end: command.end };
+		return { text: convertMathExpr(body.content), end: body.end };
+	}
+
+	if (namedFunctions[name] !== undefined) return { text: namedFunctions[name]!, end: command.end };
+	if (commandMap[name] !== undefined) return { text: commandMap[name]!, end: command.end };
+
+	// Unknown macros may have semantics we cannot approximate. Keep their
+	// immediately following arguments byte-for-byte instead of stripping TeX
+	// grouping braces or partially converting their contents.
+	let unknownEnd = command.end;
+	let next = skipHorizontalSpace(expression, unknownEnd);
+	while (expression[next] === "{") {
+		const group = parseGroup(expression, next);
+		if (!group) break;
+		unknownEnd = group.end;
+		next = skipHorizontalSpace(expression, unknownEnd);
+	}
+	return { text: expression.slice(slash, unknownEnd), end: unknownEnd };
+}
+
+function convertMathExpr(expression: string): string {
 	let result = "";
 	let i = 0;
-
-	while (i < expr.length) {
-		const ch = expr[i];
-
-		// Backslash command
-		if (ch === "\\") {
-			i++;
-			// Read command name
-			let cmd = "";
-			while (i < expr.length && /[a-zA-Z]/.test(expr[i])) {
-				cmd += expr[i];
-				i++;
-			}
-
-			// Escaped special chars
-			if (cmd === "") {
-				const next = expr[i];
-				if (next === "\\") { result += "\\"; i++; continue; }
-				if (next === "$") { result += "$"; i++; continue; }
-				if (next === "#") { result += "#"; i++; continue; }
-				if (next === "%") { result += "%"; i++; continue; }
-				if (next === "&") { result += "&"; i++; continue; }
-				if (next === "_") { result += "_"; i++; continue; }
-				if (next === "{") { result += "{"; i++; continue; }
-				if (next === "}") { result += "}"; i++; continue; }
-				if (next === "~") { result += "\u202F"; i++; continue; }  // narrow no-break space
-				if (next === " ") { result += " "; i++; continue; }
-				if (next === "|") { result += "‖"; i++; continue; }
-				if (next === ",") { result += "\u2009"; i++; continue; }  // \, thin space
-				if (next === ";") { result += "\u2005"; i++; continue; } // \; medium space
-				if (next === ":") { result += "\u2004"; i++; continue; }  // \: medium-math space
-				if (next === "!") { result += "\u2006"; i++; continue; }   // \! negative thin space
-				// unknown escaped char, keep as-is
-				result += "\\"; continue;
-			}
-
-			// Named functions (render as upright text)
-			if (cmd in namedFuncs) {
-				result += namedFuncs[cmd]!;
-				// In Unicode rendering, keep the space (LaTeX consumes it)
-				// Don't skip space after
-				continue;
-			}
-
-			// Font commands \mathbb{X}, \mathcal{X}, etc.
-			if (cmd in fontCommands) {
-				// Skip optional whitespace
-				while (i < expr.length && (expr[i] === " " || expr[i] === "\t")) i++;
-				const group = parseBraceGroup(expr, i);
-				if (group) {
-					let converted = fontCommands[cmd]!(group.content);
-					// If single-arg lookup failed, try character-by-character
-					if (converted === undefined) {
-						const perChar = [...group.content].map(c => fontCommands[cmd]!(c)).filter(Boolean).join("");
-						if (perChar.length > 0) converted = perChar;
-					}
-					result += converted ?? `\\${cmd}{${group.content}}`;
-					i = group.end;
-					continue;
-				}
-				// Single char without braces: \mathbb R
-				if (i < expr.length && /[a-zA-Z0-9]/.test(expr[i])) {
-					const converted = fontCommands[cmd]!(expr[i]);
-					result += converted ?? `\\${cmd}${expr[i]}`;
-					i++;
-					continue;
-				}
-				result += `\\${cmd}`;
-				continue;
-			}
-
-			// \frac{num}{den}
-			if (cmd === "frac" || cmd === "dfrac" || cmd === "tfrac") {
-				while (i < expr.length && expr[i] === " ") i++;
-				const numGroup = parseBraceGroup(expr, i);
-				if (numGroup) {
-					i = numGroup.end;
-					while (i < expr.length && expr[i] === " ") i++;
-					const denGroup = parseBraceGroup(expr, i);
-					if (denGroup) {
-						i = denGroup.end;
-						const num = convertMathExpr(numGroup.content).trim();
-						const den = convertMathExpr(denGroup.content).trim();
-						// Add parens if numerator or denominator has operators
-						const numParens = /[+\-*/^=≠≤≥<>∈∉⊂⊃∩∪ ]/.test(num) && num.length > 1;
-						const denParens = /[+\-*/^=≠≤≥<>∈∉⊂⊃∩∪ ]/.test(den) && den.length > 1;
-						result += `${numParens ? `(${num})` : num}/${denParens ? `(${den})` : den}`;
-						continue;
-					}
-				}
-				result += "/";
-				continue;
-			}
-
-			// \sqrt[n]{x} and \sqrt{x}
-			if (cmd === "sqrt") {
-				while (i < expr.length && expr[i] === " ") i++;
-				let nthRoot = "";
-				// Check for optional [n]
-				if (i < expr.length && expr[i] === "[") {
-					let j = i + 1;
-					while (j < expr.length && expr[j] !== "]") j++;
-					nthRoot = expr.slice(i + 1, j);
-					i = j + 1;
-					while (i < expr.length && expr[i] === " ") i++;
-				}
-				const group = parseBraceGroup(expr, i);
-				if (group) {
-					i = group.end;
-					const inner = convertMathExpr(group.content).trim();
-					const needParens = inner.length > 1;
-					if (nthRoot) {
-						result += `√[${convertMathExpr(nthRoot)}]${needParens ? `(${inner})` : inner}`;
-					} else {
-						result += `√${needParens ? `(${inner})` : inner}`;
-					}
-					continue;
-				}
-				// Single char without braces
-				if (i < expr.length && expr[i] !== " " && expr[i] !== "}" && expr[i] !== "\\") {
-					result += `√${expr[i]}`;
-					i++;
-					continue;
-				}
-				result += "√";
-				continue;
-			}
-
-			// \overset{x}{y}, \underset{x}{y}
-			if (cmd === "overset" || cmd === "underset") {
-				while (i < expr.length && expr[i] === " ") i++;
-				const top = parseBraceGroup(expr, i);
-				if (top) {
-					i = top.end;
-					while (i < expr.length && expr[i] === " ") i++;
-					const bot = parseBraceGroup(expr, i);
-					if (bot) {
-						i = bot.end;
-						result += `${convertMathExpr(bot.content)}${cmd === "overset" ? "^" : "_"}(${convertMathExpr(top.content)})`;
-						continue;
-					}
-				}
-				continue;
-			}
-
-			// \binom{n}{k}, \tbinom{n}{k}
-			if (cmd === "binom" || cmd === "tbinom") {
-				while (i < expr.length && expr[i] === " ") i++;
-				const n = parseBraceGroup(expr, i);
-				if (n) {
-					i = n.end;
-					while (i < expr.length && expr[i] === " ") i++;
-					const k = parseBraceGroup(expr, i);
-					if (k) {
-						i = k.end;
-						result += `C(${convertMathExpr(n.content)},${convertMathExpr(k.content)})`;
-						continue;
-					}
-				}
-				continue;
-			}
-
-			// \left and \right delimiters
-			if (cmd === "left" || cmd === "right") {
-				// These are sizing hints; just skip them
-				while (i < expr.length && expr[i] === " ") i++;
-				if (i < expr.length) {
-					const delim = expr[i];
-					const delimMap: Record<string, string> = {
-						"(": "(", ")": ")", "[": "[", "]": "]",
-						"|": "|", ".": "", "\\": "∕",
-					};
-					if (delim === "\\") {
-						let d = "";
-						i++;
-						while (i < expr.length && /[a-zA-Z]/.test(expr[i])) {
-							d += expr[i]; i++;
-						}
-						result += delimMap[d] ?? `\\${d}`;
-					} else {
-						result += delimMap[delim] ?? delim;
-						i++;
-					}
-				}
-				continue;
-			}
-
-			// \begin{env}...\end{env}
-			if (cmd === "begin") {
-				while (i < expr.length && expr[i] === " ") i++;
-				const envGroup = parseBraceGroup(expr, i);
-				if (envGroup) {
-					i = envGroup.end;
-					const envName = envGroup.content;
-					// Skip to \end{envName}
-					const endMarker = `\\end{${envName}}`;
-					const endIdx = expr.indexOf(endMarker, i);
-					if (endIdx !== -1) {
-						const body = expr.slice(i, endIdx);
-						i = endIdx + endMarker.length;
-						// Simple environments
-						if (envName === "cases" || envName === "aligned" || envName === "align" || envName === "array" || envName === "matrix" || envName === "pmatrix" || envName === "bmatrix" || envName === "vmatrix") {
-							const prefix = envName === "pmatrix" ? "(" : envName === "bmatrix" ? "[" : envName === "vmatrix" ? "|" : "";
-							const suffix = envName === "pmatrix" ? ")" : envName === "bmatrix" ? "]" : envName === "vmatrix" ? "|" : "";
-							// Convert body, replace & with alignment and \\ with newlines
-							const converted = convertMathExpr(body)
-								.replace(/\\\\\s*/g, "\n")
-								.replace(/&/g, "  ");
-							result += `${prefix}${converted.trim()}${suffix}`;
-						} else if (envName === "cases") {
-							const converted = convertMathExpr(body)
-								.replace(/\\\\\s*/g, "\n")
-								.replace(/&/g, ", ");
-							result += `{ ${converted.trim()} }`;
-						} else {
-							result += convertMathExpr(body);
-						}
-						continue;
-					}
-				}
-				continue;
-			}
-
-			// \text{...}
-			if (cmd === "text" || cmd === "textbf" || cmd === "textit" || cmd === "textrm") {
-				while (i < expr.length && expr[i] === " ") i++;
-				const group = parseBraceGroup(expr, i);
-				if (group) {
-					result += group.content;
-					i = group.end;
-					continue;
-				}
-				continue;
-			}
-
-			// \operatorname{...}
-			if (cmd === "operatorname") {
-				while (i < expr.length && expr[i] === " ") i++;
-				const group = parseBraceGroup(expr, i);
-				if (group) {
-					result += group.content;
-					i = group.end;
-					continue;
-				}
-				continue;
-			}
-
-			// \color{...}{...} – skip color, render inner
-			if (cmd === "color" || cmd === "textcolor" || cmd === "colorbox") {
-				while (i < expr.length && expr[i] === " ") i++;
-				const colorGroup = parseBraceGroup(expr, i);
-				if (colorGroup) {
-					i = colorGroup.end;
-					while (i < expr.length && expr[i] === " ") i++;
-					const bodyGroup = parseBraceGroup(expr, i);
-					if (bodyGroup) {
-						result += convertMathExpr(bodyGroup.content);
-						i = bodyGroup.end;
-						continue;
-					}
-				}
-				continue;
-			}
-
-			// Big operator with limits: \sum_{i=0}^{n}
-			if (cmd === "sum" || cmd === "prod" || cmd === "coprod" || cmd === "int" || cmd === "iint" || cmd === "iiint" || cmd === "oint" || cmd === "bigcup" || cmd === "bigcap" || cmd === "bigoplus" || cmd === "bigotimes" || cmd === "bigodot" || cmd === "bigvee" || cmd === "bigwedge" || cmd === "lim" || cmd === "limsup" || cmd === "liminf") {
-				result += commandMap[cmd] ?? cmd;
-				// Collect subscript and superscript
-				let sub = "";
-				let sup = "";
-				if (i < expr.length && expr[i] === "_") {
-					i++;
-					const subGroup = parseBraceGroup(expr, i);
-					if (subGroup) { sub = convertMathExpr(subGroup.content); i = subGroup.end; }
-					else if (i < expr.length && expr[i] === "\\") {
-						// Bare \command: _\infty
-						let lcmd = ""; let j = i + 1;
-						while (j < expr.length && /[a-zA-Z]/.test(expr[j])) { lcmd += expr[j]; j++; }
-						const lsym = commandMap[lcmd] ?? symbols[lcmd];
-						if (lsym) { sub = lsym; i = j; }
-						else { sub = expr[i]; i++; }
-					}
-					else if (i < expr.length) { sub = expr[i]; i++; }
-				}
-				if (i < expr.length && expr[i] === "^") {
-					i++;
-					const supGroup = parseBraceGroup(expr, i);
-					if (supGroup) { sup = convertMathExpr(supGroup.content); i = supGroup.end; }
-					else if (i < expr.length && expr[i] === "\\") {
-						// Bare \command: ^\infty
-						let lcmd = ""; let j = i + 1;
-						while (j < expr.length && /[a-zA-Z]/.test(expr[j])) { lcmd += expr[j]; j++; }
-						const lsym = commandMap[lcmd] ?? symbols[lcmd];
-						if (lsym) { sup = lsym; i = j; }
-						else { sup = expr[i]; i++; }
-					}
-					else if (i < expr.length) { sup = expr[i]; i++; }
-				}
-				// Use Unicode sub/sup only if ALL chars are convertible
-				const useUnicodeSub = sub.length > 0 && sub.length <= 8 && canSubscript(sub);
-				const useUnicodeSup = sup.length > 0 && sup.length <= 8 && canSuperscript(sup);
-				if (useUnicodeSub) result += toSubscript(sub);
-				if (useUnicodeSup) result += toSuperscript(sup);
-				// Fallback for whichever one couldn't be Unicode'd
-				if (sub && !useUnicodeSub) result += formatSub(sub);
-				if (sup && !useUnicodeSup) result += formatSup(sup);
-				continue;
-			}
-
-			// Standard command lookup
-			if (commandMap[cmd]) {
-				result += commandMap[cmd]!;
-				continue;
-			}
-
-			// Unknown command: just output the command name
-			result += cmd;
+	while (i < expression.length) {
+		const character = expression[i]!;
+		if (character === "\\") {
+			const converted = convertCommand(expression, i);
+			result += converted.text;
+			i = converted.end;
 			continue;
 		}
-
-		// Superscript ^
-		if (ch === "^") {
-			i++;
-			const group = parseBraceGroup(expr, i);
+		if (character === "^" || character === "_") {
+			const marker = character;
+			const group = parseGroup(expression, i + 1);
 			if (group) {
-				const converted = convertMathExpr(group.content);
-				if (canSuperscript(converted) && converted.length <= 8) {
-					result += toSuperscript(converted);
-				} else {
-					result += formatSup(converted);
-				}
+				result += formatScript(convertMathExpr(group.content), marker);
 				i = group.end;
 				continue;
 			}
-			// Single char or \command without braces: ^\infty, ^2
-			if (i < expr.length && expr[i] === "\\") {
-				// Read the command
-				let cmd = "";
-				let j = i + 1;
-				while (j < expr.length && /[a-zA-Z]/.test(expr[j])) { cmd += expr[j]; j++; }
-				const sym = commandMap[cmd] ?? symbols[cmd];
-				if (sym) {
-					result += superscripts[sym] ?? formatSup(sym);
-					i = j;
-					continue;
-				}
-				// Unknown command, fall through
-			}
-			if (i < expr.length) {
-				const c = expr[i];
-				result += superscripts[c] ?? formatSup(c);
-				i++;
+			if (expression[i + 1] === "\\") {
+				const converted = convertCommand(expression, i + 1);
+				result += formatScript(converted.text, marker);
+				i = converted.end;
 				continue;
 			}
-			continue;
+			if (i + 1 < expression.length) {
+				result += formatScript(expression[i + 1]!, marker);
+				i += 2;
+				continue;
+			}
 		}
-
-		// Subscript _
-		if (ch === "_") {
-			i++;
-			const group = parseBraceGroup(expr, i);
+		if (character === "{") {
+			const group = parseGroup(expression, i);
 			if (group) {
-				const converted = convertMathExpr(group.content);
-				if (canSubscript(converted) && converted.length <= 8) {
-					result += toSubscript(converted);
-				} else {
-					result += formatSub(converted);
-				}
+				result += convertMathExpr(group.content);
 				i = group.end;
 				continue;
 			}
-			// Single char or \command without braces: _\infty, _2
-			if (i < expr.length && expr[i] === "\\") {
-				let cmd = "";
-				let j = i + 1;
-				while (j < expr.length && /[a-zA-Z]/.test(expr[j])) { cmd += expr[j]; j++; }
-				const sym = commandMap[cmd] ?? symbols[cmd];
-				if (sym) {
-					result += subscripts[sym] ?? formatSub(sym);
-					i = j;
-					continue;
-				}
-			}
-			if (i < expr.length) {
-				const c = expr[i];
-				result += subscripts[c] ?? formatSub(c);
-				i++;
-				continue;
-			}
+		}
+		if (character === "'") {
+			let count = 1;
+			while (expression[i + count] === "'") count += 1;
+			result += count === 1 ? "′" : count === 2 ? "″" : count === 3 ? "‴" : "′".repeat(count);
+			i += count;
 			continue;
 		}
-
-		// Prime (apostrophe used as derivative)
-		if (ch === "'") {
-			result += "′";
-			i++;
-			continue;
-		}
-
-		// Regular character
-		result += ch;
-		i++;
+		result += character;
+		i += 1;
 	}
-
 	return result;
 }
-
-// ---------------------------------------------------------------------------
-// Formatting helpers for superscript/subscript fallback
-// ---------------------------------------------------------------------------
-
-/** Return `^(content)` or `^content` — parens for multi-char content to avoid
- *  ambiguous readings like _-∞ where a subscriptable sign mixes with a
- *  non-subscriptable symbol. Single chars are always unambiguous. */
-function formatSup(content: string): string {
-	return content.length <= 1 ? `^${content}` : `^(${content})`;
-}
-
-/** Return `_(content)` or `_content`. */
-function formatSub(content: string): string {
-	return content.length <= 1 ? `_${content}` : `_(${content})`;
-}
-
-// ---------------------------------------------------------------------------
-// Convert string to superscript characters
-// ---------------------------------------------------------------------------
-/** Check if all chars in s have a Unicode superscript form. */
-function canSuperscript(s: string): boolean {
-	return [...s].every(c => superscripts[c] !== undefined);
-}
-
-/** Check if all chars in s have a Unicode subscript form. */
-function canSubscript(s: string): boolean {
-	return [...s].every(c => subscripts[c] !== undefined);
-}
-
-function toSuperscript(s: string): string {
-	return [...s].map(c => superscripts[c] ?? c).join("");
-}
-
-function toSubscript(s: string): string {
-	return [...s].map(c => subscripts[c] ?? c).join("");
-}
-
-// ---------------------------------------------------------------------------
-// Detect LaTeX math in text and convert to Unicode.
-// Uses a real segment scanner instead of in-band placeholders so code spans
-// and fenced code blocks are preserved by construction.
-// ---------------------------------------------------------------------------
 
 type SegmentKind = "text" | "inlineCode" | "fencedCode" | "inlineMath" | "displayMath";
 
@@ -803,14 +581,9 @@ interface Segment {
 	content?: string;
 }
 
-export interface LatexUnicodeConversion {
-	text: string;
-	changed: boolean;
-}
-
 interface FenceInfo {
-	fenceChar: "`" | "~";
-	fenceLength: number;
+	character: "`" | "~";
+	length: number;
 }
 
 function nextLineEnd(text: string, start: number): number {
@@ -823,288 +596,225 @@ function stripLineEnding(line: string): string {
 }
 
 function parseFenceOpener(line: string): FenceInfo | null {
-	const body = stripLineEnding(line);
-	const match = body.match(/^([ \t]*(?:>[ \t]*)*)(`{3,}|~{3,})([^\r\n]*)$/);
+	const match = stripLineEnding(line).match(/^(?: {0,3}|(?: {0,3}>[ \t]*)+)(`{3,}|~{3,})([^\r\n]*)$/);
 	if (!match) return null;
-
-	const fence = match[2]!;
-	const rest = match[3] ?? "";
-	const fenceChar = fence[0] as "`" | "~";
-
-	// CommonMark-style restriction: backtick-fenced info strings may not
-	// themselves contain backticks.
-	if (fenceChar === "`" && rest.includes("`")) return null;
-
-	return { fenceChar, fenceLength: fence.length };
+	const fence = match[1]!;
+	if (fence[0] === "`" && (match[2] ?? "").includes("`")) return null;
+	return { character: fence[0] as "`" | "~", length: fence.length };
 }
 
 function isFenceCloser(line: string, opener: FenceInfo): boolean {
-	const body = stripLineEnding(line);
-	const match = body.match(/^([ \t]*(?:>[ \t]*)*)(`{3,}|~{3,})[ \t]*$/);
-	if (!match) return false;
-
-	const fence = match[2]!;
-	return fence[0] === opener.fenceChar && fence.length >= opener.fenceLength;
+	const match = stripLineEnding(line).match(/^(?: {0,3}|(?: {0,3}>[ \t]*)+)(`{3,}|~{3,})[ \t]*$/);
+	const fence = match?.[1];
+	return Boolean(fence && fence[0] === opener.character && fence.length >= opener.length);
 }
 
-function findFencedCodeBlockEnd(text: string, searchStart: number, opener: FenceInfo): number {
-	let search = searchStart;
-
-	while (search < text.length) {
-		const candidateEnd = nextLineEnd(text, search);
-		const candidateLine = text.slice(search, candidateEnd);
-		if (isFenceCloser(candidateLine, opener)) {
-			return candidateEnd;
-		}
-		search = candidateEnd;
+function findFenceEnd(text: string, start: number, opener: FenceInfo): number {
+	let cursor = start;
+	while (cursor < text.length) {
+		const end = nextLineEnd(text, cursor);
+		if (isFenceCloser(text.slice(cursor, end), opener)) return end;
+		cursor = end;
 	}
-
 	return text.length;
 }
 
-function findInlineCodeSpanEnd(text: string, start: number): number | null {
+function findCodeSpanEnd(text: string, start: number): number | null {
 	let openerEnd = start;
-	while (openerEnd < text.length && text[openerEnd] === "`") openerEnd++;
-	const fenceLength = openerEnd - start;
-
-	const lineEnd = text.indexOf("\n", openerEnd);
-	const searchLimit = lineEnd === -1 ? text.length : lineEnd;
-
-	let search = openerEnd;
-	while (search < searchLimit) {
-		if (text[search] !== "`") {
-			search++;
+	while (text[openerEnd] === "`") openerEnd += 1;
+	const length = openerEnd - start;
+	let cursor = openerEnd;
+	while (cursor < text.length) {
+		if (text[cursor] !== "`") {
+			cursor += 1;
 			continue;
 		}
-
-		let closerEnd = search;
-		while (closerEnd < searchLimit && text[closerEnd] === "`") closerEnd++;
-		const closerLength = closerEnd - search;
-
-		if (closerLength === fenceLength) return closerEnd;
-		search = closerEnd;
+		let end = cursor;
+		while (text[end] === "`") end += 1;
+		if (end - cursor === length) return end;
+		cursor = end;
 	}
-
 	return null;
 }
 
-function isLineStart(text: string, index: number): boolean {
-	return index === 0 || text[index - 1] === "\n";
+function isEscaped(text: string, index: number): boolean {
+	let slashes = 0;
+	for (let i = index - 1; i >= 0 && text[i] === "\\"; i -= 1) slashes += 1;
+	return slashes % 2 === 1;
 }
 
-function isInlineDollarStart(text: string, index: number): boolean {
-	return text[index] === "$" && text[index - 1] !== "$" && text[index + 1] !== "$";
+function validInlineDollarOpen(text: string, index: number): boolean {
+	const next = text[index + 1];
+	return text[index] === "$" && text[index - 1] !== "$" && next !== "$" &&
+		next !== undefined && !/\s/.test(next) && !isEscaped(text, index);
 }
 
-function findDisplayDollarMathEnd(text: string, start: number): number | null {
-	const close = text.indexOf("$$", start + 2);
-	if (close === -1 || close === start + 2) return null;
-	return close + 2;
+interface InlineDollarSearch {
+	start: number | null;
+	end: number | null;
+	failedOpeners: number[];
 }
 
-function findInlineDollarMathEnd(text: string, start: number): number | null {
+function findInlineDollarPair(text: string, start: number): InlineDollarSearch {
 	const lineEnd = text.indexOf("\n", start + 1);
-	const searchLimit = lineEnd === -1 ? text.length : lineEnd;
-
-	let cursor = start + 1;
-	while (cursor < searchLimit) {
-		if (text[cursor] === "\\") {
-			cursor += 2;
-			continue;
+	const limit = lineEnd === -1 ? text.length : lineEnd;
+	let opening = start;
+	const failedOpeners: number[] = [];
+	for (let i = start + 1; i < limit; i += 1) {
+		if (text[i] !== "$" || text[i + 1] === "$" || isEscaped(text, i)) continue;
+		const previous = text[i - 1];
+		const next = text[i + 1];
+		if (previous && !/\s/.test(previous) && (next === undefined || !/\d/.test(next))) {
+			return { start: opening, end: i + 1, failedOpeners };
 		}
-
-		if (text[cursor] === "$" && text[cursor + 1] !== "$") {
-			if (cursor === start + 1) return null;
-			return cursor + 1;
+		// An opening delimiter cannot contain another opening delimiter. Abandon
+		// it and keep the newer candidate. This both recovers `$broken $x$` and
+		// ensures a line full of unmatched dollars is scanned only once.
+		if (validInlineDollarOpen(text, i)) {
+			failedOpeners.push(opening);
+			opening = i;
 		}
-
-		cursor++;
 	}
+	failedOpeners.push(opening);
+	return { start: null, end: null, failedOpeners };
+}
 
+function findDisplayDollarEnd(text: string, start: number): number | null {
+	for (let i = start + 2; i < text.length - 1; i += 1) {
+		if (text.startsWith("$$", i) && !isEscaped(text, i)) {
+			return i === start + 2 ? null : i + 2;
+		}
+	}
 	return null;
 }
 
-function findEscapedMathEnd(text: string, start: number, close: "\\)" | "\\]", allowMultiline: boolean): number | null {
-	const searchStart = start + 2;
-	const closeIndex = text.indexOf(close, searchStart);
-	if (closeIndex === -1 || closeIndex === searchStart) return null;
-
-	if (!allowMultiline) {
-		const lineEnd = text.indexOf("\n", searchStart);
-		const searchLimit = lineEnd === -1 ? text.length : lineEnd;
-		if (closeIndex >= searchLimit) return null;
+function findEscapedMathEnd(text: string, start: number, closing: ")" | "]", multiline: boolean): number | null {
+	for (let i = start + 2; i < text.length - 1; i += 1) {
+		if (!multiline && text[i] === "\n") return null;
+		if (text[i] === "\\" && text[i + 1] === closing && !isEscaped(text, i)) {
+			return i === start + 2 ? null : i + 2;
+		}
 	}
-
-	return closeIndex + close.length;
+	return null;
 }
 
 function scanSegments(text: string): Segment[] {
 	const segments: Segment[] = [];
+	const failedDollarOpeners = new Set<number>();
 	let textStart = 0;
 	let cursor = 0;
-
 	const flushText = (end: number) => {
-		if (end > textStart) {
-			segments.push({ kind: "text", raw: text.slice(textStart, end) });
-		}
+		if (end > textStart) segments.push({ kind: "text", raw: text.slice(textStart, end) });
 	};
-
 	while (cursor < text.length) {
-		if (isLineStart(text, cursor)) {
+		if (cursor === 0 || text[cursor - 1] === "\n") {
 			const lineEnd = nextLineEnd(text, cursor);
 			const opener = parseFenceOpener(text.slice(cursor, lineEnd));
 			if (opener) {
 				flushText(cursor);
-				const blockEnd = findFencedCodeBlockEnd(text, lineEnd, opener);
-				segments.push({ kind: "fencedCode", raw: text.slice(cursor, blockEnd) });
-				cursor = blockEnd;
+				const end = findFenceEnd(text, lineEnd, opener);
+				segments.push({ kind: "fencedCode", raw: text.slice(cursor, end) });
+				cursor = end;
 				textStart = cursor;
 				continue;
 			}
 		}
-
 		if (text[cursor] === "`") {
-			const inlineCodeEnd = findInlineCodeSpanEnd(text, cursor);
-			if (inlineCodeEnd !== null) {
+			const end = findCodeSpanEnd(text, cursor);
+			if (end !== null) {
 				flushText(cursor);
-				segments.push({ kind: "inlineCode", raw: text.slice(cursor, inlineCodeEnd) });
-				cursor = inlineCodeEnd;
+				segments.push({ kind: "inlineCode", raw: text.slice(cursor, end) });
+				cursor = end;
 				textStart = cursor;
 				continue;
 			}
 		}
-
-		if (text.startsWith("$$", cursor)) {
-			const displayEnd = findDisplayDollarMathEnd(text, cursor);
-			if (displayEnd !== null) {
+		if (text.startsWith("$$", cursor) && !isEscaped(text, cursor)) {
+			const end = findDisplayDollarEnd(text, cursor);
+			if (end !== null) {
 				flushText(cursor);
-				segments.push({
-					kind: "displayMath",
-					raw: text.slice(cursor, displayEnd),
-					content: text.slice(cursor + 2, displayEnd - 2),
-				});
-				cursor = displayEnd;
+				segments.push({ kind: "displayMath", raw: text.slice(cursor, end), content: text.slice(cursor + 2, end - 2) });
+				cursor = end;
 				textStart = cursor;
 				continue;
 			}
 		}
-
-		if (text.startsWith("\\[", cursor)) {
-			const displayEnd = findEscapedMathEnd(text, cursor, "\\]", true);
-			if (displayEnd !== null) {
+		if (text.startsWith("\\[", cursor) && !isEscaped(text, cursor)) {
+			const end = findEscapedMathEnd(text, cursor, "]", true);
+			if (end !== null) {
 				flushText(cursor);
-				segments.push({
-					kind: "displayMath",
-					raw: text.slice(cursor, displayEnd),
-					content: text.slice(cursor + 2, displayEnd - 2),
-				});
-				cursor = displayEnd;
+				segments.push({ kind: "displayMath", raw: text.slice(cursor, end), content: text.slice(cursor + 2, end - 2) });
+				cursor = end;
 				textStart = cursor;
 				continue;
 			}
 		}
-
-		if (text.startsWith("\\(", cursor)) {
-			const inlineEnd = findEscapedMathEnd(text, cursor, "\\)", false);
-			if (inlineEnd !== null) {
+		if (text.startsWith("\\(", cursor) && !isEscaped(text, cursor)) {
+			const end = findEscapedMathEnd(text, cursor, ")", false);
+			if (end !== null) {
 				flushText(cursor);
-				segments.push({
-					kind: "inlineMath",
-					raw: text.slice(cursor, inlineEnd),
-					content: text.slice(cursor + 2, inlineEnd - 2),
-				});
-				cursor = inlineEnd;
+				segments.push({ kind: "inlineMath", raw: text.slice(cursor, end), content: text.slice(cursor + 2, end - 2) });
+				cursor = end;
 				textStart = cursor;
 				continue;
 			}
 		}
-
-		if (isInlineDollarStart(text, cursor)) {
-			const inlineEnd = findInlineDollarMathEnd(text, cursor);
-			if (inlineEnd !== null) {
-				flushText(cursor);
+		if (!failedDollarOpeners.has(cursor) && validInlineDollarOpen(text, cursor)) {
+			const pair = findInlineDollarPair(text, cursor);
+			for (const failed of pair.failedOpeners) failedDollarOpeners.add(failed);
+			if (pair.start !== null && pair.end !== null) {
+				flushText(pair.start);
 				segments.push({
 					kind: "inlineMath",
-					raw: text.slice(cursor, inlineEnd),
-					content: text.slice(cursor + 1, inlineEnd - 1),
+					raw: text.slice(pair.start, pair.end),
+					content: text.slice(pair.start + 1, pair.end - 1),
 				});
-				cursor = inlineEnd;
+				cursor = pair.end;
 				textStart = cursor;
 				continue;
 			}
 		}
-
-		cursor++;
+		cursor += 1;
 	}
-
 	flushText(text.length);
 	return segments;
 }
 
-function convertBareLatexCommands(text: string): string {
-	return text.replace(/\\([a-zA-Z]+)/g, (match, cmd: string) => {
-		if (commandMap[cmd]) return commandMap[cmd]!;
-		if (namedFuncs[cmd]) return namedFuncs[cmd]!;
-		return match;
-	});
+function convertBareCommands(text: string): string {
+	let result = "";
+	let cursor = 0;
+	for (let i = 0; i < text.length; i += 1) {
+		if (text[i] !== "\\" || isEscaped(text, i)) continue;
+		const command = readCommand(text, i);
+		const converted = commandMap[command.name] ?? namedFunctions[command.name];
+		if (converted === undefined) continue;
+		result += text.slice(cursor, i) + converted;
+		cursor = command.end;
+		i = command.end - 1;
+	}
+	return cursor === 0 ? text : result + text.slice(cursor);
 }
 
-function isMathSegment(segment: Segment): boolean {
+function isMath(segment: Segment): boolean {
 	return segment.kind === "inlineMath" || segment.kind === "displayMath";
 }
 
-function convertSegments(text: string): LatexUnicodeConversion {
-	const segments = scanSegments(text);
-	if (!segments.some(isMathSegment)) return { text, changed: false };
-
-	let changed = false;
-	const converted = segments
-		.map((segment) => {
-			switch (segment.kind) {
-				case "inlineMath":
-				case "displayMath": {
-					const next = convertMathExpr(segment.content ?? "").trim();
-					if (next !== segment.raw) changed = true;
-					return next;
-				}
-				case "text": {
-					// Also handle bare LaTeX commands outside math delimiters on conversion
-					// paths, but only when the surrounding text contains actual math markup.
-					const next = convertBareLatexCommands(segment.raw);
-					if (next !== segment.raw) changed = true;
-					return next;
-				}
-				case "inlineCode":
-				case "fencedCode":
-				default:
-					return segment.raw;
-			}
-		})
-		.join("");
-
-	return { text: converted, changed: changed || converted !== text };
+export interface LatexUnicodeConversion {
+	text: string;
+	changed: boolean;
 }
 
-/**
- * Check if a string contains LaTeX math
- */
-export function hasLatex(text: string): boolean {
-	return scanSegments(text).some(isMathSegment);
-}
-
-/**
- * Convert a pi message if it contains LaTeX math, returning both the text and
- * whether it changed. This combines the old hasLatex + latexToUnicode caller
- * flow into one segment scan.
- */
+/** Convert delimited LaTeX math and report whether the result differs. */
 export function convertLatexToUnicode(text: string): LatexUnicodeConversion {
-	return convertSegments(text);
-}
-
-/**
- * Convert all LaTeX math in text to Unicode equivalents.
- * Returns the converted string.
- */
-export function latexToUnicode(text: string): string {
-	return convertSegments(text).text;
+	if (!text.includes("$") && !text.includes("\\(") && !text.includes("\\[")) {
+		return { text, changed: false };
+	}
+	const segments = scanSegments(text);
+	if (!segments.some(isMath)) return { text, changed: false };
+	const converted = segments.map((segment) => {
+		if (isMath(segment)) return convertMathExpr(segment.content ?? "").trim();
+		if (segment.kind === "text") return convertBareCommands(segment.raw);
+		return segment.raw;
+	}).join("");
+	return { text: converted, changed: converted !== text };
 }
