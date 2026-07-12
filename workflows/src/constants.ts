@@ -31,12 +31,8 @@ export const WORKFLOW_AGENT_OPTION_LIMITS = {
   stallMsMax: DEFAULT_LIMITS.workflowHardTimeoutMs,
 } as const;
 
-export const WORKFLOW_ISOLATION_POLICY = {
-  /** Plain sequential agent() calls operate in the user's current workspace. */
-  directAgentDefault: "shared",
-  /** Fan-out helpers run branch/stage agent() calls in disposable git worktrees unless explicitly overridden. */
-  fanoutAgentDefault: "worktree",
-} as const;
+/** Plain sequential agent() calls may edit the user's current workspace. */
+export const DEFAULT_AGENT_WORKSPACE = "shared" as const;
 
 export const WORKFLOW_CHILD_CGROUP = {
   memoryMax: "768M",

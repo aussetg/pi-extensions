@@ -93,6 +93,36 @@ describe("workflow scheduler", () => {
     }));
   });
 
+  it("treats an empty patch as a one-shot no-op", async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-workflow-empty-patch-"));
+    const run = makeRun(root);
+    await fs.promises.mkdir(run.transcriptDir, { recursive: true });
+    vi.spyOn(WorkflowAgent.prototype, "run").mockImplementation(async (call) => {
+      const result = await writeMockAgentResult(call, "nothing to change", 1);
+      return {
+        ...result,
+        workspace: { kind: "patch", worktreeDir: path.join(root, "removed"), workspaceRoot: root, changedFiles: [] },
+      };
+    });
+    const scheduler = new WorkflowScheduler({
+      cwd: root,
+      run,
+      journal: new JsonlJournal(run.journalPath),
+      control: new RunControl(),
+      budget: new WorkflowBudget(null),
+      maxAgents: 1,
+      persist: () => undefined,
+    });
+
+    const candidate = await scheduler.agentCall("inspect", { workspace: "patch" }) as any;
+    expect(candidate).toEqual({
+      result: "nothing to change",
+      patch: expect.objectContaining({ kind: "workflow_patch", empty: true, files: [] }),
+    });
+    await expect(scheduler.applyPatch(candidate.patch)).resolves.toEqual({ applied: false, patchId: candidate.patch.id, files: [] });
+    await expect(scheduler.applyPatch(candidate.patch)).rejects.toThrow(/already applied/);
+  });
+
   it("serializes budgeted agent starts and rejects queued calls after exhaustion", async () => {
     const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-workflow-budget-serial-"));
     const run = makeRun(root);

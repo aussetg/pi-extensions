@@ -70,16 +70,43 @@ export interface AgentOptions {
    * a legacy :<thinking> suffix.
    */
   thinking?: ThinkingLevel;
-  /**
-   * Workspace policy for this subagent.
-   *
-   * Direct `agent()` defaults to `shared`. `agent()` calls inside fan-out helpers
-   * (`parallel()` / `pipeline()`) default to `worktree`. An explicit value here
-   * always wins.
-   */
-  isolation?: "shared" | "worktree";
+  /** Workspace policy for this subagent. Fan-out defaults to readOnly. */
+  workspace?: "shared" | "readOnly" | "patch";
   agentType?: string;
   stallMs?: number;
+}
+
+/** Opaque handle for a patch produced by an agent running in patch workspace mode. */
+export interface WorkflowPatchRef {
+  kind: "workflow_patch";
+  id: string;
+  callId: string;
+  files: string[];
+  empty: boolean;
+}
+
+export interface WorkflowPatchAgentResult {
+  result: unknown;
+  patch: WorkflowPatchRef;
+}
+
+export interface WorkflowPatchApplyResult {
+  applied: boolean;
+  patchId: string;
+  files: string[];
+}
+
+export interface AgentWorkspaceArtifacts {
+  kind: "patch";
+  worktreeDir: string;
+  workspaceRoot: string;
+  statusPath?: string;
+  patchPath?: string;
+  changedFiles: string[];
+  ignoredManifestPath?: string;
+  ignoredFilesDir?: string;
+  patchCaptureError?: string;
+  error?: string;
 }
 
 export type WorkflowViewPlacement = "runPanel" | "widget" | "completion" | "artifact";
@@ -327,6 +354,7 @@ export type WorkflowJournalEvent =
   | { type: "ui_closed"; runId: string; time: string; viewId: string }
   | { type: "log"; runId: string; time: string; message: string }
   | { type: "phase"; runId: string; time: string; phase: string }
+  | { type: "patch_applied"; runId: string; time: string; patchId: string; callId: string; files: string[] }
   | { type: "workflow_completed"; runId: string; time: string; outputPath: string; usage: WorkflowUsage }
   | { type: "workflow_failed"; runId: string; time: string; error: string; errorPath?: string };
 

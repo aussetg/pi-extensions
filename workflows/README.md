@@ -6,7 +6,7 @@ Highlights:
 
 - durable run directories under `~/.pi/agent/workflows/runs/<cwd-hash>/`;
 - Pi subagents launched through `agent()`;
-- `parallel()`, `pipeline()`, `phase()`, `log()`, `args`, `budget`, `cwd`, and declarative `ui` globals;
+- `parallel()`, `pipeline()`, first-class patch `apply()`, `phase()`, `log()`, `args`, `budget`, `cwd`, and declarative `ui` globals;
 - restart from a previous run's persisted script and arguments, without replaying agent results;
 - `/workflow` manager, enable/disable/status, run/list/save/resume/open, live-control,
   `skip-agent`, preview, and delete commands;
@@ -130,13 +130,30 @@ APIs.
 
 Subagent workspace policy is deliberately simple:
 
-- direct `agent()` calls use the shared project workspace by default;
-- `agent()` calls made inside `parallel()` or `pipeline()` default to `isolation: "worktree"` so
-  sibling fan-out agents do not stomp each other;
-- explicit `agent(prompt, { isolation: "shared" | "worktree" })` always wins.
+- direct `agent()` calls use `workspace: "shared"` by default and may edit the project;
+- `agent()` calls inside `parallel()` or `pipeline()` default to `workspace: "readOnly"`; only
+  read-only tools are exposed, so analysis lanes can run concurrently without copying the repository;
+- `workspace: "patch"` runs an editing agent in a disposable git worktree and returns an opaque patch
+  handle. The workflow must explicitly call `await apply(patch)` to update the shared project;
+- explicit `agent(prompt, { workspace: "shared" | "readOnly" | "patch" })` always wins.
+
+Parallel implementation uses first-class patches:
+
+```js
+const candidates = await parallel(tasks.map((task) => async () => {
+  return await agent(`Implement ${task}`, { workspace: "patch", label: task });
+}));
+
+for (const candidate of candidates) await apply(candidate.patch);
+```
+
+`apply()` accepts only a patch produced by the current workflow run. Patch applications are
+serialized, run `git apply --check` before mutation, reject stale or conflicting patches, and
+refuse to apply the same patch twice. An empty patch is a successful no-op. Ignored build outputs
+remain artifacts and are never copied into the project.
 
 `agent(prompt, opts)` options are strict JSON data. Supported keys are `label`, `phase`, `schema`,
-`model`, `thinking`, `isolation`, `agentType`, and `stallMs`; unknown keys, non-string labels/model
+`model`, `thinking`, `workspace`, `agentType`, and `stallMs`; unknown keys, non-string labels/model
 names, invalid enum values, non-JSON schemas, accessors, cycles, and oversized values fail before a
 subagent is launched. `stallMs` must be an integer between 1 second and the workflow hard timeout.
 Use `schema` for a JSON-object response schema.
@@ -145,13 +162,11 @@ Use `schema` for a JSON-object response schema.
 being converted to `null`. If best-effort behavior is desired, catch errors inside the thunk/stage and
 return an explicit `{ ok, value, error }`-style result.
 
-Worktree-isolated agents run with cwd inside a disposable git worktree. Edits made inside that
-worktree are captured as patch artifacts and are not applied to the user's main working tree
-automatically. Ignored outputs created inside the worktree are captured separately as bounded
-ignored-file artifacts plus a manifest, so build outputs under ignored paths are represented before
-the disposable worktree is removed. This is a workspace/isolation policy, not a filesystem sandbox:
-subagents are told to stay inside the worktree, and writes outside it are not captured by the
-worktree artifacts.
+Patch agents run with cwd inside a disposable git worktree. Their tracked and untracked edits are
+captured as a bounded patch artifact before the worktree is removed. Ignored outputs are captured
+separately as bounded artifacts for inspection but are not applied. This is a workspace policy, not
+a filesystem sandbox: patch agents are told to stay inside the worktree, and writes outside it are
+not captured.
 
 Workflow source is parsed before launch to reject nondeterministic and host APIs early. At runtime,
 the script talks to the parent through a JSON-only VM membrane: workflow-visible API values are
@@ -161,9 +176,10 @@ filesystem, a private network namespace, cgroup limits, and a JSON-RPC capabilit
 parent for `agent()`, `ui.*`, logging, and child workflows. This sandbox is required: `workflows`
 does not silently fall back to an unsandboxed control child.
 Subagents are still normal separate Pi child processes launched by the parent; they inherit the
-currently active tool allowlist with `workflow` removed. If no inherited non-workflow tools remain,
-the subagent is launched with `--no-tools` rather than Pi defaults. Their cwd is either the shared
-project workspace or a disposable worktree, according to the isolation policy above.
+currently active tool allowlist with `workflow` removed. If no allowed tools remain, the subagent is
+launched with `--no-tools` rather than Pi defaults. Read-only agents retain only `read`, `grep`,
+`find`, `ls`, `web_search`, `web_fetch`, and `view_image`; shared and patch agents retain the full
+inherited allowlist. Their cwd follows the workspace policy above.
 
 Subagent thinking is deliberately slightly cheaper than the caller by default: an agent launched
 from a workflow uses one thinking level below the Pi session that launched the workflow (`xhigh` →

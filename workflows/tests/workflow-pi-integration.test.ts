@@ -1,12 +1,16 @@
 import fs from "node:fs";
+import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WorkflowRegistry } from "../src/persistence/registry.js";
 import { RunStore } from "../src/persistence/run-store.js";
 import { WorkflowRunner } from "../src/runtime/runner.js";
 import { createWorkflowTool } from "../src/tool/workflow-tool.js";
 import type { WorkflowLaunchOutput } from "../src/types.js";
+
+const exec = promisify(execFile);
 
 let oldAgentDir: string | undefined;
 let oldArgv1: string | undefined;
@@ -103,7 +107,7 @@ return 'ok';`,
       input: {
         mode: "await",
         script: `export const meta = { name: 'active_tools_contract', description: 'exercise active tool inheritance' };
-await agent('record inherited tools', { isolation: 'shared' });
+await agent('record inherited tools', { workspace: 'shared' });
 return 'ok';`,
       },
       ctx: workflowCtx(),
@@ -115,6 +119,85 @@ return 'ok';`,
     expect(argv[argv.indexOf("--tools") + 1]).toBe("bash,read");
     expect(argv).not.toContain("workflow");
     expect(argv).not.toContain("--no-tools");
+  });
+
+  it("returns opaque patch handles and applies each patch at most once", async () => {
+    await initGitProject();
+    const fakePi = path.join(tmp, "fake-pi-patch.mjs");
+    await fs.promises.writeFile(
+      fakePi,
+      [
+        "import fs from 'node:fs';",
+        "import path from 'node:path';",
+        "await fs.promises.writeFile(path.join(process.cwd(), 'tracked.txt'), 'patched\\n', 'utf8');",
+        "console.log(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'implemented', usage: { input: 1, output: 1 } } }));",
+      ].join("\n"),
+      "utf8",
+    );
+    process.argv[1] = fakePi;
+
+    const result = await new WorkflowRunner({ pi: { getActiveTools: () => ["read", "bash"] } as any, runStore: new RunStore(), registry: new WorkflowRegistry() }).launchOrRun({
+      toolCallId: "patch-contract",
+      input: {
+        mode: "await",
+        script: `export const meta = { name: 'patch_contract', description: 'exercise patch production and application' };
+const candidate = await agent('implement the change', { workspace: 'patch' });
+const applied = await apply(candidate.patch);
+let duplicate = '';
+try { await apply(candidate.patch); } catch (err) { duplicate = err.message; }
+return { candidate, applied, duplicate };`,
+      },
+      ctx: workflowCtx(),
+    });
+
+    expect(result.status).toBe("completed");
+    expect(await fs.promises.readFile(path.join(cwd, "tracked.txt"), "utf8")).toBe("patched\n");
+    const output = JSON.parse(await fs.promises.readFile(result.outputPath!, "utf8")).result;
+    expect(output.candidate).toEqual({
+      result: "implemented",
+      patch: expect.objectContaining({ kind: "workflow_patch", callId: "0001", files: ["tracked.txt"], empty: false }),
+    });
+    expect(JSON.stringify(output.candidate)).not.toMatch(/patchPath|worktreeDir/);
+    expect(output.applied).toEqual(expect.objectContaining({ applied: true, files: ["tracked.txt"] }));
+    expect(output.duplicate).toMatch(/already applied/);
+    const journal = await fs.promises.readFile(path.join(path.dirname(result.scriptPath), "journal.jsonl"), "utf8");
+    expect(journal).toContain('"type":"patch_applied"');
+  });
+
+  it("rejects a patch when its preimage changed and leaves the workspace untouched", async () => {
+    await initGitProject();
+    const fakePi = path.join(tmp, "fake-pi-conflicting-patch.mjs");
+    await fs.promises.writeFile(
+      fakePi,
+      [
+        "import fs from 'node:fs';",
+        "import path from 'node:path';",
+        "const prompt = process.argv.at(-1);",
+        "await fs.promises.writeFile(path.join(process.cwd(), 'tracked.txt'), prompt.includes('conflict') ? 'conflict\\n' : 'patched\\n', 'utf8');",
+        "console.log(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'done', usage: { input: 1, output: 1 } } }));",
+      ].join("\n"),
+      "utf8",
+    );
+    process.argv[1] = fakePi;
+
+    const result = await new WorkflowRunner({ pi: { getActiveTools: () => ["bash"] } as any, runStore: new RunStore(), registry: new WorkflowRegistry() }).launchOrRun({
+      toolCallId: "patch-conflict-contract",
+      input: {
+        mode: "await",
+        script: `export const meta = { name: 'patch_conflict_contract', description: 'exercise transactional conflict checks' };
+const candidate = await agent('make patch', { workspace: 'patch' });
+await agent('create conflict', { workspace: 'shared' });
+let error = '';
+try { await apply(candidate.patch); } catch (err) { error = err.message; }
+return { error };`,
+      },
+      ctx: workflowCtx(),
+    });
+
+    expect(result.status).toBe("completed");
+    expect(await fs.promises.readFile(path.join(cwd, "tracked.txt"), "utf8")).toBe("conflict\n");
+    const output = JSON.parse(await fs.promises.readFile(result.outputPath!, "utf8")).result;
+    expect(output.error).toMatch(/no longer applies cleanly; workspace unchanged/);
   });
 
   it("passes live widget factories that render against a realistic ctx.ui.setWidget callback", async () => {
@@ -169,6 +252,15 @@ function workflowCtx(): any {
     hasUI: false,
     sessionManager: { getSessionId: () => "test-session" },
   };
+}
+
+async function initGitProject(): Promise<void> {
+  await exec("git", ["-C", cwd, "init"]);
+  await exec("git", ["-C", cwd, "config", "user.name", "test"]);
+  await exec("git", ["-C", cwd, "config", "user.email", "test@example.invalid"]);
+  await fs.promises.writeFile(path.join(cwd, "tracked.txt"), "base\n", "utf8");
+  await exec("git", ["-C", cwd, "add", "tracked.txt"]);
+  await exec("git", ["-C", cwd, "-c", "commit.gpgsign=false", "commit", "-m", "base"]);
 }
 
 function workflowDetails(lastLabel: string): WorkflowLaunchOutput {

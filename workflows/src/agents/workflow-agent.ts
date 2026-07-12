@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { Ajv2020 } from "ajv/dist/2020.js";
-import type { AgentOptions, JsonSchema, WorkflowUsage } from "../types.js";
+import type { AgentOptions, AgentWorkspaceArtifacts, JsonSchema, WorkflowUsage } from "../types.js";
 import type { ThinkingLevel } from "../thinking.js";
 import { WORKFLOW_RESOURCE_LIMITS } from "../constants.js";
 import { BoundedTextAccumulator, byteLength, truncateBytes } from "../utils/truncate.js";
@@ -82,19 +82,8 @@ export interface WorkflowAgentResult {
 interface AgentWorkspace {
   cwd: string;
   cleanupLabel?: string;
-  artifacts?: AgentWorkspaceArtifacts;
   collect(): Promise<AgentWorkspaceArtifacts | undefined>;
   cleanup(): Promise<void>;
-}
-
-interface AgentWorkspaceArtifacts {
-  kind: "worktree";
-  worktreeDir: string;
-  statusPath?: string;
-  patchPath?: string;
-  ignoredManifestPath?: string;
-  ignoredFilesDir?: string;
-  error?: string;
 }
 
 interface IgnoredArtifactManifest {
@@ -146,7 +135,7 @@ export class WorkflowAgent {
     const args = ["--mode", "json", "-p", "--session-dir", sessionDir];
     if (call.options.model) args.push("--model", call.options.model);
     if (call.options.thinking) args.push("--thinking", call.options.thinking);
-    args.push(...subagentToolArgs(call.activeTools));
+    args.push(...subagentToolArgs(call.activeTools, call.options.workspace));
 
     const systemPrompt = buildSubagentSystemPrompt(call);
     const tmp = await writeTempPrompt(call.callId, systemPrompt);
@@ -356,24 +345,29 @@ function buildSubagentSystemPrompt(call: WorkflowAgentCall): string {
   const schemaText = call.options.schema
     ? `\nIf a JSON schema is provided below, return ONLY a JSON value conforming to it, with no Markdown fences.\nSchema:\n${JSON.stringify(call.options.schema, null, 2)}\n`
     : "";
-  const isolationText = call.options.isolation === "worktree"
-    ? "\nIsolation: you are running with cwd inside a disposable git worktree. Keep all file edits inside that worktree; in-worktree edits are captured as patch artifacts, and ignored outputs are captured separately as bounded artifacts. Nothing is applied to the user's main working tree automatically. Writes outside the worktree are not captured.\n"
-    : "";
-  return `You are a workflow subagent.\nWorkflow: ${call.runId}\nPhase: ${call.phase ?? "(none)"}\nTask label: ${call.label}\n${isolationText}\nWork independently. Do not ask the user questions. Use tools as needed. Return only the requested result.${schemaText}`;
+  const workspaceText = call.options.workspace === "patch"
+    ? "\nWorkspace: patch. You are inside a disposable git worktree. Make the requested edits there. They will be captured as a patch and will not affect the user's workspace unless the workflow explicitly applies that patch.\n"
+    : call.options.workspace === "readOnly"
+      ? "\nWorkspace: read-only. You can inspect the shared project, but mutation-capable tools are disabled. Do not attempt to edit files.\n"
+      : "\nWorkspace: shared. Your edits affect the user's current project directly.\n";
+  return `You are a workflow subagent.\nWorkflow: ${call.runId}\nPhase: ${call.phase ?? "(none)"}\nTask label: ${call.label}\n${workspaceText}\nWork independently. Do not ask the user questions. Use tools as needed. Return only the requested result.${schemaText}`;
 }
 
-function subagentToolArgs(activeTools: readonly string[] | undefined): string[] {
-  const tools = normalizeSubagentTools(activeTools);
+const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls", "web_search", "web_fetch", "view_image"]);
+
+function subagentToolArgs(activeTools: readonly string[] | undefined, workspace: AgentOptions["workspace"]): string[] {
+  const tools = normalizeSubagentTools(activeTools, workspace);
   return tools.length > 0 ? ["--tools", tools.join(",")] : ["--no-tools"];
 }
 
-function normalizeSubagentTools(activeTools: readonly string[] | undefined): string[] {
+function normalizeSubagentTools(activeTools: readonly string[] | undefined, workspace: AgentOptions["workspace"]): string[] {
   const tools: string[] = [];
   const seen = new Set<string>();
   for (const raw of activeTools ?? []) {
     if (typeof raw !== "string") continue;
     const name = raw.trim();
     if (!name || name === "workflow" || name.includes(",")) continue;
+    if (workspace === "readOnly" && !READ_ONLY_TOOLS.has(name)) continue;
     if (seen.has(name)) continue;
     seen.add(name);
     tools.push(name);
@@ -583,12 +577,12 @@ async function writeTempPrompt(callId: string, text: string): Promise<{ dir: str
 }
 
 async function prepareAgentWorkspace(call: WorkflowAgentCall, callDir: string, attempt: number): Promise<AgentWorkspace> {
-  if (call.options.isolation !== "worktree") {
+  if (call.options.workspace !== "patch") {
     return { cwd: call.cwd, collect: async () => undefined, cleanup: async () => undefined };
   }
 
   const git = await getGitWorkspace(call.cwd).catch((err) => {
-    throw new Error(`isolation: "worktree" requires a git worktree cwd: ${(err as Error).message}`);
+    throw new Error(`workspace: "patch" requires a git worktree cwd: ${(err as Error).message}`);
   });
   const worktreeDir = path.join(callDir, attempt === 0 ? "worktree" : `worktree-attempt-${attempt}`);
   const statusPath = path.join(callDir, attempt === 0 ? "worktree-status.txt" : `worktree-status-attempt-${attempt}.txt`);
@@ -615,7 +609,7 @@ async function prepareAgentWorkspace(call: WorkflowAgentCall, callDir: string, a
       "commit",
       "--allow-empty",
       "-m",
-      "pi workflow isolation baseline",
+      "pi workflow patch baseline",
     ]);
   } catch (err) {
     await removeGitWorktree(git.root, worktreeDir);
@@ -626,11 +620,11 @@ async function prepareAgentWorkspace(call: WorkflowAgentCall, callDir: string, a
     cwd: path.join(worktreeDir, git.prefix),
     cleanupLabel: "worktree",
     async collect() {
-      const artifacts: AgentWorkspaceArtifacts = { kind: "worktree", worktreeDir, statusPath, patchPath, ignoredManifestPath, ignoredFilesDir };
+      const artifacts: AgentWorkspaceArtifacts = { kind: "patch", worktreeDir, workspaceRoot: git.root, statusPath, patchPath, changedFiles: [], ignoredManifestPath, ignoredFilesDir };
       const errors: string[] = [];
 
       try {
-        const status = await gitExec(["-C", worktreeDir, "status", "--short", "--ignored", "--untracked-files=all"], { allowFailure: true });
+        const status = await gitExec(["-C", worktreeDir, "status", "--short", "--ignored", "--untracked-files=all"], { allowFailure: true, maxBuffer: WORKFLOW_RESOURCE_LIMITS.worktreeStatusBytes });
         await fs.promises.writeFile(statusPath, status.stdout || status.stderr || "", "utf8");
       } catch (err) {
         delete artifacts.statusPath;
@@ -639,12 +633,15 @@ async function prepareAgentWorkspace(call: WorkflowAgentCall, callDir: string, a
 
       try {
         await gitExec(["-C", worktreeDir, "add", "-A"]);
+        const changed = await gitExec(["-C", worktreeDir, "diff", "--cached", "--name-only", "-z", "HEAD"], { encoding: "buffer", maxBuffer: WORKFLOW_RESOURCE_LIMITS.worktreeStatusBytes });
+        artifacts.changedFiles = changed.stdoutBuffer.toString("utf8").split("\0").filter(isSafeRelativePath);
         const diff = await gitExec(["-C", worktreeDir, "diff", "--cached", "--binary", "HEAD"], { maxBuffer: WORKFLOW_RESOURCE_LIMITS.worktreePatchBytes });
         if (diff.stdout.trim()) await fs.promises.writeFile(patchPath, diff.stdout, "utf8");
         else delete artifacts.patchPath;
       } catch (err) {
         if (!fs.existsSync(patchPath)) delete artifacts.patchPath;
-        errors.push(`worktree patch capture failed: ${(err as Error).message}`);
+        artifacts.patchCaptureError = (err as Error).message;
+        errors.push(`worktree patch capture failed: ${artifacts.patchCaptureError}`);
       }
 
       try {

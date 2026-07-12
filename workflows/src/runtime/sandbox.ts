@@ -11,9 +11,9 @@ import { BoundedTextAccumulator, byteLength, truncateBytes } from "../utils/trun
 
 export { type SandboxGlobals } from "./sandbox-types.js";
 
-const RPC_METHODS = ["agent", "workflow", "phase", "log", "ui.define", "ui.update", "ui.dashboard", "ui.patch", "ui.close", "ui.flush", "budget.spent", "budget.remaining"] as const;
+const RPC_METHODS = ["agent", "apply", "workflow", "phase", "log", "ui.define", "ui.update", "ui.dashboard", "ui.patch", "ui.close", "ui.flush", "budget.spent", "budget.remaining"] as const;
 const RPC_METHOD_SET = new Set<string>(RPC_METHODS);
-const CRITICAL_RPC_METHODS = new Set<string>(["agent", "workflow"]);
+const CRITICAL_RPC_METHODS = new Set<string>(["agent", "apply", "workflow"]);
 
 type RpcMethod = (typeof RPC_METHODS)[number];
 
@@ -374,6 +374,8 @@ async function dispatchRequest(globals: SandboxGlobals, method: string, params: 
       const result = await abortable(Promise.resolve().then(() => globals.agent(p.prompt, p.opts, context)), context.signal);
       return { __piWorkflowRpc: "agentResult", result, budgetSpent: readBudgetSpent(globals.budget) };
     }
+    case "apply":
+      return await abortable(Promise.resolve().then(() => globals.apply(p.patch, context)), context.signal);
     case "workflow": {
       const result = await abortable(Promise.resolve().then(() => globals.workflow(p.nameOrRef, p.args, context)), context.signal);
       return { __piWorkflowRpc: "workflowResult", result, budgetSpent: readBudgetSpent(globals.budget) };

@@ -23,7 +23,7 @@ afterEach(async () => {
   await fs.promises.rm(tmp, { recursive: true, force: true });
 });
 
-describe("WorkflowAgent worktree isolation", () => {
+describe("WorkflowAgent workspace modes", () => {
   it("collects token, tool, and model telemetry from pi JSON events", async () => {
     const repo = path.join(tmp, "repo-usage");
     const fakePi = path.join(tmp, "fake-pi-usage.mjs");
@@ -47,7 +47,7 @@ describe("WorkflowAgent worktree isolation", () => {
       cwd: repo,
       label: "usage",
       prompt: "report usage",
-      options: { isolation: "shared" },
+      options: { workspace: "shared" },
       transcriptDir,
       signal: new AbortController().signal,
       stallMs: 10_000,
@@ -82,7 +82,7 @@ describe("WorkflowAgent worktree isolation", () => {
       cwd: repo,
       label: "structured result",
       prompt: "emit structured result",
-      options: { isolation: "shared", schema: { type: "object", additionalProperties: false, required: ["ok"], properties: { ok: { type: "boolean" } } }, thinking: "high" },
+      options: { workspace: "shared", schema: { type: "object", additionalProperties: false, required: ["ok"], properties: { ok: { type: "boolean" } } }, thinking: "high" },
       transcriptDir,
       signal: new AbortController().signal,
       stallMs: 10_000,
@@ -128,7 +128,7 @@ describe("WorkflowAgent worktree isolation", () => {
       cwd: repo,
       label: "split utf8",
       prompt: "emit split utf8",
-      options: { isolation: "shared" },
+      options: { workspace: "shared" },
       transcriptDir,
       signal: new AbortController().signal,
       stallMs: 10_000,
@@ -145,6 +145,13 @@ describe("WorkflowAgent worktree isolation", () => {
     expect(argv).toContain("--tools");
     expect(argv[argv.indexOf("--tools") + 1]).toBe("read,bash");
     expect(argv).not.toContain("--no-tools");
+  });
+
+  it("restricts read-only agents to an explicit safe tool allowlist", async () => {
+    const argv = await runFakeAgentAndReadArgv("read-only-tools", ["workflow", "read", "bash", "edit", "grep", "web_fetch", "lsp"], { workspace: "readOnly" });
+
+    expect(argv).toContain("--tools");
+    expect(argv[argv.indexOf("--tools") + 1]).toBe("read,grep,web_fetch");
   });
 
   it("passes first-class thinking level to subagents", async () => {
@@ -187,7 +194,7 @@ describe("WorkflowAgent worktree isolation", () => {
       cwd: repo,
       label: "stdout limit",
       prompt: "overflow stdout",
-      options: { isolation: "shared" },
+      options: { workspace: "shared" },
       transcriptDir,
       signal: new AbortController().signal,
       stallMs: 10_000,
@@ -225,7 +232,7 @@ describe("WorkflowAgent worktree isolation", () => {
       cwd: repo,
       label: "large stream",
       prompt: "emit noisy JSON stream",
-      options: { isolation: "shared" },
+      options: { workspace: "shared" },
       transcriptDir,
       signal: new AbortController().signal,
       stallMs: 10_000,
@@ -269,7 +276,7 @@ describe("WorkflowAgent worktree isolation", () => {
       cwd: repo,
       label: "aggregate event",
       prompt: "emit aggregate event",
-      options: { isolation: "shared" },
+      options: { workspace: "shared" },
       transcriptDir,
       signal: new AbortController().signal,
       stallMs: 10_000,
@@ -303,7 +310,7 @@ describe("WorkflowAgent worktree isolation", () => {
       cwd: repo,
       label: "result limit",
       prompt: "overflow result",
-      options: { isolation: "shared" },
+      options: { workspace: "shared" },
       transcriptDir,
       signal: new AbortController().signal,
       stallMs: 10_000,
@@ -329,7 +336,7 @@ describe("WorkflowAgent worktree isolation", () => {
       cwd: repo,
       label: "stall timeout",
       prompt: "stall",
-      options: { isolation: "shared", stallMs: 50 },
+      options: { workspace: "shared", stallMs: 50 },
       transcriptDir,
       signal: new AbortController().signal,
       stallMs: 10_000,
@@ -372,7 +379,7 @@ describe("WorkflowAgent worktree isolation", () => {
       cwd: repo,
       label: "isolated",
       prompt: "write a file",
-      options: { isolation: "worktree" },
+      options: { workspace: "patch" },
       transcriptDir,
       signal: new AbortController().signal,
       stallMs: 10_000,
@@ -381,7 +388,8 @@ describe("WorkflowAgent worktree isolation", () => {
 
     expect(result.result).toBe("done");
     expect(await exists(path.join(repo, "agent-output.txt"))).toBe(false);
-    expect(result.workspace?.kind).toBe("worktree");
+    expect(result.workspace?.kind).toBe("patch");
+    expect(result.workspace?.changedFiles).toContain("agent-output.txt");
     expect(result.workspace?.patchPath).toBeTruthy();
     expect(await exists(result.workspace!.worktreeDir)).toBe(false);
     const patch = await fs.promises.readFile(result.workspace!.patchPath!, "utf8");
@@ -422,7 +430,7 @@ describe("WorkflowAgent worktree isolation", () => {
       cwd: repo,
       label: "child failure",
       prompt: "fail",
-      options: { isolation: "worktree" },
+      options: { workspace: "patch" },
       transcriptDir,
       signal: new AbortController().signal,
       stallMs: 10_000,
@@ -474,7 +482,7 @@ describe("WorkflowAgent worktree isolation", () => {
       cwd: repo,
       label: "retry artifacts",
       prompt: "stall then retry",
-      options: { isolation: "worktree", stallMs: 50 },
+      options: { workspace: "patch", stallMs: 50 },
       transcriptDir,
       signal: new AbortController().signal,
       stallMs: 10_000,
@@ -527,7 +535,7 @@ describe("WorkflowAgent worktree isolation", () => {
         cwd: repo,
         label: "cleanup failure",
         prompt: "succeed then fail cleanup",
-        options: { isolation: "worktree" },
+        options: { workspace: "patch" },
         transcriptDir,
         signal: new AbortController().signal,
         stallMs: 10_000,
@@ -578,7 +586,7 @@ describe("WorkflowAgent worktree isolation", () => {
       cwd: repo,
       label: "ignored",
       prompt: "write ignored output",
-      options: { isolation: "worktree" },
+      options: { workspace: "patch" },
       transcriptDir,
       signal: new AbortController().signal,
       stallMs: 10_000,
@@ -632,7 +640,7 @@ describe("WorkflowAgent worktree isolation", () => {
       cwd: repo,
       label: "ignored limits",
       prompt: "write ignored limits",
-      options: { isolation: "worktree" },
+      options: { workspace: "patch" },
       transcriptDir,
       signal: new AbortController().signal,
       stallMs: 10_000,
@@ -675,7 +683,7 @@ async function runFakeAgentAndReadArgv(name: string, activeTools: string[] | und
     cwd: repo,
     label: name,
     prompt: "report argv",
-    options: { isolation: "shared", ...options },
+    options: { workspace: "shared", ...options },
     transcriptDir,
     activeTools,
     signal: new AbortController().signal,

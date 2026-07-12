@@ -87,7 +87,7 @@ describe("workflow child sandbox", () => {
       agent: async () => await new Promise((resolve) => setTimeout(() => resolve("late"), 250)),
     });
 
-    await expect(executeWorkflowSandbox("agent('leaked'); return 'done';", globals, new AbortController().signal)).rejects.toThrow(/unawaited agent\/workflow/);
+    await expect(executeWorkflowSandbox("agent('leaked'); return 'done';", globals, new AbortController().signal)).rejects.toThrow(/unawaited critical operation/);
   });
 
   it("fails when fast-resolved critical child operations are left unawaited", async () => {
@@ -102,7 +102,7 @@ describe("workflow child sandbox", () => {
       },
     });
 
-    await expect(executeWorkflowSandbox("agent('leaked'); await log('yield'); return 'done';", globals, new AbortController().signal)).rejects.toThrow(/unawaited agent\/workflow/);
+    await expect(executeWorkflowSandbox("agent('leaked'); await log('yield'); return 'done';", globals, new AbortController().signal)).rejects.toThrow(/unawaited critical operation/);
     expect(calls).toEqual(["leaked"]);
   });
 
@@ -130,7 +130,7 @@ describe("workflow child sandbox", () => {
       },
     });
 
-    await expect(executeWorkflowSandbox("workflow('child'); await log('yield'); return 'done';", globals, new AbortController().signal)).rejects.toThrow(/unawaited agent\/workflow/);
+    await expect(executeWorkflowSandbox("workflow('child'); await log('yield'); return 'done';", globals, new AbortController().signal)).rejects.toThrow(/unawaited critical operation/);
     expect(calls).toEqual(["child"]);
   });
 
@@ -295,11 +295,11 @@ return { caught, after };
     const run = executeWorkflowSandbox("agent('slow'); return 'done';", globals, new AbortController().signal);
     await startedPromise;
 
-    await expect(run).rejects.toThrow(/unawaited agent\/workflow/);
+    await expect(run).rejects.toThrow(/unawaited critical operation/);
     await expect(withTimeout(abortedPromise, 500, "unawaited host RPC was not aborted")).resolves.toBe("WorkflowAbortError");
   });
 
-  it("leaves direct agent isolation to the parent scheduler default", async () => {
+  it("leaves direct agent workspace mode to the parent scheduler default", async () => {
     const calls: Array<{ prompt: unknown; opts: unknown }> = [];
     const globals = fakeGlobals({
       agent: async (prompt, opts) => {
@@ -313,7 +313,7 @@ return { caught, after };
     expect(calls).toEqual([{ prompt: "solo", opts: { label: "direct" } }]);
   });
 
-  it("defaults parallel branch agents to worktree isolation", async () => {
+  it("defaults parallel branch agents to read-only workspace mode", async () => {
     const calls: Array<{ prompt: unknown; opts: unknown }> = [];
     const globals = fakeGlobals({
       agent: async (prompt, opts) => {
@@ -324,10 +324,10 @@ return { caught, after };
 
     await executeWorkflowSandbox("return await parallel([() => agent('branch')]);", globals, new AbortController().signal);
 
-    expect(calls).toEqual([{ prompt: "branch", opts: { isolation: "worktree" } }]);
+    expect(calls).toEqual([{ prompt: "branch", opts: { workspace: "readOnly" } }]);
   });
 
-  it("defaults pipeline stage agents to worktree isolation", async () => {
+  it("defaults pipeline stage agents to read-only workspace mode", async () => {
     const calls: Array<{ prompt: unknown; opts: unknown }> = [];
     const globals = fakeGlobals({
       agent: async (prompt, opts) => {
@@ -338,10 +338,10 @@ return { caught, after };
 
     await executeWorkflowSandbox("return await pipeline(['item'], async (item) => await agent('stage ' + item));", globals, new AbortController().signal);
 
-    expect(calls).toEqual([{ prompt: "stage item", opts: { isolation: "worktree" } }]);
+    expect(calls).toEqual([{ prompt: "stage item", opts: { workspace: "readOnly" } }]);
   });
 
-  it("preserves explicit isolation inside parallel branches", async () => {
+  it("preserves explicit workspace mode inside parallel branches", async () => {
     const calls: Array<{ prompt: unknown; opts: unknown }> = [];
     const globals = fakeGlobals({
       agent: async (prompt, opts) => {
@@ -350,9 +350,28 @@ return { caught, after };
       },
     });
 
-    await executeWorkflowSandbox("return await parallel([() => agent('branch', { label: 'shared branch', isolation: 'shared' })]);", globals, new AbortController().signal);
+    await executeWorkflowSandbox("return await parallel([() => agent('branch', { label: 'shared branch', workspace: 'shared' })]);", globals, new AbortController().signal);
 
-    expect(calls).toEqual([{ prompt: "branch", opts: { label: "shared branch", isolation: "shared" } }]);
+    expect(calls).toEqual([{ prompt: "branch", opts: { label: "shared branch", workspace: "shared" } }]);
+  });
+
+  it("passes patch handles through the critical apply operation", async () => {
+    const applied: unknown[] = [];
+    const patch = { kind: "workflow_patch", id: "wr:0001", callId: "0001", files: ["x.ts"], empty: false };
+    const result = await executeWorkflowSandbox(
+      "const candidate = await agent('edit', { workspace: 'patch' }); return await apply(candidate.patch);",
+      fakeGlobals({
+        agent: async () => ({ result: "done", patch }),
+        apply: async (value) => {
+          applied.push(value);
+          return { applied: true };
+        },
+      }),
+      new AbortController().signal,
+    );
+
+    expect(result).toEqual({ applied: true });
+    expect(applied).toEqual([patch]);
   });
 
   it("rejects non-object agent options in the child before RPC", async () => {
@@ -602,6 +621,7 @@ function fakeGlobals(overrides: Partial<SandboxGlobals> = {}): SandboxGlobals {
   const logs: string[] = [];
   return {
     agent: async (prompt: unknown) => prompt,
+    apply: async () => ({ applied: true }),
     phase: () => undefined,
     log: async (message: string) => {
       logs.push(message);

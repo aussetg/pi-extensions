@@ -1,7 +1,8 @@
 import path from "node:path";
 import fs from "node:fs";
-import type { AgentOptions, RunRecord, WorkflowCallProgress, WorkflowUsage } from "../types.js";
-import { DEFAULT_LIMITS, WORKFLOW_ISOLATION_POLICY, WORKFLOW_RESOURCE_LIMITS } from "../constants.js";
+import { spawn } from "node:child_process";
+import type { AgentOptions, AgentWorkspaceArtifacts, RunRecord, WorkflowCallProgress, WorkflowPatchAgentResult, WorkflowPatchApplyResult, WorkflowPatchRef, WorkflowUsage } from "../types.js";
+import { DEFAULT_AGENT_WORKSPACE, DEFAULT_LIMITS, WORKFLOW_RESOURCE_LIMITS } from "../constants.js";
 import { WorkflowAgent } from "../agents/workflow-agent.js";
 import { JsonlJournal } from "../persistence/journal.js";
 import { relativeToRun } from "../persistence/paths.js";
@@ -13,6 +14,7 @@ import { WorkflowBudget } from "./budget.js";
 import { WorkflowAgentCapError, WorkflowAbortError, WorkflowBudgetExceededError, WorkflowSkipAgentError } from "./errors.js";
 import { RunControl } from "./run-control.js";
 import { normalizeAgentOptions } from "./agent-options.js";
+import { readBoundedTextFile } from "../persistence/safe-paths.js";
 
 export class WorkflowAgentQuota {
   private used = 0;
@@ -56,6 +58,8 @@ export class WorkflowScheduler {
   private readonly limiter: AsyncLimiter;
   private readonly agentQuota: WorkflowAgentQuota;
   private readonly agent = new WorkflowAgent();
+  private readonly workspaceMutations = new AsyncLimiter(1);
+  private readonly patches = new Map<string, RegisteredPatch>();
   private sequence = 0;
   private calls = new Map<string, WorkflowCallProgress>();
   private logEntries = 0;
@@ -93,7 +97,7 @@ export class WorkflowScheduler {
 
     const effectiveOpts = withoutUndefinedProperties({
       ...opts,
-      isolation: opts.isolation ?? WORKFLOW_ISOLATION_POLICY.directAgentDefault,
+      workspace: opts.workspace ?? DEFAULT_AGENT_WORKSPACE,
       thinking: opts.thinking ?? (modelPatternDeclaresThinking(opts.model, this.deps.modelRegistryModels) ? undefined : this.deps.defaultThinking),
     });
 
@@ -119,7 +123,7 @@ export class WorkflowScheduler {
     try {
       call.status = "running";
       this.refreshProgress();
-      const result = await this.limiter.run(async () => {
+      const launchAgent = async () => await this.limiter.run(async () => {
         return await this.agent.run({
           callId,
           runId: this.deps.run.runId,
@@ -135,6 +139,8 @@ export class WorkflowScheduler {
           stallRetries: DEFAULT_LIMITS.stallRetries,
         });
       }, agentController.signal);
+      const result = await launchAgent();
+      const returnValue = effectiveOpts.workspace === "patch" ? this.registerPatch(callId, result.result, result.workspace) : result.result;
       const durationMs = Date.now() - started;
       const usage: WorkflowUsage = { ...result.usage, durationMs };
       call.status = "done";
@@ -163,7 +169,7 @@ export class WorkflowScheduler {
       });
       this.refreshProgress();
       if (budgetError) throw budgetError;
-      return result.result;
+      return returnValue;
     } catch (err) {
       if (err instanceof WorkflowBudgetExceededError && call.status === "done") throw err;
       if (err instanceof WorkflowSkipAgentError || this.deps.control.isSkipped(callId)) {
@@ -201,6 +207,64 @@ export class WorkflowScheduler {
     } finally {
       this.deps.control.unregisterAgent(callId);
     }
+  }
+
+  async applyPatch(input: unknown, signal?: AbortSignal): Promise<WorkflowPatchApplyResult> {
+    const ref = validatePatchRef(input);
+    const patch = this.patches.get(ref.id);
+    if (!patch || patch.ref.callId !== ref.callId) throw new Error(`Unknown workflow patch: ${ref.id}`);
+    if (patch.applied) throw new Error(`Workflow patch already applied: ${ref.id}`);
+
+    return await this.workspaceMutations.run(async () => {
+      this.deps.control.throwIfAborted();
+      throwIfOperationAborted(signal);
+      if (patch.applied) throw new Error(`Workflow patch already applied: ${ref.id}`);
+
+      if (!patch.patchPath) {
+        patch.applied = true;
+        await this.recordPatchApplied(patch);
+        return { applied: false, patchId: ref.id, files: [] };
+      }
+
+      const root = await gitRoot(this.deps.cwd, signal);
+      if (path.resolve(root) !== path.resolve(patch.workspaceRoot)) throw new Error(`Workflow patch ${ref.id} belongs to a different git workspace`);
+      const patchText = await readBoundedTextFile(patch.patchPath, WORKFLOW_RESOURCE_LIMITS.worktreePatchBytes);
+      try {
+        await gitApply(root, patchText, true, signal);
+      } catch (err) {
+        throw new Error(`Workflow patch ${ref.id} no longer applies cleanly; workspace unchanged: ${(err as Error).message}`);
+      }
+      await gitApply(root, patchText, false, signal);
+      patch.applied = true;
+      await this.recordPatchApplied(patch);
+      return { applied: true, patchId: ref.id, files: [...patch.ref.files] };
+    }, signal);
+  }
+
+  private registerPatch(callId: string, result: unknown, workspace: AgentWorkspaceArtifacts | undefined): WorkflowPatchAgentResult {
+    if (!workspace || workspace.kind !== "patch") throw new Error(`Patch agent ${callId} did not produce patch artifacts`);
+    if (workspace.patchCaptureError) throw new Error(`Patch agent ${callId} could not capture its edits: ${workspace.patchCaptureError}`);
+    const id = `${this.deps.run.runId}:${callId}`;
+    const ref: WorkflowPatchRef = {
+      kind: "workflow_patch",
+      id,
+      callId,
+      files: [...workspace.changedFiles],
+      empty: !workspace.patchPath,
+    };
+    this.patches.set(id, { ref, patchPath: workspace.patchPath, workspaceRoot: workspace.workspaceRoot, applied: false });
+    return { result, patch: ref };
+  }
+
+  private async recordPatchApplied(patch: RegisteredPatch): Promise<void> {
+    await this.deps.journal.append({
+      type: "patch_applied",
+      runId: this.deps.run.runId,
+      time: nowIso(),
+      patchId: patch.ref.id,
+      callId: patch.ref.callId,
+      files: [...patch.ref.files],
+    }).catch(() => undefined);
   }
 
   phase(title: string): void {
@@ -375,6 +439,78 @@ interface AsyncLimiterWaiter {
 
 interface AsyncLimiterReservation {
   release(): void;
+}
+
+interface RegisteredPatch {
+  ref: WorkflowPatchRef;
+  patchPath?: string;
+  workspaceRoot: string;
+  applied: boolean;
+}
+
+function validatePatchRef(input: unknown): WorkflowPatchRef {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("apply(patch) expects a workflow patch returned by a patch agent");
+  const value = input as Partial<WorkflowPatchRef>;
+  if (value.kind !== "workflow_patch" || typeof value.id !== "string" || typeof value.callId !== "string") throw new Error("apply(patch) expects a workflow patch returned by a patch agent");
+  return value as WorkflowPatchRef;
+}
+
+async function gitRoot(cwd: string, signal?: AbortSignal): Promise<string> {
+  return (await gitCapture(["-C", cwd, "rev-parse", "--show-toplevel"], signal)).trim();
+}
+
+async function gitApply(root: string, patchText: string, check: boolean, signal?: AbortSignal): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const args = ["-C", root, "apply", "--binary", "--whitespace=nowarn", ...(check ? ["--check"] : []), "-"];
+    const proc = spawn("git", args, { stdio: ["pipe", "ignore", "pipe"], env: gitEnv() });
+    const stderr: string[] = [];
+    let settled = false;
+    const finish = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", abort);
+      err ? reject(err) : resolve();
+    };
+    const abort = () => {
+      proc.kill("SIGKILL");
+      finish(signal?.reason instanceof Error ? signal.reason : new WorkflowAbortError());
+    };
+    proc.stderr.on("data", (chunk) => stderr.push(chunk.toString()));
+    proc.on("error", (err) => finish(err));
+    proc.on("close", (code) => finish(code === 0 ? undefined : new Error(stderr.join("").trim() || `git apply exited with ${code}`)));
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    else proc.stdin.end(patchText);
+  });
+}
+
+async function gitCapture(args: string[], signal?: AbortSignal): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const proc = spawn("git", args, { stdio: ["ignore", "pipe", "pipe"], env: gitEnv() });
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    let settled = false;
+    const finish = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", abort);
+      err ? reject(err) : resolve(stdout.join(""));
+    };
+    const abort = () => {
+      proc.kill("SIGKILL");
+      finish(signal?.reason instanceof Error ? signal.reason : new WorkflowAbortError());
+    };
+    proc.stdout.on("data", (chunk) => stdout.push(chunk.toString()));
+    proc.stderr.on("data", (chunk) => stderr.push(chunk.toString()));
+    proc.on("error", (err) => finish(err));
+    proc.on("close", (code) => finish(code === 0 ? undefined : new Error(stderr.join("").trim() || `git exited with ${code}`)));
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+  });
+}
+
+function gitEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "Never" };
 }
 
 interface LinkedAbortSignal {

@@ -3,7 +3,7 @@ import { isThinkingLevel } from "../thinking.js";
 import type { AgentOptions, JsonObject, JsonValue } from "../types.js";
 import { byteLength } from "../utils/truncate.js";
 
-const AGENT_OPTION_KEYS = new Set(["label", "phase", "schema", "model", "thinking", "isolation", "agentType", "stallMs"]);
+const AGENT_OPTION_KEYS = new Set(["label", "phase", "schema", "model", "thinking", "workspace", "agentType", "stallMs"]);
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
 
 export function normalizeAgentOptions(input: unknown): AgentOptions {
@@ -32,9 +32,9 @@ export function normalizeAgentOptions(input: unknown): AgentOptions {
     out.thinking = opts.thinking;
   }
 
-  if (opts.isolation !== undefined) {
-    if (opts.isolation !== "shared" && opts.isolation !== "worktree") throw new Error("agent opts.isolation must be one of: shared, worktree");
-    out.isolation = opts.isolation;
+  if (opts.workspace !== undefined) {
+    if (opts.workspace !== "shared" && opts.workspace !== "readOnly" && opts.workspace !== "patch") throw new Error("agent opts.workspace must be one of: shared, readOnly, patch");
+    out.workspace = opts.workspace;
   }
 
   if (opts.stallMs !== undefined) {

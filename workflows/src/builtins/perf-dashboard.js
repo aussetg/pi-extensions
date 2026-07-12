@@ -48,6 +48,7 @@ const rows = [];
 await pipeline(targets, async (target) => {
   const result = await agent(`Benchmark and analyze ${target}.`, {
     label: `benchmark ${target}`,
+    workspace: 'shared',
     schema: {
       type: 'object',
       properties: { target: { type: 'string' }, medianMs: { type: 'number' }, p95Ms: { type: 'number' }, status: { type: 'string' } },

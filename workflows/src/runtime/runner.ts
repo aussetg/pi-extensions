@@ -195,6 +195,7 @@ export class WorkflowRunner {
 
     const globals = {
       agent: (prompt: unknown, opts?: unknown, rpc?: SandboxRpcContext) => scheduler.agentCall(prompt, opts === undefined ? {} : opts, rpc?.signal),
+      apply: (patch: unknown, rpc?: SandboxRpcContext) => scheduler.applyPatch(patch, rpc?.signal),
       phase: (title: string) => scheduler.phase(title),
       log: (message: string) => scheduler.log(message),
       workflow: async (nameOrRef: unknown, childArgs?: unknown, rpc?: SandboxRpcContext) => {

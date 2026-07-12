@@ -31,7 +31,7 @@ describe("workflow agent option validation", () => {
       phase: "Review",
       model: "sonnet",
       thinking: "low",
-      isolation: "worktree",
+      workspace: "patch",
       agentType: "reviewer",
       stallMs: 10_000,
       schema,
@@ -40,7 +40,7 @@ describe("workflow agent option validation", () => {
       phase: "Review",
       model: "sonnet",
       thinking: "low",
-      isolation: "worktree",
+      workspace: "patch",
       agentType: "reviewer",
       stallMs: 10_000,
       schema,
@@ -68,7 +68,7 @@ describe("workflow agent option validation", () => {
     expect(() => normalizeAgentOptions(null)).toThrow(/options must be an object/);
     expect(() => normalizeAgentOptions([])).toThrow(/options must be an object/);
     expect(() => normalizeAgentOptions({ thinking: "ultra" })).toThrow(/opts\.thinking/);
-    expect(() => normalizeAgentOptions({ isolation: "sandbox" })).toThrow(/opts\.isolation/);
+    expect(() => normalizeAgentOptions({ workspace: "sandbox" })).toThrow(/opts\.workspace/);
     expect(() => normalizeAgentOptions({ label: undefined })).toThrow(/opts\.label.*undefined/);
     expect(() => normalizeAgentOptions({ label: "" })).toThrow(/opts\.label.*non-empty/);
     expect(() => normalizeAgentOptions({ phase: "A\nB" })).toThrow(/opts\.phase.*control/);
@@ -109,7 +109,7 @@ describe("workflow agent option validation", () => {
       persist: async () => {},
     });
 
-    await expect(scheduler.agentCall("bad", { isolation: "mars" })).rejects.toThrow(/opts\.isolation/);
+    await expect(scheduler.agentCall("bad", { workspace: "mars" })).rejects.toThrow(/opts\.workspace/);
     expect(runSpy).not.toHaveBeenCalled();
 
     await expect(scheduler.agentCall("good", { label: "good" })).resolves.toBe("ok");
