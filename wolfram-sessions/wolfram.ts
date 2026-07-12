@@ -150,6 +150,15 @@ function restoreEnvironment(): void {
 	managedEnvironment = undefined;
 }
 
+async function removeSessionArtifacts(base: string): Promise<string | undefined> {
+	try {
+		await fs.promises.rm(base, { recursive: true, force: true });
+		return undefined;
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
+	}
+}
+
 export default function wolframSessionsExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		configureEnvironment(ctx);
@@ -165,10 +174,13 @@ export default function wolframSessionsExtension(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		const base = sessionBase;
+		const script = wlSessionScript;
 		let result: Awaited<ReturnType<typeof runWlSession>> | undefined;
+		let cleanupError: string | undefined;
 		try {
-			if (base && wlSessionScript) result = await runWlSession(pi, base, ["stop-all"]);
+			if (base && script) result = await runWlSession(pi, base, ["stop-all"]);
 		} finally {
+			if (base && (!script || result?.code === 0)) cleanupError = await removeSessionArtifacts(base);
 			restoreEnvironment();
 			sessionBase = undefined;
 			sessionId = undefined;
@@ -178,6 +190,8 @@ export default function wolframSessionsExtension(pi: ExtensionAPI) {
 
 		if (ctx.hasUI && result && result.code !== 0) {
 			ctx.ui.notify(`Could not stop Wolfram sessions: ${result.stderr || result.stdout}`, "warning");
+		} else if (ctx.hasUI && cleanupError) {
+			ctx.ui.notify(`Could not remove Wolfram session artifacts: ${cleanupError}`, "warning");
 		}
 	});
 
