@@ -3,7 +3,7 @@ import { isThinkingLevel } from "../thinking.js";
 import type { AgentOptions, JsonObject, JsonValue } from "../types.js";
 import { byteLength } from "../utils/truncate.js";
 
-const AGENT_OPTION_KEYS = new Set(["label", "phase", "schema", "model", "thinking", "workspace", "agentType", "stallMs"]);
+const AGENT_OPTION_KEYS = new Set(["label", "phase", "schema", "model", "thinking", "workspace", "stallMs"]);
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
 
 export function normalizeAgentOptions(input: unknown): AgentOptions {
@@ -25,7 +25,6 @@ export function normalizeAgentOptions(input: unknown): AgentOptions {
   if (opts.label !== undefined) out.label = validateStringOption(opts.label, "label", WORKFLOW_AGENT_OPTION_LIMITS.labelBytes);
   if (opts.phase !== undefined) out.phase = validateStringOption(opts.phase, "phase", WORKFLOW_AGENT_OPTION_LIMITS.phaseBytes);
   if (opts.model !== undefined) out.model = validateStringOption(opts.model, "model", WORKFLOW_AGENT_OPTION_LIMITS.modelBytes);
-  if (opts.agentType !== undefined) out.agentType = validateStringOption(opts.agentType, "agentType", WORKFLOW_AGENT_OPTION_LIMITS.agentTypeBytes);
 
   if (opts.thinking !== undefined) {
     if (!isThinkingLevel(opts.thinking)) throw new Error("agent opts.thinking must be one of: off, minimal, low, medium, high, xhigh");
@@ -49,7 +48,7 @@ export function normalizeAgentOptions(input: unknown): AgentOptions {
   return out;
 }
 
-function validateStringOption(value: unknown, key: "label" | "phase" | "model" | "agentType", maxBytes: number): string {
+function validateStringOption(value: unknown, key: "label" | "phase" | "model", maxBytes: number): string {
   if (typeof value !== "string") throw new Error(`agent opts.${key} must be a string`);
   if (value.trim() === "") throw new Error(`agent opts.${key} must be a non-empty string`);
   if (CONTROL_CHARS.test(value)) throw new Error(`agent opts.${key} must not contain control characters`);

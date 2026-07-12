@@ -32,7 +32,6 @@ describe("workflow agent option validation", () => {
       model: "sonnet",
       thinking: "low",
       workspace: "patch",
-      agentType: "reviewer",
       stallMs: 10_000,
       schema,
     })).toEqual({
@@ -41,7 +40,6 @@ describe("workflow agent option validation", () => {
       model: "sonnet",
       thinking: "low",
       workspace: "patch",
-      agentType: "reviewer",
       stallMs: 10_000,
       schema,
     });
@@ -73,7 +71,7 @@ describe("workflow agent option validation", () => {
     expect(() => normalizeAgentOptions({ label: "" })).toThrow(/opts\.label.*non-empty/);
     expect(() => normalizeAgentOptions({ phase: "A\nB" })).toThrow(/opts\.phase.*control/);
     expect(() => normalizeAgentOptions({ model: 12 })).toThrow(/opts\.model.*string/);
-    expect(() => normalizeAgentOptions({ agentType: "x".repeat(WORKFLOW_AGENT_OPTION_LIMITS.agentTypeBytes + 1) })).toThrow(/opts\.agentType.*exceeds/);
+    expect(() => normalizeAgentOptions({ agentType: "reviewer" })).toThrow(/opts\.agentType.*not supported/);
     expect(() => normalizeAgentOptions({ stallMs: 0 })).toThrow(/opts\.stallMs/);
     expect(() => normalizeAgentOptions({ stallMs: 1.5 })).toThrow(/opts\.stallMs/);
     expect(() => normalizeAgentOptions({ stallMs: WORKFLOW_AGENT_OPTION_LIMITS.stallMsMax + 1 })).toThrow(/opts\.stallMs/);
@@ -140,7 +138,6 @@ function makeRun(root: string): RunRecord {
     scriptHash: "sha256:script",
     progress: { total: 0, running: 0, completed: 0, failed: 0, skipped: 0, calls: [], recentLogs: [], updatedAt: new Date(0).toISOString() },
     usage: { agentCount: 0, subagentTokens: 0, toolUses: 0, estimated: true },
-    uiViews: [],
   };
 }
 

@@ -200,7 +200,6 @@ describe("RunStore loaded record path safety", () => {
           outputPath: path.join(outside, "output.json"),
           errorPath: path.join(outside, "error.json"),
           recovery: { scriptPath: path.join(outside, "recover.js"), resumeFromRunId: record.runId, args: { keep: true } },
-          uiViews: [{ viewId: "safe", title: "Safe", specPath: path.join(outside, "spec.json"), latestStatePath: path.join(outside, "state.json") }],
         },
         null,
         2,
@@ -222,7 +221,6 @@ describe("RunStore loaded record path safety", () => {
     expect(loaded.outputPath).toBeUndefined();
     expect(loaded.errorPath).toBeUndefined();
     expect(loaded.recovery).toEqual({ scriptPath: path.join(runDir, "script.js"), resumeFromRunId: record.runId, args: { keep: true } });
-    expect(loaded.uiViews).toEqual([{ viewId: "safe", title: "Safe", specPath: path.join(runDir, "ui", "safe", "spec.json"), latestStatePath: path.join(runDir, "ui", "safe", "state-latest.json") }]);
 
     await expect(fresh.delete(record.runId)).resolves.toBe(true);
     await expect(fs.promises.readFile(path.join(outsideVictim, "sentinel"), "utf8")).resolves.toBe("keep me");

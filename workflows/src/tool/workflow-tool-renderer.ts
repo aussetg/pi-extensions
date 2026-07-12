@@ -1,6 +1,6 @@
 import { StaticTextComponent, type ComponentLike } from "../ui/simple-components.js";
 import type { WorkflowLaunchOutput } from "../types.js";
-import { WorkflowResultComponent, type WorkflowResultRenderProfile } from "../ui/workflow-result-component.js";
+import { WorkflowResultComponent } from "../ui/workflow-result-component.js";
 import { sanitizeLine } from "../utils/truncate.js";
 
 export function renderWorkflowCall(args: Record<string, unknown>, theme?: any): StaticTextComponent {
@@ -13,15 +13,10 @@ export function renderWorkflowCall(args: Record<string, unknown>, theme?: any): 
 export function renderWorkflowResult(result: { details?: WorkflowLaunchOutput | any; content?: Array<{ type: string; text?: string }> }, options?: { expanded?: boolean; isPartial?: boolean }, theme?: any, context?: { lastComponent?: unknown }): ComponentLike {
   const details = result.details as WorkflowLaunchOutput | undefined;
   if (!details) return new StaticTextComponent(result.content?.find((c) => c.type === "text")?.text ?? "workflow");
-  const renderOptions = { partial: options?.isPartial, profile: toolResultProfile(options) };
+  const renderOptions = { partial: options?.isPartial };
   if (context?.lastComponent instanceof WorkflowResultComponent) {
     context.lastComponent.update(details, renderOptions, theme);
     return context.lastComponent;
   }
   return new WorkflowResultComponent(details, renderOptions, theme);
-}
-
-function toolResultProfile(options?: { expanded?: boolean; isPartial?: boolean }): WorkflowResultRenderProfile {
-  if (options?.isPartial) return "panel";
-  return options?.expanded ? "full" : "panel";
 }

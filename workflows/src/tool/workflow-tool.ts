@@ -45,7 +45,7 @@ export function createWorkflowTool(deps: WorkflowToolDeps): any {
     name: "workflow",
     label: "Workflow",
     description: WORKFLOW_TOOL_DESCRIPTION,
-    promptSnippet: "Run deterministic JavaScript workflows only for complex/non-standard orchestration that requires multiple Pi subagents; avoid for sequential or single-agent work.",
+    promptSnippet: "Run constrained JavaScript workflows only for complex/non-standard orchestration that requires multiple Pi subagents; avoid for sequential or single-agent work.",
     promptGuidelines: WORKFLOW_PROMPT_GUIDELINES,
     parameters: WorkflowInputSchema,
     renderCall: (args: Record<string, unknown>, theme: any) => renderWorkflowCall(args, theme),

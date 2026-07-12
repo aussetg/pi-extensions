@@ -118,7 +118,6 @@ async function runWorkflow(source, startGlobals) {
   const script = new vm.Script(`"use strict";\n(async () => {\n${source}\n})()`, { filename: "workflow.js" });
   const result = await script.runInContext(context, { timeout: 1000 });
 
-  await runtime.flush();
   await drainNonCritical();
   runtime.assertNoUnhandledCriticalOperations();
 
@@ -483,122 +482,6 @@ const BOOTSTRAP_SOURCE = String.raw`
     }));
   }
 
-  function createUiGlobal() {
-    let chain = Promise.resolve();
-    const failures = [];
-    const enqueue = (work) => {
-      const run = chain.then(work);
-      chain = run.catch(() => undefined);
-      return run;
-    };
-    const firstUnhandledFailure = () => failures.find((operation) => operation.error && !operation.handled);
-    const markFailedOperationsHandled = () => {
-      for (const operation of failures) {
-        if (operation.error) operation.handled = true;
-      }
-    };
-    const flushBarrier = (shouldMarkFailuresHandled = () => false) => enqueue(async () => {
-      await Promise.resolve();
-      const failed = firstUnhandledFailure();
-      if (failed) {
-        if (shouldMarkFailuresHandled()) markFailedOperationsHandled();
-        throw failed.error;
-      }
-      return await hostRpc("ui.flush", {}, false);
-    });
-    const track = (promise, fields = {}, opts = {}) => {
-      const operation = { handled: false, error: undefined };
-      promise.catch((err) => {
-        operation.error = err;
-        failures.push(operation);
-      });
-      const markHandled = () => {
-        operation.handled = true;
-        if (typeof opts.onHandled === "function") opts.onHandled();
-      };
-      const awaitedPromise = () => {
-        if (!opts.flushOnAwait) return promise;
-        return promise.then((value) => flushBarrier(() => operation.handled).then(() => value));
-      };
-      const handle = Object.create(null);
-      for (const [key, value] of Object.entries(fields)) {
-        if (value !== undefined) Object.defineProperty(handle, key, { value, enumerable: true, writable: false, configurable: false });
-      }
-      Object.defineProperties(handle, {
-        then: {
-          value: (onFulfilled, onRejected) => {
-            if (typeof onRejected === "function") markHandled();
-            return awaitedPromise().then(onFulfilled, onRejected);
-          },
-          enumerable: false,
-          writable: false,
-          configurable: false,
-        },
-        catch: {
-          value: (onRejected) => {
-            markHandled();
-            return awaitedPromise().catch(onRejected);
-          },
-          enumerable: false,
-          writable: false,
-          configurable: false,
-        },
-        finally: {
-          value: (onFinally) => {
-            return awaitedPromise().finally(onFinally);
-          },
-          enumerable: false,
-          writable: false,
-          configurable: false,
-        },
-      });
-      return Object.freeze(handle);
-    };
-    const trackUiOperation = (promise, fields = {}) => track(promise, fields, { flushOnAwait: true });
-    const dashboard = (doc) => {
-      return trackUiOperation(enqueue(() => hostRpc("ui.dashboard", { doc }, false)), { id: "dashboard" });
-    };
-    const flush = () => {
-      let handled = false;
-      const promise = flushBarrier(() => handled);
-      return track(promise, {}, {
-        onHandled: () => {
-          handled = true;
-        },
-      });
-    };
-
-    return Object.freeze({
-      define: (spec) => {
-        if (isDashboardDefineInput(spec)) return dashboard(spec);
-        const id = spec && typeof spec === "object" ? spec.id : undefined;
-        return trackUiOperation(enqueue(() => hostRpc("ui.define", { spec }, false)), { id });
-      },
-      update: (...updateArgs) => {
-        const [viewId, state] = updateArgs;
-        if (updateArgs.length === 1 && isRecord(viewId)) return dashboard(viewId);
-        return trackUiOperation(enqueue(() => hostRpc("ui.update", { viewId, state }, false)));
-      },
-      dashboard,
-      help: () => "Prefer ui.dashboard({ title, progress, metrics, charts, tables, sections }); repeated calls update the same default dashboard. Await ui.define/update/dashboard/patch/close or ui.flush() when you need a persistence barrier. Strict API: ui.define({ version: 1, id, title, initialState, layout }); ui.update(id, state). Workflow scripts are top-level async JS; do not use export default, globalThis, Date.now(), or Math.random().",
-      patch: (viewId, patch) => trackUiOperation(enqueue(() => hostRpc("ui.patch", { viewId, patch }, false))),
-      close: (viewId) => {
-        return trackUiOperation(enqueue(() => hostRpc("ui.close", { viewId }, false)), { id: viewId });
-      },
-      flush,
-      __flush: async () => {
-        await flushBarrier();
-      },
-    });
-  }
-
-  function isDashboardDefineInput(input) {
-    if (!isRecord(input)) return false;
-    if (hasOwn(input, "version")) return false;
-    if (hasOwn(input, "layout")) return false;
-    return ["title", "status", "summary", "progress", "metrics", "sections", "charts", "tables"].some((key) => hasOwn(input, key));
-  }
-
   function createBudgetGlobal() {
     return Object.freeze({
       total: budgetTotal,
@@ -676,7 +559,7 @@ const BOOTSTRAP_SOURCE = String.raw`
     return Object.freeze(value);
   }
 
-  function installDeterministicIntrinsics() {
+  function installConstrainedIntrinsics() {
     const ForbiddenFunction = function ForbiddenFunction() {
       throw new Error("Function constructor is not available in workflow scripts");
     };
@@ -697,34 +580,34 @@ const BOOTSTRAP_SOURCE = String.raw`
     poisonConstructor(Object.getPrototypeOf(async function* () {}));
     Object.defineProperty(ForbiddenFunction, "constructor", { value: ForbiddenFunction, writable: false, configurable: false });
 
-    const deterministicMath = Object.create(null);
+    const workflowMath = Object.create(null);
     for (const key of Reflect.ownKeys(Math)) {
       if (key === "random") continue;
       const descriptor = Object.getOwnPropertyDescriptor(Math, key);
-      if (descriptor) Object.defineProperty(deterministicMath, key, descriptor);
+      if (descriptor) Object.defineProperty(workflowMath, key, descriptor);
     }
-    Object.defineProperty(deterministicMath, "random", {
+    Object.defineProperty(workflowMath, "random", {
       value: () => {
-        throw new Error("Math.random() is not deterministic in workflow scripts");
+        throw new Error("Math.random() is not available in workflow scripts");
       },
       writable: false,
       configurable: false,
     });
 
     const NativeDate = Date;
-    function DeterministicDate(...args) {
-      if (!new.target) throw new Error("Date() is not deterministic in workflow scripts; use new Date(value) with explicit args");
-      if (args.length === 0) throw new Error("argless new Date() is not deterministic in workflow scripts");
-      return Reflect.construct(NativeDate, args, new.target === DeterministicDate ? NativeDate : new.target);
+    function WorkflowDate(...args) {
+      if (!new.target) throw new Error("Date() is not available in workflow scripts; use new Date(value) with explicit args");
+      if (args.length === 0) throw new Error("argless new Date() is not available in workflow scripts");
+      return Reflect.construct(NativeDate, args, new.target === WorkflowDate ? NativeDate : new.target);
     }
     for (const key of ["parse", "UTC"]) {
       const descriptor = Object.getOwnPropertyDescriptor(NativeDate, key);
-      if (descriptor) Object.defineProperty(DeterministicDate, key, descriptor);
+      if (descriptor) Object.defineProperty(WorkflowDate, key, descriptor);
     }
-    Object.defineProperties(DeterministicDate, {
+    Object.defineProperties(WorkflowDate, {
       now: {
         value: () => {
-          throw new Error("Date.now() is not deterministic in workflow scripts");
+          throw new Error("Date.now() is not available in workflow scripts");
         },
         writable: false,
         configurable: false,
@@ -737,7 +620,7 @@ const BOOTSTRAP_SOURCE = String.raw`
     });
     try {
       Object.defineProperty(NativeDate.prototype, "constructor", {
-        value: DeterministicDate,
+        value: WorkflowDate,
         writable: false,
         configurable: false,
       });
@@ -745,12 +628,12 @@ const BOOTSTRAP_SOURCE = String.raw`
       // Non-critical hardening only.
     }
     try {
-      Object.setPrototypeOf(DeterministicDate, null);
+      Object.setPrototypeOf(WorkflowDate, null);
     } catch {
       // Non-critical hardening only.
     }
 
-    const frozenMath = Object.freeze(deterministicMath);
+    const frozenMath = Object.freeze(workflowMath);
     try {
       Object.setPrototypeOf(frozenMath, null);
     } catch {
@@ -758,22 +641,21 @@ const BOOTSTRAP_SOURCE = String.raw`
     }
 
     try {
-      Object.freeze(DeterministicDate);
+      Object.freeze(WorkflowDate);
     } catch {
       // Non-critical hardening only.
     }
 
     Object.defineProperties(globalThis, {
-      Date: { value: DeterministicDate, writable: false, configurable: false },
+      Date: { value: WorkflowDate, writable: false, configurable: false },
       Math: { value: frozenMath, writable: false, configurable: false },
       Function: { value: ForbiddenFunction, writable: false, configurable: false },
       eval: { value: forbiddenEval, writable: false, configurable: false },
     });
   }
 
-  installDeterministicIntrinsics();
+  installConstrainedIntrinsics();
 
-  const ui = createUiGlobal();
   const budget = createBudgetGlobal();
   const args = deepFreeze(start.args ?? {});
 
@@ -785,7 +667,6 @@ const BOOTSTRAP_SOURCE = String.raw`
     phase: { value: phase, writable: true, configurable: true },
     log: { value: log, writable: true, configurable: true },
     workflow: { value: workflow, writable: true, configurable: true },
-    ui: { value: ui, writable: false, configurable: false },
     args: { value: args, writable: false, configurable: false },
     budget: { value: budget, writable: false, configurable: false },
     cwd: { value: String(start.cwd ?? ""), writable: false, configurable: false },
@@ -794,10 +675,7 @@ const BOOTSTRAP_SOURCE = String.raw`
     clearTimeout: { value: clearWorkflowTimeout, writable: false, configurable: false },
   });
 
-  return Object.freeze({
-    flush: () => ui.__flush(),
-    assertNoUnhandledCriticalOperations,
-  });
+  return Object.freeze({ assertNoUnhandledCriticalOperations });
 })()
 `;
 
@@ -864,7 +742,7 @@ async function drainNonCritical() {
   await Promise.race([
     Promise.allSettled(pending),
     new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error("Workflow returned before non-critical log/UI operations flushed")), 2_000);
+      timer = setTimeout(() => reject(new Error("Workflow returned before non-critical log operations flushed")), 2_000);
     }),
   ]).finally(() => clearTimeout(timer));
 }

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { RunRecord, WorkflowInput, WorkflowViewSnapshot } from "../types.js";
+import type { RunRecord, WorkflowInput } from "../types.js";
 import { RENDER_LIMITS, SCRIPT_MAX_BYTES, WORKFLOW_RESOURCE_LIMITS } from "../constants.js";
 import { workflowFilePath } from "../persistence/paths.js";
 import { registryRefreshOptions } from "../persistence/trust.js";
@@ -9,21 +9,16 @@ import { readBoundedTextFile } from "../persistence/safe-paths.js";
 import type { RunStore } from "../persistence/run-store.js";
 import type { WorkflowRegistry } from "../persistence/registry.js";
 import { WorkflowRunner } from "../runtime/runner.js";
-import { loadViewSnapshot } from "../ui/workflow-view-store.js";
-import { WorkflowViewRenderer } from "../ui/workflow-view-renderer.js";
-import { WorkflowViewComponent } from "../ui/workflow-view-widget.js";
-import { normalizeDashboardDocument } from "../ui/dashboard.js";
 import { WorkflowManagerComponent, formatRunList } from "../ui/workflow-manager.js";
 import { PagerComponent } from "../ui/simple-components.js";
 import type { WorkflowActivation } from "../tool/workflow-activation.js";
 import { slugify } from "../utils/ids.js";
 import { sanitizeLine, sanitizeRenderedLine, truncateForChat } from "../utils/truncate.js";
-import { parseWorkflowCommand, workflowHelpText, type WorkflowCommand, type WorkflowOpenProfile } from "./workflow-command-parser.js";
+import { parseWorkflowCommand, workflowHelpText, type WorkflowCommand } from "./workflow-command-parser.js";
 
 export interface WorkflowCommandDeps {
   runStore: RunStore;
   registry: WorkflowRegistry;
-  renderer: WorkflowViewRenderer;
   activation: WorkflowActivation;
 }
 
@@ -68,8 +63,6 @@ export async function routeWorkflowCommand(pi: ExtensionAPI, command: WorkflowCo
       return;
   }
 
-  if (command.action === "preview-ui") return previewUi(deps, ctx, command.json, command.profile, command.width);
-
   await deps.registry.refresh(ctx.cwd, registryRefreshOptions(ctx));
   await deps.runStore.refresh(ctx.cwd);
   switch (command.action) {
@@ -92,7 +85,7 @@ export async function routeWorkflowCommand(pi: ExtensionAPI, command: WorkflowCo
     case "skip-agent":
       return skipAgent(deps, ctx, command.runId, command.callId);
     case "open":
-      return openArtifact(deps, ctx, command.runId, command.target, command.viewId, command.profile, command.width);
+      return openArtifact(deps, ctx, command.runId, command.target);
     case "delete":
       return deleteRun(deps, ctx, command.runId);
   }
@@ -106,7 +99,7 @@ async function openManager(deps: WorkflowCommandDeps, ctx: any): Promise<void> {
 }
 
 async function runWorkflow(pi: ExtensionAPI, deps: WorkflowCommandDeps, ctx: any, input: WorkflowInput): Promise<void> {
-  const runner = new WorkflowRunner({ pi, runStore: deps.runStore, registry: deps.registry, renderer: deps.renderer });
+  const runner = new WorkflowRunner({ pi, runStore: deps.runStore, registry: deps.registry });
   const result = await runner.launchOrRun({ toolCallId: `cmd_${Date.now().toString(36)}`, input, ctx });
   await printOrNotify(ctx, result.summary);
 }
@@ -152,49 +145,12 @@ async function skipAgent(deps: WorkflowCommandDeps, ctx: any, runId: string, cal
   await printOrNotify(ctx, ok ? `skip-agent sent to ${callId}` : `skip-agent could not be applied to ${callId}`);
 }
 
-async function openArtifact(deps: WorkflowCommandDeps, ctx: any, runId: string, target: "result" | "script" | "journal" | "transcripts" | "ui", viewId?: string, profile?: WorkflowOpenProfile, width?: number): Promise<void> {
+async function openArtifact(deps: WorkflowCommandDeps, ctx: any, runId: string, target: "result" | "script" | "journal" | "transcripts"): Promise<void> {
   const run = requireRun(deps.runStore.get(runId), runId);
-  if (target === "ui") {
-    const snapshot = await loadViewSnapshot(run, viewId);
-    if (!snapshot) return printOrNotify(ctx, viewId ? `Run ${runId} has no UI view ${viewId}` : `Run ${runId} has no UI views`);
-    await openUiSnapshot(deps, ctx, `${runId} ui${viewId ? `/${viewId}` : ""}`, snapshot, profile ?? "full", width);
-    return;
-  }
   const file = artifactPath(run, target);
   const text = target === "transcripts" ? await listTranscripts(run) : await readBoundedTextFile(file, artifactReadLimit(target, file));
   if (ctx.hasUI) showCommandWidget(ctx, `${runId} ${target}`, new PagerComponent(`${runId} ${target}`, text.split("\n")).render(100).slice(2), `Artifact: ${file}`);
   else console.log(truncateForChat(text, 50_000));
-}
-
-async function previewUi(deps: WorkflowCommandDeps, ctx: any, json: string, profile: WorkflowOpenProfile = "panel", width?: number): Promise<void> {
-  const state = normalizeDashboardDocument(JSON.parse(json) as unknown);
-  const snapshot: WorkflowViewSnapshot = {
-    seq: 0,
-    spec: {
-      version: 1,
-      id: "preview",
-      title: typeof state.title === "string" && state.title.trim() ? state.title.trim().slice(0, 120) : "Dashboard preview",
-      initialState: state,
-      layout: { type: "dashboard" },
-    },
-    state,
-  };
-  await openUiSnapshot(deps, ctx, "dashboard preview", snapshot, profile, width);
-}
-
-async function openUiSnapshot(deps: WorkflowCommandDeps, ctx: any, title: string, snapshot: WorkflowViewSnapshot, profile: WorkflowOpenProfile, width?: number): Promise<void> {
-  if (width !== undefined) {
-    const lines = deps.renderer.render(snapshot, width, profile);
-    if (ctx.hasUI) return showCommandWidget(ctx, title, lines);
-    console.log(lines.join("\n"));
-    return;
-  }
-
-  if (ctx.hasUI) {
-    const component = new WorkflowViewComponent(snapshot, deps.renderer, profile);
-    showCommandWidget(ctx, title, component.render(100));
-  } else if (profile === "full") console.log(deps.renderer.renderMarkdown(snapshot));
-  else console.log(deps.renderer.render(snapshot, 100, profile).join("\n"));
 }
 
 function showCommandWidget(ctx: any, title: string, lines: string[], footer?: string): void {

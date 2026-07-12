@@ -60,6 +60,5 @@ function run(runId: string): RunRecord {
       updatedAt: new Date(0).toISOString(),
     },
     usage: { agentCount: 0, subagentTokens: 0, toolUses: 0 },
-    uiViews: [],
   };
 }

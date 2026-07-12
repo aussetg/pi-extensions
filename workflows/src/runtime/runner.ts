@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { RunRecord, ToolResult, WorkflowInput, WorkflowLaunchOutput, WorkflowUsage, WorkflowViewPlacement, WorkflowViewSnapshot } from "../types.js";
+import type { RunRecord, ToolResult, WorkflowInput, WorkflowLaunchOutput, WorkflowUsage } from "../types.js";
 import { CHAT_PREVIEW_BYTES, DEFAULT_LIMITS, SCRIPT_MAX_BYTES, WORKFLOW_RESOURCE_LIMITS, WORKFLOW_RESULT_MESSAGE } from "../constants.js";
 import { WorkflowRegistry } from "../persistence/registry.js";
 import { RunStore } from "../persistence/run-store.js";
@@ -15,10 +15,6 @@ import { RunControl } from "./run-control.js";
 import { WorkflowAgentQuota, WorkflowScheduler } from "./scheduler.js";
 import { executeWorkflowSandbox } from "./sandbox.js";
 import type { SandboxRpcContext } from "./sandbox-types.js";
-import { createWorkflowUiGlobal } from "./ui-global.js";
-import { WorkflowViewStore, workflowViewPlacement } from "../ui/workflow-view-store.js";
-import { WorkflowViewComponent } from "../ui/workflow-view-widget.js";
-import { WorkflowViewRenderer, type WorkflowViewRenderProfile } from "../ui/workflow-view-renderer.js";
 import { WorkflowProgressComponent } from "../ui/workflow-result-component.js";
 import { nowIso } from "../utils/ids.js";
 import { truncateForChat } from "../utils/truncate.js";
@@ -30,7 +26,6 @@ export interface WorkflowRunnerDeps {
   pi: ExtensionAPI;
   runStore: RunStore;
   registry: WorkflowRegistry;
-  renderer?: WorkflowViewRenderer;
   childDepth?: number;
   budget?: WorkflowBudget;
   agentQuota?: WorkflowAgentQuota;
@@ -51,11 +46,7 @@ interface ResolvedWorkflowSource {
 }
 
 export class WorkflowRunner {
-  private readonly renderer: WorkflowViewRenderer;
-
-  constructor(private readonly deps: WorkflowRunnerDeps) {
-    this.renderer = deps.renderer ?? new WorkflowViewRenderer();
-  }
+  constructor(private readonly deps: WorkflowRunnerDeps) {}
 
   async launchOrRun(args: LaunchArgs): Promise<WorkflowLaunchOutput> {
     validateInput(args.input);
@@ -121,11 +112,9 @@ export class WorkflowRunner {
     const { record, resolved, stableArgs, input, ctx, control, defaultAgentThinking, modelRegistryModels } = args;
     const journal = new JsonlJournal(record.journalPath);
     await journal.append({ type: "workflow_started", runId: record.runId, time: nowIso(), scriptHash: record.scriptHash, argsHash: record.argsHash });
-    const viewComponents = new Map<string, WorkflowViewComponent>();
     let progressComponent: WorkflowProgressComponent | undefined;
     let progressRenderTimer: NodeJS.Timeout | undefined;
     const showInlineProgress = !!args.onUpdate;
-    const showLiveWidgets = !!ctx.hasUI && !args.onUpdate;
     const showStandardProgress = !!ctx.hasUI && !args.onUpdate;
     const tickProgress = showInlineProgress || showStandardProgress;
     const updateStandardProgress = () => {
@@ -157,25 +146,16 @@ export class WorkflowRunner {
       clearInterval(progressRenderTimer);
       progressRenderTimer = undefined;
     };
-    let viewStore!: WorkflowViewStore;
     const emitProgress = () => {
       updateStandardProgress();
       try {
-        args.onUpdate?.({ content: [{ type: "text", text: progressSummary(record) }], details: { ...asyncOutput(record), progress: record.progress, uiViews: outputViews(viewStore, ["runPanel"]) } as WorkflowLaunchOutput & { progress: unknown } });
+        args.onUpdate?.({ content: [{ type: "text", text: progressSummary(record) }], details: { ...asyncOutput(record), progress: record.progress } as WorkflowLaunchOutput & { progress: unknown } });
       } catch {
         // Progress rendering is best-effort; it should never change workflow semantics.
       }
     };
-    viewStore = new WorkflowViewStore(record, journal, this.deps.runStore, (_viewId, snapshot) => {
-      if (ctx.hasUI && (showLiveWidgets || workflowViewPlacement(snapshot) === "widget")) updateLiveView(ctx, record, snapshot, this.renderer, viewComponents);
-      if (workflowViewPlacement(snapshot) === "runPanel") emitProgress();
-    }, (_viewId, snapshot) => {
-      if (ctx.hasUI && (showLiveWidgets || workflowViewPlacement(snapshot) === "widget")) clearLiveView(ctx, record, snapshot);
-      if (workflowViewPlacement(snapshot) === "runPanel") emitProgress();
-    });
     updateStandardProgress();
     startProgressTicker();
-    const ui = createWorkflowUiGlobal(viewStore);
     const budget = this.deps.budget ?? new WorkflowBudget(input.budgetTokens ?? null);
     const agentQuota = this.deps.agentQuota ?? new WorkflowAgentQuota(Math.min(input.maxAgents ?? DEFAULT_LIMITS.agentCap, DEFAULT_LIMITS.agentCap));
     const scheduler = new WorkflowScheduler({
@@ -216,7 +196,6 @@ export class WorkflowRunner {
           childSignal.cleanup();
         }
       },
-      ui,
       args: stableArgs,
       budget,
       cwd: ctx.cwd,
@@ -228,7 +207,6 @@ export class WorkflowRunner {
       throwIfShutdownAborted(record);
       record.status = "completed";
       record.endedAt = nowIso();
-      if (typeof (ui as any).__flush === "function") await (ui as any).__flush();
       const outputPath = path.join(record.runDir, "output.json");
       await fs.promises.writeFile(outputPath, `${JSON.stringify({ result }, null, 2)}\n`, "utf8");
       await this.deps.runStore.flush(record.runId);
@@ -237,10 +215,9 @@ export class WorkflowRunner {
       throwIfAborted(control.signal);
       throwIfShutdownAborted(record);
       await journal.append({ type: "workflow_completed", runId: record.runId, time: nowIso(), outputPath, usage: record.usage });
-      const output = completedOutput(record, result, outputViews(viewStore, ["runPanel", "completion"]));
+      const output = completedOutput(record, result);
       stopProgressTicker();
       if (showStandardProgress) clearStandardProgress(ctx, record);
-      clearLiveViews(ctx, record, viewStore, showLiveWidgets);
       return output;
     } catch (err) {
       const aborted = err instanceof WorkflowAbortError || control.signal.aborted;
@@ -248,17 +225,15 @@ export class WorkflowRunner {
       const error = aborted ? "Workflow aborted" : (err as Error).message;
       record.status = aborted ? "aborted" : "failed";
       record.endedAt = nowIso();
-      if (typeof (ui as any).__flush === "function") await (ui as any).__flush().catch(() => undefined);
       const errorPath = path.join(record.runDir, "error.json");
       await fs.promises.writeFile(errorPath, `${JSON.stringify({ error, stack: (err as Error).stack }, null, 2)}\n`, "utf8");
       await this.deps.runStore.flush(record.runId);
       record.errorPath = errorPath;
       await journal.append({ type: "workflow_failed", runId: record.runId, time: nowIso(), error, errorPath });
       await this.deps.runStore.saveNow(record);
-      const output = failedOutput(record, err, outputViews(viewStore, ["runPanel", "completion"]));
+      const output = failedOutput(record, err);
       stopProgressTicker();
       if (showStandardProgress) clearStandardProgress(ctx, record);
-      clearLiveViews(ctx, record, viewStore, showLiveWidgets);
       return output;
     }
   }
@@ -386,7 +361,7 @@ function liveOutputSummary(record: RunRecord, status: WorkflowLaunchOutput["stat
   return `Workflow ${record.name} launched (${record.runId}). Artifacts: ${record.runDir}`;
 }
 
-function completedOutput(record: RunRecord, result: unknown, uiViews?: WorkflowViewSnapshot[]): WorkflowLaunchOutput {
+function completedOutput(record: RunRecord, result: unknown): WorkflowLaunchOutput {
   return {
     status: "completed",
     taskId: record.taskId,
@@ -404,12 +379,11 @@ function completedOutput(record: RunRecord, result: unknown, uiViews?: WorkflowV
     progress: structuredClone(record.progress),
     startedAt: record.startedAt,
     endedAt: record.endedAt,
-    uiViews,
     recovery: { toolCall: { scriptPath: record.scriptPath, resumeFromRunId: record.runId, args: record.recovery?.args } },
   };
 }
 
-function failedOutput(record: RunRecord, err: unknown, uiViews?: WorkflowViewSnapshot[]): WorkflowLaunchOutput {
+function failedOutput(record: RunRecord, err: unknown): WorkflowLaunchOutput {
   const message = (err as Error).message ?? String(err);
   return {
     status: "failed",
@@ -428,7 +402,6 @@ function failedOutput(record: RunRecord, err: unknown, uiViews?: WorkflowViewSna
     progress: structuredClone(record.progress),
     startedAt: record.startedAt,
     endedAt: record.endedAt,
-    uiViews,
     recovery: { toolCall: { scriptPath: record.scriptPath, resumeFromRunId: record.runId, args: record.recovery?.args } },
   };
 }
@@ -453,11 +426,6 @@ function getModelRegistryModels(ctx: any): readonly ModelRegistryModelLike[] | u
   } catch {
     return undefined;
   }
-}
-
-function outputViews(store: WorkflowViewStore, placements: WorkflowViewPlacement[]): WorkflowViewSnapshot[] | undefined {
-  const views = store.listByPlacement(...placements).map((snapshot) => structuredClone(snapshot) as WorkflowViewSnapshot);
-  return views.length > 0 ? views : undefined;
 }
 
 function throwIfAborted(signal: AbortSignal): void {
@@ -500,45 +468,6 @@ function linkAbortSignals(...signals: Array<AbortSignal | undefined>): LinkedAbo
   };
 }
 
-function updateLiveView(ctx: any, run: RunRecord, snapshot: WorkflowViewSnapshot, renderer: WorkflowViewRenderer, components: Map<string, WorkflowViewComponent>): void {
-  const placement = workflowViewPlacement(snapshot);
-  if (placement !== "widget" && placement !== "runPanel") return;
-  const key = liveViewKey(run, snapshot);
-  let component = components.get(snapshot.spec.id);
-  const profile = liveViewProfile(snapshot);
-  if (!component) {
-    component = new WorkflowViewComponent(snapshot, renderer, profile);
-    components.set(snapshot.spec.id, component);
-  } else component.update(snapshot);
-  try {
-    ctx.ui?.setWidget?.(key, () => component, { placement: "aboveEditor" });
-  } catch {
-    // UI delivery is best-effort; artifacts and final details still carry the view.
-  }
-}
-
-function liveViewProfile(snapshot: WorkflowViewSnapshot): Extract<WorkflowViewRenderProfile, "compact" | "panel"> {
-  const placement = workflowViewPlacement(snapshot);
-  return placement === "widget" || snapshot.spec.defaultExpanded === false ? "compact" : "panel";
-}
-
-function clearLiveViews(ctx: any, run: RunRecord, store: WorkflowViewStore, includeRunPanels: boolean): void {
-  if (!ctx.hasUI) return;
-  const placements: WorkflowViewPlacement[] = includeRunPanels ? ["runPanel", "widget"] : ["widget"];
-  for (const snapshot of store.listByPlacement(...placements)) {
-    clearLiveView(ctx, run, snapshot);
-  }
-}
-
-function clearLiveView(ctx: any, run: RunRecord, snapshot: WorkflowViewSnapshot): void {
-  if (!ctx.hasUI) return;
-  try {
-    ctx.ui?.setWidget?.(liveViewKey(run, snapshot), undefined);
-  } catch {
-    // Ignore UI cleanup failures.
-  }
-}
-
 function clearStandardProgress(ctx: any, run: RunRecord): void {
   if (!ctx.hasUI) return;
   try {
@@ -550,8 +479,4 @@ function clearStandardProgress(ctx: any, run: RunRecord): void {
 
 function standardProgressKey(run: RunRecord): string {
   return `workflow:${run.runId}:__progress`;
-}
-
-function liveViewKey(run: RunRecord, snapshot: WorkflowViewSnapshot): string {
-  return `workflow:${run.runId}:${snapshot.spec.id}`;
 }

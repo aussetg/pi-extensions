@@ -23,7 +23,6 @@ export const WORKFLOW_AGENT_OPTION_LIMITS = {
   labelBytes: 500,
   phaseBytes: 500,
   modelBytes: 500,
-  agentTypeBytes: 120,
   schemaBytes: 64 * 1024,
   schemaDepth: 16,
   schemaNodes: 2_000,
@@ -69,35 +68,10 @@ export const WORKFLOW_RESOURCE_LIMITS = {
   worktreeIgnoredSymlinkBytes: 4 * 1024,
 } as const;
 
-export const UI_LIMITS = {
-  maxViewsPerRun: 5,
-  maxSpecBytes: 64 * 1024,
-  maxStateBytes: 512 * 1024,
-  maxUpdateHz: 4,
-  maxDashboardCharts: 4,
-  maxDashboardChartPoints: 80,
-  maxDashboardTables: 2,
-  maxDashboardTableRows: 12,
-  maxDashboardTableColumns: 6,
-  minDashboardPanelLines: 6,
-  maxDashboardPanelLines: 24,
-  maxRowsPerTable: 500,
-  maxRenderedRows: 50,
-  maxSeriesPoints: 500,
-  maxNodeDepth: 8,
-  maxNodeCount: 100,
-  maxTextBytesPerNode: 16 * 1024,
-  maxColumnWidth: 120,
-  maxStateSnapshotsPerView: 200,
-} as const;
-
 export const RENDER_LIMITS = {
   managerRows: 40,
-  progressCalls: 12,
-  progressLogs: 3,
-  compactViewLines: 3,
-  panelViewLines: 10,
-  workflowPanelLines: 16,
-  fullViewLines: 220,
+  progressCalls: 8,
+  progressLogs: 1,
+  resultLines: 16,
   pagerLines: 300,
 } as const;

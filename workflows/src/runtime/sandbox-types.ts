@@ -8,7 +8,6 @@ export interface SandboxGlobals {
   phase: (title: string) => void | Promise<void>;
   log: (message: string) => void | Promise<void>;
   workflow: (nameOrRef: unknown, args?: unknown, context?: SandboxRpcContext) => Promise<unknown>;
-  ui: unknown;
   args: unknown;
   budget: unknown;
   cwd: string;

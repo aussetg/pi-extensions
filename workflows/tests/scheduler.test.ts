@@ -120,6 +120,7 @@ describe("workflow scheduler", () => {
       patch: expect.objectContaining({ kind: "workflow_patch", empty: true, files: [] }),
     });
     await expect(scheduler.applyPatch(candidate.patch)).resolves.toEqual({ applied: false, patchId: candidate.patch.id, files: [] });
+    expect(run.progress.recentLogs.at(-1)).toBe("patch 0001 contained no changes");
     await expect(scheduler.applyPatch(candidate.patch)).rejects.toThrow(/already applied/);
   });
 
@@ -211,7 +212,6 @@ function makeRun(root: string): RunRecord {
     scriptHash: "sha256:script",
     progress: { total: 0, running: 0, completed: 0, failed: 0, skipped: 0, calls: [], recentLogs: [], updatedAt: new Date(0).toISOString() },
     usage: { agentCount: 0, subagentTokens: 0, toolUses: 0, estimated: true },
-    uiViews: [],
   };
 }
 

@@ -124,7 +124,6 @@ export class RunStore {
     const runDir = path.join(root, runId);
     const transcriptDir = path.join(runDir, "subagents");
     await ensureDir(transcriptDir);
-    await ensureDir(path.join(runDir, "ui"));
 
     const scriptPath = path.join(runDir, "script.js");
     const argsPath = path.join(runDir, "args.json");
@@ -169,7 +168,6 @@ export class RunStore {
       resumeFromRunId: args.resumeFromRunId,
       progress,
       usage: { agentCount: 0, subagentTokens: 0, toolUses: 0, estimated: true },
-      uiViews: [],
     };
     record.recovery = { scriptPath, resumeFromRunId: runId, args: stableArgs };
 
@@ -282,7 +280,6 @@ export class RunStore {
       journalPath: record.journalPath,
       outputPath: record.outputPath,
       runPath: record.runDir,
-      uiViews: record.uiViews.map((view) => ({ viewId: view.viewId, specPath: view.specPath, latestStatePath: view.latestStatePath })),
       subagents,
       recovery: record.recovery,
     };
@@ -490,7 +487,8 @@ function normalizeLoadedRunRecord(raw: unknown, root: string, dirName: string): 
 
   const runDir = path.join(root, dirName);
   const paths = canonicalRunPaths(runDir);
-  const record = raw as unknown as RunRecord;
+  const { uiViews: _removedUiViews, ...persisted } = raw;
+  const record = persisted as unknown as RunRecord;
   return {
     ...record,
     runDir,
@@ -502,7 +500,6 @@ function normalizeLoadedRunRecord(raw: unknown, root: string, dirName: string): 
     transcriptDir: paths.transcriptDir,
     outputPath: scopedOrExistingDefault(record.outputPath, runDir, "output.json"),
     errorPath: scopedOrExistingDefault(record.errorPath, runDir, "error.json"),
-    uiViews: normalizeUiViews(record.uiViews, runDir),
     recovery: normalizeRecovery(record.recovery, paths.scriptPath, record.runId),
   };
 }
@@ -523,25 +520,6 @@ function scopedOrExistingDefault(rawPath: unknown, runDir: string, fileName: str
   if (scoped) return scoped;
   const fallback = path.join(runDir, fileName);
   return fs.existsSync(fallback) ? fallback : undefined;
-}
-
-function normalizeUiViews(rawViews: unknown, runDir: string): RunRecord["uiViews"] {
-  if (!Array.isArray(rawViews)) return [];
-  const views: RunRecord["uiViews"] = [];
-  const seen = new Set<string>();
-  for (const rawView of rawViews) {
-    if (!isRecord(rawView) || typeof rawView.viewId !== "string" || !/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(rawView.viewId)) continue;
-    if (seen.has(rawView.viewId)) continue;
-    seen.add(rawView.viewId);
-    const viewDir = path.join(runDir, "ui", rawView.viewId);
-    views.push({
-      viewId: rawView.viewId,
-      title: typeof rawView.title === "string" ? rawView.title : rawView.viewId,
-      specPath: path.join(viewDir, "spec.json"),
-      latestStatePath: path.join(viewDir, "state-latest.json"),
-    });
-  }
-  return views;
 }
 
 function normalizeRecovery(rawRecovery: unknown, scriptPath: string, runId: string): RunRecord["recovery"] {

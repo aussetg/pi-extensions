@@ -11,7 +11,7 @@ import { BoundedTextAccumulator, byteLength, truncateBytes } from "../utils/trun
 
 export { type SandboxGlobals } from "./sandbox-types.js";
 
-const RPC_METHODS = ["agent", "apply", "workflow", "phase", "log", "ui.define", "ui.update", "ui.dashboard", "ui.patch", "ui.close", "ui.flush", "budget.spent", "budget.remaining"] as const;
+const RPC_METHODS = ["agent", "apply", "workflow", "phase", "log", "budget.spent", "budget.remaining"] as const;
 const RPC_METHOD_SET = new Set<string>(RPC_METHODS);
 const CRITICAL_RPC_METHODS = new Set<string>(["agent", "apply", "workflow"]);
 
@@ -384,22 +384,6 @@ async function dispatchRequest(globals: SandboxGlobals, method: string, params: 
       return await abortable(Promise.resolve().then(() => globals.phase(String(p.title ?? ""))), context.signal);
     case "log":
       return await abortable(Promise.resolve().then(() => globals.log(String(p.message ?? ""))), context.signal);
-    case "ui.define":
-      return await abortable(Promise.resolve().then(() => (globals.ui as any).define(p.spec)), context.signal);
-    case "ui.update":
-      return await abortable(Promise.resolve().then(() => Object.prototype.hasOwnProperty.call(p, "state") ? (globals.ui as any).update(String(p.viewId ?? ""), p.state) : (globals.ui as any).update(p.viewId)), context.signal);
-    case "ui.dashboard":
-      return await abortable(Promise.resolve().then(() => (globals.ui as any).dashboard(p.doc)), context.signal);
-    case "ui.patch":
-      return await abortable(Promise.resolve().then(() => (globals.ui as any).patch(String(p.viewId ?? ""), p.patch)), context.signal);
-    case "ui.close":
-      return await abortable(Promise.resolve().then(() => (globals.ui as any).close(String(p.viewId ?? ""))), context.signal);
-    case "ui.flush": {
-      const ui = globals.ui as any;
-      if (typeof ui.flush === "function") return await abortable(Promise.resolve().then(() => ui.flush()), context.signal);
-      if (typeof ui.__flush === "function") return await abortable(Promise.resolve().then(() => ui.__flush()), context.signal);
-      return undefined;
-    }
     case "budget.spent":
       return readBudgetSpent(globals.budget);
     case "budget.remaining":

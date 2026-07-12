@@ -157,8 +157,8 @@ function validateBody(ast: Node, metaNode?: Node): void {
       case "MemberExpression": {
         const prop = memberPropertyName(node);
         if (prop && FORBIDDEN_PROPERTIES.has(prop)) throw new WorkflowScriptError(`Forbidden property access: ${prop}`, loc(node));
-        if (isMember(node, "Date", "now")) throw new WorkflowScriptError("Date.now() is not deterministic", loc(node));
-        if (isMember(node, "Math", "random")) throw new WorkflowScriptError("Math.random() is not deterministic", loc(node));
+        if (isMember(node, "Date", "now")) throw new WorkflowScriptError("Date.now() is not available in workflow scripts", loc(node));
+        if (isMember(node, "Math", "random")) throw new WorkflowScriptError("Math.random() is not available in workflow scripts", loc(node));
         break;
       }
       case "CallExpression": {
@@ -166,15 +166,15 @@ function validateBody(ast: Node, metaNode?: Node): void {
           throw new WorkflowScriptError(`Forbidden call: ${node.callee.name}()`, loc(node));
         }
         if (node.callee.type === "Identifier" && node.callee.name === "Date") {
-          throw new WorkflowScriptError("Date() is not deterministic; use new Date(value) with explicit args", loc(node));
+          throw new WorkflowScriptError("Date() is not available; use new Date(value) with explicit args", loc(node));
         }
-        if (isMember(node.callee, "Date", "now")) throw new WorkflowScriptError("Date.now() is not deterministic", loc(node));
-        if (isMember(node.callee, "Math", "random")) throw new WorkflowScriptError("Math.random() is not deterministic", loc(node));
+        if (isMember(node.callee, "Date", "now")) throw new WorkflowScriptError("Date.now() is not available in workflow scripts", loc(node));
+        if (isMember(node.callee, "Math", "random")) throw new WorkflowScriptError("Math.random() is not available in workflow scripts", loc(node));
         break;
       }
       case "NewExpression": {
         if (node.callee.type === "Identifier" && node.callee.name === "Date" && node.arguments.length === 0) {
-          throw new WorkflowScriptError("argless new Date() is not deterministic", loc(node));
+          throw new WorkflowScriptError("argless new Date() is not available in workflow scripts", loc(node));
         }
         if (node.callee.type === "Identifier" && node.callee.name === "Function") {
           throw new WorkflowScriptError("new Function() is not allowed", loc(node));

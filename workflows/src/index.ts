@@ -5,18 +5,16 @@ import { createWorkflowAutocomplete } from "./commands/workflow-autocomplete.js"
 import { WorkflowRegistry } from "./persistence/registry.js";
 import { RunStore } from "./persistence/run-store.js";
 import { registryRefreshOptions } from "./persistence/trust.js";
-import { WorkflowViewRenderer } from "./ui/workflow-view-renderer.js";
 import { renderWorkflowResultMessage } from "./ui/messages.js";
 import { createWorkflowActivation } from "./tool/workflow-activation.js";
 
 export function createWorkflowExtension(pi: ExtensionAPI): void {
   const runStore = new RunStore();
   const registry = new WorkflowRegistry();
-  const renderer = new WorkflowViewRenderer();
   const activation = createWorkflowActivation(pi);
 
   pi.registerTool(createWorkflowTool({ pi, runStore, registry }));
-  registerWorkflowCommand(pi, { runStore, registry, renderer, activation });
+  registerWorkflowCommand(pi, { runStore, registry, activation });
   pi.registerMessageRenderer?.("workflow_result", renderWorkflowResultMessage as any);
 
   pi.on("tool_result", (event: any) => {

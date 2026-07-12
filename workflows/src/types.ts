@@ -49,7 +49,6 @@ export interface WorkflowLaunchOutput {
   progress?: WorkflowProgressSnapshot;
   startedAt?: string;
   endedAt?: string;
-  uiViews?: WorkflowViewSnapshot[];
   recovery?: {
     toolCall: {
       scriptPath: string;
@@ -72,7 +71,6 @@ export interface AgentOptions {
   thinking?: ThinkingLevel;
   /** Workspace policy for this subagent. Fan-out defaults to readOnly. */
   workspace?: "shared" | "readOnly" | "patch";
-  agentType?: string;
   stallMs?: number;
 }
 
@@ -109,141 +107,6 @@ export interface AgentWorkspaceArtifacts {
   error?: string;
 }
 
-export type WorkflowViewPlacement = "runPanel" | "widget" | "completion" | "artifact";
-
-export interface WorkflowViewSpec {
-  version: 1;
-  id: string;
-  title: string;
-  description?: string;
-  placement?: WorkflowViewPlacement;
-  defaultExpanded?: boolean;
-  stateSchema?: JsonSchema;
-  initialState?: JsonObject;
-  layout: WorkflowLayoutNode;
-  expandedLayout?: WorkflowLayoutNode;
-  limits?: {
-    maxRows?: number;
-    maxSeriesPoints?: number;
-    updateHz?: number;
-  };
-}
-
-export type WorkflowLayoutNode =
-  | { type: "vstack"; children: WorkflowLayoutNode[] }
-  | { type: "hstack"; children: WorkflowLayoutNode[] }
-  | { type: "grid"; columns: number; children: WorkflowLayoutNode[] }
-  | { type: "dashboard"; bind?: string }
-  | { type: "text"; text: string }
-  | { type: "markdown"; bind?: string; text?: string; maxLines?: number }
-  | {
-      type: "metric";
-      label: string;
-      bind: string;
-      format?: WorkflowFormat;
-      trendBind?: string;
-      threshold?: { warnAbove?: number; errorAbove?: number; warnBelow?: number; errorBelow?: number };
-    }
-  | { type: "progress"; label: string; valueBind?: string; totalBind?: string; percentBind?: string }
-  | { type: "sparkline"; label: string; bind: string; format?: "number" | "duration" | "percent"; maxPoints?: number }
-  | {
-      type: "table";
-      bind: string;
-      columns: WorkflowTableColumn[];
-      maxRows?: number;
-    }
-  | { type: "keyValue"; bind: string; maxItems?: number }
-  | { type: "statusList"; bind: string; itemLabelKey?: string; itemStatusKey?: string; itemDetailKey?: string; maxItems?: number }
-  | { type: "phaseList"; maxItems?: number }
-  | { type: "logTail"; bind?: string; maxLines?: number };
-
-export type WorkflowTableColumn = ({ path: string; key?: never } | { key: string; path?: never }) & { label: string; format?: WorkflowFormat; width?: number };
-
-export type WorkflowFormat = "text" | "number" | "percent" | "duration" | "bytes" | "tokens" | "cost" | "status";
-
-export type WorkflowDashboardDocument = JsonObject & {
-  title?: string;
-  status?: string;
-  summary?: string;
-  panel?: WorkflowDashboardPanel;
-  progress?: WorkflowDashboardProgress;
-  metrics?: WorkflowDashboardMetric[];
-  charts?: WorkflowDashboardChart[];
-  tables?: WorkflowDashboardTable[];
-  sections?: WorkflowDashboardSection[];
-};
-
-export type WorkflowDashboardPanelBlock = "summary" | "progress" | "metrics" | "charts" | "tables" | "sections";
-
-export type WorkflowDashboardPanel = JsonObject & {
-  lines?: number;
-  priority?: WorkflowDashboardPanelBlock[];
-};
-
-export type WorkflowDashboardProgress = JsonObject & {
-  label?: string;
-  value?: number;
-  total?: number;
-  percent?: number;
-  detail?: string;
-};
-
-export type WorkflowDashboardMetric = JsonObject & {
-  label: string;
-  value?: JsonValue;
-  format?: WorkflowFormat;
-  status?: string;
-  detail?: string;
-};
-
-export type WorkflowDashboardChartType = "sparkline";
-export type WorkflowDashboardChartFormat = "number" | "duration" | "percent";
-export type WorkflowDashboardChartDirection = "up" | "down" | "neutral";
-
-export type WorkflowDashboardChart = JsonObject & {
-  type?: WorkflowDashboardChartType;
-  label: string;
-  values: number[];
-  format?: WorkflowDashboardChartFormat;
-  direction?: WorkflowDashboardChartDirection;
-  value?: JsonValue;
-  status?: string;
-  detail?: string;
-};
-
-export type WorkflowDashboardTableColumn = JsonObject & {
-  key?: string;
-  path?: string;
-  label?: string;
-  format?: WorkflowFormat;
-  width?: number;
-};
-
-export type WorkflowDashboardTableRow = JsonObject;
-
-export type WorkflowDashboardTable = JsonObject & {
-  title?: string;
-  columns: Array<string | WorkflowDashboardTableColumn>;
-  rows: WorkflowDashboardTableRow[];
-  maxRows?: number;
-};
-
-export type WorkflowDashboardSection = JsonObject & {
-  title?: string;
-  summary?: string;
-  progress?: WorkflowDashboardProgress;
-  metrics?: WorkflowDashboardMetric[];
-  rows?: WorkflowDashboardRow[];
-  lines?: string[];
-};
-
-export type WorkflowDashboardRow = JsonObject & {
-  label?: string;
-  status?: string;
-  value?: JsonValue;
-  detail?: string;
-};
-
 export type RunStatus = "running" | "paused" | "completed" | "failed" | "aborted" | "stale";
 export type CallStatus = "pending" | "running" | "done" | "failed" | "skipped" | "aborted";
 
@@ -253,7 +116,6 @@ export interface WorkflowCallProgress {
   phase?: string;
   model?: string;
   thinking?: ThinkingLevel;
-  agentType?: string;
   status: CallStatus;
   usage?: WorkflowUsage;
   startedAt?: string;
@@ -300,7 +162,6 @@ export interface RunRecord {
   phase?: string;
   progress: WorkflowProgressSnapshot;
   usage: WorkflowUsage;
-  uiViews: Array<{ viewId: string; title: string; specPath: string; latestStatePath: string }>;
   recovery?: { scriptPath: string; resumeFromRunId: string; args?: Record<string, unknown> };
 }
 
@@ -314,15 +175,8 @@ export interface RunManifest {
   journalPath: string;
   outputPath?: string;
   runPath: string;
-  uiViews: Array<{ viewId: string; specPath: string; latestStatePath: string }>;
   subagents: Array<{ callId: string; transcriptPath: string; resultPath?: string }>;
   recovery?: { scriptPath: string; resumeFromRunId: string; args?: Record<string, unknown> };
-}
-
-export interface WorkflowViewSnapshot {
-  spec: WorkflowViewSpec;
-  state: JsonObject;
-  seq: number;
 }
 
 export type WorkflowJournalEvent =
@@ -349,9 +203,6 @@ export type WorkflowJournalEvent =
       model?: string;
       thinking?: ThinkingLevel;
     }
-  | { type: "ui_defined"; runId: string; time: string; viewId: string; specPath: string }
-  | { type: "ui_state"; runId: string; time: string; viewId: string; seq: number; statePath: string }
-  | { type: "ui_closed"; runId: string; time: string; viewId: string }
   | { type: "log"; runId: string; time: string; message: string }
   | { type: "phase"; runId: string; time: string; phase: string }
   | { type: "patch_applied"; runId: string; time: string; patchId: string; callId: string; files: string[] }

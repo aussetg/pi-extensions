@@ -104,7 +104,7 @@ export class WorkflowScheduler {
     const callId = String(++this.sequence).padStart(4, "0");
     const phase = effectiveOpts.phase ?? this.deps.run.phase;
     const label = effectiveOpts.label ?? `agent ${callId}`;
-    const call: WorkflowCallProgress = { callId, label, phase, model: effectiveOpts.model, thinking: effectiveOpts.thinking, agentType: effectiveOpts.agentType, status: "pending", startedAt: nowIso() };
+    const call: WorkflowCallProgress = { callId, label, phase, model: effectiveOpts.model, thinking: effectiveOpts.thinking, status: "pending", startedAt: nowIso() };
     this.calls.set(callId, call);
     this.refreshProgress();
     await this.deps.journal.append({
@@ -265,6 +265,12 @@ export class WorkflowScheduler {
       callId: patch.ref.callId,
       files: [...patch.ref.files],
     }).catch(() => undefined);
+    const message = patch.ref.empty
+      ? `patch ${patch.ref.callId} contained no changes`
+      : `applied patch ${patch.ref.callId} (${patch.ref.files.length} file${patch.ref.files.length === 1 ? "" : "s"})`;
+    this.deps.run.progress.recentLogs.push(message);
+    this.deps.run.progress.recentLogs = this.deps.run.progress.recentLogs.slice(-20);
+    this.refreshProgress();
   }
 
   phase(title: string): void {

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Deterministic multi-agent workflows with durable artifacts and declarative UI.",
+  "description": "Constrained multi-agent workflows with durable artifacts and inferred progress.",
   "main": "index.ts",
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -11,19 +11,19 @@
     "check": "npm run typecheck && npm test"
   },
   "dependencies": {
-    "acorn": "latest",
-    "ajv": "latest"
+    "acorn": "8.16.0",
+    "ajv": "8.20.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "typebox": "*"
+    "@earendil-works/pi-coding-agent": "0.80.3",
+    "typebox": "1.1.39"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.80.3",
-    "@types/node": "latest",
-    "typebox": "latest",
-    "typescript": "latest",
-    "vitest": "latest"
+    "@types/node": "25.9.1",
+    "typebox": "1.1.39",
+    "typescript": "6.0.3",
+    "vitest": "4.1.7"
   },
   "pi": {
     "extensions": [

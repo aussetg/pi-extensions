@@ -475,74 +475,6 @@ return await parallel([
     expect(prompts.sort()).toEqual(["bad", "ok"]);
   });
 
-  it("flushes UI persistence when an operation handle is awaited", async () => {
-    const calls: string[] = [];
-    const result = await executeWorkflowSandbox("await ui.update('view', { value: 1 }); return 'ok';", fakeGlobals({ ui: recordingUi(calls) }), new AbortController().signal);
-
-    expect(result).toBe("ok");
-    expect(calls).toEqual(["update:view:1", "flush", "flush"]);
-  });
-
-  it("does not flush each unawaited UI operation before the final drain", async () => {
-    const calls: string[] = [];
-    const result = await executeWorkflowSandbox("ui.update('view', { value: 1 }); return 'ok';", fakeGlobals({ ui: recordingUi(calls) }), new AbortController().signal);
-
-    expect(result).toBe("ok");
-    expect(calls).toEqual(["update:view:1", "flush"]);
-  });
-
-  it("uses ui.flush as an explicit UI batch barrier", async () => {
-    const calls: string[] = [];
-    const result = await executeWorkflowSandbox("ui.update('view', { value: 1 }); ui.update('view', { value: 2 }); await ui.flush(); return 'ok';", fakeGlobals({ ui: recordingUi(calls) }), new AbortController().signal);
-
-    expect(result).toBe("ok");
-    expect(calls).toEqual(["update:view:1", "update:view:2", "flush", "flush"]);
-  });
-
-  it("makes delayed UI persistence failures catchable from awaited operations", async () => {
-    const calls: string[] = [];
-    let flushCount = 0;
-    const ui = recordingUi(calls, {
-      flush: async () => {
-        calls.push("flush");
-        flushCount++;
-        if (flushCount === 1) throw new Error("persist failed");
-      },
-    });
-
-    const result = await executeWorkflowSandbox(
-      "let caught = ''; try { await ui.update('view', { value: 1 }); } catch (err) { caught = err.message; } return { caught };",
-      fakeGlobals({ ui }),
-      new AbortController().signal,
-    );
-
-    expect(result).toEqual({ caught: "persist failed" });
-    expect(calls).toEqual(["update:view:1", "flush", "flush"]);
-  });
-
-  it("lets ui.flush catch and handle earlier unawaited UI failures", async () => {
-    const calls: string[] = [];
-    const ui = recordingUi(calls, {
-      update: async () => {
-        calls.push("update:bad");
-        throw new Error("bad ui update");
-      },
-    });
-    const log = async () => {
-      for (let i = 0; i < 50 && !calls.includes("update:bad"); i++) await delay(1);
-      await delay(5);
-    };
-
-    const result = await executeWorkflowSandbox(
-      "ui.update('view', { value: 1 }); await log('yield'); let caught = ''; try { await ui.flush(); } catch (err) { caught = err.message; } return { caught };",
-      fakeGlobals({ ui, log }),
-      new AbortController().signal,
-    );
-
-    expect(result).toEqual({ caught: "bad ui update" });
-    expect(calls).toEqual(["update:bad", "flush"]);
-  });
-
   it("rejects direct constructor escapes on workflow API functions", async () => {
     await expect(executeWorkflowSandbox("return agent.constructor('return process')().cwd();", fakeGlobals(), new AbortController().signal)).rejects.toThrow(/Forbidden property access|Function constructor|Code generation|not available/);
   });
@@ -578,7 +510,11 @@ return await parallel([
     await expect(executeWorkflowSandbox("export const x = 1;", fakeGlobals(), new AbortController().signal)).rejects.toThrow(/may not export/);
   });
 
-  it("uses null-prototype deterministic Math and Date globals", async () => {
+  it("does not expose a workflow-defined UI global", async () => {
+    await expect(executeWorkflowSandbox("return typeof ui;", fakeGlobals(), new AbortController().signal)).resolves.toBe("undefined");
+  });
+
+  it("uses null-prototype constrained Math and Date globals", async () => {
     const result = await executeWorkflowSandbox(
       "const d = new Date(0); return { iso: d.toISOString(), isDate: d instanceof Date, parsed: Date.parse('1970-01-01T00:00:00.000Z'), utc: Date.UTC(1970, 0, 1), mathProtoNull: Object.getPrototypeOf(Math) === null, dateProtoNull: Object.getPrototypeOf(Date) === null };",
       fakeGlobals(),
@@ -588,12 +524,12 @@ return await parallel([
     expect(result).toEqual({ iso: "1970-01-01T00:00:00.000Z", isDate: true, parsed: 0, utc: 0, mathProtoNull: true, dateProtoNull: true });
   });
 
-  it("rejects Date and Math nondeterminism through prototype escapes", async () => {
+  it("rejects ambient Date and Math access through prototype escapes", async () => {
     const globals = fakeGlobals();
-    await expect(executeWorkflowSandbox("return Object.getPrototypeOf(Math).random();", globals, new AbortController().signal)).rejects.toThrow(/Cannot read|null|undefined|not deterministic/);
-    await expect(executeWorkflowSandbox("return Object.getPrototypeOf(Date).now();", globals, new AbortController().signal)).rejects.toThrow(/Cannot read|null|undefined|not deterministic/);
-    await expect(executeWorkflowSandbox("return Object.getPrototypeOf(new Date(0)).constructor.now();", globals, new AbortController().signal)).rejects.toThrow(/Forbidden property access|Date\.now\(\) is not deterministic/);
-    await expect(executeWorkflowSandbox("return Date(0);", globals, new AbortController().signal)).rejects.toThrow(/Date\(\) is not deterministic/);
+    await expect(executeWorkflowSandbox("return Object.getPrototypeOf(Math).random();", globals, new AbortController().signal)).rejects.toThrow(/Cannot read|null|undefined|not available/);
+    await expect(executeWorkflowSandbox("return Object.getPrototypeOf(Date).now();", globals, new AbortController().signal)).rejects.toThrow(/Cannot read|null|undefined|not available/);
+    await expect(executeWorkflowSandbox("return Object.getPrototypeOf(new Date(0)).constructor.now();", globals, new AbortController().signal)).rejects.toThrow(/Forbidden property access|Date\.now\(\) is not available/);
+    await expect(executeWorkflowSandbox("return Date(0);", globals, new AbortController().signal)).rejects.toThrow(/Date\(\) is not available/);
   });
 
   it("rejects oversized child protocol output", async () => {
@@ -627,43 +563,9 @@ function fakeGlobals(overrides: Partial<SandboxGlobals> = {}): SandboxGlobals {
       logs.push(message);
     },
     workflow: async () => null,
-    ui: {
-      define: async (spec: any) => ({ id: spec?.id }),
-      update: async () => undefined,
-      dashboard: async () => ({ id: "dashboard" }),
-      patch: async () => undefined,
-      close: async () => undefined,
-      flush: async () => undefined,
-    },
     args: {},
     budget: { total: null, spent: () => 0, remaining: () => Number.POSITIVE_INFINITY },
     cwd: process.cwd(),
-    ...overrides,
-  };
-}
-
-function recordingUi(calls: string[], overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    define: async (spec: any) => {
-      calls.push(`define:${spec?.id ?? ""}`);
-      return { id: spec?.id };
-    },
-    update: async (viewId: string, state: any) => {
-      calls.push(`update:${viewId}:${state?.value ?? ""}`);
-    },
-    dashboard: async () => {
-      calls.push("dashboard");
-      return { id: "dashboard" };
-    },
-    patch: async (viewId: string) => {
-      calls.push(`patch:${viewId}`);
-    },
-    close: async (viewId: string) => {
-      calls.push(`close:${viewId}`);
-    },
-    flush: async () => {
-      calls.push("flush");
-    },
     ...overrides,
   };
 }

@@ -7,13 +7,7 @@ export type WorkflowCommand =
   | { action: "resume"; runId: string; scriptPath?: string; args?: Record<string, unknown>; mode?: "await" | "async" }
   | { action: "stop" | "pause" | "continue" | "delete"; runId: string }
   | { action: "skip-agent"; runId: string; callId: string }
-  | { action: "open"; runId: string; target: "result" | "script" | "journal" | "transcripts" | "ui"; viewId?: string; profile?: WorkflowOpenProfile; width?: number }
-  | { action: "preview-ui"; json: string; profile?: WorkflowOpenProfile; width?: number };
-
-export type WorkflowOpenProfile = "compact" | "panel" | "full";
-
-const MIN_PREVIEW_WIDTH = 20;
-const MAX_PREVIEW_WIDTH = 240;
+  | { action: "open"; runId: string; target: "result" | "script" | "journal" | "transcripts" };
 
 export function parseWorkflowCommand(raw: string): WorkflowCommand {
   const argv = tokenize(raw.trim());
@@ -62,20 +56,13 @@ export function parseWorkflowCommand(raw: string): WorkflowCommand {
       if (runId.startsWith("--") || callId.startsWith("--") || argv.length > 0) throw new Error(`Usage: /workflow ${action} <runId> <callId>`);
       return { action, runId, callId };
     }
-    case "preview-ui": {
-      const json = argv.shift();
-      if (!json) throw new Error("Usage: /workflow preview-ui <json> [--profile compact|panel|full] [--width <columns>]");
-      const options = parseRenderOptions(argv);
-      if (argv.length > 0) throw new Error("Too many arguments for /workflow preview-ui");
-      return { action: "preview-ui", json, ...options };
-    }
     case "open": {
       const runId = argv.shift();
-      if (!runId) throw new Error("Usage: /workflow open <runId> [result|script|journal|transcripts|ui] [viewId] [--profile compact|panel|full] [--width <columns>]");
+      if (!runId) throw new Error("Usage: /workflow open <runId> [result|script|journal|transcripts]");
       const target = argv.shift() ?? "result";
-      if (!isOpenTarget(target)) throw new Error("Open target must be result, script, journal, transcripts, or ui");
-      const options = parseOpenOptions(target, argv);
-      return { action: "open", runId, target, ...options };
+      if (!isOpenTarget(target)) throw new Error("Open target must be result, script, journal, or transcripts");
+      if (argv.length > 0) throw new Error("Too many arguments for /workflow open");
+      return { action: "open", runId, target };
     }
     default:
       throw new Error(`Unknown /workflow action: ${action}\n${workflowHelpText()}`);
@@ -92,57 +79,8 @@ export function workflowHelpText(): string {
     "/workflow resume <runId> [--script <scriptPath>] [--args <json>] [--await|--async]",
     "/workflow stop|pause|continue|delete <runId>",
     "/workflow skip-agent <runId> <callId>",
-    "/workflow open <runId> [result|script|journal|transcripts|ui] [viewId] [--profile compact|panel|full] [--width <columns>]",
-    "/workflow preview-ui <json> [--profile compact|panel|full] [--width <columns>]",
+    "/workflow open <runId> [result|script|journal|transcripts]",
   ].join("\n");
-}
-
-function parseOpenOptions(target: "result" | "script" | "journal" | "transcripts" | "ui", argv: string[]): { viewId?: string; profile?: WorkflowOpenProfile; width?: number } {
-  let viewId: string | undefined;
-  const options = parseRenderOptions(argv, (arg) => {
-    if (target !== "ui") throw new Error("Only /workflow open <runId> ui accepts viewId, --profile, or --width");
-    if (viewId !== undefined) throw new Error("Too many view ids for /workflow open <runId> ui");
-    viewId = arg;
-  });
-  if (target !== "ui" && (options.profile !== undefined || options.width !== undefined)) throw new Error("--profile and --width are only valid for /workflow open <runId> ui");
-  return { viewId, ...options };
-}
-
-function parseRenderOptions(argv: string[], positional?: (arg: string) => void): { profile?: WorkflowOpenProfile; width?: number } {
-  let profile: WorkflowOpenProfile | undefined;
-  let width: number | undefined;
-  while (argv.length > 0) {
-    const arg = argv.shift()!;
-    if (arg === "--profile") {
-      const value = argv.shift();
-      if (profile !== undefined) throw new Error("Duplicate --profile option");
-      if (!value || value.startsWith("--")) throw new Error("--profile requires a value");
-      profile = parseProfile(value);
-      continue;
-    }
-    if (arg === "--width") {
-      const value = argv.shift();
-      if (width !== undefined) throw new Error("Duplicate --width option");
-      if (!value || value.startsWith("--")) throw new Error("--width requires a value");
-      width = parsePreviewWidth(value);
-      continue;
-    }
-    if (arg.startsWith("--")) throw new Error(`Unknown render option: ${arg}`);
-    if (!positional) throw new Error(`Unexpected argument: ${arg}`);
-    positional(arg);
-  }
-  return { profile, width };
-}
-
-function parseProfile(value: string): WorkflowOpenProfile {
-  if (value === "compact" || value === "panel" || value === "full") return value;
-  throw new Error("--profile must be compact, panel, or full");
-}
-
-function parsePreviewWidth(value: string): number {
-  const width = Number(value);
-  if (!Number.isInteger(width) || width <= 0) throw new Error("--width must be a positive integer");
-  return Math.min(MAX_PREVIEW_WIDTH, Math.max(MIN_PREVIEW_WIDTH, width));
 }
 
 function parseListFilter(argv: string[]): "running" | "completed" | "all" {
@@ -243,8 +181,8 @@ function normalizeAction(action: string): string {
   return action;
 }
 
-function isOpenTarget(value: string): value is "result" | "script" | "journal" | "transcripts" | "ui" {
-  return ["result", "script", "journal", "transcripts", "ui"].includes(value);
+function isOpenTarget(value: string): value is "result" | "script" | "journal" | "transcripts" {
+  return ["result", "script", "journal", "transcripts"].includes(value);
 }
 
 export function tokenize(input: string): string[] {

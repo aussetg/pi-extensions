@@ -7,7 +7,6 @@ import { WORKFLOW_RESOURCE_LIMITS } from "../src/constants.js";
 import { workflowFilePath } from "../src/persistence/paths.js";
 import { WorkflowRegistry } from "../src/persistence/registry.js";
 import { RunStore } from "../src/persistence/run-store.js";
-import { WorkflowViewRenderer } from "../src/ui/workflow-view-renderer.js";
 
 const meta = { name: "x", description: "test workflow" };
 const source = "export const meta = { name: 'x', description: 'test workflow' };\nreturn 'ok';\n";
@@ -120,15 +119,14 @@ describe("/workflow command routing", () => {
     expect(control.stop).toHaveBeenCalledWith("stopped by /workflow stop");
   });
 
-  it("routes artifact and UI opening to text or widget surfaces", async () => {
+  it("routes artifact opening to text output", async () => {
     const cwd = await makeCwd();
     const runStore = new RunStore();
     const { record } = await runStore.create({ cwd, sessionId: "s", meta, source, args: {} });
     record.outputPath = path.join(record.runDir, "output.json");
     await fs.promises.writeFile(record.outputPath, "result text", "utf8");
     await fs.promises.mkdir(path.join(record.transcriptDir, "agent-1"), { recursive: true });
-    await attachUiView(record, "main", "hello from ui");
-    await runStore.setStatus(record.runId, "completed", { outputPath: record.outputPath, uiViews: record.uiViews });
+    await runStore.setStatus(record.runId, "completed", { outputPath: record.outputPath });
     const deps = makeDeps(runStore);
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
 
@@ -141,10 +139,6 @@ describe("/workflow command routing", () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining("export const meta"));
     expect(log).toHaveBeenCalledWith(expect.stringContaining("agent-1"));
 
-    const widgetCalls: Array<{ key: string; value: unknown; options?: { placement?: string } }> = [];
-    await routeWorkflowCommand({} as any, { action: "open", runId: record.runId, target: "ui", viewId: "main", width: 60 }, deps, uiCtx(cwd, "open-session", widgetCalls));
-
-    expect(widgetCalls.some((call) => call.value !== undefined && JSON.stringify(call.value).includes("hello from ui"))).toBe(true);
   });
 
   it("surfaces missing artifact read errors", async () => {
@@ -189,7 +183,7 @@ describe("/workflow save", () => {
       routeWorkflowCommand(
         {} as any,
         { action: "save", runId: record.runId, scope: "project" },
-        { runStore, registry: new WorkflowRegistry(), renderer: new WorkflowViewRenderer(), activation: {} as any },
+        { runStore, registry: new WorkflowRegistry(), activation: {} as any },
         { cwd, hasUI: false },
       ),
     ).rejects.toThrow(/already exists/);
@@ -233,7 +227,7 @@ describe("/workflow resume", () => {
       routeWorkflowCommand(
         {} as any,
         { action: "resume", runId: record.runId },
-        { runStore, registry: new WorkflowRegistry(), renderer: new WorkflowViewRenderer(), activation: {} as any },
+        { runStore, registry: new WorkflowRegistry(), activation: {} as any },
         { cwd, hasUI: false },
       ),
     ).rejects.toThrow(/JSON|Unexpected|position/);
@@ -251,7 +245,7 @@ describe("/workflow resume", () => {
       routeWorkflowCommand(
         {} as any,
         { action: "resume", runId: record.runId },
-        { runStore, registry: new WorkflowRegistry(), renderer: new WorkflowViewRenderer(), activation: {} as any },
+        { runStore, registry: new WorkflowRegistry(), activation: {} as any },
         { cwd, hasUI: false },
       ),
     ).rejects.toThrow(/exceeds/);
@@ -270,7 +264,7 @@ describe("/workflow resume", () => {
       routeWorkflowCommand(
         {} as any,
         { action: "resume", runId: record.runId },
-        { runStore, registry: new WorkflowRegistry(), renderer: new WorkflowViewRenderer(), activation: {} as any },
+        { runStore, registry: new WorkflowRegistry(), activation: {} as any },
         { cwd, hasUI: false },
       ),
     ).rejects.toThrow(/unsafe file|EISDIR|directory|illegal operation/i);
@@ -288,68 +282,17 @@ describe("/workflow resume", () => {
       routeWorkflowCommand(
         {} as any,
         { action: "resume", runId: record.runId },
-        { runStore, registry: new WorkflowRegistry(), renderer: new WorkflowViewRenderer(), activation: {} as any },
+        { runStore, registry: new WorkflowRegistry(), activation: {} as any },
         { cwd, hasUI: false },
       ),
     ).rejects.toThrow(/JSON object/);
   });
 });
 
-describe("/workflow command preview widgets", () => {
-  it("clears preview widgets independently per UI session", async () => {
-    vi.useFakeTimers();
-    try {
-      const deps = { runStore: new RunStore(), registry: new WorkflowRegistry(), renderer: new WorkflowViewRenderer(), activation: {} as any };
-      const callsA: Array<{ key: string; value: unknown; options?: { placement?: string } }> = [];
-      const callsB: Array<{ key: string; value: unknown; options?: { placement?: string } }> = [];
-      const ctxA = previewCtx("session-a", callsA);
-      const ctxB = previewCtx("session-b", callsB);
-
-      await routeWorkflowCommand({} as any, { action: "preview-ui", json: '{"title":"A","metrics":[{"label":"x","value":1}]}' }, deps, ctxA);
-      await routeWorkflowCommand({} as any, { action: "preview-ui", json: '{"title":"B","metrics":[{"label":"y","value":2}]}' }, deps, ctxB);
-
-      expect(callsA).toHaveLength(1);
-      expect(callsB).toHaveLength(1);
-      expect(callsA[0].key).not.toBe(callsB[0].key);
-      expect(callsA[0].value).not.toBeUndefined();
-      expect(callsB[0].value).not.toBeUndefined();
-
-      await vi.advanceTimersByTimeAsync(30_000);
-
-      expect(callsA).toContainEqual(expect.objectContaining({ key: callsA[0].key, value: undefined }));
-      expect(callsB).toContainEqual(expect.objectContaining({ key: callsB[0].key, value: undefined }));
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("falls back to UI object identity when no session id is available", async () => {
-    vi.useFakeTimers();
-    try {
-      const deps = { runStore: new RunStore(), registry: new WorkflowRegistry(), renderer: new WorkflowViewRenderer(), activation: {} as any };
-      const callsA: Array<{ key: string; value: unknown; options?: { placement?: string } }> = [];
-      const callsB: Array<{ key: string; value: unknown; options?: { placement?: string } }> = [];
-
-      await routeWorkflowCommand({} as any, { action: "preview-ui", json: '{"title":"A"}' }, deps, previewCtx(undefined, callsA));
-      await routeWorkflowCommand({} as any, { action: "preview-ui", json: '{"title":"B"}' }, deps, previewCtx(undefined, callsB));
-
-      expect(callsA[0].key).not.toBe(callsB[0].key);
-
-      await vi.advanceTimersByTimeAsync(30_000);
-
-      expect(callsA).toContainEqual(expect.objectContaining({ key: callsA[0].key, value: undefined }));
-      expect(callsB).toContainEqual(expect.objectContaining({ key: callsB[0].key, value: undefined }));
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-});
-
-function makeDeps(runStore = new RunStore(), activation: Record<string, unknown> = {}): { runStore: RunStore; registry: WorkflowRegistry; renderer: WorkflowViewRenderer; activation: any } {
+function makeDeps(runStore = new RunStore(), activation: Record<string, unknown> = {}) {
   return {
     runStore,
     registry: new WorkflowRegistry(),
-    renderer: new WorkflowViewRenderer(),
     activation: {
       enable: () => undefined,
       disable: () => undefined,
@@ -357,7 +300,7 @@ function makeDeps(runStore = new RunStore(), activation: Record<string, unknown>
       report: () => undefined,
       updateStatus: () => undefined,
       ...activation,
-    },
+    } as any,
   };
 }
 
@@ -373,30 +316,6 @@ function noUiCtx(cwd: string): any {
 
 function uiCtx(cwd: string, sessionId: string | undefined, calls: Array<{ key: string; value: unknown; options?: { placement?: string } }>): any {
   return { cwd, ...previewCtx(sessionId, calls) };
-}
-
-async function attachUiView(record: any, viewId: string, message: string): Promise<void> {
-  const viewDir = path.join(record.runDir, "ui", viewId);
-  await fs.promises.mkdir(viewDir, { recursive: true });
-  const specPath = path.join(viewDir, "spec.json");
-  const latestStatePath = path.join(viewDir, "state-latest.json");
-  await fs.promises.writeFile(
-    specPath,
-    `${JSON.stringify(
-      {
-        version: 1,
-        id: viewId,
-        title: "Main view",
-        initialState: { message },
-        layout: { type: "markdown", bind: "/message" },
-      },
-      null,
-      2,
-    )}\n`,
-    "utf8",
-  );
-  await fs.promises.writeFile(latestStatePath, `${JSON.stringify({ message }, null, 2)}\n`, "utf8");
-  record.uiViews.push({ viewId, title: "Main view", specPath, latestStatePath });
 }
 
 function previewCtx(sessionId: string | undefined, calls: Array<{ key: string; value: unknown; options?: { placement?: string } }>): any {

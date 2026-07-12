@@ -49,7 +49,10 @@ describe("Pi integration contracts", () => {
     const second = tool.renderResult({ details: workflowDetails("fresh partial row") }, { isPartial: true }, undefined, context);
 
     expect(second).toBe(first);
-    expect(second.render(100).join("\n")).toContain("fresh partial row");
+    const rendered = second.render(100).join("\n");
+    expect(rendered).toContain("fresh partial row");
+    expect(rendered).toContain("Review");
+    expect(rendered).toContain("Verify");
   });
 
   it("delivers background workflow completion through pi.sendMessage follow-up options", async () => {
@@ -200,7 +203,7 @@ return { error };`,
     expect(output.error).toMatch(/no longer applies cleanly; workspace unchanged/);
   });
 
-  it("passes live widget factories that render against a realistic ctx.ui.setWidget callback", async () => {
+  it("derives the live widget from workflow execution progress", async () => {
     const renderedWidgets: Array<{ key: string; lines: string[] }> = [];
     const cleared: string[] = [];
     const runStore = new RunStore();
@@ -210,16 +213,9 @@ return { error };`,
       toolCallId: "set-widget-contract",
       input: {
         mode: "await",
-        script: `export const meta = { name: 'set_widget_contract', description: 'exercise live widget callback rendering' };
-await ui.define({
-  version: 1,
-  id: 'live',
-  title: 'Live UI',
-  placement: 'widget',
-  initialState: { count: 1 },
-  layout: { type: 'metric', label: 'count', bind: '/count' },
-});
-await ui.update('live', { count: 2 });
+        script: `export const meta = { name: 'set_widget_contract', description: 'exercise inferred progress rendering' };
+phase('Inspect');
+await log('checking');
 return 'ok';`,
       },
       ctx: {
@@ -241,8 +237,8 @@ return 'ok';`,
     });
 
     expect(result.status).toBe("completed");
-    expect(renderedWidgets.some((widget) => widget.key.endsWith(":live") && widget.lines.join("\n").includes("Live UI") && widget.lines.join("\n").includes("count: 2"))).toBe(true);
-    expect(cleared.some((key) => key.endsWith(":live"))).toBe(true);
+    expect(renderedWidgets.some((widget) => widget.key.endsWith(":__progress") && widget.lines.join("\n").includes("set_widget_contract"))).toBe(true);
+    expect(cleared.some((key) => key.endsWith(":__progress"))).toBe(true);
   });
 });
 
@@ -271,6 +267,7 @@ function workflowDetails(lastLabel: string): WorkflowLaunchOutput {
     runId: "wr_renderer_contract",
     name: "renderer_contract",
     description: "exercise tool renderer lifecycle",
+    phases: [{ title: "Review" }, { title: "Verify" }],
     summary: "summary",
     scriptPath: "/tmp/workflow.js",
     transcriptDir: "/tmp/subagents",
@@ -281,6 +278,7 @@ function workflowDetails(lastLabel: string): WorkflowLaunchOutput {
       completed: 0,
       failed: 0,
       skipped: 0,
+      phase: "Review",
       updatedAt: startedAt,
       calls: [{ callId: "0001", label: lastLabel, status: "running", startedAt }],
       recentLogs: [],
