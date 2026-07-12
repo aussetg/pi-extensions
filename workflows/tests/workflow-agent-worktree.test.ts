@@ -202,7 +202,7 @@ describe("WorkflowAgent workspace modes", () => {
     })).rejects.toThrow(/stdout line exceeded/);
   });
 
-  it("streams large Pi JSON output without retaining a transcript copy", async () => {
+  it("streams bounded Pi JSON output without retaining a transcript copy", async () => {
     const repo = path.join(tmp, "repo-large-stream");
     const fakePi = path.join(tmp, "fake-pi-large-stream.mjs");
     const transcriptDir = path.join(tmp, "transcripts-large-stream");
@@ -219,7 +219,7 @@ describe("WorkflowAgent workspace modes", () => {
         "await fs.promises.writeFile(sessionPath, JSON.stringify({ type: 'session', version: 3, id: 'fake-session', timestamp: '2026-01-01T00:00:00.000Z', cwd: process.cwd() }) + '\\n', 'utf8');",
         "console.log(JSON.stringify({ type: 'session', version: 3, id: 'fake-session', timestamp: '2026-01-01T00:00:00.000Z', cwd: process.cwd() }));",
         "const payload = 'x'.repeat(2048);",
-        "for (let i = 0; i < 2300; i++) console.log(JSON.stringify({ type: 'message_update', message: { role: 'assistant', content: [{ type: 'text', text: payload }] }, assistantMessageEvent: { type: 'text_delta', delta: payload } }));",
+        "for (let i = 0; i < 700; i++) console.log(JSON.stringify({ type: 'message_update', message: { role: 'assistant', content: [{ type: 'text', text: payload }] }, assistantMessageEvent: { type: 'text_delta', delta: payload } }));",
         "console.log(JSON.stringify({ type: 'message_end', message: { role: 'assistant', model: 'sonnet-test', content: [{ type: 'text', text: 'final ok' }], usage: { input: 5, output: 7 } } }));",
       ].join("\n"),
       "utf8",
@@ -247,11 +247,165 @@ describe("WorkflowAgent workspace modes", () => {
     const transcript = JSON.parse(await fs.promises.readFile(result.transcriptPath, "utf8"));
     expect(transcript.messages).toBeUndefined();
     expect(transcript.stream.messagesRetained).toBe(false);
-    expect(transcript.stream.stdoutBytes).toBeGreaterThan(4 * 1024 * 1024);
+    expect(transcript.stream.stdoutBytes).toBeGreaterThan(2 * 1024 * 1024);
+    expect(transcript.stream.stdoutBytes).toBeLessThanOrEqual(WORKFLOW_RESOURCE_LIMITS.subagentStdoutBytes);
     expect(transcript.stream.messageCount).toBe(1);
     expect(transcript.stream.assistantMessageCount).toBe(1);
     expect(transcript.piSession.sessionId).toBe("fake-session");
     expect(transcript.piSession.sessionPath).toBe(result.sessionPath);
+  });
+
+  it("rejects subagent stdout that exceeds the total stream limit", async () => {
+    const repo = path.join(tmp, "repo-total-stdout-limit");
+    const fakePi = path.join(tmp, "fake-pi-total-stdout-limit.mjs");
+    const transcriptDir = path.join(tmp, "transcripts-total-stdout-limit");
+
+    await fs.promises.mkdir(repo, { recursive: true });
+    await fs.promises.writeFile(
+      fakePi,
+      [
+        `const line = JSON.stringify({ type: "message_update", value: "${"x".repeat(4096)}" }) + "\\n";`,
+        `for (let i = 0; i < ${Math.ceil(WORKFLOW_RESOURCE_LIMITS.subagentStdoutBytes / 4096) + 100}; i++) {`,
+        "  if (!process.stdout.write(line)) await new Promise((resolve) => process.stdout.once('drain', resolve));",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    process.argv[1] = fakePi;
+
+    await expect(new WorkflowAgent().run({
+      callId: "0001",
+      runId: "wr_test",
+      cwd: repo,
+      label: "total stdout limit",
+      prompt: "overflow total stdout",
+      options: { workspace: "shared" },
+      transcriptDir,
+      signal: new AbortController().signal,
+      stallMs: 10_000,
+      stallRetries: 0,
+    })).rejects.toThrow(/stdout exceeded/);
+  });
+
+  it("rejects subagent streams with too many events", async () => {
+    const repo = path.join(tmp, "repo-event-limit");
+    const fakePi = path.join(tmp, "fake-pi-event-limit.mjs");
+    const transcriptDir = path.join(tmp, "transcripts-event-limit");
+
+    await fs.promises.mkdir(repo, { recursive: true });
+    await fs.promises.writeFile(fakePi, `for (let i = 0; i <= ${WORKFLOW_RESOURCE_LIMITS.subagentEvents}; i++) console.log("{}");`, "utf8");
+    process.argv[1] = fakePi;
+
+    await expect(new WorkflowAgent().run({
+      callId: "0001",
+      runId: "wr_test",
+      cwd: repo,
+      label: "event limit",
+      prompt: "overflow event count",
+      options: { workspace: "shared" },
+      transcriptDir,
+      signal: new AbortController().signal,
+      stallMs: 10_000,
+      stallRetries: 0,
+    })).rejects.toThrow(/event count exceeded/);
+  });
+
+  it("rejects malformed JSON events", async () => {
+    const repo = path.join(tmp, "repo-malformed-event");
+    const fakePi = path.join(tmp, "fake-pi-malformed-event.mjs");
+    const transcriptDir = path.join(tmp, "transcripts-malformed-event");
+
+    await fs.promises.mkdir(repo, { recursive: true });
+    await fs.promises.writeFile(fakePi, "console.log('{not json');", "utf8");
+    process.argv[1] = fakePi;
+
+    await expect(new WorkflowAgent().run({
+      callId: "0001",
+      runId: "wr_test",
+      cwd: repo,
+      label: "malformed event",
+      prompt: "emit malformed JSON",
+      options: { workspace: "shared" },
+      transcriptDir,
+      signal: new AbortController().signal,
+      stallMs: 10_000,
+      stallRetries: 0,
+    })).rejects.toThrow(/malformed JSON event/);
+  });
+
+  it("requires a valid final assistant message", async () => {
+    const repo = path.join(tmp, "repo-missing-assistant");
+    const fakePi = path.join(tmp, "fake-pi-missing-assistant.mjs");
+    const transcriptDir = path.join(tmp, "transcripts-missing-assistant");
+
+    await fs.promises.mkdir(repo, { recursive: true });
+    await fs.promises.writeFile(fakePi, "console.log(JSON.stringify({ type: 'session', id: 'empty' }));", "utf8");
+    process.argv[1] = fakePi;
+
+    await expect(new WorkflowAgent().run({
+      callId: "0001",
+      runId: "wr_test",
+      cwd: repo,
+      label: "missing assistant",
+      prompt: "emit no result",
+      options: { workspace: "shared" },
+      transcriptDir,
+      signal: new AbortController().signal,
+      stallMs: 10_000,
+      stallRetries: 0,
+    })).rejects.toThrow(/valid final assistant message/);
+  });
+
+  it("does not accept an errored assistant event as a final result", async () => {
+    const repo = path.join(tmp, "repo-errored-assistant");
+    const fakePi = path.join(tmp, "fake-pi-errored-assistant.mjs");
+    const transcriptDir = path.join(tmp, "transcripts-errored-assistant");
+
+    await fs.promises.mkdir(repo, { recursive: true });
+    await fs.promises.writeFile(
+      fakePi,
+      "console.log(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'partial', stopReason: 'error', errorMessage: 'request failed' } }));",
+      "utf8",
+    );
+    process.argv[1] = fakePi;
+
+    await expect(new WorkflowAgent().run({
+      callId: "0001",
+      runId: "wr_test",
+      cwd: repo,
+      label: "errored assistant",
+      prompt: "fail",
+      options: { workspace: "shared" },
+      transcriptDir,
+      signal: new AbortController().signal,
+      stallMs: 10_000,
+      stallRetries: 0,
+    })).rejects.toThrow(/valid final assistant message/);
+  });
+
+  it("compiles structured output schemas before launching a subagent", async () => {
+    const repo = path.join(tmp, "repo-invalid-schema");
+    const fakePi = path.join(tmp, "fake-pi-invalid-schema.mjs");
+    const launchedPath = path.join(tmp, "invalid-schema-launched");
+    const transcriptDir = path.join(tmp, "transcripts-invalid-schema");
+
+    await fs.promises.mkdir(repo, { recursive: true });
+    await fs.promises.writeFile(fakePi, `await import("node:fs").then((fs) => fs.promises.writeFile(${JSON.stringify(launchedPath)}, "launched"));`, "utf8");
+    process.argv[1] = fakePi;
+
+    await expect(new WorkflowAgent().run({
+      callId: "0001",
+      runId: "wr_test",
+      cwd: repo,
+      label: "invalid schema",
+      prompt: "do not launch",
+      options: { workspace: "shared", schema: { type: "not-a-json-schema-type" } },
+      transcriptDir,
+      signal: new AbortController().signal,
+      stallMs: 10_000,
+      stallRetries: 0,
+    })).rejects.toThrow(/schema is invalid/);
+    expect(await exists(launchedPath)).toBe(false);
   });
 
   it("drops oversized aggregate events after the final message", async () => {

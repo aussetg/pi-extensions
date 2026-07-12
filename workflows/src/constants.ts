@@ -48,6 +48,8 @@ export const WORKFLOW_RESOURCE_LIMITS = {
   workflowOutputBytes: 2 * 1024 * 1024,
   workflowChildStderrBytes: 64 * 1024,
   subagentStdoutLineBytes: 1024 * 1024,
+  subagentStdoutBytes: 4 * 1024 * 1024,
+  subagentEvents: 10_000,
   subagentResultTextBytes: 512 * 1024,
   subagentStderrBytes: 128 * 1024,
   runRecordBytes: 8 * 1024 * 1024,

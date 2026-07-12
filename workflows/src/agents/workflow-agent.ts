@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { Ajv2020 } from "ajv/dist/2020.js";
+import type { ValidateFunction } from "ajv";
 import type { AgentOptions, AgentWorkspaceArtifacts, JsonSchema, WorkflowUsage } from "../types.js";
 import type { ThinkingLevel } from "../thinking.js";
 import { WORKFLOW_RESOURCE_LIMITS } from "../constants.js";
@@ -42,6 +43,7 @@ interface SubagentStreamState {
   droppedOversizeLines: number;
   messageCount: number;
   assistantMessageCount: number;
+  hasValidFinalAssistantMessage: boolean;
   toolExecutions: number;
   fallbackToolCalls: number;
   subagentTokens: number;
@@ -86,6 +88,11 @@ interface AgentWorkspace {
   cleanup(): Promise<void>;
 }
 
+interface StructuredResultValidator {
+  validate: ValidateFunction;
+  errorsText(): string;
+}
+
 interface IgnoredArtifactManifest {
   version: 1;
   kind: "worktree_ignored_files";
@@ -104,6 +111,7 @@ interface IgnoredArtifactManifest {
 
 export class WorkflowAgent {
   async run(call: WorkflowAgentCall): Promise<WorkflowAgentResult> {
+    const structuredValidator = call.options.schema ? compileStructuredResultSchema(call.options.schema) : undefined;
     const callDir = path.join(call.transcriptDir, call.callId);
     await ensureDir(callDir);
     const promptPath = path.join(callDir, "prompt.txt");
@@ -120,7 +128,7 @@ export class WorkflowAgent {
     let lastError: unknown;
     for (let attempt = 0; attempt <= stallRetries; attempt++) {
       try {
-        return await this.runAttempt(call, callDir, attempt);
+        return await this.runAttempt(call, callDir, attempt, structuredValidator);
       } catch (err) {
         if (err instanceof WorkflowSkipAgentError || err instanceof WorkflowAbortError || call.signal.aborted) throw err;
         lastError = err;
@@ -132,7 +140,7 @@ export class WorkflowAgent {
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
-  private async runAttempt(call: WorkflowAgentCall, callDir: string, attempt: number): Promise<WorkflowAgentResult> {
+  private async runAttempt(call: WorkflowAgentCall, callDir: string, attempt: number, structuredValidator?: StructuredResultValidator): Promise<WorkflowAgentResult> {
     const stream = createSubagentStreamState();
     const stderr = new BoundedTextAccumulator(WORKFLOW_RESOURCE_LIMITS.subagentStderrBytes, "\n… subagent stderr truncated …");
     const workspace = await prepareAgentWorkspace(call, callDir, attempt);
@@ -199,7 +207,7 @@ export class WorkflowAgent {
           if (!line.trim()) return;
           if (byteLength(line) > WORKFLOW_RESOURCE_LIMITS.subagentStdoutLineBytes) {
             if (isDroppableOversizedEventPrefix(line)) {
-              stream.eventCount++;
+              countSubagentEvent(call.callId, stream);
               stream.droppedOversizeLines++;
               resetTimer();
               return;
@@ -207,22 +215,26 @@ export class WorkflowAgent {
             throw new Error(`Subagent ${call.callId} stdout line exceeded ${WORKFLOW_RESOURCE_LIMITS.subagentStdoutLineBytes} bytes`);
           }
           resetTimer();
-          stream.eventCount++;
+          countSubagentEvent(call.callId, stream);
           let event: any;
           try {
             event = JSON.parse(line);
-          } catch {
+          } catch (err) {
             stream.malformedEventCount++;
-            return;
+            throw new Error(`Subagent ${call.callId} emitted malformed JSON event: ${(err as Error).message}`);
           }
           stream.parsedEventCount++;
           recordSubagentEvent(call.callId, event, stream);
         };
 
         proc.stdout.on("data", (chunk) => {
+          if (settled) return;
           const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
           stream.stdoutBytes += buffer.length;
           try {
+            if (stream.stdoutBytes > WORKFLOW_RESOURCE_LIMITS.subagentStdoutBytes) {
+              throw new Error(`Subagent ${call.callId} stdout exceeded ${WORKFLOW_RESOURCE_LIMITS.subagentStdoutBytes} bytes`);
+            }
             stdoutBuffer += stdoutDecoder.write(buffer);
             while (true) {
               const newline = stdoutBuffer.indexOf("\n");
@@ -238,7 +250,7 @@ export class WorkflowAgent {
               if (newline === -1) {
                 if (byteLength(stdoutBuffer) > WORKFLOW_RESOURCE_LIMITS.subagentStdoutLineBytes) {
                   if (isDroppableOversizedEventPrefix(stdoutBuffer)) {
-                    stream.eventCount++;
+                    countSubagentEvent(call.callId, stream);
                     stream.droppedOversizeLines++;
                     discardingOversizeLine = true;
                     stdoutBuffer = "";
@@ -281,10 +293,11 @@ export class WorkflowAgent {
       const transcriptPath = path.join(callDir, attempt === 0 ? "transcript.json" : `transcript-attempt-${attempt}.json`);
       await fs.promises.writeFile(transcriptPath, `${JSON.stringify(buildTranscriptSummary({ attempt, exitCode, stderr: stderr.toString(), sessionDir, sessionPath, stream, workspace: workspaceArtifacts }), null, 2)}\n`, "utf8");
       if (exitCode !== 0) throw new Error(`Subagent ${call.callId} exited with ${exitCode}: ${truncateBytes(stderr.toString(), 4000)}`);
+      if (!stream.hasValidFinalAssistantMessage) throw new Error(`Subagent ${call.callId} did not emit a valid final assistant message`);
 
       const resultText = stream.resultText;
       assertResultTextWithinLimit(call.callId, resultText);
-      const result = call.options.schema ? parseStructuredResult(resultText, call.options.schema) : resultText;
+      const result = structuredValidator ? parseStructuredResult(resultText, structuredValidator) : resultText;
       const usage = collectUsage(stream);
       const resultPath = path.join(callDir, "result.json");
       completedResult = { result, resultText, transcriptPath, resultPath, usage, model: stream.model, thinking: call.options.thinking, sessionPath, workspace: workspaceArtifacts };
@@ -392,6 +405,7 @@ function createSubagentStreamState(): SubagentStreamState {
     droppedOversizeLines: 0,
     messageCount: 0,
     assistantMessageCount: 0,
+    hasValidFinalAssistantMessage: false,
     toolExecutions: 0,
     fallbackToolCalls: 0,
     subagentTokens: 0,
@@ -426,7 +440,20 @@ function recordSubagentEvent(callId: string, event: unknown, stream: SubagentStr
 
   if (typeof message.model === "string" && message.model.trim()) stream.model = message.model;
   const text = assistantTextFromMessage(callId, message);
-  if (typeof message.content === "string" || text.trim()) stream.resultText = text;
+  if (record.type === "message_end") {
+    stream.hasValidFinalAssistantMessage = text.trim().length > 0
+      && message.stopReason !== "error"
+      && message.stopReason !== "aborted"
+      && message.stopReason !== "toolUse";
+    if (stream.hasValidFinalAssistantMessage) stream.resultText = text;
+  }
+}
+
+function countSubagentEvent(callId: string, stream: SubagentStreamState): void {
+  stream.eventCount++;
+  if (stream.eventCount > WORKFLOW_RESOURCE_LIMITS.subagentEvents) {
+    throw new Error(`Subagent ${callId} event count exceeded ${WORKFLOW_RESOURCE_LIMITS.subagentEvents}`);
+  }
 }
 
 function isMessageLike(value: unknown): value is MessageLike {
@@ -442,6 +469,7 @@ function assistantTextFromMessage(callId: string, message: MessageLike): string 
   const chunks: string[] = [];
   let bytes = 0;
   for (const part of message.content) {
+    if (!part || typeof part !== "object" || Array.isArray(part)) continue;
     if (part.type !== "text" || typeof part.text !== "string") continue;
     bytes += byteLength(part.text) + (chunks.length > 0 ? 1 : 0);
     if (bytes > WORKFLOW_RESOURCE_LIMITS.subagentResultTextBytes) {
@@ -453,7 +481,9 @@ function assistantTextFromMessage(callId: string, message: MessageLike): string 
 }
 
 function countToolCallParts(message: MessageLike): number {
-  return Array.isArray(message.content) ? message.content.filter((part) => part.type === "toolCall").length : 0;
+  return Array.isArray(message.content)
+    ? message.content.filter((part) => !!part && typeof part === "object" && !Array.isArray(part) && part.type === "toolCall").length
+    : 0;
 }
 
 function collectUsage(stream: SubagentStreamState): WorkflowUsage {
@@ -496,6 +526,7 @@ function buildTranscriptSummary(input: { attempt: number; exitCode: number; stde
       droppedOversizeLines: input.stream.droppedOversizeLines,
       messageCount: input.stream.messageCount,
       assistantMessageCount: input.stream.assistantMessageCount,
+      hasValidFinalAssistantMessage: input.stream.hasValidFinalAssistantMessage,
       toolExecutions: input.stream.toolExecutions,
       fallbackToolCalls: input.stream.fallbackToolCalls,
       subagentTokens: input.stream.subagentTokens,
@@ -563,7 +594,13 @@ async function sessionHeaderMatches(filePath: string, sessionId: string): Promis
   }
 }
 
-function parseStructuredResult(text: string, schema: JsonSchema): unknown {
+function compileStructuredResultSchema(schema: JsonSchema): StructuredResultValidator {
+  const ajv = new Ajv2020({ allErrors: true, strict: false });
+  const validate = ajv.compile(schema);
+  return { validate, errorsText: () => ajv.errorsText(validate.errors) };
+}
+
+function parseStructuredResult(text: string, validator: StructuredResultValidator): unknown {
   const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/```$/i, "").trim();
   let value: unknown;
   try {
@@ -571,9 +608,7 @@ function parseStructuredResult(text: string, schema: JsonSchema): unknown {
   } catch (err) {
     throw new Error(`Subagent structured output was not valid JSON: ${(err as Error).message}. Output: ${truncateBytes(text, 2000)}`);
   }
-  const ajv = new Ajv2020({ allErrors: true, strict: false });
-  const validate = ajv.compile(schema);
-  if (!validate(value)) throw new Error(`Subagent structured output failed schema: ${ajv.errorsText(validate.errors)}`);
+  if (!validator.validate(value)) throw new Error(`Subagent structured output failed schema: ${validator.errorsText()}`);
   return value;
 }
 
@@ -633,7 +668,8 @@ async function prepareAgentWorkspace(call: WorkflowAgentCall, callDir: string, a
 
       try {
         const status = await gitExec(["-C", worktreeDir, "status", "--short", "--ignored", "--untracked-files=all"], { allowFailure: true, maxBuffer: WORKFLOW_RESOURCE_LIMITS.worktreeStatusBytes });
-        await fs.promises.writeFile(statusPath, status.stdout || status.stderr || "", "utf8");
+        const statusText = truncateBytes(status.stdout || status.stderr || "", WORKFLOW_RESOURCE_LIMITS.worktreeStatusBytes, "\n… worktree status truncated …\n");
+        await fs.promises.writeFile(statusPath, statusText, "utf8");
       } catch (err) {
         delete artifacts.statusPath;
         errors.push(`worktree status capture failed: ${(err as Error).message}`);
