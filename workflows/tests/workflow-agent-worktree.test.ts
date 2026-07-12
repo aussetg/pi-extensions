@@ -348,6 +348,42 @@ describe("WorkflowAgent workspace modes", () => {
     expect(error.error).toMatch(/stalled after 50ms/);
   });
 
+  it("does not retry a stalled shared agent after partial edits", async () => {
+    const repo = path.join(tmp, "repo-shared-stall");
+    const fakePi = path.join(tmp, "fake-pi-shared-stall.mjs");
+    const transcriptDir = path.join(tmp, "transcripts-shared-stall");
+
+    await fs.promises.mkdir(repo, { recursive: true });
+    await fs.promises.writeFile(
+      fakePi,
+      [
+        "import fs from 'node:fs';",
+        "import path from 'node:path';",
+        "await fs.promises.appendFile(path.join(process.cwd(), 'partial.txt'), 'edit\\n');",
+        "setInterval(() => {}, 1000);",
+      ].join("\n"),
+      "utf8",
+    );
+    process.argv[1] = fakePi;
+
+    const run = new WorkflowAgent().run({
+      callId: "0001",
+      runId: "wr_test",
+      cwd: repo,
+      label: "shared stall",
+      prompt: "edit then stall",
+      options: { workspace: "shared", stallMs: 50 },
+      transcriptDir,
+      signal: new AbortController().signal,
+      stallMs: 10_000,
+      stallRetries: 5,
+    });
+
+    await expect(rejectionMessageWithin(run, 1000)).resolves.toMatch(/stalled after 50ms/);
+    await expect(fs.promises.readFile(path.join(repo, "partial.txt"), "utf8")).resolves.toBe("edit\n");
+    expect(await exists(path.join(transcriptDir, "0001", "pi-session-attempt-1"))).toBe(false);
+  });
+
   it("runs the subagent in a disposable git worktree and captures edits as a patch", async () => {
     const repo = path.join(tmp, "repo");
     const fakePi = path.join(tmp, "fake-pi.mjs");

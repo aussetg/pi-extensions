@@ -109,14 +109,22 @@ export class WorkflowAgent {
     const promptPath = path.join(callDir, "prompt.txt");
     await fs.promises.writeFile(promptPath, call.prompt, "utf8");
 
+    // A shared agent may have changed its cwd before going quiet. Starting the
+    // prompt over in that dirty workspace can repeat those edits. Patch agents
+    // get a fresh disposable worktree per attempt, while read-only agents
+    // cannot mutate their workspace, so only those modes are safe to retry.
+    const stallRetries = call.options.workspace === "patch" || call.options.workspace === "readOnly"
+      ? call.stallRetries
+      : 0;
+
     let lastError: unknown;
-    for (let attempt = 0; attempt <= call.stallRetries; attempt++) {
+    for (let attempt = 0; attempt <= stallRetries; attempt++) {
       try {
         return await this.runAttempt(call, callDir, attempt);
       } catch (err) {
         if (err instanceof WorkflowSkipAgentError || err instanceof WorkflowAbortError || call.signal.aborted) throw err;
         lastError = err;
-        if (!String((err as Error).message).includes("stalled") || attempt >= call.stallRetries) break;
+        if (!String((err as Error).message).includes("stalled") || attempt >= stallRetries) break;
       }
     }
     const errorPath = path.join(callDir, "error.json");
