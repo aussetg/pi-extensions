@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 
 const DEFAULT_IDLE_TTL_SECONDS = "3600";
+const DEFAULT_COMMAND_TIMEOUT_MS = 20_000;
+const STOP_TIMEOUT_PER_SESSION_MS = 11_000;
 
 let sessionBase: string | undefined;
 let sessionId: string | undefined;
@@ -83,7 +85,21 @@ async function runWlSession(pi: ExtensionAPI, base: string, args: string[]): Pro
 		...args.map(shellQuote),
 	].join(" ");
 
-	return await pi.exec("bash", ["-lc", command], { timeout: 20_000 });
+	return await pi.exec("bash", ["-lc", command], { timeout: commandTimeoutMs(base, args) });
+}
+
+function commandTimeoutMs(base: string, args: string[]): number {
+	if (args[0] !== "stop-all") return DEFAULT_COMMAND_TIMEOUT_MS;
+
+	try {
+		let sessionCount = 0;
+		for (const entry of fs.readdirSync(base, { withFileTypes: true })) {
+			if (entry.isDirectory()) sessionCount += 1;
+		}
+		return Math.max(DEFAULT_COMMAND_TIMEOUT_MS, 5_000 + sessionCount * STOP_TIMEOUT_PER_SESSION_MS);
+	} catch {
+		return DEFAULT_COMMAND_TIMEOUT_MS;
+	}
 }
 
 function configureEnvironment(ctx: ExtensionContext) {
