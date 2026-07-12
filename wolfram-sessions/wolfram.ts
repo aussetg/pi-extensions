@@ -1,5 +1,4 @@
-import { CONFIG_DIR_NAME, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import crypto from "node:crypto";
+import { CONFIG_DIR_NAME, type ExecResult, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -20,47 +19,33 @@ let sessionId: string | undefined;
 let wlSessionScript: string | undefined;
 let managedEnvironment: ManagedEnvironment | undefined;
 
-function shellQuote(value: string): string {
-	return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
-
 function sanitize(value: string): string {
 	return value.replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 96) || "unknown";
 }
 
-function shortHash(value: string): string {
-	return crypto.createHash("sha256").update(value).digest("hex").slice(0, 16);
-}
-
 function getPiSessionId(ctx: ExtensionContext): string {
-	const manager = ctx.sessionManager as unknown as {
-		getSessionId?: () => string;
-		getSessionFile?: () => string | undefined;
-	};
-
-	const id = manager.getSessionId?.();
-	if (id) return id;
-
-	const file = manager.getSessionFile?.();
-	if (file) return `${path.basename(file, ".jsonl")}-${shortHash(file)}`;
-
-	return `memory-${shortHash(ctx.cwd)}`;
+	return ctx.sessionManager.getSessionId();
 }
 
-function getSessionBase(ctx: ExtensionContext): string {
+function getSessionBase(sessionId: string): string {
 	const runtimeDir = process.env.XDG_RUNTIME_DIR;
 	const defaultRoot = path.join(runtimeDir && path.isAbsolute(runtimeDir) ? runtimeDir : os.tmpdir(), "pi-wolfram-sessions");
 	const root = process.env.WL_PI_SESSION_BASE_ROOT ?? defaultRoot;
-	return path.join(root, `pi-${sanitize(getPiSessionId(ctx))}`);
+	return path.join(root, `pi-${sanitize(sessionId)}`);
 }
 
 function agentDir(): string {
 	return process.env.PI_CODING_AGENT_DIR || process.env.PI_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
 }
 
-function isProjectTrusted(ctx: ExtensionContext): boolean {
-	const checker = (ctx as unknown as { isProjectTrusted?: () => boolean }).isProjectTrusted;
-	return typeof checker === "function" ? checker.call(ctx) === true : true;
+function isExecutableFile(candidate: string): boolean {
+	try {
+		if (!fs.statSync(candidate).isFile()) return false;
+		fs.accessSync(candidate, fs.constants.X_OK);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 function findWlSessionScript(ctx: ExtensionContext): string | undefined {
@@ -70,30 +55,27 @@ function findWlSessionScript(ctx: ExtensionContext): string | undefined {
 		path.join(os.homedir(), ".agents", "skills", "wolfram-mathematica", "scripts", "wl-session"),
 	].filter((candidate): candidate is string => Boolean(candidate));
 
-	if (isProjectTrusted(ctx)) {
+	if (ctx.isProjectTrusted()) {
 		candidates.push(
 			path.join(ctx.cwd, CONFIG_DIR_NAME, "skills", "wolfram-mathematica", "scripts", "wl-session"),
 			path.join(ctx.cwd, ".agents", "skills", "wolfram-mathematica", "scripts", "wl-session"),
 		);
 	}
 
-	return candidates.find((candidate) => fs.existsSync(candidate));
+	return candidates.find(isExecutableFile);
 }
 
-async function runWlSession(pi: ExtensionAPI, base: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number | null }> {
+function runWlSession(pi: ExtensionAPI, base: string, args: string[]): Promise<ExecResult> {
 	if (!wlSessionScript) {
-		return { stdout: "", stderr: "wl-session script not found", code: 127 };
+		return Promise.resolve({ stdout: "", stderr: "wl-session script not found", code: 127, killed: false });
 	}
 
-	const ttl = process.env.WL_SESSION_IDLE_TTL ?? DEFAULT_IDLE_TTL_SECONDS;
-	const command = [
-		`WL_SESSION_BASE=${shellQuote(base)}`,
-		`WL_SESSION_IDLE_TTL=${shellQuote(ttl)}`,
-		shellQuote(wlSessionScript),
-		...args.map(shellQuote),
-	].join(" ");
-
-	return await pi.exec("bash", ["-lc", command], { timeout: commandTimeoutMs(base, args) });
+	const ttl = managedEnvironment?.appliedIdleTtl ?? process.env.WL_SESSION_IDLE_TTL ?? DEFAULT_IDLE_TTL_SECONDS;
+	return pi.exec(
+		"/usr/bin/env",
+		["--", `WL_SESSION_BASE=${base}`, `WL_SESSION_IDLE_TTL=${ttl}`, wlSessionScript, ...args],
+		{ timeout: commandTimeoutMs(base, args) },
+	);
 }
 
 function commandTimeoutMs(base: string, args: string[]): number {
@@ -112,7 +94,7 @@ function commandTimeoutMs(base: string, args: string[]): number {
 
 function configureEnvironment(ctx: ExtensionContext) {
 	const nextSessionId = getPiSessionId(ctx);
-	const nextSessionBase = getSessionBase(ctx);
+	const nextSessionBase = getSessionBase(nextSessionId);
 	const nextWlSessionScript = findWlSessionScript(ctx);
 
 	fs.mkdirSync(nextSessionBase, { recursive: true, mode: 0o700 });
