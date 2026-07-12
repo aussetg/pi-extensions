@@ -8,9 +8,17 @@ const DEFAULT_IDLE_TTL_SECONDS = "3600";
 const DEFAULT_COMMAND_TIMEOUT_MS = 20_000;
 const STOP_TIMEOUT_PER_SESSION_MS = 11_000;
 
+type ManagedEnvironment = {
+	previousBase: string | undefined;
+	previousIdleTtl: string | undefined;
+	appliedBase: string;
+	appliedIdleTtl: string;
+};
+
 let sessionBase: string | undefined;
 let sessionId: string | undefined;
 let wlSessionScript: string | undefined;
+let managedEnvironment: ManagedEnvironment | undefined;
 
 function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, `'"'"'`)}'`;
@@ -103,14 +111,43 @@ function commandTimeoutMs(base: string, args: string[]): number {
 }
 
 function configureEnvironment(ctx: ExtensionContext) {
-	sessionId = getPiSessionId(ctx);
-	sessionBase = getSessionBase(ctx);
-	wlSessionScript = findWlSessionScript(ctx);
+	const nextSessionId = getPiSessionId(ctx);
+	const nextSessionBase = getSessionBase(ctx);
+	const nextWlSessionScript = findWlSessionScript(ctx);
 
-	fs.mkdirSync(sessionBase, { recursive: true, mode: 0o700 });
-	fs.chmodSync(sessionBase, 0o700);
-	process.env.WL_SESSION_BASE = sessionBase;
-	process.env.WL_SESSION_IDLE_TTL ??= DEFAULT_IDLE_TTL_SECONDS;
+	fs.mkdirSync(nextSessionBase, { recursive: true, mode: 0o700 });
+	fs.chmodSync(nextSessionBase, 0o700);
+	restoreEnvironment();
+
+	const previousBase = process.env.WL_SESSION_BASE;
+	const previousIdleTtl = process.env.WL_SESSION_IDLE_TTL;
+	const appliedIdleTtl = previousIdleTtl ?? DEFAULT_IDLE_TTL_SECONDS;
+	process.env.WL_SESSION_BASE = nextSessionBase;
+	process.env.WL_SESSION_IDLE_TTL = appliedIdleTtl;
+	managedEnvironment = {
+		previousBase,
+		previousIdleTtl,
+		appliedBase: nextSessionBase,
+		appliedIdleTtl,
+	};
+
+	sessionId = nextSessionId;
+	sessionBase = nextSessionBase;
+	wlSessionScript = nextWlSessionScript;
+}
+
+function restoreEnvironment(): void {
+	if (!managedEnvironment) return;
+
+	if (process.env.WL_SESSION_BASE === managedEnvironment.appliedBase) {
+		if (managedEnvironment.previousBase === undefined) delete process.env.WL_SESSION_BASE;
+		else process.env.WL_SESSION_BASE = managedEnvironment.previousBase;
+	}
+	if (process.env.WL_SESSION_IDLE_TTL === managedEnvironment.appliedIdleTtl) {
+		if (managedEnvironment.previousIdleTtl === undefined) delete process.env.WL_SESSION_IDLE_TTL;
+		else process.env.WL_SESSION_IDLE_TTL = managedEnvironment.previousIdleTtl;
+	}
+	managedEnvironment = undefined;
 }
 
 export default function wolframSessionsExtension(pi: ExtensionAPI) {
@@ -128,14 +165,19 @@ export default function wolframSessionsExtension(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		const base = sessionBase;
-		if (!base || !wlSessionScript) return;
+		let result: Awaited<ReturnType<typeof runWlSession>> | undefined;
+		try {
+			if (base && wlSessionScript) result = await runWlSession(pi, base, ["stop-all"]);
+		} finally {
+			restoreEnvironment();
+			sessionBase = undefined;
+			sessionId = undefined;
+			wlSessionScript = undefined;
+			if (ctx.hasUI) ctx.ui.setStatus("wolfram-sessions", undefined);
+		}
 
-		const result = await runWlSession(pi, base, ["stop-all"]);
-		if (ctx.hasUI) {
-			ctx.ui.setStatus("wolfram-sessions", undefined);
-			if (result.code !== 0) {
-				ctx.ui.notify(`Could not stop Wolfram sessions: ${result.stderr || result.stdout}`, "warning");
-			}
+		if (ctx.hasUI && result && result.code !== 0) {
+			ctx.ui.notify(`Could not stop Wolfram sessions: ${result.stderr || result.stdout}`, "warning");
 		}
 	});
 
