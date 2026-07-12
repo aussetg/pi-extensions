@@ -1,0 +1,44 @@
+{
+  "name": "rich-tools",
+  "private": true,
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "postinstall": "node scripts/prune-tree-sitter.mjs",
+    "test": "node --test scripts/*.test.mjs",
+    "test:rendering": "node --test scripts/rendering-equivalence.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "migrate:sessions": "node scripts/migrate-apply-patch-sessions.mjs",
+    "bench:rendering": "node --expose-gc scripts/benchmark-rendering.mjs"
+  },
+  "dependencies": {
+    "@pierre/diffs": "^1.2.1",
+    "@tree-sitter-grammars/tree-sitter-toml": "^0.7.0",
+    "@tree-sitter-grammars/tree-sitter-yaml": "^0.7.1",
+    "@tree-sitter-grammars/tree-sitter-zig": "^1.1.2",
+    "diff": "8.0.3",
+    "shiki": "^3.23.0",
+    "tree-sitter": "^0.25.0",
+    "tree-sitter-bash": "^0.25.1",
+    "tree-sitter-c": "^0.24.1",
+    "tree-sitter-cpp": "^0.23.4",
+    "tree-sitter-css": "^0.23.2",
+    "tree-sitter-go": "^0.25.0",
+    "tree-sitter-haskell": "^0.23.1",
+    "tree-sitter-html": "^0.23.2",
+    "tree-sitter-java": "^0.23.5",
+    "tree-sitter-javascript": "^0.25.0",
+    "tree-sitter-json": "^0.24.8",
+    "tree-sitter-julia": "^0.23.1",
+    "tree-sitter-php": "^0.24.2",
+    "tree-sitter-python": "^0.25.0",
+    "tree-sitter-regex": "^0.25.0",
+    "tree-sitter-ruby": "^0.23.1",
+    "tree-sitter-rust": "^0.24.0",
+    "tree-sitter-typescript": "^0.23.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "typescript": "^5.9.3"
+  }
+}
