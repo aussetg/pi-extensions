@@ -14,7 +14,7 @@ Every top-level extension is a directory with an `index.ts` entry point:
 | `code-feedback` | LSP diagnostics and automatic formatter feedback |
 | `helpers` | Runtime profiling and small TUI fixes |
 | `latex-unicode` | LaTeX-to-Unicode message rendering |
-| `notebooks` | Session-scoped notebook backends; currently Wolfram/Mathematica |
+| `wolfram-sessions` | Session-scoped Wolfram/Mathematica kernels |
 | `rich-tools` | Rich tool rendering, web tools, patching, and image support |
 | `system-context` | Linux system context injected into the model prompt |
 | `wayland-surface` | Wayland surface sharing and screenshots |

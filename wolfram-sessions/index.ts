@@ -1,5 +1,5 @@
 import registerWolframSessions from "./wolfram.ts";
 
-export default function notebooksExtension(pi: any): void {
+export default function wolframSessionsExtension(pi: any): void {
 	registerWolframSessions(pi);
 }
