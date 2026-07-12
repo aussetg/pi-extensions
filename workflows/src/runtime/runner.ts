@@ -176,7 +176,7 @@ export class WorkflowRunner {
         defaultThinking: defaultAgentThinking,
         modelRegistryModels,
         activeTools: safeActiveTools(this.deps.pi),
-        persist: () => this.deps.runStore.scheduleSave(record),
+        checkpoint: () => this.deps.runStore.checkpoint(record),
         onProgress: emitProgress,
       });
 
@@ -193,7 +193,8 @@ export class WorkflowRunner {
           try {
             const output = await child.launchOrRun({ toolCallId: `${record.taskId}_child`, input: childInput, signal: childSignal.signal, ctx });
             addUsage(record.usage, output.usage);
-            this.deps.runStore.scheduleSave(record);
+            await journal.append({ type: "usage", runId: record.runId, time: nowIso(), usage: { ...record.usage } });
+            this.deps.runStore.checkpoint(record);
             emitProgress();
             if (output.status === "failed") throw childWorkflowError(output);
             if (!output.outputPath) return output;
@@ -240,8 +241,7 @@ export class WorkflowRunner {
       stopProgressTicker();
       if (showStandardProgress) clearStandardProgress(ctx, record);
 
-      // A failed queued progress save must not prevent the terminal save from being attempted.
-      await this.deps.runStore.flush(record.runId).catch(() => undefined);
+      // saveNow supersedes pending checkpoints and follows any write already in flight.
       await this.deps.runStore.saveNow(record);
     }
 

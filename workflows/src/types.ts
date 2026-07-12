@@ -188,6 +188,8 @@ export type WorkflowJournalEvent =
       callId: string;
       label: string;
       phase?: string;
+      model?: string;
+      thinking?: ThinkingLevel;
       promptHash: string;
       optsHash: string;
     }
@@ -205,6 +207,7 @@ export type WorkflowJournalEvent =
     }
   | { type: "log"; runId: string; time: string; message: string }
   | { type: "phase"; runId: string; time: string; phase: string }
+  | { type: "usage"; runId: string; time: string; usage: WorkflowUsage }
   | { type: "patch_applied"; runId: string; time: string; patchId: string; callId: string; files: string[] }
   | { type: "workflow_completed"; runId: string; time: string; outputPath: string; usage: WorkflowUsage }
   | { type: "workflow_failed"; runId: string; time: string; error: string; errorPath?: string };

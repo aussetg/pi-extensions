@@ -1,8 +1,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WORKFLOW_RESOURCE_LIMITS } from "../src/constants.js";
+import { JsonlJournal } from "../src/persistence/journal.js";
 import { RunStore } from "../src/persistence/run-store.js";
 
 const meta = { name: "x", description: "test workflow" };
@@ -247,6 +248,76 @@ describe("RunStore loaded record path safety", () => {
 });
 
 describe("RunStore serialized saves", () => {
+  it("checkpoints growing run summaries at geometric intervals", async () => {
+    const cwd = path.join(tmp, "checkpoints");
+    await fs.promises.mkdir(cwd, { recursive: true });
+
+    const store = new RunStore();
+    const { record } = await store.create({ cwd, sessionId: "s", meta, source, args: {} });
+    const scheduled = vi.spyOn(store, "scheduleSave");
+
+    for (let total = 1; total <= 1_000; total++) {
+      record.progress.total = total;
+      store.checkpoint(record);
+    }
+
+    expect(scheduled).toHaveBeenCalledTimes(10); // 1, 2, 4, ... 512
+    await store.flush(record.runId);
+  });
+
+  it("builds the subagent manifest only when the run terminalizes", async () => {
+    const cwd = path.join(tmp, "terminal-manifest");
+    await fs.promises.mkdir(cwd, { recursive: true });
+
+    const store = new RunStore();
+    const { record } = await store.create({ cwd, sessionId: "s", meta, source, args: {} });
+    const callDir = path.join(record.transcriptDir, "0001");
+    await fs.promises.mkdir(callDir, { recursive: true });
+    await fs.promises.writeFile(path.join(callDir, "result.json"), "{}\n", "utf8");
+
+    record.progress.total = 1;
+    store.checkpoint(record);
+    await store.flush(record.runId);
+    await expect(fs.promises.stat(record.manifestPath)).rejects.toMatchObject({ code: "ENOENT" });
+
+    record.status = "completed";
+    record.endedAt = new Date().toISOString();
+    await store.saveNow(record);
+    const manifest = JSON.parse(await fs.promises.readFile(record.manifestPath, "utf8"));
+    expect(manifest.subagents).toEqual([
+      expect.objectContaining({ callId: "0001", resultPath: path.join(callDir, "result.json") }),
+    ]);
+  });
+
+  it("rebuilds a stale summary from the authoritative journal", async () => {
+    const cwd = path.join(tmp, "journal-replay");
+    await fs.promises.mkdir(cwd, { recursive: true });
+
+    const store = new RunStore();
+    const { record } = await store.create({ cwd, sessionId: "s", meta, source, args: {} });
+    const outputPath = path.join(record.runDir, "output.json");
+    const resultPath = path.join(record.transcriptDir, "0001", "result.json");
+    await fs.promises.mkdir(path.dirname(resultPath), { recursive: true });
+    await fs.promises.writeFile(resultPath, "{}\n", "utf8");
+    await fs.promises.writeFile(outputPath, "{}\n", "utf8");
+    const journal = new JsonlJournal(record.journalPath);
+    const usage = { agentCount: 1, subagentTokens: 12, toolUses: 2, estimated: false };
+    await journal.append({ type: "agent_started", runId: record.runId, time: new Date(1).toISOString(), callId: "0001", label: "replayed", promptHash: "p", optsHash: "o" });
+    await journal.append({ type: "agent_result", runId: record.runId, time: new Date(2).toISOString(), callId: "0001", status: "done", resultPath: path.relative(record.runDir, resultPath), usage });
+    await journal.append({ type: "workflow_completed", runId: record.runId, time: new Date(3).toISOString(), outputPath, usage });
+
+    const fresh = new RunStore();
+    await fresh.refresh(cwd);
+    const replayed = fresh.get(record.runId)!;
+
+    expect(replayed.status).toBe("completed");
+    expect(replayed.outputPath).toBe(outputPath);
+    expect(replayed.progress).toEqual(expect.objectContaining({ total: 1, completed: 1, running: 0 }));
+    expect(replayed.progress.calls[0]).toEqual(expect.objectContaining({ callId: "0001", label: "replayed", status: "done", resultPath }));
+    expect(replayed.usage).toEqual(usage);
+    await expect(fs.promises.stat(replayed.manifestPath)).resolves.toBeTruthy();
+  });
+
   it("flushes debounced progress saves before terminal saves", async () => {
     const cwd = path.join(tmp, "serial");
     await fs.promises.mkdir(cwd, { recursive: true });

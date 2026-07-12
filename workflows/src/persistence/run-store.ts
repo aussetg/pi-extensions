@@ -1,13 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import type { RunManifest, RunRecord, RunStatus, WorkflowMeta, WorkflowProgressSnapshot } from "../types.js";
+import type { RunManifest, RunRecord, RunStatus, WorkflowJournalEvent, WorkflowMeta, WorkflowProgressSnapshot, WorkflowUsage } from "../types.js";
 import { EXTENSION_VERSION, WORKFLOW_RESOURCE_LIMITS } from "../constants.js";
 import { sha256, stableHash } from "../utils/hashes.js";
 import { createRunId, createTaskId, nowIso } from "../utils/ids.js";
 import { toStableJsonValue } from "../utils/stable-json.js";
 import { ensureDir, runRootForCwd } from "./paths.js";
 import { readBoundedTextFile } from "./safe-paths.js";
+import { JsonlJournal } from "./journal.js";
 
 export interface RunStoreCreateArgs {
   cwd: string;
@@ -76,6 +77,8 @@ export class RunStore {
   private readonly saveQueues = new Map<string, Promise<void>>();
   private readonly saveTimers = new Map<string, NodeJS.Timeout>();
   private readonly scheduledSaves = new Map<string, RunRecord>();
+  private readonly nextCheckpointAt = new Map<string, number>();
+  private readonly manifestsWritten = new Set<string>();
   private readonly ownerTimers = new Map<string, NodeJS.Timeout>();
   private readonly ownerIdentities = new Map<string, RunOwnerIdentity>();
   private readonly shutdownStops = new Map<string, ShutdownStop>();
@@ -94,6 +97,8 @@ export class RunStore {
       if (runRoot === root && !this.controls.has(runId)) {
         this.runs.delete(runId);
         this.runRoots.delete(runId);
+        this.nextCheckpointAt.delete(runId);
+        this.manifestsWritten.delete(runId);
       }
     }
 
@@ -109,8 +114,13 @@ export class RunStore {
       try {
         const record = normalizeLoadedRunRecord(JSON.parse(await readBoundedTextFile(recordPath, WORKFLOW_RESOURCE_LIMITS.runRecordBytes)), root, entry.name);
         if (this.controls.has(record.runId)) continue;
+        const hasFinalizedManifest = isTerminalStatus(record.status) && fs.existsSync(record.manifestPath);
+        if (hasFinalizedManifest) this.manifestsWritten.add(record.runId);
+        else await replayJournal(record);
         this.runs.set(record.runId, record);
         this.runRoots.set(record.runId, root);
+        this.nextCheckpointAt.set(record.runId, nextCheckpointAfter(checkpointSize(record)));
+        if (isTerminalStatus(record.status) && !this.manifestsWritten.has(record.runId)) await this.saveNow(record);
       } catch {
         // Invalid records should not poison extension startup.
       }
@@ -179,6 +189,7 @@ export class RunStore {
     await writeRunOwner(runDir, runId, args.sessionId, this.ownerIdentity(runId));
     this.runs.set(runId, record);
     this.runRoots.set(runId, root);
+    this.nextCheckpointAt.set(runId, 1);
     await this.saveNow(record);
     return { record, runDir };
   }
@@ -187,6 +198,23 @@ export class RunStore {
     this.applyShutdownStop(record);
     this.runs.set(record.runId, record);
     this.runRoots.set(record.runId, path.dirname(record.runDir));
+    this.scheduleSave(record);
+  }
+
+  /**
+   * Checkpoint at geometrically increasing agent counts. The journal carries
+   * every transition; these summaries only make discovery faster. Writing at
+   * 1, 2, 4, ... agents keeps aggregate summary serialization O(n).
+   */
+  checkpoint(record: RunRecord): void {
+    this.applyShutdownStop(record);
+    this.runs.set(record.runId, record);
+    this.runRoots.set(record.runId, path.dirname(record.runDir));
+    const size = checkpointSize(record);
+    let next = this.nextCheckpointAt.get(record.runId) ?? 1;
+    if (size < next) return;
+    while (next <= size) next *= 2;
+    this.nextCheckpointAt.set(record.runId, next);
     this.scheduleSave(record);
   }
 
@@ -240,11 +268,17 @@ export class RunStore {
     this.applyShutdownStop(record);
     this.runs.set(record.runId, record);
     this.runRoots.set(record.runId, path.dirname(record.runDir));
+    this.cancelScheduledSave(record.runId);
     await this.enqueueSave(record.runId, async () => {
       this.applyShutdownStop(record);
       await this.writeRunRecord(record);
-      await this.writeManifest(record);
-      if (isTerminalStatus(record.status)) await removeRunOwner(record.runDir).catch(() => undefined);
+      if (isTerminalStatus(record.status)) {
+        if (!this.manifestsWritten.has(record.runId)) {
+          await this.writeManifest(record);
+          this.manifestsWritten.add(record.runId);
+        }
+        await removeRunOwner(record.runDir).catch(() => undefined);
+      }
     });
   }
 
@@ -364,7 +398,6 @@ export class RunStore {
       const record = this.runs.get(runId);
       if (!record) continue;
       this.applyShutdownStop(record, shutdownStop);
-      await this.flush(runId);
       await this.saveNow(record);
     }
     return liveRuns.length;
@@ -394,7 +427,6 @@ export class RunStore {
     Object.assign(record, extra);
     record.status = status;
     if (status !== "running" && status !== "paused" && !record.endedAt) record.endedAt = nowIso();
-    await this.flush(runId);
     await this.saveNow(record);
   }
 
@@ -415,6 +447,8 @@ export class RunStore {
     await this.flush(runId).catch(() => undefined);
     this.stopOwnerHeartbeat(runId);
     this.ownerIdentities.delete(runId);
+    this.nextCheckpointAt.delete(runId);
+    this.manifestsWritten.delete(runId);
     this.shutdownStops.delete(runId);
     this.controls.delete(runId);
     this.liveRuns.delete(runId);
@@ -434,7 +468,6 @@ export class RunStore {
         run.status = "stale";
         run.endedAt = nowIso();
         run.recovery = await recoveryForRun(run);
-        await this.flush(run.runId);
         await this.saveNow(run);
         count++;
       }
@@ -549,6 +582,144 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isTerminalStatus(status: RunStatus): boolean {
   return status !== "running" && status !== "paused";
+}
+
+function checkpointSize(record: RunRecord): number {
+  return Math.max(record.progress.total, record.usage.agentCount);
+}
+
+function nextCheckpointAfter(size: number): number {
+  let next = 1;
+  while (next <= size) next *= 2;
+  return next;
+}
+
+async function replayJournal(record: RunRecord): Promise<void> {
+  let events: WorkflowJournalEvent[];
+  try {
+    events = await new JsonlJournal(record.journalPath).readAll();
+  } catch {
+    // A valid checkpoint is still useful when a journal was externally damaged.
+    return;
+  }
+  if (events.length === 0) return;
+
+  const calls = new Map<string, WorkflowProgressSnapshot["calls"][number]>();
+  const recentLogs: string[] = [];
+  let phase: string | undefined;
+  let updatedAt = record.startedAt;
+  let sawExecutionEvent = false;
+  let usage: WorkflowUsage = { agentCount: 0, subagentTokens: 0, toolUses: 0, estimated: true };
+
+  for (const event of events) {
+    if (event.runId !== record.runId) continue;
+    updatedAt = event.time;
+    switch (event.type) {
+      case "workflow_started":
+        sawExecutionEvent = true;
+        break;
+      case "agent_started":
+        sawExecutionEvent = true;
+        calls.set(event.callId, {
+          callId: event.callId,
+          label: event.label,
+          phase: event.phase,
+          model: event.model,
+          thinking: event.thinking,
+          status: "running",
+          startedAt: event.time,
+        });
+        break;
+      case "agent_result": {
+        sawExecutionEvent = true;
+        const call = calls.get(event.callId) ?? {
+          callId: event.callId,
+          label: `agent ${event.callId}`,
+          status: "running" as const,
+          startedAt: event.time,
+        };
+        call.status = journalCallStatus(event.status);
+        call.endedAt = event.time;
+        call.error = event.error;
+        call.model = event.model;
+        call.thinking = event.thinking;
+        call.usage = event.usage;
+        call.resultPath = scopedPath(event.resultPath, record.runDir);
+        calls.set(event.callId, call);
+        if (event.usage) addUsage(usage, event.usage);
+        break;
+      }
+      case "phase":
+        phase = event.phase;
+        break;
+      case "log":
+        recentLogs.push(event.message);
+        if (recentLogs.length > 20) recentLogs.shift();
+        break;
+      case "usage":
+        sawExecutionEvent = true;
+        usage = { ...event.usage };
+        break;
+      case "patch_applied": {
+        const message = event.files.length === 0
+          ? `patch ${event.callId} contained no changes`
+          : `applied patch ${event.callId} (${event.files.length} file${event.files.length === 1 ? "" : "s"})`;
+        recentLogs.push(message);
+        if (recentLogs.length > 20) recentLogs.shift();
+        break;
+      }
+      case "workflow_completed":
+        sawExecutionEvent = true;
+        record.status = "completed";
+        record.endedAt = event.time;
+        record.outputPath = scopedPath(event.outputPath, record.runDir);
+        usage = { ...event.usage };
+        break;
+      case "workflow_failed":
+        sawExecutionEvent = true;
+        record.status = record.status === "aborted" || event.error === "Workflow aborted" ? "aborted" : "failed";
+        record.endedAt = event.time;
+        record.errorPath = scopedPath(event.errorPath, record.runDir);
+        delete record.outputPath;
+        break;
+    }
+  }
+
+  if (sawExecutionEvent) {
+    const progressCalls = [...calls.values()];
+    record.progress = {
+      total: progressCalls.length,
+      running: progressCalls.filter((call) => call.status === "running" || call.status === "pending").length,
+      completed: progressCalls.filter((call) => call.status === "done").length,
+      failed: progressCalls.filter((call) => call.status === "failed" || call.status === "aborted").length,
+      skipped: progressCalls.filter((call) => call.status === "skipped").length,
+      phase: phase ?? record.phase,
+      calls: progressCalls,
+      recentLogs,
+      updatedAt,
+    };
+    record.usage = usage;
+  } else {
+    if (phase !== undefined) {
+      record.phase = phase;
+      record.progress.phase = phase;
+    }
+    if (recentLogs.length > 0) record.progress.recentLogs = recentLogs;
+    record.progress.updatedAt = updatedAt;
+  }
+  if (phase !== undefined) record.phase = phase;
+}
+
+function journalCallStatus(status: "done" | "error" | "skipped" | "aborted"): WorkflowProgressSnapshot["calls"][number]["status"] {
+  return status === "error" ? "failed" : status;
+}
+
+function addUsage(target: WorkflowUsage, usage: WorkflowUsage): void {
+  target.agentCount += usage.agentCount;
+  target.subagentTokens += usage.subagentTokens;
+  target.toolUses += usage.toolUses;
+  if (usage.durationMs !== undefined) target.durationMs = (target.durationMs ?? 0) + usage.durationMs;
+  target.estimated = target.estimated || usage.estimated;
 }
 
 async function waitForLiveRunsToSettle(liveRuns: LiveRun[], waitMs: number): Promise<void> {

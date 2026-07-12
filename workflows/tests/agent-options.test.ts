@@ -104,7 +104,7 @@ describe("workflow agent option validation", () => {
       control: new RunControl(),
       budget: new WorkflowBudget(null),
       maxAgents: 1,
-      persist: async () => {},
+      checkpoint: () => {},
     });
 
     await expect(scheduler.agentCall("bad", { workspace: "mars" })).rejects.toThrow(/opts\.workspace/);

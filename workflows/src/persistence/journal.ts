@@ -10,10 +10,28 @@ export interface JournalWriter {
   append(event: WorkflowJournalEvent): Promise<void>;
 }
 
+const appendQueues = new Map<string, Promise<void>>();
+
 export class JsonlJournal implements JournalWriter {
   constructor(public readonly filePath: string) {}
 
-  async append(event: WorkflowJournalEvent): Promise<void> {
+  append(event: WorkflowJournalEvent): Promise<void> {
+    const key = path.resolve(this.filePath);
+    const previous = appendQueues.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(() => this.appendNow(event));
+    appendQueues.set(key, next);
+    void next.then(
+      () => {
+        if (appendQueues.get(key) === next) appendQueues.delete(key);
+      },
+      () => {
+        if (appendQueues.get(key) === next) appendQueues.delete(key);
+      },
+    );
+    return next;
+  }
+
+  private async appendNow(event: WorkflowJournalEvent): Promise<void> {
     await ensureDir(path.dirname(this.filePath));
     const line = `${JSON.stringify(event)}\n`;
     const bytes = byteLength(line);

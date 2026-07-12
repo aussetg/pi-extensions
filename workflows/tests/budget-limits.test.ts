@@ -113,7 +113,7 @@ return await parallel(lanes.map((lane) => async () => {
       control,
       budget: new WorkflowBudget(null),
       maxAgents: limit + 2,
-      persist: () => {},
+      checkpoint: () => {},
     });
     const calls = Array.from({ length: limit + 2 }, (_, index) => scheduler.agentCall(`agent ${index}`, { label: `agent ${index}` }));
 
@@ -161,7 +161,7 @@ return await parallel(lanes.map((lane) => async () => {
       control,
       budget: new WorkflowBudget(null),
       maxAgents: limit + 2,
-      persist: () => {},
+      checkpoint: () => {},
     });
     const controllers = Array.from({ length: limit + 2 }, () => new AbortController());
     const calls = controllers.map((controller, index) => scheduler.agentCall(`agent ${index}`, { label: `agent ${index}` }, controller.signal));
@@ -216,7 +216,7 @@ return await parallel(lanes.map((lane) => async () => {
       control,
       budget: new WorkflowBudget(null),
       maxAgents: 1,
-      persist: () => {},
+      checkpoint: () => {},
     });
     const controller = new AbortController();
     const call = scheduler.agentCall("agent", { label: "agent 0" }, controller.signal);

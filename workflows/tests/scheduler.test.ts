@@ -47,6 +47,24 @@ describe("workflow journal bounds", () => {
 
     await expect(journal.append({ type: "log", runId: "wr_test", time: new Date(0).toISOString(), message: "x".repeat(WORKFLOW_RESOURCE_LIMITS.journalEventBytes) } as any)).rejects.toThrow(/journal event exceeds/);
   });
+
+  it("serializes quota checks and appends across journal instances", async () => {
+    const runDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-workflow-journal-serial-"));
+    const journalPath = path.join(runDir, "journal.jsonl");
+    const event = { type: "log", runId: "wr_test", time: new Date(0).toISOString(), message: "last slot" } as const;
+    const eventBytes = Buffer.byteLength(`${JSON.stringify(event)}\n`, "utf8");
+    await fs.promises.writeFile(journalPath, "", "utf8");
+    await fs.promises.truncate(journalPath, WORKFLOW_RESOURCE_LIMITS.journalBytes - eventBytes);
+
+    const results = await Promise.allSettled([
+      new JsonlJournal(journalPath).append(event),
+      new JsonlJournal(journalPath).append(event),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect((await fs.promises.stat(journalPath)).size).toBe(WORKFLOW_RESOURCE_LIMITS.journalBytes);
+  });
 });
 
 describe("workflow scheduler", () => {
@@ -56,6 +74,7 @@ describe("workflow scheduler", () => {
     await fs.promises.mkdir(run.transcriptDir, { recursive: true });
     const journal = new JsonlJournal(run.journalPath);
     const usage = { agentCount: 1, subagentTokens: 48_700, toolUses: 9, estimated: false };
+    const checkpoint = vi.fn();
 
     vi.spyOn(WorkflowAgent.prototype, "run").mockImplementation(async (call) => {
       const callDir = path.join(call.transcriptDir, call.callId);
@@ -72,7 +91,7 @@ describe("workflow scheduler", () => {
       control: new RunControl(),
       budget: new WorkflowBudget(null),
       maxAgents: 10,
-      persist: () => undefined,
+      checkpoint,
     });
 
     await expect(scheduler.agentCall("live usage", { label: "agent with usage" })).resolves.toBe("ok");
@@ -85,6 +104,7 @@ describe("workflow scheduler", () => {
     expect(run.progress.calls[0].usage?.durationMs).toBeGreaterThanOrEqual(0);
     expect(run.usage).toEqual(expect.objectContaining({ agentCount: 1, subagentTokens: 48_700, toolUses: 9, estimated: true }));
     expect(run.usage.durationMs).toBeGreaterThanOrEqual(0);
+    expect(checkpoint).toHaveBeenCalledTimes(1);
 
     const events = await journal.readAll();
     expect(events.find((event) => event.type === "agent_result")).toEqual(expect.objectContaining({
@@ -111,7 +131,7 @@ describe("workflow scheduler", () => {
       control: new RunControl(),
       budget: new WorkflowBudget(null),
       maxAgents: 1,
-      persist: () => undefined,
+      checkpoint: () => undefined,
     });
 
     const candidate = await scheduler.agentCall("inspect", { workspace: "patch" }) as any;
@@ -149,7 +169,7 @@ describe("workflow scheduler", () => {
       control: new RunControl(),
       budget: new WorkflowBudget(10),
       maxAgents: 10,
-      persist: () => undefined,
+      checkpoint: () => undefined,
     });
 
     const first = scheduler.agentCall("one", { label: "one" });
@@ -178,7 +198,7 @@ describe("workflow scheduler", () => {
       control: new RunControl(),
       budget: new WorkflowBudget(null),
       maxAgents: 10,
-      persist: () => undefined,
+      checkpoint: () => undefined,
     });
 
     for (let i = 0; i < WORKFLOW_RESOURCE_LIMITS.logEntries + 5; i++) await scheduler.log(`log ${i}`);

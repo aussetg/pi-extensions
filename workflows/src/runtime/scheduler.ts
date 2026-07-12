@@ -51,7 +51,7 @@ export interface SchedulerDeps {
   defaultThinking?: ThinkingLevel;
   modelRegistryModels?: readonly ModelRegistryModelLike[];
   activeTools?: string[];
-  persist: () => void;
+  checkpoint: () => void;
   onProgress?: () => void;
 }
 
@@ -116,9 +116,12 @@ export class WorkflowScheduler {
       callId,
       label,
       phase,
+      model: effectiveOpts.model,
+      thinking: effectiveOpts.thinking,
       promptHash: sha256(prompt),
       optsHash: stableHash(effectiveOpts),
     });
+    this.deps.checkpoint();
 
     const agentController = this.deps.control.registerAgent(callId, signal);
     const started = Date.now();
@@ -328,7 +331,6 @@ export class WorkflowScheduler {
       recentLogs: this.deps.run.progress.recentLogs.slice(-20),
       updatedAt: nowIso(),
     };
-    this.deps.persist();
     this.deps.onProgress?.();
   }
 
