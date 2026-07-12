@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { WORKFLOW_RESOURCE_LIMITS } from "../src/constants.js";
 import { WorkflowRegistry } from "../src/persistence/registry.js";
 import { RunStore } from "../src/persistence/run-store.js";
 import { WorkflowRunner } from "../src/runtime/runner.js";
@@ -84,6 +85,40 @@ return 'ok';`,
     expect(messages).toHaveLength(1);
     expect(messages[0].message).toMatchObject({ customType: "workflow_result", display: true, details: { status: "completed", runId: launched.runId } });
     expect(messages[0].options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
+  });
+
+  it("persists async initialization failures as terminal runs", async () => {
+    const runStore = new CorruptingJournalRunStore();
+    let resolveCompletion!: (output: WorkflowLaunchOutput) => void;
+    const completion = new Promise<WorkflowLaunchOutput>((resolve) => {
+      resolveCompletion = resolve;
+    });
+    const runner = new WorkflowRunner({
+      pi: {
+        getActiveTools: () => [],
+        sendMessage: (message: any) => resolveCompletion(message.details),
+      } as any,
+      runStore,
+      registry: new WorkflowRegistry(),
+    });
+
+    const launched = await runner.launchOrRun({
+      toolCallId: "initialization-failure-contract",
+      input: {
+        mode: "async",
+        script: `export const meta = { name: 'initialization_failure_contract', description: 'exercise durable initialization failures' };
+return 'unreachable';`,
+      },
+      ctx: workflowCtx(),
+    });
+    const failed = await completion;
+
+    expect(launched.status).toBe("async_launched");
+    expect(failed).toMatchObject({ status: "failed", runId: launched.runId, error: expect.stringMatching(/journal quota exceeded/i) });
+    const runDir = path.dirname(launched.scriptPath);
+    const persisted = JSON.parse(await fs.promises.readFile(path.join(runDir, "run.json"), "utf8"));
+    expect(persisted).toMatchObject({ status: "failed", runId: launched.runId, endedAt: expect.any(String), errorPath: path.join(runDir, "error.json") });
+    await expect(fs.promises.stat(path.join(runDir, "owner.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("inherits active Pi tools for subagents while stripping workflow itself", async () => {
@@ -241,6 +276,14 @@ return 'ok';`,
     expect(cleared.some((key) => key.endsWith(":__progress"))).toBe(true);
   });
 });
+
+class CorruptingJournalRunStore extends RunStore {
+  override async create(args: Parameters<RunStore["create"]>[0]): ReturnType<RunStore["create"]> {
+    const created = await super.create(args);
+    await fs.promises.truncate(created.record.journalPath, WORKFLOW_RESOURCE_LIMITS.journalBytes + 1);
+    return created;
+  }
+}
 
 function workflowCtx(): any {
   return {

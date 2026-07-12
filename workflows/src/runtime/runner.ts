@@ -111,7 +111,6 @@ export class WorkflowRunner {
   private async executeRun(args: { record: RunRecord; resolved: ResolvedWorkflowSource; stableArgs: Record<string, unknown>; input: WorkflowInput; ctx: any; control: RunControl; defaultAgentThinking?: ReturnType<typeof defaultAgentThinkingFromContext>; modelRegistryModels?: readonly ModelRegistryModelLike[]; onUpdate?: LaunchArgs["onUpdate"] }): Promise<WorkflowLaunchOutput> {
     const { record, resolved, stableArgs, input, ctx, control, defaultAgentThinking, modelRegistryModels } = args;
     const journal = new JsonlJournal(record.journalPath);
-    await journal.append({ type: "workflow_started", runId: record.runId, time: nowIso(), scriptHash: record.scriptHash, argsHash: record.argsHash });
     let progressComponent: WorkflowProgressComponent | undefined;
     let progressRenderTimer: NodeJS.Timeout | undefined;
     const showInlineProgress = !!args.onUpdate;
@@ -154,88 +153,97 @@ export class WorkflowRunner {
         // Progress rendering is best-effort; it should never change workflow semantics.
       }
     };
-    updateStandardProgress();
-    startProgressTicker();
-    const budget = this.deps.budget ?? new WorkflowBudget(input.budgetTokens ?? null);
-    const agentQuota = this.deps.agentQuota ?? new WorkflowAgentQuota(Math.min(input.maxAgents ?? DEFAULT_LIMITS.agentCap, DEFAULT_LIMITS.agentCap));
-    const scheduler = new WorkflowScheduler({
-      cwd: ctx.cwd,
-      run: record,
-      journal,
-      control,
-      budget,
-      maxAgents: agentQuota.total,
-      agentQuota,
-      defaultThinking: defaultAgentThinking,
-      modelRegistryModels,
-      activeTools: safeActiveTools(this.deps.pi),
-      persist: () => this.deps.runStore.scheduleSave(record),
-      onProgress: emitProgress,
-    });
-
-    const globals = {
-      agent: (prompt: unknown, opts?: unknown, rpc?: SandboxRpcContext) => scheduler.agentCall(prompt, opts === undefined ? {} : opts, rpc?.signal),
-      apply: (patch: unknown, rpc?: SandboxRpcContext) => scheduler.applyPatch(patch, rpc?.signal),
-      phase: (title: string) => scheduler.phase(title),
-      log: (message: string) => scheduler.log(message),
-      workflow: async (nameOrRef: unknown, childArgs?: unknown, rpc?: SandboxRpcContext) => {
-        if ((this.deps.childDepth ?? 0) >= 1) throw new Error("Nested child workflows are limited to one level");
-        const childInput = childWorkflowInput(nameOrRef, childArgs);
-        const child = new WorkflowRunner({ ...this.deps, childDepth: (this.deps.childDepth ?? 0) + 1, budget, agentQuota });
-        const childSignal = linkAbortSignals(control.signal, rpc?.signal);
-        try {
-          const output = await child.launchOrRun({ toolCallId: `${record.taskId}_child`, input: childInput, signal: childSignal.signal, ctx });
-          addUsage(record.usage, output.usage);
-          this.deps.runStore.scheduleSave(record);
-          emitProgress();
-          if (output.status === "failed") throw childWorkflowError(output);
-          if (!output.outputPath) return output;
-          const parsed = JSON.parse(await readBoundedTextFile(output.outputPath, WORKFLOW_RESOURCE_LIMITS.workflowOutputBytes)) as { result?: unknown };
-          return parsed.result ?? null;
-        } finally {
-          childSignal.cleanup();
-        }
-      },
-      args: stableArgs,
-      budget,
-      cwd: ctx.cwd,
-    };
-
+    let result: unknown;
+    let failure: unknown;
+    let failed = false;
     try {
-      const result = await executeWorkflowSandbox(resolved.parsed.executableSource, globals, control.signal);
+      await journal.append({ type: "workflow_started", runId: record.runId, time: nowIso(), scriptHash: record.scriptHash, argsHash: record.argsHash });
+      updateStandardProgress();
+      startProgressTicker();
+
+      const budget = this.deps.budget ?? new WorkflowBudget(input.budgetTokens ?? null);
+      const agentQuota = this.deps.agentQuota ?? new WorkflowAgentQuota(Math.min(input.maxAgents ?? DEFAULT_LIMITS.agentCap, DEFAULT_LIMITS.agentCap));
+      const scheduler = new WorkflowScheduler({
+        cwd: ctx.cwd,
+        run: record,
+        journal,
+        control,
+        budget,
+        maxAgents: agentQuota.total,
+        agentQuota,
+        defaultThinking: defaultAgentThinking,
+        modelRegistryModels,
+        activeTools: safeActiveTools(this.deps.pi),
+        persist: () => this.deps.runStore.scheduleSave(record),
+        onProgress: emitProgress,
+      });
+
+      const globals = {
+        agent: (prompt: unknown, opts?: unknown, rpc?: SandboxRpcContext) => scheduler.agentCall(prompt, opts === undefined ? {} : opts, rpc?.signal),
+        apply: (patch: unknown, rpc?: SandboxRpcContext) => scheduler.applyPatch(patch, rpc?.signal),
+        phase: (title: string) => scheduler.phase(title),
+        log: (message: string) => scheduler.log(message),
+        workflow: async (nameOrRef: unknown, childArgs?: unknown, rpc?: SandboxRpcContext) => {
+          if ((this.deps.childDepth ?? 0) >= 1) throw new Error("Nested child workflows are limited to one level");
+          const childInput = childWorkflowInput(nameOrRef, childArgs);
+          const child = new WorkflowRunner({ ...this.deps, childDepth: (this.deps.childDepth ?? 0) + 1, budget, agentQuota });
+          const childSignal = linkAbortSignals(control.signal, rpc?.signal);
+          try {
+            const output = await child.launchOrRun({ toolCallId: `${record.taskId}_child`, input: childInput, signal: childSignal.signal, ctx });
+            addUsage(record.usage, output.usage);
+            this.deps.runStore.scheduleSave(record);
+            emitProgress();
+            if (output.status === "failed") throw childWorkflowError(output);
+            if (!output.outputPath) return output;
+            const parsed = JSON.parse(await readBoundedTextFile(output.outputPath, WORKFLOW_RESOURCE_LIMITS.workflowOutputBytes)) as { result?: unknown };
+            return parsed.result ?? null;
+          } finally {
+            childSignal.cleanup();
+          }
+        },
+        args: stableArgs,
+        budget,
+        cwd: ctx.cwd,
+      };
+
+      result = await executeWorkflowSandbox(resolved.parsed.executableSource, globals, control.signal);
       throwIfAborted(control.signal);
       throwIfShutdownAborted(record);
       record.status = "completed";
       record.endedAt = nowIso();
       const outputPath = path.join(record.runDir, "output.json");
       await fs.promises.writeFile(outputPath, `${JSON.stringify({ result }, null, 2)}\n`, "utf8");
-      await this.deps.runStore.flush(record.runId);
       record.outputPath = outputPath;
-      await this.deps.runStore.saveNow(record);
       throwIfAborted(control.signal);
       throwIfShutdownAborted(record);
       await journal.append({ type: "workflow_completed", runId: record.runId, time: nowIso(), outputPath, usage: record.usage });
-      const output = completedOutput(record, result);
-      stopProgressTicker();
-      if (showStandardProgress) clearStandardProgress(ctx, record);
-      return output;
     } catch (err) {
+      failed = true;
+      failure = err;
       const aborted = err instanceof WorkflowAbortError || control.signal.aborted;
       if (!aborted) control.stop("workflow failed");
-      const error = aborted ? "Workflow aborted" : (err as Error).message;
+      const error = aborted ? "Workflow aborted" : errorMessage(err);
       record.status = aborted ? "aborted" : "failed";
       record.endedAt = nowIso();
+      delete record.outputPath;
       const errorPath = path.join(record.runDir, "error.json");
-      await fs.promises.writeFile(errorPath, `${JSON.stringify({ error, stack: (err as Error).stack }, null, 2)}\n`, "utf8");
-      await this.deps.runStore.flush(record.runId);
-      record.errorPath = errorPath;
-      await journal.append({ type: "workflow_failed", runId: record.runId, time: nowIso(), error, errorPath });
-      await this.deps.runStore.saveNow(record);
-      const output = failedOutput(record, err);
+      try {
+        await fs.promises.writeFile(errorPath, `${JSON.stringify({ error, stack: err instanceof Error ? err.stack : undefined }, null, 2)}\n`, "utf8");
+        record.errorPath = errorPath;
+      } catch {
+        // The terminal run record is still authoritative when an error artifact cannot be written.
+      }
+      await journal.append({ type: "workflow_failed", runId: record.runId, time: nowIso(), error, errorPath: record.errorPath }).catch(() => undefined);
+    } finally {
       stopProgressTicker();
       if (showStandardProgress) clearStandardProgress(ctx, record);
-      return output;
+
+      // A failed queued progress save must not prevent the terminal save from being attempted.
+      await this.deps.runStore.flush(record.runId).catch(() => undefined);
+      await this.deps.runStore.saveNow(record);
     }
+
+    return failed ? failedOutput(record, failure) : completedOutput(record, result);
   }
 
   private async resolveSource(input: WorkflowInput, cwd: string): Promise<ResolvedWorkflowSource> {
@@ -384,7 +392,7 @@ function completedOutput(record: RunRecord, result: unknown): WorkflowLaunchOutp
 }
 
 function failedOutput(record: RunRecord, err: unknown): WorkflowLaunchOutput {
-  const message = (err as Error).message ?? String(err);
+  const message = errorMessage(err);
   return {
     status: "failed",
     taskId: record.taskId,
@@ -404,6 +412,10 @@ function failedOutput(record: RunRecord, err: unknown): WorkflowLaunchOutput {
     endedAt: record.endedAt,
     recovery: { toolCall: { scriptPath: record.scriptPath, resumeFromRunId: record.runId, args: record.recovery?.args } },
   };
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function progressSummary(record: RunRecord): string {
