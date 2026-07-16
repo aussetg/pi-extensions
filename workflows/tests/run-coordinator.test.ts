@@ -92,6 +92,10 @@ describe("per-run coordinator core", () => {
   it("turns a crash-left running operation into explicit paused interruption evidence", async () => {
     const fixture = await runFixture();
     const database = RunDatabase.open(fixture.databasePath);
+    expect(database.reconcileCoordinatorOpen(now())).toMatchObject({
+      disposition: "started",
+      run: { status: "running" },
+    });
     const operation = insertOperation(database, "stale", "command", 0);
     database.close();
 
@@ -107,6 +111,19 @@ describe("per-run coordinator core", () => {
       reason: { code: "coordinator-interrupted" },
     });
     reader.close();
+  });
+
+  it("recovers a running run when the prior coordinator stopped at an operation boundary", async () => {
+    const fixture = await runFixture();
+    const database = RunDatabase.open(fixture.databasePath);
+    database.reconcileCoordinatorOpen(now());
+    enqueue(database, { kind: "stop", reason: "test complete" });
+    database.close();
+
+    await expect(runCore(fixture.runDir)).resolves.toMatchObject({
+      status: "stopped",
+      openDisposition: "recovered",
+    });
   });
 
   it("validates and atomically resolves challenge-bound checkpoint responses", async () => {

@@ -7,6 +7,7 @@ import { parseFlowCommand } from "../src/commands/flow-command-parser.js";
 import { registerExecutePlanCommand } from "../src/commands/execute-plan-command.js";
 import { registerGoalCommand } from "../src/commands/goal-command.js";
 import { RunCatalog } from "../src/persistence/run-catalog.js";
+import { coordinatorUnitName } from "../src/runtime/coordinator-identity.js";
 import { NamedWorkflowService } from "../src/runtime/named-workflow-service.js";
 import type { RunRecord } from "../src/runtime/durable-types.js";
 import { sha256 } from "../src/utils/hashes.js";
@@ -134,6 +135,54 @@ describe("Phase 26 extension interface", () => {
       await fs.promises.rm(root, { recursive: true, force: true });
     }
   });
+
+  it("relaunches an inactive coordinator while restoring an active async run", async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "workflow-extension-recovery-"));
+    let service: NamedWorkflowService | undefined;
+    try {
+      const project = path.join(root, "project");
+      await fs.promises.mkdir(project);
+      const catalog = new RunCatalog(path.join(root, "runs"));
+      const at = new Date().toISOString();
+      const created = await catalog.create({
+        run: runRecord(at, "queued"),
+        event: {
+          type: "run-created",
+          payload: { authority: "user", mode: "async", sessionId: "session-1", projectRoot: project },
+          at,
+        },
+      });
+      created.database.reconcileCoordinatorOpen(new Date(Date.now() + 1).toISOString());
+      created.database.close();
+
+      const inspect = vi.fn(async () => ({ activeState: "inactive" }));
+      const launch = vi.fn(async () => undefined);
+      service = new NamedWorkflowService(fakePi([], []) as any, {
+        catalog,
+        coordinator: { launch, launcher: { inspect } } as any,
+        pollIntervalMs: 25,
+      });
+      const ctx = {
+        cwd: project,
+        mode: "tui",
+        sessionManager: {
+          getSessionId: () => "session-1",
+          getHeader: () => ({ id: "session-1" }),
+          getEntries: () => [],
+        },
+        ui: { notify: vi.fn() },
+      };
+
+      await service.restoreAsyncNotifications(ctx as any);
+      await vi.waitFor(() => expect(launch).toHaveBeenCalledWith(created.entry.paths.root));
+
+      expect(inspect).toHaveBeenCalledWith(coordinatorUnitName(created.entry.runId));
+      expect(launch).toHaveBeenCalledOnce();
+    } finally {
+      service?.detachContext();
+      await fs.promises.rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 function fakePi(tools: any[], commands: string[]) {
@@ -151,7 +200,7 @@ function fakePi(tools: any[], commands: string[]) {
   };
 }
 
-function runRecord(at: string): Omit<RunRecord, "runId"> {
+function runRecord(at: string, status: "queued" | "completed" = "completed"): Omit<RunRecord, "runId"> {
   return {
     revision: 1,
     workflow: {
@@ -165,7 +214,7 @@ function runRecord(at: string): Omit<RunRecord, "runId"> {
     projectSnapshotHash: sha256("project"),
     routeSnapshotHash: sha256("routes"),
     contextIdentityHash: sha256("context"),
-    status: "completed",
+    status,
     safety: {
       concurrency: 4,
       maximumAgentLaunches: 100,
@@ -188,7 +237,7 @@ function runRecord(at: string): Omit<RunRecord, "runId"> {
     },
     createdAt: at,
     updatedAt: at,
-    endedAt: at,
+    ...(status === "completed" ? { endedAt: at } : {}),
   };
 }
 

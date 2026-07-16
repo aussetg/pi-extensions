@@ -54,13 +54,13 @@ export function coordinatorOpenMutation(
   const hasRunningWork = runningOperationIds.length > 0 || runningAttempts > 0 || runningSessions > 0;
 
   if (run.status === "queued" && !hasRunningWork) return { disposition: "started", runningOperationIds };
-  if (run.status === "running") return { disposition: "recovered", runningOperationIds };
-  if ((run.status === "queued" || TERMINAL.has(run.status)) && hasRunningWork) {
+  if ((run.status === "queued" || run.status === "running" || TERMINAL.has(run.status)) && hasRunningWork) {
     return {
       disposition: "stale-effects-settled",
       runningOperationIds,
     };
   }
+  if (run.status === "running") return { disposition: "recovered", runningOperationIds };
   return { disposition: "none", runningOperationIds };
 }
 

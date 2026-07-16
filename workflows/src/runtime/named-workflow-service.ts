@@ -35,6 +35,7 @@ import { readRunDetails, readWorkflowResult, summarizeRun } from "./workflow-run
 const SETTLED = new Set(["waiting", "paused", "completed", "failed", "stopped"]);
 const TERMINAL = new Set(["completed", "failed", "stopped"]);
 const POLL_MS = 250;
+const COORDINATOR_PROBE_MS = 1_000;
 const INVOCATION_BYTES = 512 * 1024;
 
 export const DEFAULT_WORKFLOW_SAFETY: Readonly<SafetyConfiguration> = Object.freeze({
@@ -368,7 +369,7 @@ export class NamedWorkflowService implements NamedWorkflowClient {
         await onUpdate?.(summarizeRun(run, await this.shortId(run.runId)));
       }
       if (SETTLED.has(run.status)) return run;
-      if (Date.now() - lastCoordinatorProbe >= 1_000) {
+      if (Date.now() - lastCoordinatorProbe >= COORDINATOR_PROBE_MS) {
         lastCoordinatorProbe = Date.now();
         await this.reconcileInactiveCoordinator(entry, run);
       }
@@ -390,6 +391,7 @@ export class NamedWorkflowService implements NamedWorkflowClient {
 
   private watch(entry: RunCatalogEntry, owner: string | undefined, expectedProject: string): void {
     if (!owner || this.watchers.has(entry.runId) || this.notified.has(entry.runId)) return;
+    let lastCoordinatorProbe = 0;
     const poll = async () => {
       this.watchers.delete(entry.runId);
       if (!this.context || sessionId(this.context) !== owner || path.resolve(projectRoot(this.context.cwd)) !== path.resolve(expectedProject)) return;
@@ -402,7 +404,12 @@ export class NamedWorkflowService implements NamedWorkflowClient {
           this.notify(summarizeRun(run, await this.shortId(run.runId)));
           return;
         }
-      } catch { /* A transient read failure must not take ownership away from systemd. */ }
+        if (Date.now() - lastCoordinatorProbe >= COORDINATOR_PROBE_MS) {
+          lastCoordinatorProbe = Date.now();
+          await this.reconcileInactiveCoordinator(entry, run);
+        }
+      } catch { /* A transient read or systemd failure must not abandon the watcher. */ }
+      if (!this.context || sessionId(this.context) !== owner || path.resolve(projectRoot(this.context.cwd)) !== path.resolve(expectedProject)) return;
       const timer = setTimeout(() => void poll(), this.pollIntervalMs);
       timer.unref?.();
       this.watchers.set(entry.runId, timer);
