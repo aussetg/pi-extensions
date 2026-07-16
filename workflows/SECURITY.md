@@ -22,6 +22,10 @@ socket, clock, random, code-generation, or workflow-launch primitive. Reviewed c
 runs in a separate memory-bounded child with frozen globals, disabled string/Wasm code generation,
 bounded typed messages, and a synchronous-segment watchdog.
 
+Purity and capture analysis follows ordinary local helper bodies and helper-return aliases. Only
+nested parallel, fan-out, and candidate callbacks start a separately checked capture boundary;
+sequential stage and loop callbacks remain inside their enclosing boundary.
+
 ## Agent completion and control
 
 An agent succeeds only after `finish_work` parameters match the admitted output schema and the

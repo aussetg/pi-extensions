@@ -161,6 +161,14 @@ describe("structured workflow definitions", () => {
     ["captured branch mutation", `let x = 0; await flow.parallel("work", { a: async () => { x++; return null; } });`],
     ["aliased captured branch mutation", `const x = []; await flow.parallel("work", { a: async () => { const alias = x; alias.push(1); return null; } });`],
     ["captured mutating helper", `const x = []; const mutate = () => x.push(1); await flow.parallel("work", { a: async () => { mutate(); return null; } });`],
+    ["local helper mutating a parallel capture", `const x = []; await flow.parallel("work", { a: async () => { const mutate = () => x.push(1); mutate(); return null; } });`],
+    ["nested helper shadow masking a parallel capture", `const x = []; await flow.parallel("work", { a: async () => { const helper = () => { const x = []; return x; }; x.push(1); return helper(); } });`],
+    ["local helper returning a parallel capture", `const x = []; await flow.parallel("work", { a: async () => { const get = () => x; const alias = get(); alias.push(1); return null; } });`],
+    ["direct local helper result mutating a parallel capture", `const x = []; await flow.parallel("work", { a: async () => { const get = () => x; get().push(1); return null; } });`],
+    ["local helper mutating a fanOut capture", `const x = []; await flow.fanOut("work", [1], { key: item => String(item) }, async () => { const mutate = () => x.push(1); mutate(); return null; });`],
+    ["local helper mutating a candidate capture", `const x = []; await flow.candidate("work", async () => { const mutate = () => x.push(1); mutate(); return null; });`],
+    ["local helper mutating loop condition state", `let x = 0; await flow.loop("work", { maxIterations: 1, while: () => { const mutate = () => x++; mutate(); return x < 2; } }, async () => null);`],
+    ["nested sequential callback mutating a parallel capture", `const x = []; await flow.parallel("work", { a: async () => { await flow.loop("steps", { maxIterations: 1, while: () => true }, async () => { const mutate = () => x.push(1); mutate(); }); return null; } });`],
     ["effectful for", `for (let i = 0; i < 3; i++) await flow.stage("work", async () => null);`],
     ["mutated local for counter", `for (let i = 0; i < 3; i++) { i--; }`],
     ["captured local for counter mutation", `for (let i = 0; i < 3; i++) { const reset = () => { i = 0; }; reset(); }`],
@@ -190,6 +198,26 @@ describe("structured workflow definitions", () => {
         return await flow.candidate("attempt", async workspace => flow.candidate("nested", async () => workspace));
       `, { capabilities: ["candidate-write"] })),
     ).toThrow(/unavailable inside candidate/);
+  });
+
+  it("allows local helpers and sequential semantic callbacks to mutate branch-local state", () => {
+    expect(() => parseStructuredWorkflow(simpleSource("local-helper", `
+      return await flow.parallel("work", {
+        a: async () => {
+          const values = [];
+          const append = value => values.push(value);
+          append(1);
+          await flow.loop("steps", {
+            maxIterations: 1,
+            while: () => values.length === 1,
+          }, async () => {
+            const appendNested = value => values.push(value);
+            appendNested(2);
+          });
+          return values;
+        },
+      });
+    `))).not.toThrow();
   });
 
   it("rejects unconditional duplicate sibling ids but permits exclusive branches", () => {

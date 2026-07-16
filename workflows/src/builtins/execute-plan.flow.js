@@ -293,7 +293,7 @@ export default defineWorkflow({
           summary,
           evidence: pointResult.value.evidence,
         });
-        ledger = ledger.slice(-64);
+        if (ledger.length > 64) ledger.splice(0, ledger.length - 64);
         candidateSummary = summary;
 
         if (outcome === "completed" || outcome === "skipped") {

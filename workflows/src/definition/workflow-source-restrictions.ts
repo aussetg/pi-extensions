@@ -34,6 +34,7 @@ const MUTATING_METHODS = new Set([
   "copyWithin", "fill", "pop", "push", "reverse", "shift", "sort", "splice", "unshift", "set", "add",
   "delete", "clear",
 ]);
+const CAPTURE_BOUNDARY_CALLBACKS = new Set(["parallel-branch", "fanout-body", "candidate-body"]);
 
 const REQUIRED_CAPABILITIES: Partial<Record<string, WorkflowCapability[]>> = {
   agent: ["read-project"],
@@ -92,7 +93,7 @@ export function validateDeterministicSource(context: WorkflowSourceContext): voi
   for (const [callback, kind] of context.callbacks) {
     if (kind === "loop-condition" || kind === "fanout-key") validatePureCallback(context, callback, kind);
     if (kind === "parallel-branch" || kind === "fanout-body" || kind === "candidate-body") {
-      validateNoCapturedMutation(callback, kind);
+      validateNoCapturedMutation(context, callback, kind);
     }
   }
   for (const fn of topFunctionNodes) {
@@ -353,7 +354,7 @@ function isSchemaBoundedArgsArray(node: WorkflowAstNode, context: WorkflowSource
 
 function validatePureCallback(context: WorkflowSourceContext, callback: WorkflowAstNode, kind: string): void {
   walk(callback.body, (node) => {
-    if (node !== callback && isFunction(node)) return false;
+    if (isFunction(node) && context.callbacks.has(node)) return false;
     if (getFlowCall(node, context.flowName)) throw new WorkflowScriptError(`${kind} callback may not execute effects`, location(node));
     if (isMutationNode(node)) throw new WorkflowScriptError(`${kind} callback may not mutate state`, location(node));
     if (kind === "fanout-key" && node.type === "CallExpression") {
@@ -363,51 +364,156 @@ function validatePureCallback(context: WorkflowSourceContext, callback: Workflow
   });
 }
 
-function validateNoCapturedMutation(callback: WorkflowAstNode, kind: string): void {
-  const local = collectDeclaredNames(callback);
-  const capturedAliases = collectCapturedAliases(callback, local);
-  walk(callback.body, (node) => {
-    // Nested semantic callbacks have their own deterministic execution boundary.
-    // In particular, a sequential loop inside a candidate must be able to fold
-    // point results into candidate-local state without making the candidate
-    // callback appear to mutate a concurrent capture.
-    if (node !== callback && isFunction(node)) return false;
-    if (node.type === "CallExpression" && node.callee?.type === "Identifier" && !local.has(node.callee.name)) {
+function validateNoCapturedMutation(
+  context: WorkflowSourceContext,
+  callback: WorkflowAstNode,
+  kind: string,
+): void {
+  const local = collectCaptureBoundaryNames(context, callback);
+  const capturedAliases = collectCapturedAliases(context, callback, local);
+  const ownNames = new Map<WorkflowAstNode, Set<string>>();
+  const isLocal = (node: WorkflowAstNode, name: string): boolean =>
+    bindingBelongsToCaptureBoundary(context, callback, node, name, ownNames);
+  walkCaptureBoundary(context, callback, (node) => {
+    if (node.type === "CallExpression" && node.callee?.type === "Identifier" && !isLocal(node.callee, node.callee.name)) {
       throw new WorkflowScriptError(`${kind} callback may not invoke captured helper ${node.callee.name}`, location(node));
     }
     if (!isMutationNode(node)) return;
-    const root = rootIdentifier(mutationTarget(node));
-    if (root && (!local.has(root) || capturedAliases.has(root))) {
-      throw new WorkflowScriptError(`${kind} callback may not mutate captured binding ${root}`, location(node));
+    const target = mutationTarget(node);
+    const root = rootIdentifier(target);
+    const captured = root
+      ? !isLocal(target!, root) || (capturedAliases.has(root) && mutatesReferencedValue(node))
+      : mutatesReferencedValue(node) && aliasesCapturedValue(target, local, capturedAliases);
+    if (captured) {
+      throw new WorkflowScriptError(
+        root
+          ? `${kind} callback may not mutate captured binding ${root}`
+          : `${kind} callback may not mutate state returned by a call`,
+        location(node),
+      );
     }
     return undefined;
   });
 }
 
-function collectCapturedAliases(callback: WorkflowAstNode, local: Set<string>): Set<string> {
+function bindingBelongsToCaptureBoundary(
+  context: WorkflowSourceContext,
+  callback: WorkflowAstNode,
+  node: WorkflowAstNode,
+  name: string,
+  cache: Map<WorkflowAstNode, Set<string>>,
+): boolean {
+  for (const fn of functionAncestors(context, node)) {
+    let names = cache.get(fn);
+    if (!names) {
+      names = collectOwnFunctionNames(fn);
+      cache.set(fn, names);
+    }
+    if (names.has(name)) return true;
+    if (fn === callback) return false;
+  }
+  return false;
+}
+
+function collectOwnFunctionNames(fn: WorkflowAstNode): Set<string> {
+  const result = functionParameterNames(fn);
+  if (fn.id?.name) result.add(fn.id.name);
+  walk(fn.body, (node) => {
+    if (isFunction(node)) {
+      if (node.type === "FunctionDeclaration" && node.id?.name) result.add(node.id.name);
+      return false;
+    }
+    if (node.type === "VariableDeclarator") collectPatternNames(node.id, result);
+    if (node.type === "CatchClause" && node.param) collectPatternNames(node.param, result);
+    return undefined;
+  });
+  return result;
+}
+
+function collectCapturedAliases(
+  context: WorkflowSourceContext,
+  callback: WorkflowAstNode,
+  local: Set<string>,
+): Set<string> {
   const aliases = new Set<string>();
-  const assignments: Array<{ targets: string[]; source?: string }> = [];
-  walk(callback.body, (node) => {
+  const assignments: Array<{ targets: string[]; source?: WorkflowAstNode }> = [];
+  walkCaptureBoundary(context, callback, (node) => {
     if (node.type === "VariableDeclarator") {
       const targets = new Set<string>();
       collectPatternNames(node.id, targets);
-      assignments.push({ targets: [...targets], source: rootIdentifier(node.init) });
+      assignments.push({ targets: [...targets], source: node.init });
     }
     if (node.type === "AssignmentExpression" && node.operator === "=" && node.left?.type === "Identifier") {
-      assignments.push({ targets: [node.left.name], source: rootIdentifier(node.right) });
+      assignments.push({ targets: [node.left.name], source: node.right });
     }
   });
   let changed = true;
   while (changed) {
     changed = false;
     for (const assignment of assignments) {
-      if (!assignment.source || (local.has(assignment.source) && !aliases.has(assignment.source))) continue;
+      if (!aliasesCapturedValue(assignment.source, local, aliases)) continue;
       for (const target of assignment.targets) {
         if (!aliases.has(target)) { aliases.add(target); changed = true; }
       }
     }
   }
   return aliases;
+}
+
+function aliasesCapturedValue(
+  node: WorkflowAstNode | undefined,
+  local: Set<string>,
+  aliases: Set<string>,
+): boolean {
+  if (!node) return false;
+  if (node.type === "Identifier") return !local.has(node.name) || aliases.has(node.name);
+  if (node.type === "MemberExpression") return aliasesCapturedValue(node.object, local, aliases);
+  if (node.type === "ChainExpression" || node.type === "AwaitExpression") {
+    return aliasesCapturedValue(node.expression ?? node.argument, local, aliases);
+  }
+  if (node.type === "AssignmentExpression") return aliasesCapturedValue(node.right, local, aliases);
+  if (node.type === "ConditionalExpression") {
+    return aliasesCapturedValue(node.consequent, local, aliases)
+      || aliasesCapturedValue(node.alternate, local, aliases);
+  }
+  if (node.type === "LogicalExpression") {
+    return aliasesCapturedValue(node.left, local, aliases)
+      || aliasesCapturedValue(node.right, local, aliases);
+  }
+  if (node.type === "SequenceExpression") {
+    return aliasesCapturedValue(node.expressions.at(-1), local, aliases);
+  }
+  // A call can return one of its inputs or closed-over state. Without a type or
+  // effect system there is no sound local proof that the result is fresh, so a
+  // capture-constrained callback may read it but may not mutate through it.
+  return node.type === "CallExpression";
+}
+
+function collectCaptureBoundaryNames(
+  context: WorkflowSourceContext,
+  callback: WorkflowAstNode,
+): Set<string> {
+  const result = functionParameterNames(callback);
+  if (callback.id?.name) result.add(callback.id.name);
+  walkCaptureBoundary(context, callback, (node) => {
+    if (node.type === "VariableDeclarator") collectPatternNames(node.id, result);
+    if (node.type === "FunctionDeclaration" && node.id) result.add(node.id.name);
+    if (node.type === "CatchClause" && node.param) collectPatternNames(node.param, result);
+    return undefined;
+  });
+  return result;
+}
+
+function walkCaptureBoundary(
+  context: WorkflowSourceContext,
+  callback: WorkflowAstNode,
+  visitor: (node: WorkflowAstNode) => void | false,
+): void {
+  walk(callback.body, (node) => {
+    const nestedKind = isFunction(node) ? context.callbacks.get(node) : undefined;
+    if (nestedKind && CAPTURE_BOUNDARY_CALLBACKS.has(nestedKind)) return false;
+    return visitor(node);
+  });
 }
 
 function validateMutation(context: WorkflowSourceContext, node: WorkflowAstNode): void {
@@ -649,6 +755,12 @@ function mutationTarget(node: WorkflowAstNode): WorkflowAstNode | undefined {
   if (node.type === "UpdateExpression" || node.type === "UnaryExpression") return node.argument;
   if (node.type === "CallExpression") return node.callee.object;
   return undefined;
+}
+
+function mutatesReferencedValue(node: WorkflowAstNode): boolean {
+  if (node.type === "CallExpression") return true;
+  const target = mutationTarget(node);
+  return target?.type === "MemberExpression" || target?.type === "ChainExpression";
 }
 
 function rootIdentifier(node: WorkflowAstNode | undefined): string | undefined {
