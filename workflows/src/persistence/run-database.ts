@@ -3,6 +3,7 @@ import path from "node:path";
 import { DatabaseSync } from "./sqlite.js";
 import type { JsonValue } from "../types.js";
 import type {
+  AgentMediatedToolIntentRecord,
   AgentProgress,
   AgentProgressEvent,
   AgentSessionRecord,
@@ -110,6 +111,9 @@ import type {
   AgentInfrastructurePauseInput,
   AgentInfrastructureRetryInput,
   AgentMediatedToolCommit,
+  AgentMediatedToolStart,
+  AgentMediatedToolStartResult,
+  AgentMediatedToolUncertain,
   AgentProgressToolCommit,
   AgentToolCommitResult,
   AgentYieldSettlementInput,
@@ -163,6 +167,9 @@ export type {
   AgentInfrastructurePauseInput,
   AgentInfrastructureRetryInput,
   AgentMediatedToolCommit,
+  AgentMediatedToolStart,
+  AgentMediatedToolStartResult,
+  AgentMediatedToolUncertain,
   AgentYieldSettlementInput,
   ApprovalControlResolution,
   AtomicOperationCompletion,
@@ -721,6 +728,91 @@ export class RunDatabase extends RunDatabaseReader {
     return { receipt: this.readAgentToolReceipt(input.agentSessionId, input.toolCallId)!, duplicate: false };
   }
 
+  /** Durably claim a mediated effect before any external work starts. */
+  startAgentMediatedTool(input: AgentMediatedToolStart): AgentMediatedToolStartResult {
+    validateAgentMediatedToolIdentity(input);
+    assertIsoDate(input.startedAt, "agent mediated tool start time");
+    const existing = this.readAgentMediatedToolIntent(input.agentSessionId, input.toolCallId);
+    if (existing) {
+      assertSameAgentMediatedToolIntent(existing, input);
+      return { intent: existing, started: false };
+    }
+    this.write(input.expectedRevision, {
+      type: `agent-${input.toolName.replaceAll("_", "-")}-started`,
+      operationId: this.readAgentSession(input.agentSessionId)?.operationId,
+      payload: { agentSessionId: input.agentSessionId, toolCallId: input.toolCallId },
+      at: input.startedAt,
+    }, (run) => {
+      requireLiveAgentExecution(this.database, run.runId, input.agentSessionId, input.executionId);
+      this.database.prepare(`
+        INSERT INTO agent_mediated_tool_intents(
+          agent_session_id, execution_id, tool_call_id, tool_name, request_hash,
+          status, reason_json, started_at, updated_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, 'started', NULL, ?, ?, NULL)
+      `).run(
+        input.agentSessionId,
+        input.executionId,
+        input.toolCallId,
+        input.toolName,
+        input.requestHash,
+        input.startedAt,
+        input.startedAt,
+      );
+    });
+    return { intent: this.readAgentMediatedToolIntent(input.agentSessionId, input.toolCallId)!, started: true };
+  }
+
+  /**
+   * An effect that crossed its write-ahead boundary without a receipt is never
+   * retried automatically. Pause its complete agent hierarchy for inspection.
+   */
+  markAgentMediatedToolUncertain(input: AgentMediatedToolUncertain): AgentMediatedToolIntentRecord {
+    validateAgentMediatedToolIdentity(input);
+    assertStructuredReason(input.reason);
+    assertIsoDate(input.at, "agent mediated tool uncertainty time");
+    if (
+      input.reason.category !== "effect"
+      || input.reason.code !== "mediated-tool-outcome-uncertain"
+      || input.reason.retryable
+    ) throw new TypeError("Invalid mediated tool uncertainty reason");
+    this.write(input.expectedRevision, {
+      type: "agent-mediated-tool-uncertain",
+      operationId: this.readAgentSession(input.agentSessionId)?.operationId,
+      payload: {
+        agentSessionId: input.agentSessionId,
+        toolCallId: input.toolCallId,
+        toolName: input.toolName,
+      },
+      at: input.at,
+    }, (run) => {
+      const intent = requiredAgentMediatedToolIntent(this.database, input.agentSessionId, input.toolCallId);
+      assertSameAgentMediatedToolIntentRow(intent, input);
+      if (requiredString(intent, "status") === "completed") {
+        throw new RunDatabaseStateError(`Mediated tool ${input.toolCallId} is already completed`);
+      }
+      const session = this.database.prepare(
+        "SELECT * FROM agent_sessions WHERE agent_session_id = ? AND run_id = ?",
+      ).get(input.agentSessionId, run.runId) as SqlRow | undefined;
+      if (!session) throw new RunDatabaseStateError(`Unknown agent session ${input.agentSessionId}`);
+      if (input.reason.operationId && input.reason.operationId !== requiredString(session, "operation_id")) {
+        throw new RunDatabaseStateError("Mediated tool uncertainty belongs to another operation");
+      }
+      this.database.prepare(`
+        UPDATE agent_mediated_tool_intents
+        SET status = 'uncertain', reason_json = ?, updated_at = ?, completed_at = NULL
+        WHERE agent_session_id = ? AND tool_call_id = ?
+      `).run(optionalReasonJson(input.reason), input.at, input.agentSessionId, input.toolCallId);
+      const status = requiredString(session, "status");
+      if (
+        (status === "running" || status === "waiting")
+        && optionalString(session, "current_execution_id") !== undefined
+      ) {
+        pauseAgentHierarchy(this.database, run, input.agentSessionId, input.reason, input.at);
+      }
+    });
+    return this.readAgentMediatedToolIntent(input.agentSessionId, input.toolCallId)!;
+  }
+
   /** Commit a coordinator-mediated semantic tool before its result reaches the model. */
   commitAgentMediatedTool(input: AgentMediatedToolCommit): AgentToolCommitResult {
     validateAgentToolCommit(input);
@@ -734,6 +826,13 @@ export class RunDatabase extends RunDatabaseReader {
       at: input.committedAt,
     }, (run) => {
       requireLiveAgentExecution(this.database, run.runId, input.agentSessionId, input.executionId);
+      const intent = requiredAgentMediatedToolIntent(this.database, input.agentSessionId, input.toolCallId);
+      assertSameAgentMediatedToolIntentRow(intent, input);
+      if (requiredString(intent, "status") !== "started") {
+        throw new RunDatabaseStateError(
+          `Mediated tool ${input.toolCallId} is ${requiredString(intent, "status")}, not committable`,
+        );
+      }
       insertAgentProgressMutation(
         this.database,
         run.runId,
@@ -742,6 +841,11 @@ export class RunDatabase extends RunDatabaseReader {
         { type: "observed", progress: input.progress },
         input.committedAt,
       );
+      this.database.prepare(`
+        UPDATE agent_mediated_tool_intents
+        SET status = 'completed', reason_json = NULL, updated_at = ?, completed_at = ?
+        WHERE agent_session_id = ? AND tool_call_id = ?
+      `).run(input.committedAt, input.committedAt, input.agentSessionId, input.toolCallId);
       insertAgentToolReceipt(this.database, input);
     });
     return { receipt: this.readAgentToolReceipt(input.agentSessionId, input.toolCallId)!, duplicate: false };
@@ -1493,6 +1597,64 @@ function validateAgentToolCommit(input: AgentProgressToolCommit | AgentFinishToo
     throw new TypeError(`Unknown agent protocol tool ${input.toolName}`);
   }
   encodeCanonicalJson(input.response, "value");
+}
+
+function validateAgentMediatedToolIdentity(input: {
+  expectedRevision: number;
+  agentSessionId: string;
+  executionId: string;
+  toolCallId: string;
+  toolName: import("../runtime/durable-types.js").AgentMediatedToolName;
+  requestHash: string;
+}): void {
+  assertPositiveInteger(input.expectedRevision, "agent mediated tool expected revision");
+  assertIdentifier(input.agentSessionId, "agent session id");
+  assertIdentifier(input.executionId, "agent execution id");
+  assertAgentToolCallId(input.toolCallId);
+  assertHash(input.requestHash, "agent mediated tool request hash");
+  if (!["web_search", "web_fetch", "workspace_command"].includes(input.toolName)) {
+    throw new TypeError(`Unknown mediated agent tool ${input.toolName}`);
+  }
+}
+
+function assertSameAgentMediatedToolIntent(
+  existing: AgentMediatedToolIntentRecord,
+  input: Pick<AgentMediatedToolStart, "executionId" | "toolName" | "requestHash" | "toolCallId">,
+): void {
+  if (
+    existing.executionId !== input.executionId
+    || existing.toolName !== input.toolName
+    || existing.requestHash !== input.requestHash
+  ) {
+    throw new RunDatabaseStateError(
+      `Conflicting duplicate ${input.toolName} intent ${input.toolCallId} for ${existing.agentSessionId}`,
+    );
+  }
+}
+
+function requiredAgentMediatedToolIntent(
+  database: DatabaseSync,
+  agentSessionId: string,
+  toolCallId: string,
+): SqlRow {
+  const row = database.prepare(
+    "SELECT * FROM agent_mediated_tool_intents WHERE agent_session_id = ? AND tool_call_id = ?",
+  ).get(agentSessionId, toolCallId) as SqlRow | undefined;
+  if (!row) throw new RunDatabaseStateError(`Mediated tool ${toolCallId} has no durable intent`);
+  return row;
+}
+
+function assertSameAgentMediatedToolIntentRow(
+  row: SqlRow,
+  input: Pick<AgentMediatedToolStart, "executionId" | "toolName" | "requestHash" | "toolCallId">,
+): void {
+  if (
+    requiredString(row, "execution_id") !== input.executionId
+    || requiredString(row, "tool_name") !== input.toolName
+    || requiredString(row, "request_hash") !== input.requestHash
+  ) {
+    throw new RunDatabaseStateError(`Conflicting mediated tool intent ${input.toolCallId}`);
+  }
 }
 
 function duplicateToolReceipt(

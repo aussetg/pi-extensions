@@ -2,16 +2,21 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   SystemdUserUnitLauncher,
+  workflowUnitName,
   type WorkflowUnitHandle,
 } from "../systemd/launcher.js";
 import { unitResourcePolicy } from "../systemd/unit-properties.js";
 import type { JsonObject, JsonValue } from "../types.js";
 import { stableHash } from "../utils/hashes.js";
-import type { AgentMediatedToolExecutor, AgentMediatedToolRequest } from "./mediation.js";
+import type {
+  AgentMediatedToolCancellation,
+  AgentMediatedToolExecutor,
+  AgentMediatedToolRequest,
+} from "./mediation.js";
 
 export interface AgentWebMediator {
-  search(input: { query: string; maxResults: number }): Promise<JsonValue>;
-  fetch(input: { url: string; maxBytes: number }): Promise<JsonValue>;
+  search(input: { query: string; maxResults: number }, signal: AbortSignal): Promise<JsonValue>;
+  fetch(input: { url: string; maxBytes: number }, signal: AbortSignal): Promise<JsonValue>;
 }
 
 export interface HostAgentMediatedToolExecutorOptions {
@@ -41,6 +46,7 @@ export class HostAgentMediatedToolExecutor implements AgentMediatedToolExecutor 
   }
 
   async execute(request: AgentMediatedToolRequest): Promise<JsonValue> {
+    request.signal.throwIfAborted();
     if (request.toolName === "workspace_command") return await this.workspaceCommand(request);
     if (!this.web) throw new Error(`${request.toolName} has no configured host mediator`);
     const payload = request.payload as JsonObject;
@@ -48,12 +54,17 @@ export class HostAgentMediatedToolExecutor implements AgentMediatedToolExecutor 
       return await this.web.search({
         query: String(payload.query),
         maxResults: typeof payload.maxResults === "number" ? payload.maxResults : 10,
-      });
+      }, request.signal);
     }
     return await this.web.fetch({
       url: String(payload.url),
       maxBytes: typeof payload.maxBytes === "number" ? payload.maxBytes : 512 * 1024,
-    });
+    }, request.signal);
+  }
+
+  async cancel(request: AgentMediatedToolCancellation): Promise<void> {
+    if (request.toolName !== "workspace_command") return;
+    await this.launcher.stop(workflowUnitName("command", workspaceCommandId(request)), 1_000);
   }
 
   private async workspaceCommand(request: AgentMediatedToolRequest): Promise<JsonValue> {
@@ -64,12 +75,10 @@ export class HostAgentMediatedToolExecutor implements AgentMediatedToolExecutor 
       fs.promises.access(this.bwrapPath, fs.constants.X_OK),
       this.launcher.preflight(),
     ]);
+    request.signal.throwIfAborted();
     const relativeCwd = path.relative(request.workspace.root, request.workspace.cwd);
     const cwd = relativeCwd && relativeCwd !== "." ? `/workspace/${relativeCwd.split(path.sep).join("/")}` : "/workspace";
-    const id = `command_${stableHash({
-      executionId: request.executionId,
-      toolCallId: request.toolCallId,
-    }).slice(7, 39)}`;
+    const id = workspaceCommandId(request);
     const bwrap = [
       this.bwrapPath,
       "--new-session",
@@ -101,7 +110,7 @@ export class HostAgentMediatedToolExecutor implements AgentMediatedToolExecutor 
     let stdout = Buffer.alloc(0);
     let stderr = Buffer.alloc(0);
     let truncated = false;
-    let stopped: "timeout" | "output" | undefined;
+    let stopped: "timeout" | "output" | "cancel" | undefined;
     const append = (stream: "stdout" | "stderr", chunk: Buffer) => {
       const used = stdout.length + stderr.length;
       const remaining = Math.max(0, this.maximumCommandOutputBytes - used);
@@ -127,14 +136,27 @@ export class HostAgentMediatedToolExecutor implements AgentMediatedToolExecutor 
         handle.stderr!.on("data", (chunk: Buffer) => append("stderr", Buffer.from(chunk)));
       },
     });
+    const abort = () => {
+      stopped ??= "cancel";
+      void service.stop(1_000);
+    };
+    request.signal.addEventListener("abort", abort, { once: true });
+    if (request.signal.aborted) abort();
     const timer = setTimeout(() => {
       stopped ??= "timeout";
       void service.stop(1_000);
     }, timeoutMs);
     timer.unref?.();
-    const completion = await service.wait();
-    clearTimeout(timer);
-    const cleanup = await service.collect();
+    let completion: Awaited<ReturnType<WorkflowUnitHandle["wait"]>>;
+    let cleanup: Awaited<ReturnType<WorkflowUnitHandle["collect"]>>;
+    try {
+      completion = await service.wait();
+      cleanup = await service.collect();
+    } finally {
+      clearTimeout(timer);
+      request.signal.removeEventListener("abort", abort);
+    }
+    if (stopped === "cancel") request.signal.throwIfAborted();
     return {
       ok: stopped === undefined && completion.outcome === "success",
       exitCode: completion.exitCode,
@@ -148,4 +170,11 @@ export class HostAgentMediatedToolExecutor implements AgentMediatedToolExecutor 
       unitCleaned: cleanup.collected,
     } as unknown as JsonValue;
   }
+}
+
+function workspaceCommandId(request: Pick<AgentMediatedToolRequest, "executionId" | "toolCallId">): string {
+  return `command_${stableHash({
+    executionId: request.executionId,
+    toolCallId: request.toolCallId,
+  }).slice(7, 39)}`;
 }

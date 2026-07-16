@@ -28,14 +28,14 @@ export class KagiWebMediator implements AgentWebMediator {
     }
   }
 
-  async search(input: { query: string; maxResults: number }): Promise<JsonValue> {
+  async search(input: { query: string; maxResults: number }, signal: AbortSignal): Promise<JsonValue> {
     const response = await this.request("/search", {
       query: input.query,
       workflow: "search",
       format: "json",
       limit: input.maxResults,
       timeout: Math.min(4, this.timeoutMs / 1_000),
-    });
+    }, signal);
     const envelope = record(response, "Kagi search response");
     const payload = envelope.data;
     const data = Array.isArray(payload)
@@ -56,12 +56,12 @@ export class KagiWebMediator implements AgentWebMediator {
     } as unknown as JsonValue;
   }
 
-  async fetch(input: { url: string; maxBytes: number }): Promise<JsonValue> {
+  async fetch(input: { url: string; maxBytes: number }, signal: AbortSignal): Promise<JsonValue> {
     const response = await this.request("/extract", {
       pages: [{ url: input.url }],
       timeout: Math.min(10, this.timeoutMs / 1_000),
       format: "json",
-    });
+    }, signal);
     const data = array(record(response, "Kagi extract response").data, "Kagi extract data");
     const page = data.find((entry) => entry && typeof entry === "object" && !Array.isArray(entry)
       && (entry as Record<string, unknown>).url === input.url) as Record<string, unknown> | undefined;
@@ -78,8 +78,8 @@ export class KagiWebMediator implements AgentWebMediator {
     } as unknown as JsonValue;
   }
 
-  private async request(endpoint: "/search" | "/extract", body: unknown): Promise<unknown> {
-    const signal = AbortSignal.timeout(this.timeoutMs);
+  private async request(endpoint: "/search" | "/extract", body: unknown, signal: AbortSignal): Promise<unknown> {
+    const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(this.timeoutMs)]);
     const response = await this.fetchImpl(`${KAGI_API_ROOT}${endpoint}`, {
       method: "POST",
       headers: {
@@ -88,7 +88,7 @@ export class KagiWebMediator implements AgentWebMediator {
         accept: "application/json",
       },
       body: JSON.stringify(body),
-      signal,
+      signal: requestSignal,
     });
     const bytes = Buffer.from(await response.arrayBuffer());
     if (bytes.length > MAX_RESPONSE_BYTES) throw new Error("Kagi API response exceeded its bound");

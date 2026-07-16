@@ -1,4 +1,4 @@
-export const RUN_DATABASE_SCHEMA_VERSION = 1;
+export const RUN_DATABASE_SCHEMA_VERSION = 2;
 export const RUN_DATABASE_BUSY_TIMEOUT_MS = 5_000;
 
 /**
@@ -211,6 +211,24 @@ CREATE TABLE agent_finish_artifacts (
   ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
   PRIMARY KEY (agent_session_id, ordinal)
 ) STRICT;
+
+CREATE TABLE agent_mediated_tool_intents (
+  agent_session_id TEXT NOT NULL REFERENCES agent_sessions(agent_session_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+  execution_id TEXT NOT NULL,
+  tool_call_id TEXT NOT NULL,
+  tool_name TEXT NOT NULL CHECK (tool_name IN ('web_search', 'web_fetch', 'workspace_command')),
+  request_hash TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('started', 'uncertain', 'completed')),
+  reason_json TEXT CHECK (reason_json IS NULL OR json_valid(reason_json)),
+  started_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT,
+  PRIMARY KEY (agent_session_id, tool_call_id),
+  CHECK ((status = 'uncertain') = (reason_json IS NOT NULL)),
+  CHECK ((status = 'completed') = (completed_at IS NOT NULL))
+) STRICT;
+CREATE INDEX agent_mediated_tool_intents_session_status
+  ON agent_mediated_tool_intents(agent_session_id, status, started_at, tool_call_id);
 
 CREATE TABLE agent_tool_receipts (
   agent_session_id TEXT NOT NULL REFERENCES agent_sessions(agent_session_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,

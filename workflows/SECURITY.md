@@ -89,11 +89,13 @@ path, size, media type, and digest. Path escapes and symlink components fail clo
 
 Agent/coordinator tool traffic uses a private per-run Unix socket and one execution token. Request
 values are closed, bounded schemas. Tool-call IDs are idempotent: exact duplicates return the
-committed response; conflicting duplicates fail.
+committed response; conflicting duplicates fail. Coordinator-mediated effects commit a write-ahead
+intent before dispatch. An intent left without a receipt is quarantined, its command unit is stopped,
+and the agent hierarchy pauses rather than repeating an effect with an unknown outcome.
 
 ## SQLite and process ownership
 
-Each run has one schema-version-1 SQLite database configured with WAL, foreign keys, full
+Each run has one schema-version-2 SQLite database configured with WAL, foreign keys, full
 synchronization, and a bounded busy timeout. State transitions use short `BEGIN IMMEDIATE`
 transactions and expected revisions. Unknown schema versions are rejected; there are no migrations.
 

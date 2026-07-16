@@ -12,11 +12,13 @@ import {
 } from "../persistence/run-database.js";
 import type {
   AgentFinishRecord,
+  AgentMediatedToolIntentRecord,
   AgentMediatedToolName,
   AgentProgress,
   AgentProgressEvent,
   AgentToolReceiptRecord,
   ResourceMeasurement,
+  StructuredReason,
 } from "../runtime/durable-types.js";
 import { AGENT_PROGRESS_LIMITS } from "../runtime/agent-progress-limits.js";
 import {
@@ -69,6 +71,8 @@ export interface AgentProtocolExecutionBinding {
   network?: "none" | "research";
   /** Exact cgroup-v2 path owned by the transient agent unit. */
   controlGroup?: string;
+  /** Cancels coordinator-mediated work with the owning semantic effect. */
+  signal?: AbortSignal;
 }
 
 export interface AgentProtocolServerOptions {
@@ -83,7 +87,7 @@ export interface AgentProtocolServerOptions {
   resourceSampleIntervalMs?: number;
 }
 
-interface AuthorizedExecution extends AgentProtocolExecutionBinding {
+interface AuthorizedExecution extends Omit<AgentProtocolExecutionBinding, "signal"> {
   executionToken: string;
   outputRoot: string;
   finishSchema: JsonSchema;
@@ -91,6 +95,8 @@ interface AuthorizedExecution extends AgentProtocolExecutionBinding {
   schemaLess: boolean;
   validateFinish: ValidateFunction;
   queue: Promise<void>;
+  effectAbort: AbortController;
+  detachSignal?: () => void;
 }
 
 interface ConnectionState {
@@ -98,6 +104,13 @@ interface ConnectionState {
   eventSequence: number;
   buffer: string;
   chain: Promise<void>;
+}
+
+interface MediatedToolOwner {
+  agentSessionId: string;
+  operationId: string;
+  attemptId: string;
+  effectAbort?: AbortController;
 }
 
 /** Coordinator-owned endpoint for every model-callable terminal/progress tool. */
@@ -209,11 +222,21 @@ export class AgentProtocolServer implements AsyncDisposable {
     await ensurePrivateOutputRoot(this.runDir, outputRoot);
     if (binding.workspace) await assertMediatedWorkspace(binding.workspace);
     const prior = this.authorized.get(binding.executionId);
-    if (prior && prior.executionToken !== executionToken) {
-      throw new Error(`Agent execution ${binding.executionId} is already authorized`);
+    if (prior) throw new Error(`Agent execution ${binding.executionId} is already authorized`);
+    await this.reconcileUnsettledMediatedTool(binding);
+    const effectAbort = new AbortController();
+    let detachSignal: (() => void) | undefined;
+    if (binding.signal) {
+      const relay = () => effectAbort.abort(binding.signal!.reason);
+      if (binding.signal.aborted) relay();
+      else {
+        binding.signal.addEventListener("abort", relay, { once: true });
+        detachSignal = () => binding.signal!.removeEventListener("abort", relay);
+      }
     }
+    const { signal: _signal, ...authorizedBinding } = binding;
     this.authorized.set(binding.executionId, {
-      ...binding,
+      ...authorizedBinding,
       executionToken,
       outputRoot,
       finishSchema: contract.parameters,
@@ -221,12 +244,17 @@ export class AgentProtocolServer implements AsyncDisposable {
       schemaLess: contract.schemaLess,
       validateFinish: ajv.compile(contract.parameters),
       queue: Promise.resolve(),
+      effectAbort,
+      ...(detachSignal ? { detachSignal } : {}),
     });
     return { socketPath: this.socketPath, executionToken };
   }
 
   revoke(executionId: string): void {
     const id = executionIdentifier(executionId);
+    const binding = this.authorized.get(id);
+    binding?.detachSignal?.();
+    binding?.effectAbort.abort(new Error(`Agent execution ${id} was revoked`));
     this.authorized.delete(id);
     this.lastResourceSample.delete(id);
   }
@@ -236,6 +264,7 @@ export class AgentProtocolServer implements AsyncDisposable {
     this.server = undefined;
     for (const socket of this.sockets) socket.destroy();
     this.sockets.clear();
+    for (const executionId of [...this.authorized.keys()]) this.revoke(executionId);
     if (server) {
       await new Promise<void>((resolve) => server.close(() => resolve())).catch(() => undefined);
     }
@@ -388,45 +417,148 @@ export class AgentProtocolServer implements AsyncDisposable {
       throw protocolFailure("authority", "workspace_command requires a candidate workspace");
     }
     validateMediatedPayload(toolName, payload);
-    const response = canonicalJsonValue(await this.mediatedTools.execute({
-      toolName,
-      toolCallId,
-      payload,
-      runDir: this.runDir,
-      executionId: binding.executionId,
-      operationId: binding.operationId,
-      attemptId: binding.attemptId,
-      outputRoot: binding.outputRoot,
-      workspace: binding.workspace,
-    }), {
-      maxBytes: Math.min(this.database.readRun().safety.outputBytes, 1024 * 1024),
-      maxDepth: 32,
-      maxNodes: 20_000,
-      maxStringScalars: 512_000,
-    });
-    const committedAt = this.timestamp();
+    const started = await this.startMediatedToolIntent(binding, toolCallId, toolName, requestHash);
+    if (!started.started) {
+      const receipt = this.database.readAgentToolReceipt(binding.agentSessionId, toolCallId);
+      if (receipt) return matchingReceipt(receipt, binding, toolName, requestHash).response;
+      await this.settleUncertainMediatedTool(binding, started.intent);
+      throw mediatedToolUncertainFailure(toolName, toolCallId);
+    }
+
+    try {
+      const response = canonicalJsonValue(await this.mediatedTools.execute({
+        toolName,
+        toolCallId,
+        payload,
+        runDir: this.runDir,
+        executionId: binding.executionId,
+        operationId: binding.operationId,
+        attemptId: binding.attemptId,
+        outputRoot: binding.outputRoot,
+        workspace: binding.workspace,
+        signal: binding.effectAbort.signal,
+      }), {
+        maxBytes: Math.min(this.database.readRun().safety.outputBytes, 1024 * 1024),
+        maxDepth: 32,
+        maxNodes: 20_000,
+        maxStringScalars: 512_000,
+      });
+      const committedAt = this.timestamp();
+      for (let attempt = 0; attempt < MAX_COMMIT_RETRIES; attempt += 1) {
+        const existing = this.database.readAgentToolReceipt(binding.agentSessionId, toolCallId);
+        if (existing) return matchingReceipt(existing, binding, toolName, requestHash).response;
+        const current = requiredSessionProgress(this.database, binding.agentSessionId);
+        try {
+          return this.database.commitAgentMediatedTool({
+            expectedRevision: this.database.readRun().revision,
+            agentSessionId: binding.agentSessionId,
+            executionId: binding.executionId,
+            toolCallId,
+            toolName,
+            requestHash,
+            response,
+            committedAt,
+            progress: { ...current, updatedAt: committedAt },
+          }).receipt.response;
+        } catch (error) {
+          if (error instanceof RunRevisionConflictError) continue;
+          throw error;
+        }
+      }
+      throw protocolFailure("revision-race", `Could not commit ${toolName} after repeated revision races`, true);
+    } catch (error) {
+      const receipt = this.database.readAgentToolReceipt(binding.agentSessionId, toolCallId);
+      if (receipt) return matchingReceipt(receipt, binding, toolName, requestHash).response;
+      await this.settleUncertainMediatedTool(binding, started.intent);
+      throw mediatedToolUncertainFailure(toolName, toolCallId, error);
+    }
+  }
+
+  private async startMediatedToolIntent(
+    binding: AuthorizedExecution,
+    toolCallId: string,
+    toolName: AgentMediatedToolName,
+    requestHash: string,
+  ): Promise<ReturnType<RunDatabase["startAgentMediatedTool"]>> {
+    const startedAt = this.timestamp();
     for (let attempt = 0; attempt < MAX_COMMIT_RETRIES; attempt += 1) {
-      const existing = this.database.readAgentToolReceipt(binding.agentSessionId, toolCallId);
-      if (existing) return matchingReceipt(existing, binding, toolName, requestHash).response;
-      const current = requiredSessionProgress(this.database, binding.agentSessionId);
       try {
-        return this.database.commitAgentMediatedTool({
+        return this.database.startAgentMediatedTool({
           expectedRevision: this.database.readRun().revision,
           agentSessionId: binding.agentSessionId,
           executionId: binding.executionId,
           toolCallId,
           toolName,
           requestHash,
-          response,
-          committedAt,
-          progress: { ...current, updatedAt: committedAt },
-        }).receipt.response;
+          startedAt,
+        });
       } catch (error) {
         if (error instanceof RunRevisionConflictError) continue;
         throw error;
       }
     }
-    throw protocolFailure("revision-race", `Could not commit ${toolName} after repeated revision races`, true);
+    throw protocolFailure("revision-race", `Could not start ${toolName} after repeated revision races`, true);
+  }
+
+  private async reconcileUnsettledMediatedTool(binding: AgentProtocolExecutionBinding): Promise<void> {
+    const intent = this.database.readUnsettledAgentMediatedToolIntent(binding.agentSessionId);
+    if (!intent) return;
+    await this.settleUncertainMediatedTool(binding, intent);
+    throw mediatedToolUncertainFailure(intent.toolName, intent.toolCallId);
+  }
+
+  private async settleUncertainMediatedTool(
+    binding: MediatedToolOwner,
+    intent: AgentMediatedToolIntentRecord,
+  ): Promise<void> {
+    const at = this.timestamp();
+    const reason: StructuredReason = {
+      category: "effect",
+      code: "mediated-tool-outcome-uncertain",
+      summary: `${intent.toolName} crossed its durable start boundary without a committed receipt; it will not be repeated`,
+      retryable: false,
+      operationId: binding.operationId,
+      details: {
+        agentSessionId: binding.agentSessionId,
+        toolCallId: intent.toolCallId,
+        toolName: intent.toolName,
+      },
+    };
+    let quarantined = false;
+    for (let attempt = 0; attempt < MAX_COMMIT_RETRIES; attempt += 1) {
+      try {
+        this.database.markAgentMediatedToolUncertain({
+          expectedRevision: this.database.readRun().revision,
+          agentSessionId: binding.agentSessionId,
+          executionId: intent.executionId,
+          toolCallId: intent.toolCallId,
+          toolName: intent.toolName,
+          requestHash: intent.requestHash,
+          reason,
+          at,
+        });
+        quarantined = true;
+        break;
+      } catch (error) {
+        if (error instanceof RunRevisionConflictError) continue;
+        throw error;
+      }
+    }
+    if (!quarantined) {
+      throw protocolFailure("revision-race", `Could not quarantine ${intent.toolName} after repeated revision races`, true);
+    }
+    if (binding.effectAbort) {
+      binding.effectAbort.abort(reason);
+      this.revoke(intent.executionId);
+    }
+    await this.mediatedTools?.cancel({
+      toolName: intent.toolName,
+      toolCallId: intent.toolCallId,
+      runDir: this.runDir,
+      executionId: intent.executionId,
+      operationId: binding.operationId,
+      attemptId: binding.attemptId,
+    });
   }
 
   private async reportProgress(
@@ -713,6 +845,17 @@ function requiredSessionProgress(database: RunDatabase, agentSessionId: string):
   const session = database.readAgentSession(agentSessionId);
   if (!session) throw new RunDatabaseStateError(`Unknown agent session ${agentSessionId}`);
   return session.progress;
+}
+
+function mediatedToolUncertainFailure(
+  toolName: AgentMediatedToolName,
+  toolCallId: string,
+  _cause?: unknown,
+): Error {
+  return protocolFailure(
+    "mediated-tool-outcome-uncertain",
+    `${toolName} call ${toolCallId} ended without a durable receipt; the workflow was paused and the effect will not be repeated`,
+  );
 }
 
 function validateEvidenceEvent(value: JsonValue, binding: AuthorizedExecution, expectedSequence: number): AgentEvent {

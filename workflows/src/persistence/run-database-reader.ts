@@ -2,6 +2,7 @@ import { DatabaseSync } from "./sqlite.js";
 import path from "node:path";
 import type {
   AgentLiveProgressProjection,
+  AgentMediatedToolIntentRecord,
   AgentProgress,
   AgentProgressRecord,
   AgentRecentProgress,
@@ -23,6 +24,7 @@ import type {
   OperationStatus,
   RunEvent,
   RunRecord,
+  StructuredReason,
   VerificationRecord,
   WorkflowCallRecord,
   WorkspaceCheckpointRecord,
@@ -39,6 +41,7 @@ import {
   assertIdentifier,
   assertIsoDate,
   assertRunRecord,
+  assertStructuredReason,
   assertWorkspace,
   decodeCanonicalJson,
   optionalNumber,
@@ -827,6 +830,30 @@ export class RunDatabaseReader implements Disposable {
     return row ? agentToolReceiptFromRow(row) : undefined;
   }
 
+  readAgentMediatedToolIntent(
+    agentSessionId: string,
+    toolCallId: string,
+  ): AgentMediatedToolIntentRecord | undefined {
+    this.assertOpen();
+    assertIdentifier(agentSessionId, "agent session id");
+    assertAgentToolCallId(toolCallId);
+    const row = this.database.prepare(
+      "SELECT * FROM agent_mediated_tool_intents WHERE agent_session_id = ? AND tool_call_id = ?",
+    ).get(agentSessionId, toolCallId) as SqlRow | undefined;
+    return row ? agentMediatedToolIntentFromRow(row) : undefined;
+  }
+
+  readUnsettledAgentMediatedToolIntent(agentSessionId: string): AgentMediatedToolIntentRecord | undefined {
+    this.assertOpen();
+    assertIdentifier(agentSessionId, "agent session id");
+    const row = this.database.prepare(`
+      SELECT * FROM agent_mediated_tool_intents
+      WHERE agent_session_id = ? AND status != 'completed'
+      ORDER BY started_at, tool_call_id LIMIT 1
+    `).get(agentSessionId) as SqlRow | undefined;
+    return row ? agentMediatedToolIntentFromRow(row) : undefined;
+  }
+
   listAgentToolReceipts(agentSessionId: string): AgentToolReceiptRecord[] {
     this.assertOpen();
     assertIdentifier(agentSessionId, "agent session id");
@@ -1226,6 +1253,44 @@ function agentToolReceiptFromRow(row: SqlRow): AgentToolReceiptRecord {
     throw new RunDatabaseCorruptionError(`Invalid agent protocol tool ${receipt.toolName}`);
   }
   return receipt;
+}
+
+function agentMediatedToolIntentFromRow(row: SqlRow): AgentMediatedToolIntentRecord {
+  const reasonSource = optionalString(row, "reason_json");
+  const reason = reasonSource === undefined
+    ? undefined
+    : decodeCanonicalJson(reasonSource, "value") as unknown as StructuredReason;
+  if (reason) assertStructuredReason(reason);
+  const intent: AgentMediatedToolIntentRecord = {
+    agentSessionId: requiredString(row, "agent_session_id"),
+    executionId: requiredString(row, "execution_id"),
+    toolCallId: requiredString(row, "tool_call_id"),
+    toolName: requiredString(row, "tool_name") as AgentMediatedToolIntentRecord["toolName"],
+    requestHash: requiredString(row, "request_hash"),
+    status: requiredString(row, "status") as AgentMediatedToolIntentRecord["status"],
+    startedAt: requiredString(row, "started_at"),
+    updatedAt: requiredString(row, "updated_at"),
+    ...(optionalString(row, "completed_at") ? { completedAt: optionalString(row, "completed_at")! } : {}),
+    ...(reason ? { reason } : {}),
+  };
+  assertIdentifier(intent.agentSessionId, "agent session id");
+  assertIdentifier(intent.executionId, "agent execution id");
+  assertAgentToolCallId(intent.toolCallId);
+  assertHash(intent.requestHash, "agent mediated tool request hash");
+  assertIsoDate(intent.startedAt, "agent mediated tool startedAt");
+  assertIsoDate(intent.updatedAt, "agent mediated tool updatedAt");
+  if (intent.completedAt) assertIsoDate(intent.completedAt, "agent mediated tool completedAt");
+  if (!["web_search", "web_fetch", "workspace_command"].includes(intent.toolName)) {
+    throw new RunDatabaseCorruptionError(`Invalid mediated agent tool ${intent.toolName}`);
+  }
+  if (!["started", "uncertain", "completed"].includes(intent.status)) {
+    throw new RunDatabaseCorruptionError(`Invalid mediated agent tool status ${intent.status}`);
+  }
+  if ((intent.status === "uncertain") !== Boolean(intent.reason)
+    || (intent.status === "completed") !== Boolean(intent.completedAt)) {
+    throw new RunDatabaseCorruptionError(`Inconsistent mediated agent tool intent ${intent.toolCallId}`);
+  }
+  return intent;
 }
 
 function recentProgressFromRow(row: SqlRow): AgentRecentProgress {

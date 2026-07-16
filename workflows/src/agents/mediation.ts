@@ -19,10 +19,21 @@ export interface AgentMediatedToolRequest {
   attemptId: string;
   outputRoot: string;
   workspace: AgentProtocolWorkspaceAuthority;
+  signal: AbortSignal;
+}
+
+export interface AgentMediatedToolCancellation {
+  toolName: AgentMediatedToolName;
+  toolCallId: string;
+  runDir: string;
+  executionId: string;
+  operationId: string;
+  attemptId: string;
 }
 
 export interface AgentMediatedToolExecutor {
   execute(request: AgentMediatedToolRequest): Promise<JsonValue>;
+  cancel(request: AgentMediatedToolCancellation): Promise<void>;
 }
 
 export async function assertMediatedWorkspace(workspace: AgentProtocolWorkspaceAuthority): Promise<void> {

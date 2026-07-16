@@ -176,6 +176,7 @@ describe("semantic flow.agent adapter", () => {
     const workspace = await manager.create({ logicalId: "shared" });
     fixture.adapterOptions.candidateManager = manager;
     fixture.adapterOptions.mediatedTools = {
+      cancel: async () => {},
       execute: async (request) => {
         expect(request.toolName).toBe("web_search");
         return { results: ["source"] };

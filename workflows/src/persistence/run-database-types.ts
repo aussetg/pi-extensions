@@ -1,6 +1,7 @@
 import type { JsonObject, JsonValue } from "../types.js";
 import type {
   AgentFinishRecord,
+  AgentMediatedToolIntentRecord,
   AgentProgress,
   AgentProgressEvent,
   AgentSessionRecord,
@@ -134,6 +135,32 @@ interface AgentToolCommitBase {
   requestHash: string;
   response: JsonValue;
   committedAt: string;
+}
+
+export interface AgentMediatedToolStart {
+  expectedRevision: number;
+  agentSessionId: string;
+  executionId: string;
+  toolCallId: string;
+  toolName: AgentMediatedToolName;
+  requestHash: string;
+  startedAt: string;
+}
+
+export interface AgentMediatedToolStartResult {
+  intent: AgentMediatedToolIntentRecord;
+  started: boolean;
+}
+
+export interface AgentMediatedToolUncertain {
+  expectedRevision: number;
+  agentSessionId: string;
+  executionId: string;
+  toolCallId: string;
+  toolName: AgentMediatedToolName;
+  requestHash: string;
+  reason: StructuredReason;
+  at: string;
 }
 
 export interface AgentProgressToolCommit extends AgentToolCommitBase {

@@ -551,9 +551,43 @@ describe("logical agent session supervision", () => {
       attemptId: "attempt-worker-1",
       outputRoot: path.join(root, "outputs", "execution-worker-1"),
       workspace: { mode: "candidate", root: candidate, cwd: candidate },
+      signal: new AbortController().signal,
     });
     expect(response).toMatchObject({ ok: true, exitCode: 0, network: "unshared", unitCleaned: true });
     expect(await fs.promises.readFile(path.join(candidate, "edited.txt"), "utf8")).toBe("edited\n");
+  }, 30_000);
+
+  it("stops the mediated command unit when its owning signal is cancelled", async () => {
+    const root = await workerRoot();
+    const candidate = path.join(root, "candidate-command-cancel");
+    await fs.promises.mkdir(candidate);
+    const mediator = new HostAgentMediatedToolExecutor();
+    const controller = new AbortController();
+    const script = [
+      'require("node:fs").writeFileSync("started.txt", "started\\n")',
+      'setTimeout(()=>{require("node:fs").writeFileSync("late.txt", "late\\n");process.exit(0)},5000)',
+    ].join(";");
+    const execution = mediator.execute({
+      toolName: "workspace_command",
+      toolCallId: "cancel-command",
+      payload: { argv: [process.execPath, "-e", script], timeoutMs: 10_000 },
+      runDir: root,
+      executionId: "execution-worker-cancel",
+      operationId: "operation-worker-cancel",
+      attemptId: "attempt-worker-cancel",
+      outputRoot: path.join(root, "outputs", "execution-worker-cancel"),
+      workspace: { mode: "candidate", root: candidate, cwd: candidate },
+      signal: controller.signal,
+    });
+    for (let retry = 0; retry < 100; retry += 1) {
+      if (fs.existsSync(path.join(candidate, "started.txt"))) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(fs.existsSync(path.join(candidate, "started.txt"))).toBe(true);
+    controller.abort(new Error("test cancelled command"));
+    await expect(execution).rejects.toThrow(/test cancelled command/);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(fs.existsSync(path.join(candidate, "late.txt"))).toBe(false);
   }, 30_000);
 });
 
@@ -742,7 +776,11 @@ describe("private coordinator agent protocol", () => {
     const calls: string[] = [];
     const server = new AgentProtocolServer(fixture.runDir, fixture.database, {
       mediatedTools: {
+        cancel: async () => {},
         execute: async (request) => {
+          expect(fixture.database.readAgentMediatedToolIntent(fixture.agentSessionId, request.toolCallId))
+            .toMatchObject({ status: "started", toolName: request.toolName });
+          expect(fixture.database.readAgentToolReceipt(fixture.agentSessionId, request.toolCallId)).toBeUndefined();
           calls.push(request.toolName);
           if (request.toolName === "web_search") return { results: [{ title: "Primary", url: "https://example.test/" }] } as JsonValue;
           if (request.toolName === "workspace_command") {
@@ -772,12 +810,126 @@ describe("private coordinator agent protocol", () => {
     });
     expect(await client.request("web_search", "search-1", { query: "durable systems", maxResults: 3 }))
       .toMatchObject({ results: [{ url: "https://example.test/" }] });
+    const revisionAfterSearch = fixture.database.readRun().revision;
+    expect(await client.request("web_search", "search-1", { query: "durable systems", maxResults: 3 }))
+      .toMatchObject({ results: [{ url: "https://example.test/" }] });
+    expect(fixture.database.readRun().revision).toBe(revisionAfterSearch);
     expect(await client.request("workspace_command", "command-1", { argv: ["printf", "candidate"] }))
       .toEqual({ ok: true, network: "unshared" });
     expect(await fs.promises.readFile(path.join(candidate, "edited.txt"), "utf8")).toBe("candidate edit\n");
     expect(calls).toEqual(["web_search", "workspace_command"]);
     expect(fixture.database.listAgentToolReceipts(fixture.agentSessionId).map((receipt) => receipt.toolName))
       .toEqual(["web_search", "workspace_command"]);
+    expect(fixture.database.readAgentMediatedToolIntent(fixture.agentSessionId, "search-1"))
+      .toMatchObject({ status: "completed", completedAt: expect.any(String) });
+    expect(fixture.database.readAgentMediatedToolIntent(fixture.agentSessionId, "command-1"))
+      .toMatchObject({ status: "completed", completedAt: expect.any(String) });
+    await client.close();
+    await server.close();
+    fixture.database.close();
+  });
+
+  it("quarantines a crash-left mediated intent instead of executing it again", async () => {
+    const fixture = await protocolFixture();
+    const candidate = path.join(fixture.runDir, "workspaces", "candidates", "uncertain", "project");
+    await fs.promises.mkdir(candidate, { recursive: true });
+    const payload = { argv: ["sh", "-c", "printf changed > value.txt"] } as JsonValue;
+    const requestHash = stableHash({ protocolVersion: 1, toolName: "workspace_command", payload });
+    fixture.database.startAgentMediatedTool({
+      expectedRevision: fixture.database.readRun().revision,
+      agentSessionId: fixture.agentSessionId,
+      executionId: fixture.executionId,
+      toolCallId: "command-crash",
+      toolName: "workspace_command",
+      requestHash,
+      startedAt: NOW,
+    });
+    // This is the state left by a coordinator death after dispatch and before receipt commit.
+    await fs.promises.writeFile(path.join(candidate, "value.txt"), "changed\n", "utf8");
+
+    let executions = 0;
+    const cancelled: string[] = [];
+    const server = new AgentProtocolServer(fixture.runDir, fixture.database, {
+      mediatedTools: {
+        execute: async () => { executions += 1; return { ok: true }; },
+        cancel: async (request) => { cancelled.push(request.toolCallId); },
+      },
+    });
+    await server.start();
+    await expect(server.authorize({
+      executionId: fixture.executionId,
+      agentSessionId: fixture.agentSessionId,
+      operationId: fixture.operationId,
+      attemptId: fixture.attemptId,
+      resultMode: "value",
+      executionToken: "d".repeat(64),
+      workspace: { mode: "candidate", root: candidate, cwd: candidate },
+    })).rejects.toThrow(/without a durable receipt/i);
+
+    expect(executions).toBe(0);
+    expect(cancelled).toEqual(["command-crash"]);
+    expect(fixture.database.readAgentMediatedToolIntent(fixture.agentSessionId, "command-crash"))
+      .toMatchObject({
+        status: "uncertain",
+        reason: { code: "mediated-tool-outcome-uncertain", retryable: false },
+      });
+    expect(fixture.database.readAgentToolReceipt(fixture.agentSessionId, "command-crash")).toBeUndefined();
+    expect(fixture.database.readAgentSession(fixture.agentSessionId)?.status).toBe("paused");
+    expect(fixture.database.readOperation(fixture.operationId)?.status).toBe("paused");
+    expect(fixture.database.readRun().status).toBe("paused");
+    expect(await fs.promises.readFile(path.join(candidate, "value.txt"), "utf8")).toBe("changed\n");
+
+    await server.close();
+    fixture.database.close();
+  });
+
+  it("cancels an in-flight mediated effect with its owning execution", async () => {
+    const fixture = await protocolFixture();
+    const candidate = path.join(fixture.runDir, "workspaces", "candidates", "cancelled", "project");
+    await fs.promises.mkdir(candidate, { recursive: true });
+    const owner = new AbortController();
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const cancelled: string[] = [];
+    const server = new AgentProtocolServer(fixture.runDir, fixture.database, {
+      mediatedTools: {
+        execute: async (request) => {
+          entered();
+          await new Promise<never>((_resolve, reject) => {
+            request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
+          });
+          return null;
+        },
+        cancel: async (request) => { cancelled.push(request.toolCallId); },
+      },
+    });
+    await server.start();
+    const token = "e".repeat(64);
+    const authority = await server.authorize({
+      executionId: fixture.executionId,
+      agentSessionId: fixture.agentSessionId,
+      operationId: fixture.operationId,
+      attemptId: fixture.attemptId,
+      resultMode: "value",
+      executionToken: token,
+      workspace: { mode: "candidate", root: candidate, cwd: candidate },
+      signal: owner.signal,
+    });
+    const client = await AgentProtocolClient.connect({
+      socketPath: authority.socketPath,
+      executionId: fixture.executionId,
+      executionToken: token,
+    });
+    const request = client.request("workspace_command", "command-cancel", { argv: ["sleep", "60"] });
+    await started;
+    owner.abort(new Error("scope stopped"));
+    await expect(request).rejects.toThrow(/without a durable receipt/i);
+
+    expect(cancelled).toEqual(["command-cancel"]);
+    expect(fixture.database.readAgentMediatedToolIntent(fixture.agentSessionId, "command-cancel"))
+      .toMatchObject({ status: "uncertain", reason: { code: "mediated-tool-outcome-uncertain" } });
+    expect(fixture.database.readRun().status).toBe("paused");
+
     await client.close();
     await server.close();
     fixture.database.close();

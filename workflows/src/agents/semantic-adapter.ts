@@ -186,6 +186,7 @@ export class SemanticAgentAdapter implements SemanticEffectAdapter {
             cwd: resolved.launchWorkspace.cwd,
           },
           network: resolved.options.network,
+          signal: request.signal,
           ...(controlGroup ? { controlGroup } : {}),
         });
         const actualWorkspace = await this.currentLaunchWorkspace(resolved);

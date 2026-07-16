@@ -322,6 +322,20 @@ export type AgentTerminalToolName =
 /** Non-terminal tools whose authority remains in the coordinator. */
 export type AgentMediatedToolName = "web_search" | "web_fetch" | "workspace_command";
 
+/** Write-ahead authority for one coordinator-mediated effect. */
+export interface AgentMediatedToolIntentRecord {
+  agentSessionId: string;
+  executionId: string;
+  toolCallId: string;
+  toolName: AgentMediatedToolName;
+  requestHash: string;
+  status: "started" | "uncertain" | "completed";
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  reason?: StructuredReason;
+}
+
 export type AgentProtocolToolName = AgentTerminalToolName | AgentMediatedToolName;
 
 /**
