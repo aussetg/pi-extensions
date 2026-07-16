@@ -2,12 +2,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { parseStructuredWorkflow } from "../src/definition/workflow-definition.js";
+import {
+  STRUCTURED_RUNTIME_API_HASH,
+  STRUCTURED_RUNTIME_API_VERSION,
+  parseStructuredWorkflow,
+} from "../src/definition/workflow-definition.js";
 import {
   StructuredWorkflowRegistry,
   createWorkflowInvocationSnapshot,
   writeWorkflowInvocationSnapshot,
 } from "../src/registry/structured-workflows.js";
+import { assertPreparedWorkflowInvocation } from "../src/runtime/prepared-workflow-run.js";
 
 const temporary: string[] = [];
 
@@ -107,7 +112,31 @@ describe("structured workflow definitions", () => {
     const runDir = path.join(root, "run");
     await writeWorkflowInvocationSnapshot(runDir, snapshot);
     expect(await fs.promises.readFile(path.join(runDir, "source.flow.js"), "utf8")).toBe(ref.source);
-    expect(JSON.parse(await fs.promises.readFile(path.join(runDir, "context", "invocation.json"), "utf8")).input).toEqual(snapshot.input);
+    const persisted = JSON.parse(await fs.promises.readFile(path.join(runDir, "context", "invocation.json"), "utf8"));
+    expect(persisted.input).toEqual(snapshot.input);
+    const run = {
+      workflow: {
+        id: ref.id,
+        name: ref.name,
+        sourceHash: snapshot.sourceHash,
+        definitionHash: snapshot.definitionHash,
+      },
+    };
+    expect(() => assertPreparedWorkflowInvocation(run, ref.parsed, persisted)).not.toThrow();
+    expect(() => assertPreparedWorkflowInvocation(run, ref.parsed, {
+      ...persisted,
+      runtimeApiVersion: STRUCTURED_RUNTIME_API_VERSION - 1,
+    })).toThrow(/different structured-runtime revision/);
+    expect(() => assertPreparedWorkflowInvocation(run, ref.parsed, {
+      ...persisted,
+      runtimeApiHash: `sha256:${"0".repeat(64)}`,
+    })).toThrow(/different structured-runtime revision/);
+    expect(() => assertPreparedWorkflowInvocation(run, {
+      ...ref.parsed,
+      metadata: { ...ref.parsed.metadata, description: "Reinterpreted by another runtime" },
+    }, persisted)).toThrow(/definition changed under the current structured-runtime revision/);
+    expect(persisted.runtimeApiVersion).toBe(STRUCTURED_RUNTIME_API_VERSION);
+    expect(persisted.runtimeApiHash).toBe(STRUCTURED_RUNTIME_API_HASH);
     await expect(writeWorkflowInvocationSnapshot(runDir, snapshot)).rejects.toMatchObject({ code: "EEXIST" });
     expect(() => createWorkflowInvocationSnapshot(ref, { value: "wrong" })).toThrow(/Invalid arguments/);
   });

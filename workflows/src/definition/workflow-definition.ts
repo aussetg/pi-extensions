@@ -1,7 +1,13 @@
 import { sha256, stableHash } from "../utils/hashes.js";
 import type { JsonObject, JsonValue } from "../types.js";
 import { deepFreezeJson } from "./canonical-json.js";
-import type { ParsedStructuredWorkflow, StructuredWorkflowDefinition } from "./types.js";
+import type {
+  ParsedStructuredWorkflow,
+  StructuredWorkflowDefinition,
+  StructuredWorkflowMetadata,
+  WorkflowId,
+  WorkflowReviewSummary,
+} from "./types.js";
 import {
   buildExecutableSource,
   buildParentMap,
@@ -15,7 +21,7 @@ import {
 } from "./workflow-metadata.js";
 import { analyzeWorkflowSource } from "./workflow-source-analysis.js";
 
-export const STRUCTURED_RUNTIME_API_VERSION = 13;
+export const STRUCTURED_RUNTIME_API_VERSION = 14;
 
 export const STRUCTURED_RUNTIME_API_DESCRIPTOR = deepFreezeJson({
   formatVersion: 1,
@@ -34,6 +40,32 @@ export const STRUCTURED_RUNTIME_API_DESCRIPTOR = deepFreezeJson({
 } as unknown as JsonValue);
 
 export const STRUCTURED_RUNTIME_API_HASH = stableHash(STRUCTURED_RUNTIME_API_DESCRIPTOR);
+
+/** One reviewed definition identity, including the control-runtime revision that interpreted it. */
+export function structuredWorkflowDefinitionHash(input: {
+  workflowId: WorkflowId;
+  metadata: StructuredWorkflowMetadata;
+  sourceHash: string;
+  runtimeApiVersion: number;
+  runtimeApiHash: string;
+  review: WorkflowReviewSummary;
+}): string {
+  return stableHash({
+    id: input.workflowId,
+    name: input.metadata.name,
+    title: input.metadata.title ?? null,
+    description: input.metadata.description,
+    inputSchema: input.metadata.inputSchema,
+    outputSchema: input.metadata.outputSchema,
+    capabilities: input.metadata.capabilities,
+    modelVisible: input.metadata.modelVisible,
+    maxParallelism: input.metadata.maxParallelism ?? null,
+    sourceHash: input.sourceHash,
+    runtimeApiVersion: input.runtimeApiVersion,
+    runtimeApiHash: input.runtimeApiHash,
+    review: input.review,
+  });
+}
 
 export function defineWorkflow<TArgs extends JsonObject, TResult extends JsonValue>(
   definition: StructuredWorkflowDefinition<TArgs, TResult>,

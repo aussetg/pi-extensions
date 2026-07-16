@@ -14,6 +14,7 @@ import {
   STRUCTURED_RUNTIME_API_HASH,
   STRUCTURED_RUNTIME_API_VERSION,
   parseStructuredWorkflow,
+  structuredWorkflowDefinitionHash,
 } from "../definition/workflow-definition.js";
 import { WorkflowScriptError } from "../runtime/errors.js";
 import type {
@@ -117,16 +118,9 @@ export function createWorkflowInvocationSnapshot(ref: StructuredWorkflowRef, arg
   const validate = ajv.compile(ref.inputSchema);
   if (!validate(input)) throw new Error(`Invalid arguments for ${ref.id}: ${ajv.errorsText(validate.errors)}`);
 
-  const definitionHash = stableHash({
-    id: ref.id,
-    name: ref.name,
-    title: ref.title ?? null,
-    description: ref.description,
-    inputSchema: ref.inputSchema,
-    outputSchema: ref.outputSchema,
-    capabilities: ref.capabilities,
-    modelVisible: ref.modelVisible,
-    maxParallelism: ref.maxParallelism ?? null,
+  const definitionHash = structuredWorkflowDefinitionHash({
+    workflowId: ref.id,
+    metadata: ref,
     sourceHash: ref.sourceHash,
     runtimeApiVersion: STRUCTURED_RUNTIME_API_VERSION,
     runtimeApiHash: STRUCTURED_RUNTIME_API_HASH,

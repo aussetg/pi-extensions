@@ -109,6 +109,10 @@ process, and pressure data is read before collection.
 SQLite is the ordinary control transport. An interrupted `running` row is paused on reopen rather
 than silently continued. Extension shutdown does not stop services.
 
+Prepared runs pin the structured-runtime version, API hash, and reviewed definition hash. A
+coordinator with a different revision refuses to resume the run before workflow control or effects
+execute; the workflow must be started again under the current revision.
+
 ## Verification, replay, and apply
 
 Verification binds candidate tree, lineage, write scope, project snapshot, profile, environment,

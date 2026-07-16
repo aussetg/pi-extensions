@@ -13,7 +13,13 @@ import { CandidateWorkspaceManager } from "../candidates/store.js";
 import { SandboxedCommandExecutor } from "../commands/executor.js";
 import { SemanticCommandAdapter } from "../commands/semantic-adapter.js";
 import { DEFINITION_LIMITS } from "../definition/limits.js";
-import { parseStructuredWorkflow } from "../definition/workflow-definition.js";
+import type { ParsedStructuredWorkflow } from "../definition/types.js";
+import {
+  STRUCTURED_RUNTIME_API_HASH,
+  STRUCTURED_RUNTIME_API_VERSION,
+  parseStructuredWorkflow,
+  structuredWorkflowDefinitionHash,
+} from "../definition/workflow-definition.js";
 import { SemanticExperimentAdapter } from "../experiments/adapter.js";
 import { SemanticMeasurementAdapter } from "../measurements/adapter.js";
 import { HostMeasurementEnvironmentProvider } from "../measurements/environment.js";
@@ -28,14 +34,19 @@ import {
   assertProjectSnapshotManifest,
   type ProjectSnapshotManifest,
 } from "../workspaces/project-snapshot.js";
+import type { RunRecord } from "./durable-types.js";
 import { executeSequentialSemanticRun, type SequentialSemanticRunOutcome } from "./semantic-engine.js";
 
 const SOURCE_BYTES = 2 * 1024 * 1024;
 const CONTEXT_JSON_BYTES = 8 * 1024 * 1024;
 
-interface PersistedInvocation {
+export interface PersistedWorkflowInvocation {
+  formatVersion: 1;
   workflowId: string;
+  sourceHash: string;
   definitionHash: string;
+  runtimeApiVersion: number;
+  runtimeApiHash: string;
   input: JsonObject;
   inputHash: string;
 }
@@ -59,7 +70,7 @@ export async function executePreparedWorkflowRun(
   }
   const [source, invocation, resources, manifest, replay] = await Promise.all([
     readText(path.join(runDir, "source.flow.js"), SOURCE_BYTES),
-    readCanonicalJson<PersistedInvocation>(path.join(runDir, "context", "invocation.json")),
+    readCanonicalJson<unknown>(path.join(runDir, "context", "invocation.json")),
     readCanonicalJson<PreparedWorkflowExecutionResources>(path.join(runDir, "context", "resources.json")),
     readCanonicalJson<ProjectSnapshotManifest>(
       path.join(runDir, "context", "project-manifest.json"),
@@ -70,7 +81,7 @@ export async function executePreparedWorkflowRun(
   const run = database.readRun();
   const parsed = parseStructuredWorkflow(source);
   assertProjectSnapshotManifest(manifest);
-  assertInvocation(run, parsed, invocation);
+  assertPreparedWorkflowInvocation(run, parsed, invocation);
   assertResources(run, resources, manifest);
 
   const projectRoot = path.join(runDir, "context", "project");
@@ -170,22 +181,51 @@ export async function executePreparedWorkflowRun(
   });
 }
 
-function assertInvocation(
-  run: ReturnType<RunDatabase["readRun"]>,
-  parsed: ReturnType<typeof parseStructuredWorkflow>,
-  invocation: PersistedInvocation,
-): void {
-  if (!plainRecord(invocation) || typeof invocation.workflowId !== "string"
-    || typeof invocation.definitionHash !== "string" || !plainRecord(invocation.input)
-    || typeof invocation.inputHash !== "string") {
+export function assertPreparedWorkflowInvocation(
+  run: {
+    workflow: Pick<RunRecord["workflow"], "id" | "name" | "sourceHash" | "definitionHash">;
+  },
+  parsed: ParsedStructuredWorkflow,
+  invocation: unknown,
+): asserts invocation is PersistedWorkflowInvocation {
+  if (!plainRecord(invocation) || invocation.formatVersion !== 1
+    || typeof invocation.workflowId !== "string" || typeof invocation.sourceHash !== "string"
+    || typeof invocation.definitionHash !== "string"
+    || !Number.isSafeInteger(invocation.runtimeApiVersion) || typeof invocation.runtimeApiHash !== "string"
+    || !plainRecord(invocation.input) || typeof invocation.inputHash !== "string") {
     throw new Error("Persisted workflow invocation is invalid");
   }
   if (invocation.workflowId !== run.workflow.id || invocation.definitionHash !== run.workflow.definitionHash) {
     throw new Error("Persisted workflow invocation belongs to another run");
   }
+  if (
+    invocation.runtimeApiVersion !== STRUCTURED_RUNTIME_API_VERSION
+    || invocation.runtimeApiHash !== STRUCTURED_RUNTIME_API_HASH
+  ) {
+    throw new Error(
+      "Prepared workflow requires a different structured-runtime revision "
+      + `(prepared v${invocation.runtimeApiVersion} ${invocation.runtimeApiHash}, `
+      + `current v${STRUCTURED_RUNTIME_API_VERSION} ${STRUCTURED_RUNTIME_API_HASH}); start a new run`,
+    );
+  }
   if (stableHash(invocation.input) !== invocation.inputHash) throw new Error("Persisted workflow input hash is corrupt");
-  if (parsed.sourceHash !== run.workflow.sourceHash || parsed.metadata.name !== run.workflow.name) {
+  if (
+    invocation.sourceHash !== parsed.sourceHash
+    || parsed.sourceHash !== run.workflow.sourceHash
+    || parsed.metadata.name !== run.workflow.name
+  ) {
     throw new Error("Persisted workflow source belongs to another run");
+  }
+  const currentDefinitionHash = structuredWorkflowDefinitionHash({
+    workflowId: run.workflow.id,
+    metadata: parsed.metadata,
+    sourceHash: parsed.sourceHash,
+    runtimeApiVersion: STRUCTURED_RUNTIME_API_VERSION,
+    runtimeApiHash: STRUCTURED_RUNTIME_API_HASH,
+    review: parsed.review,
+  });
+  if (currentDefinitionHash !== invocation.definitionHash) {
+    throw new Error("Persisted workflow definition changed under the current structured-runtime revision; start a new run");
   }
 }
 
