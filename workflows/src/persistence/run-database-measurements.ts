@@ -6,6 +6,7 @@ import {
 } from "../experiments/records.js";
 import {
   applyMetricCohortDeltaToSnapshot,
+  applyMetricDispositionToSnapshot,
   normalizeMetricCohortDelta,
   normalizeMetricDefinition,
   type PersistedMetricObservation,
@@ -13,6 +14,7 @@ import {
 } from "../measurements/metrics.js";
 import {
   measurementBindingHash,
+  type MeasurementDispositionRecord,
   type MeasurementRecord,
   type MeasurementSampleRecord,
 } from "../measurements/records.js";
@@ -95,12 +97,13 @@ export function insertMeasurement(
     database.prepare(`
       INSERT INTO measurement_observations(
         measurement_id, run_id, ordinal, sequence, observation_id, metric_id, output_id,
-        value, samples_json, initial_status, status, improvement_passed, guardrail_passed
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        value, samples_json, initial_status, status, best_reference, improvement_passed, guardrail_passed
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.measurementId, runId, ordinal, persisted.sequence, observation.observationId,
       observation.metricId, observation.outputId, observation.value,
       encodeCanonicalJson(observation.samples as unknown as JsonValue), observation.status, persisted.status,
+      persisted.bestReference,
       booleanValue(persisted.improvementPassed), booleanValue(persisted.guardrailPassed),
     );
   }
@@ -123,6 +126,102 @@ export function listMeasurements(database: DatabaseSync, limit: number): Measure
   const rows = database.prepare("SELECT measurement_id FROM measurements ORDER BY ended_at, measurement_id LIMIT ?")
     .all(bounded) as SqlRow[];
   return rows.map((row) => readMeasurement(database, requiredString(row, "measurement_id"))!);
+}
+
+export function readMeasurementDisposition(
+  database: DatabaseSync,
+  measurementId: string,
+): MeasurementDispositionRecord | undefined {
+  assertIdentifier(measurementId, "measurement disposition id");
+  const row = database.prepare("SELECT * FROM measurement_dispositions WHERE measurement_id = ?")
+    .get(measurementId) as SqlRow | undefined;
+  return row ? measurementDispositionFromRow(row) : undefined;
+}
+
+export function readMeasurementDispositionByOperation(
+  database: DatabaseSync,
+  operationId: string,
+): MeasurementDispositionRecord | undefined {
+  assertIdentifier(operationId, "measurement disposition operation id");
+  const row = database.prepare("SELECT * FROM measurement_dispositions WHERE operation_id = ?")
+    .get(operationId) as SqlRow | undefined;
+  return row ? measurementDispositionFromRow(row) : undefined;
+}
+
+/** Finalize candidate observations in the same transaction as accept/reject completion. */
+export function finalizeMeasurementDisposition(
+  database: DatabaseSync,
+  input: {
+    runId: string;
+    operationId: string;
+    operationPath: string;
+    operationKind: string;
+    value: JsonValue | undefined;
+    disposedAt: string;
+  },
+): void {
+  if (input.operationKind !== "accept" && input.operationKind !== "reject") return;
+  const value = optionalRecord(input.value);
+  if (!value || !Object.prototype.hasOwnProperty.call(value, "measurement")) return;
+  const disposition = input.operationKind === "accept" ? "accepted" as const : "rejected" as const;
+  const measurementBinding = requiredRecord(value.measurement, "candidate measurement disposition");
+  const measurementId = requiredStringValue(measurementBinding.measurementId, "measurement disposition id");
+  assertIdentifier(measurementId, "measurement disposition id");
+  assertIsoDate(input.disposedAt, "measurement disposition time");
+  assertDispositionResult(value, disposition, input.operationPath);
+
+  const measurement = readMeasurement(database, measurementId);
+  if (!measurement || measurement.runId !== input.runId || !measurement.candidateId) {
+    throw new RunDatabaseStateError("Measurement is not bound to its candidate");
+  }
+  const expectedMeasurement = {
+    measurementId: measurement.measurementId,
+    profileHash: measurement.profileHash,
+    environmentHash: measurement.environmentHash,
+    bindingHash: measurement.bindingHash,
+  };
+  if (stableHash(measurementBinding) !== stableHash(expectedMeasurement)) {
+    throw new RunDatabaseStateError("Candidate disposition changed its exact measurement binding");
+  }
+  assertDispositionCandidate(database, measurement, value.candidate);
+
+  const operation = database.prepare("SELECT ordinal FROM operations WHERE operation_id = ? AND run_id = ?")
+    .get(input.operationId, input.runId) as SqlRow | undefined;
+  const measuredOperation = database.prepare("SELECT ordinal FROM operations WHERE operation_id = ? AND run_id = ?")
+    .get(measurement.operationId, input.runId) as SqlRow | undefined;
+  if (!operation || !measuredOperation || requiredNumber(measuredOperation, "ordinal") >= requiredNumber(operation, "ordinal")) {
+    throw new RunDatabaseStateError("Measurement disposition must follow its measurement operation");
+  }
+  const existing = readMeasurementDisposition(database, measurementId);
+  if (existing) {
+    throw new RunDatabaseStateError(`Measurement ${measurementId} was already ${existing.disposition}`);
+  }
+  const observations = database.prepare(
+    "SELECT initial_status, status FROM measurement_observations WHERE measurement_id = ? ORDER BY ordinal",
+  ).all(measurementId) as SqlRow[];
+  if (
+    observations.length !== measurement.delta.observations.length
+    || observations.some((row) => requiredString(row, "initial_status") !== "pending" || requiredString(row, "status") !== "pending")
+  ) throw new RunDatabaseStateError("Measurement observations are not pending disposition");
+
+  const next = applyMetricDispositionToSnapshot(readMetricStates(database, input.runId), measurement.delta, disposition);
+  const changed = database.prepare(
+    "UPDATE measurement_observations SET status = ? WHERE measurement_id = ? AND status = 'pending'",
+  ).run(disposition, measurementId).changes;
+  if (Number(changed) !== observations.length) throw new RunDatabaseStateError("Measurement disposition lost an observation race");
+  for (const metric of next) upsertMetric(database, input.runId, metric);
+  database.prepare(`
+    INSERT INTO measurement_dispositions(
+      measurement_id, run_id, operation_id, candidate_id, disposition, disposed_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    measurementId,
+    input.runId,
+    input.operationId,
+    measurement.candidateId,
+    disposition,
+    input.disposedAt,
+  );
 }
 
 export function readMetric(database: DatabaseSync, runId: string, metricId: string): PersistedMetricState | undefined {
@@ -155,32 +254,22 @@ export function insertExperiment(database: DatabaseSync, record: ExperimentRecor
     .get(record.candidateId, runId) as SqlRow | undefined;
   const measurement = database.prepare("SELECT candidate_id, binding_hash FROM measurements WHERE measurement_id = ? AND run_id = ?")
     .get(record.measurementId, runId) as SqlRow | undefined;
-  const disposition = database.prepare("SELECT kind, ordinal, status, result_value_json FROM operations WHERE operation_id = ? AND run_id = ?")
-    .get(record.dispositionOperationId, runId) as SqlRow | undefined;
+  const disposition = database.prepare(`
+    SELECT d.candidate_id, d.disposition, o.kind, o.ordinal, o.status
+    FROM measurement_dispositions d
+    JOIN operations o ON o.operation_id = d.operation_id AND o.run_id = d.run_id
+    WHERE d.measurement_id = ? AND d.operation_id = ? AND d.run_id = ?
+  `).get(record.measurementId, record.dispositionOperationId, runId) as SqlRow | undefined;
   if (!candidate || !measurement || optionalString(measurement, "candidate_id") !== record.candidateId) {
     throw new RunDatabaseStateError("Experiment candidate and measurement are not exactly linked");
   }
   if (
     !disposition || requiredString(disposition, "status") !== "completed" ||
     requiredNumber(disposition, "ordinal") >= requiredNumber(operation, "ordinal") ||
+    requiredString(disposition, "candidate_id") !== record.candidateId ||
+    requiredString(disposition, "disposition") !== record.disposition ||
     (record.disposition === "accepted" ? requiredString(disposition, "kind") !== "accept" : requiredString(disposition, "kind") !== "reject")
   ) throw new RunDatabaseStateError("Experiment disposition is invalid");
-  const dispositionValue = decodeCanonicalJson(requiredString(disposition, "result_value_json")) as Record<string, any>;
-  const changedPaths = (database.prepare(
-    "SELECT path FROM candidate_changed_paths WHERE candidate_id = ? ORDER BY ordinal",
-  ).all(record.candidateId) as SqlRow[]).map((row) => requiredString(row, "path"));
-  const candidateAuthorityHash = stableHash({
-    treeHash: requiredString(candidate, "tree_hash"),
-    lineageHash: requiredString(candidate, "lineage_hash"),
-    writeScopeHash: requiredString(candidate, "write_scope_hash"),
-    changedPaths,
-  });
-  if (
-    dispositionValue.candidate?.authorityHash !== candidateAuthorityHash
-    || dispositionValue.measurement?.bindingHash !== requiredString(measurement, "binding_hash")
-  ) {
-    throw new RunDatabaseStateError("Experiment disposition does not bind its exact evidence");
-  }
   requiredArtifactRef(database, record.recordArtifact);
   const expectedBinding = stableHash({
     formatVersion: 1,
@@ -389,9 +478,94 @@ function observationFromRow(row: SqlRow): PersistedMetricObservation {
     outputId: requiredString(row, "output_id"),
     value: requiredNumber(row, "value"),
     status: requiredString(row, "status") as PersistedMetricObservation["status"],
+    bestReference: optionalNumber(row, "best_reference") ?? null,
     improvementPassed: nullableBoolean(row, "improvement_passed"),
     guardrailPassed: nullableBoolean(row, "guardrail_passed"),
   };
+}
+
+function measurementDispositionFromRow(row: SqlRow): MeasurementDispositionRecord {
+  const disposition = requiredString(row, "disposition");
+  if (disposition !== "accepted" && disposition !== "rejected") {
+    throw new RunDatabaseCorruptionError("Measurement disposition is invalid");
+  }
+  const record: MeasurementDispositionRecord = {
+    measurementId: requiredString(row, "measurement_id"),
+    runId: requiredString(row, "run_id"),
+    operationId: requiredString(row, "operation_id"),
+    candidateId: requiredString(row, "candidate_id"),
+    disposition,
+    disposedAt: requiredString(row, "disposed_at"),
+  };
+  assertIdentifier(record.measurementId, "measurement disposition id");
+  assertIdentifier(record.runId, "measurement disposition run id");
+  assertIdentifier(record.operationId, "measurement disposition operation id");
+  assertIdentifier(record.candidateId, "measurement disposition candidate id");
+  assertIsoDate(record.disposedAt, "measurement disposition time");
+  return record;
+}
+
+function assertDispositionResult(
+  value: Record<string, JsonValue>,
+  disposition: "accepted" | "rejected",
+  operationPath: string,
+): void {
+  if (value.formatVersion !== 2 || value.disposition !== disposition || value.operationPath !== operationPath) {
+    throw new RunDatabaseStateError("Candidate disposition output changed semantic identity");
+  }
+  const recordHash = requiredStringValue(value.recordHash, "candidate disposition record hash");
+  const receiptId = requiredStringValue(value.receiptId, "candidate disposition receipt id");
+  assertHash(recordHash, "candidate disposition record hash");
+  const semantic = { ...value };
+  delete semantic.receiptId;
+  delete semantic.recordHash;
+  const prefix = disposition === "accepted" ? "acceptance" : "rejection";
+  if (recordHash !== stableHash(semantic) || receiptId !== `${prefix}_${recordHash.slice(7, 39)}`) {
+    throw new RunDatabaseStateError("Candidate disposition output has an invalid semantic hash");
+  }
+}
+
+function assertDispositionCandidate(
+  database: DatabaseSync,
+  measurement: MeasurementRecord,
+  value: JsonValue | undefined,
+): void {
+  if (!measurement.candidateId) throw new RunDatabaseStateError("Measurement disposition candidate is missing");
+  const candidate = database.prepare(`
+    SELECT tree_hash, lineage_hash, write_scope_hash FROM candidates
+    WHERE candidate_id = ? AND run_id = ?
+  `).get(measurement.candidateId, measurement.runId) as SqlRow | undefined;
+  if (!candidate) throw new RunDatabaseStateError("Measurement disposition candidate is missing");
+  const changedPaths = (database.prepare(
+    "SELECT path FROM candidate_changed_paths WHERE candidate_id = ? ORDER BY ordinal",
+  ).all(measurement.candidateId) as SqlRow[]).map((row) => requiredString(row, "path"));
+  const body = {
+    treeHash: requiredString(candidate, "tree_hash"),
+    lineageHash: requiredString(candidate, "lineage_hash"),
+    writeScopeHash: requiredString(candidate, "write_scope_hash"),
+    changedPaths,
+  };
+  const expected = { ...body, authorityHash: stableHash(body) };
+  if (stableHash(requiredRecord(value, "candidate disposition authority")) !== stableHash(expected)) {
+    throw new RunDatabaseStateError("Candidate disposition changed its exact candidate authority");
+  }
+}
+
+function optionalRecord(value: JsonValue | undefined): Record<string, JsonValue> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, JsonValue>
+    : undefined;
+}
+
+function requiredRecord(value: JsonValue | undefined, label: string): Record<string, JsonValue> {
+  const record = optionalRecord(value);
+  if (!record) throw new RunDatabaseStateError(`${label} must be an object`);
+  return record;
+}
+
+function requiredStringValue(value: JsonValue | undefined, label: string): string {
+  if (typeof value !== "string") throw new RunDatabaseStateError(`${label} must be a string`);
+  return value;
 }
 
 function upsertMetric(database: DatabaseSync, runId: string, metric: PersistedMetricState): void {

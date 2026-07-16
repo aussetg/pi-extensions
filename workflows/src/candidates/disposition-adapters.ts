@@ -237,7 +237,7 @@ function immutableDispositionIdentity(
 ): SemanticEffectJournalIdentity {
   return {
     semanticKey: stableHash({
-      formatVersion: 1,
+      formatVersion: 2,
       kind: "candidate-disposition",
       disposition,
       semanticInput,
@@ -350,7 +350,7 @@ function assertAcceptanceBindings(
   resolved: ResolvedDisposition,
   pathValue: string,
 ): void {
-  if (record.formatVersion !== 1 || record.disposition !== "accepted" || record.operationPath !== pathValue
+  if (record.formatVersion !== 2 || record.disposition !== "accepted" || record.operationPath !== pathValue
     || stableHash(record.candidate) !== stableHash(candidateAuthorityBinding(resolved.candidate))
     || stableHash(record.verification) !== stableHash(verificationDispositionBinding(resolved.verification!))
     || stableHash(record.measurement ?? null) !== stableHash(resolved.measurement ? measurementDispositionBinding(resolved.measurement) : null)) {
@@ -363,7 +363,7 @@ function assertRejectionBindings(
   resolved: ResolvedDisposition,
   pathValue: string,
 ): void {
-  if (record.formatVersion !== 1 || record.disposition !== "rejected" || record.operationPath !== pathValue
+  if (record.formatVersion !== 2 || record.disposition !== "rejected" || record.operationPath !== pathValue
     || record.reason !== resolved.reason
     || stableHash(record.candidate) !== stableHash(candidateAuthorityBinding(resolved.candidate))
     || stableHash(record.verification ?? null) !== stableHash(resolved.verification ? verificationDispositionBinding(resolved.verification) : null)

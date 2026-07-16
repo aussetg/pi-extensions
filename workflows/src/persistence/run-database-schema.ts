@@ -1,4 +1,4 @@
-export const RUN_DATABASE_SCHEMA_VERSION = 2;
+export const RUN_DATABASE_SCHEMA_VERSION = 3;
 export const RUN_DATABASE_BUSY_TIMEOUT_MS = 5_000;
 
 /**
@@ -498,12 +498,24 @@ CREATE TABLE measurement_observations (
   samples_json TEXT NOT NULL CHECK (json_valid(samples_json)),
   initial_status TEXT NOT NULL CHECK (initial_status IN ('baseline', 'observational', 'pending')),
   status TEXT NOT NULL CHECK (status IN ('baseline', 'observational', 'pending', 'accepted', 'rejected')),
+  best_reference REAL,
   improvement_passed INTEGER CHECK (improvement_passed IS NULL OR improvement_passed IN (0, 1)),
   guardrail_passed INTEGER CHECK (guardrail_passed IS NULL OR guardrail_passed IN (0, 1)),
   PRIMARY KEY (measurement_id, ordinal),
-  FOREIGN KEY (run_id, metric_id) REFERENCES metrics(run_id, metric_id) DEFERRABLE INITIALLY DEFERRED
+  FOREIGN KEY (run_id, metric_id) REFERENCES metrics(run_id, metric_id) DEFERRABLE INITIALLY DEFERRED,
+  CHECK ((initial_status = 'baseline') = (best_reference IS NULL))
 ) STRICT;
 CREATE INDEX measurement_observations_metric_sequence ON measurement_observations(run_id, metric_id, sequence DESC);
+
+CREATE TABLE measurement_dispositions (
+  measurement_id TEXT PRIMARY KEY REFERENCES measurements(measurement_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+  operation_id TEXT NOT NULL UNIQUE REFERENCES operations(operation_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+  candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id) DEFERRABLE INITIALLY DEFERRED,
+  disposition TEXT NOT NULL CHECK (disposition IN ('accepted', 'rejected')),
+  disposed_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX measurement_dispositions_run_disposed ON measurement_dispositions(run_id, disposed_at, measurement_id);
 
 CREATE TABLE experiments (
   experiment_id TEXT PRIMARY KEY,

@@ -33,7 +33,7 @@ import { AGENT_PROGRESS_LIMITS } from "../runtime/agent-progress-limits.js";
 import type { JsonValue } from "../types.js";
 import type { ExperimentRecord } from "../experiments/records.js";
 import type { PersistedMetricState } from "../measurements/metrics.js";
-import type { MeasurementRecord } from "../measurements/records.js";
+import type { MeasurementDispositionRecord, MeasurementRecord } from "../measurements/records.js";
 import {
   assertAgentToolCallId,
   assertArtifactRecord,
@@ -75,6 +75,8 @@ import {
   readExperimentByOperation as readExperimentByOperationRow,
   readMeasurement as readMeasurementRow,
   readMeasurementByOperation as readMeasurementByOperationRow,
+  readMeasurementDisposition as readMeasurementDispositionRow,
+  readMeasurementDispositionByOperation as readMeasurementDispositionByOperationRow,
   readMetric as readMetricRow,
 } from "./run-database-measurements.js";
 
@@ -492,6 +494,16 @@ export class RunDatabaseReader implements Disposable {
   readMeasurementByOperation(operationId: string): MeasurementRecord | undefined {
     this.assertOpen();
     return readMeasurementByOperationRow(this.database, operationId);
+  }
+
+  readMeasurementDisposition(measurementId: string): MeasurementDispositionRecord | undefined {
+    this.assertOpen();
+    return readMeasurementDispositionRow(this.database, measurementId);
+  }
+
+  readMeasurementDispositionByOperation(operationId: string): MeasurementDispositionRecord | undefined {
+    this.assertOpen();
+    return readMeasurementDispositionByOperationRow(this.database, operationId);
   }
 
   listMeasurements(limitValue = 256): MeasurementRecord[] {

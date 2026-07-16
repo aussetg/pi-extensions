@@ -31,12 +31,12 @@ afterEach(() => {
 });
 
 describe("run SQLite database", () => {
-  it("creates and reopens the one-row version-2 WAL database", () => {
+  it("creates and reopens the one-row version-3 WAL database", () => {
     const databasePath = runDatabasePath();
     const database = RunDatabase.create(databasePath, { run: runRecord() });
 
     expect(database.configuration()).toEqual({
-      schemaVersion: 2,
+      schemaVersion: 3,
       journalMode: "wal",
       foreignKeys: true,
       synchronous: 2,
@@ -326,7 +326,7 @@ describe("run SQLite database", () => {
     reopened.close();
   });
 
-  it.each([0, 1, 99])("rejects unknown schema version %i without modifying it", (version) => {
+  it.each([0, 1, 2, 99])("rejects unknown schema version %i without modifying it", (version) => {
     const databasePath = runDatabasePath();
     const unknown = new DatabaseSync(databasePath);
     unknown.exec(`PRAGMA user_version = ${version}`);

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { extractMeasurementInvocation, MeasurementOutputError } from "../src/measurements/extractors.js";
 import {
   applyMetricCohortDeltaToHandles,
+  applyMetricDispositionToHandles,
   buildMetricCohortDelta,
   createMetricHandle,
   evaluateMeasurementPolicy,
@@ -231,6 +232,44 @@ describe("metric normalization and policy", () => {
     expect(isMetricWithinGuardrail(guardrail, observation("memory", "memory", 55, "1"))).toBe(true);
     expect(isMetricWithinGuardrail(guardrail, observation("memory", "memory", 55.1, "2"))).toBe(false);
   });
+
+  it("advances grouped accepted references and leaves rejected observations out of them", () => {
+    const speed = createMetricHandle("speed", { direction: "maximize", primary: true });
+    const memory = createMetricHandle("memory", {
+      direction: "minimize",
+      guardrail: { reference: "best", maximumAbsoluteRegression: 10 },
+    });
+    const handles = new Map([["speed", speed], ["memory", memory]]);
+    establishBaselines([
+      { outputId: "speed", handle: speed, value: 100 },
+      { outputId: "memory", handle: memory, value: 50 },
+    ]);
+
+    const accepted = candidateDelta("a", "b", [
+      { outputId: "speed", handle: speed, value: 110 },
+      { outputId: "memory", handle: memory, value: 55 },
+    ]);
+    applyMetricCohortDeltaToHandles(handles, accepted);
+    expect(metricHandleState(speed).recentObservations.at(-1)).toMatchObject({
+      status: "pending", bestReference: 100,
+    });
+    applyMetricDispositionToHandles(handles, accepted, "accepted");
+    expect(metricHandleState(speed)).toMatchObject({ current: 110, best: 110, relativeGain: 0.1 });
+    expect(metricHandleState(memory)).toMatchObject({ current: 55, best: 55, relativeGain: -0.1 });
+    expect(metricHandleState(memory).recentObservations.at(-1)).toMatchObject({ status: "accepted" });
+
+    const rejected = candidateDelta("c", "d", [
+      { outputId: "speed", handle: speed, value: 90 },
+      { outputId: "memory", handle: memory, value: 70 },
+    ]);
+    applyMetricCohortDeltaToHandles(handles, rejected);
+    applyMetricDispositionToHandles(handles, rejected, "rejected");
+    expect(metricHandleState(speed)).toMatchObject({ current: 110, best: 110, relativeGain: 0.1 });
+    expect(metricHandleState(memory)).toMatchObject({ current: 55, best: 55, relativeGain: -0.1 });
+    expect(metricHandleState(speed).recentObservations.at(-1)).toMatchObject({
+      status: "rejected", bestReference: 110,
+    });
+  });
 });
 
 function regexProfile(pattern: string, group: number | string): MeasurementProfileDefinition {
@@ -264,6 +303,26 @@ function establishBaselines(mappings: Array<{ outputId: string; handle: object; 
     new Map(mappings.map((mapping) => [metricHandleState(mapping.handle).metricId, mapping.handle])),
     delta,
   );
+}
+
+function candidateDelta(
+  measurementSuffix: string,
+  candidateSuffix: string,
+  mappings: Array<{ outputId: string; handle: object; value: number }>,
+) {
+  return buildMetricCohortDelta({
+    measurementId: `measurement_${measurementSuffix.repeat(32)}`,
+    operationPath: `run/measure:candidate-${measurementSuffix}`,
+    profileId: "project:bench",
+    profileHash: `sha256:${"1".repeat(64)}`,
+    environmentHash: `sha256:${"2".repeat(64)}`,
+    candidate: {
+      candidateId: `candidate_${candidateSuffix.repeat(32)}`,
+      treeHash: `sha256:${"3".repeat(64)}`,
+      lineageHash: `sha256:${"4".repeat(64)}`,
+    },
+    mappings: mappings.map((mapping) => ({ ...mapping, samples: [mapping.value] })),
+  });
 }
 
 function observation(metricId: string, outputId: string, value: number, suffix: string): MetricObservation {

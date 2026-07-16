@@ -21,7 +21,7 @@ import {
 } from "./workflow-metadata.js";
 import { analyzeWorkflowSource } from "./workflow-source-analysis.js";
 
-export const STRUCTURED_RUNTIME_API_VERSION = 15;
+export const STRUCTURED_RUNTIME_API_VERSION = 16;
 
 export const STRUCTURED_RUNTIME_API_DESCRIPTOR = deepFreezeJson({
   formatVersion: 1,
@@ -38,6 +38,7 @@ export const STRUCTURED_RUNTIME_API_DESCRIPTOR = deepFreezeJson({
   concurrency: "host-ceiling-with-workflow-lower-request",
   callbackState: "capture-checked-through-ordinary-local-helpers",
   command: "reviewed-profile-plus-bounded-scalar-arguments",
+  measurementDisposition: "pending-cohort-finalized-by-exact-candidate-disposition",
 } as unknown as JsonValue);
 
 export const STRUCTURED_RUNTIME_API_HASH = stableHash(STRUCTURED_RUNTIME_API_DESCRIPTOR);

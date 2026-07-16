@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ArtifactStore } from "../src/artifacts/store.js";
+import { SemanticRejectAdapter } from "../src/candidates/disposition-adapters.js";
 import { createOpaqueCandidateRef, describeOpaqueCandidateRef } from "../src/candidates/refs.js";
 import { candidateAuthorityBinding, measurementDispositionBinding } from "../src/candidates/disposition.js";
 import { scanCandidateTree } from "../src/candidates/tree.js";
@@ -17,7 +18,7 @@ import { createMetricHandle } from "../src/measurements/metrics.js";
 import { normalizeMeasurementProfile, type MeasurementProfileDefinition, type MeasurementProfileSnapshot } from "../src/measurements/profiles.js";
 import type { HostPressureProvider } from "../src/measurements/pressure.js";
 import { RunDatabase } from "../src/persistence/run-database.js";
-import type { RunRecord } from "../src/runtime/durable-types.js";
+import type { CandidateRecord, RunRecord } from "../src/runtime/durable-types.js";
 import {
   executeSequentialSemanticRun,
   semanticInvocationHash,
@@ -134,6 +135,73 @@ describe("SQLite measurement cohorts", () => {
     expect(fixture.database.listMeasurements()).toHaveLength(1);
   });
 
+  it("atomically accepts a pending cohort and restores its metric state after a crash", async () => {
+    const fixture = await createFixture(`
+      const score = flow.metric("score", {
+        direction: "maximize",
+        primary: true,
+        sampling: { warmups: 0, samples: 1, aggregate: "median" },
+      });
+      await flow.measure("baseline", { metric: score, measurement: "project:bench", output: "speed" });
+      const measured = await flow.measure("candidate-measure", {
+        metric: score, measurement: "project:bench", output: "speed", workspace: flow.snapshot,
+      });
+      await flow.accept("accept", {
+        candidate: flow.snapshot, measurement: measured, verification: {},
+      });
+      return { summary: score.summary() };
+    `, { snapshot: true });
+    const candidate = await fixture.createCandidate("accepted candidate");
+    const executor = new ScriptedMeasurementExecutor([
+      protocol({ speed: 10, memory: 1 }, 0),
+      protocol({ speed: 12, memory: 1 }, 1),
+    ]);
+    let crash = true;
+    await expect(fixture.execute([
+      fixture.measurementAdapter(executor),
+      dispositionAdapter("accept"),
+    ], {
+      snapshot: candidate,
+      faultInjector: (point, operation) => {
+        if (point === "after-operation-completion" && operation?.kind === "accept" && crash) {
+          crash = false;
+          throw new SemanticEngineCrashError("power loss after acceptance commit");
+        }
+      },
+    })).rejects.toBeInstanceOf(SemanticEngineCrashError);
+
+    const candidateMeasurement = fixture.database.listMeasurements().find((entry) => entry.candidateId)!;
+    const accept = fixture.database.listOperations({ limit: 32 }).find((entry) => entry.kind === "accept")!;
+    expect(fixture.database.readMeasurementDisposition(candidateMeasurement.measurementId)).toMatchObject({
+      operationId: accept.operationId,
+      candidateId: candidateId(candidate),
+      disposition: "accepted",
+    });
+    expect(fixture.database.readMetric("score")).toMatchObject({
+      baseline: 10,
+      current: 12,
+      best: 12,
+      relativeGain: 0.2,
+      observationCount: 2,
+      recentObservations: [
+        { status: "baseline", bestReference: null },
+        { status: "accepted", bestReference: 10 },
+      ],
+    });
+
+    const completed = await fixture.execute([
+      fixture.measurementAdapter(new ScriptedMeasurementExecutor([])),
+      dispositionAdapter("accept"),
+    ], { snapshot: candidate });
+    expect(completed).toMatchObject({
+      status: "completed",
+      result: {
+        summary: { baseline: 10, current: 12, best: 12, relativeGain: 0.2, observationCount: 2 },
+      },
+    });
+    expect(executor.requests).toHaveLength(2);
+  });
+
   it("replays an exact cross-revision cohort and imports its SQLite/artifact evidence", async () => {
     const source = await createFixture(singleBody());
     const sourceExecutor = new ScriptedMeasurementExecutor([protocol({ speed: 21, memory: 1 }, 1)]);
@@ -238,7 +306,7 @@ describe("SQLite experiment records", () => {
     ]);
     const adapters = [
       fixture.measurementAdapter(executor),
-      dispositionAdapter("reject"),
+      new SemanticRejectAdapter({ runDir: fixture.runDir, database: fixture.database }),
       new SemanticExperimentAdapter({ runDir: fixture.runDir, database: fixture.database }),
     ];
     const outcome = await fixture.execute(adapters, { snapshot: candidate });
@@ -263,6 +331,21 @@ describe("SQLite experiment records", () => {
     });
     expect(experiment.bindingHash).toMatch(/^sha256:/);
     expect(fixture.database.readExperiment(experiment.experimentId)).toEqual(experiment);
+    expect(fixture.database.readMeasurementDisposition(candidateMeasurement.measurementId)).toMatchObject({
+      operationId: disposition.operationId,
+      candidateId: candidateId(candidate),
+      disposition: "rejected",
+    });
+    expect(fixture.database.readMetric("score")).toMatchObject({
+      baseline: 10,
+      current: 10,
+      best: 10,
+      relativeGain: 0,
+      recentObservations: [
+        { status: "baseline", bestReference: null },
+        { status: "rejected", bestReference: 10 },
+      ],
+    });
   });
 
   it("refuses a disposition that names another measurement", async () => {
@@ -293,11 +376,11 @@ describe("SQLite experiment records", () => {
     const executor = new ScriptedMeasurementExecutor([protocol({ speed: 10, memory: 1 }, 0)]);
     const failed = await fixture.execute([
       fixture.measurementAdapter(executor),
-      dispositionAdapter("reject"),
+      new SemanticRejectAdapter({ runDir: fixture.runDir, database: fixture.database }),
       new SemanticExperimentAdapter({ runDir: fixture.runDir, database: fixture.database }),
     ], { snapshot: candidate });
     expect(failed).toMatchObject({ status: "failed" });
-    expect((failed as { error?: string }).error).toMatch(/measurement is not bound to its candidate/i);
+    expect((failed as { error?: string }).error).toMatch(/measurement is not bound to .*candidate/i);
     expect(fixture.database.listExperiments()).toEqual([]);
   });
 });
@@ -421,7 +504,7 @@ async function createFixture(body: string, options: FixtureOptions = {}) {
         createdAt: new Date().toISOString(),
       }, { type: "candidate-workspace-fixture", payload: { workspaceId }, at: new Date().toISOString() });
       const id = `candidate_${stableHash({ runId, workspaceId, treeHash: tree.treeHash }).slice(7, 39)}`;
-      database.registerCandidate(database.readRun().revision, {
+      const candidate: CandidateRecord = {
         candidateId: id,
         runId,
         workspace: { kind: "candidate", workspaceId, treeHash: tree.treeHash, lineageHash, writeScopeHash },
@@ -429,7 +512,10 @@ async function createFixture(body: string, options: FixtureOptions = {}) {
         manifest: manifest.artifact,
         diff: diff.artifact,
         frozenAt: new Date().toISOString(),
-      }, { type: "candidate-fixture", payload: { candidateId: id }, at: new Date().toISOString() });
+      };
+      database.registerCandidate(database.readRun().revision, candidate, {
+        type: "candidate-fixture", payload: { candidateId: id }, at: new Date().toISOString(),
+      });
       return createOpaqueCandidateRef({
         runId,
         candidateId: id,
@@ -437,7 +523,7 @@ async function createFixture(body: string, options: FixtureOptions = {}) {
         committedAttempt: 1,
         treeHash: tree.treeHash,
         lineageHash,
-        recordHash: stableHash({ id, treeHash: tree.treeHash }),
+        recordHash: stableHash(candidate),
       });
     },
   };
@@ -594,16 +680,24 @@ class SequencedPressure implements HostPressureProvider {
 }
 
 function dispositionAdapter(kind: "accept" | "reject"): SemanticEffectAdapter {
-  const binding = (request: { input: unknown; database: RunDatabase }) => {
+  const binding = (request: { input: unknown; database: RunDatabase; path: string }) => {
     const options = request.input as Record<string, any>;
     const id = candidateId(options.candidate);
     const candidate = request.database.readCandidate(id)!;
     const measurement = request.database.readMeasurement(options.measurement.measurementId)!;
-    return {
+    const semantic = {
+      formatVersion: 2 as const,
       disposition: kind === "accept" ? "accepted" : "rejected",
+      operationPath: request.path,
       candidate: candidateAuthorityBinding(candidate),
       measurement: measurementDispositionBinding(measurement),
       ...(options.reason ? { reason: options.reason } : {}),
+    };
+    const recordHash = stableHash(semantic);
+    return {
+      ...semantic,
+      receiptId: `${kind === "accept" ? "acceptance" : "rejection"}_${recordHash.slice(7, 39)}`,
+      recordHash,
     };
   };
   return {

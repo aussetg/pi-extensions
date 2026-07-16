@@ -62,6 +62,15 @@ export interface MeasurementRecord {
   endedAt: string;
 }
 
+export interface MeasurementDispositionRecord {
+  measurementId: string;
+  runId: string;
+  operationId: string;
+  candidateId: string;
+  disposition: "accepted" | "rejected";
+  disposedAt: string;
+}
+
 export interface MeasurementWorkflowResult {
   measurementId: string;
   profile: string;

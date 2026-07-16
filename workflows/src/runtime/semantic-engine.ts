@@ -69,7 +69,11 @@ import {
 } from "./semantic-engine-helpers.js";
 import type { SemanticEffectJournalIdentity } from "./semantic-engine-types.js";
 import { SemanticJournalRuntime } from "./semantic-journal.js";
-import { createMetricHandle } from "../measurements/metrics.js";
+import {
+  applyMetricDispositionToHandles,
+  createMetricHandle,
+  metricHandleState,
+} from "../measurements/metrics.js";
 import { isCandidateWorkspaceCapability } from "../candidates/store.js";
 
 export { semanticInvocationHash } from "./semantic-engine-helpers.js";
@@ -98,6 +102,7 @@ export class SequentialSemanticEngine {
   private readonly limiter: SemanticConcurrencyLimiter;
   private readonly candidateConcurrency: CandidateConcurrencyGuard;
   private readonly structures: StructuredConcurrencyRuntime;
+  private readonly metricHandles = new Map<string, object>();
   private readonly operationAdmissionLimit: number;
   private readonly journal: SemanticJournalRuntime;
 
@@ -232,7 +237,7 @@ export class SequentialSemanticEngine {
       agent: (id: unknown, input: unknown) => this.effect("agent", id, input),
       command: (id: unknown, input: unknown) => this.effect("command", id, input),
       checkpoint: (id: unknown, input: unknown) => this.checkpoint(id, input),
-      metric: (id: unknown, definition: unknown) => createMetricHandle(id, definition),
+      metric: (id: unknown, definition: unknown) => this.createMetric(id, definition),
       measure: (id: unknown, input: unknown) => this.effect("measure", id, input),
       candidate: (id: unknown, body: unknown, options?: unknown) => this.candidate(id, body, options),
       verify: (id: unknown, input: unknown) => this.effect("verify", id, input),
@@ -736,9 +741,30 @@ export class SequentialSemanticEngine {
     if (operation.result.workspace?.kind === "candidate" && !adapter.restore) {
       throw new RunDatabaseStateError(`Completed mutation ${operation.path} has no workspace restore adapter`);
     }
-    return adapter.restore
+    const value = adapter.restore
       ? await adapter.restore({ ...admission, database: this.database, operation: operation as OperationRecord & { result: OperationResult } })
       : operation.result.value;
+    this.restoreMetricDisposition(operation);
+    return value;
+  }
+
+  private createMetric(id: unknown, definition: unknown): object {
+    const handle = createMetricHandle(id, definition);
+    const metricId = metricHandleState(handle).metricId;
+    if (this.metricHandles.has(metricId)) throw new Error(`Duplicate metric id ${metricId}`);
+    this.metricHandles.set(metricId, handle);
+    return handle;
+  }
+
+  private restoreMetricDisposition(operation: OperationRecord): void {
+    if (operation.kind !== "accept" && operation.kind !== "reject") return;
+    const disposition = this.database.readMeasurementDispositionByOperation(operation.operationId);
+    if (!disposition) return;
+    const measurement = this.database.readMeasurement(disposition.measurementId);
+    if (!measurement) {
+      throw new RunDatabaseStateError(`Measurement disposition ${operation.path} lost its cohort`);
+    }
+    applyMetricDispositionToHandles(this.metricHandles, measurement.delta, disposition.disposition);
   }
 
   private async controlledOutcome(suspension: SemanticRunSuspension): Promise<SequentialSemanticRunOutcome> {

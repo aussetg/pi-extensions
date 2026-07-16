@@ -145,6 +145,7 @@ import {
   planWorkflowJournal,
 } from "./workflow-journal.js";
 import {
+  finalizeMeasurementDisposition,
   insertExperiment,
   insertMeasurement,
 } from "./run-database-measurements.js";
@@ -1244,6 +1245,14 @@ export class RunDatabase extends RunDatabaseReader {
       if (input.experiment) insertExperiment(this.database, input.experiment, run.runId, input.operationId);
       if (input.verification) insertVerification(this.database, input.verification, run.runId);
 
+      finalizeMeasurementDisposition(this.database, {
+        runId: run.runId,
+        operationId: input.operationId,
+        operationPath: requiredString(operation, "path"),
+        operationKind: requiredString(operation, "kind"),
+        value: input.result.value,
+        disposedAt: input.completedAt,
+      });
       updateCompletedOperation(this.database, input);
       if (input.journal) insertWorkflowCall(this.database, input.journal, input.result, run.runId, input.operationId);
       if (input.replay) {

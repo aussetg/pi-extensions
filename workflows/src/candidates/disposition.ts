@@ -30,13 +30,14 @@ export interface VerificationDispositionBinding {
 }
 
 export interface MeasurementDispositionBinding {
+  measurementId: string;
   profileHash: string;
   environmentHash: string;
   bindingHash: string;
 }
 
 interface CandidateDispositionRecordBase {
-  formatVersion: 1;
+  formatVersion: 2;
   receiptId: string;
   operationPath: string;
   candidate: CandidateAuthorityBinding;
@@ -100,6 +101,7 @@ export function measurementDispositionBinding(
   measurement: MeasurementRecord,
 ): MeasurementDispositionBinding {
   return {
+    measurementId: measurement.measurementId,
     profileHash: measurement.profileHash,
     environmentHash: measurement.environmentHash,
     bindingHash: measurement.bindingHash,
@@ -134,7 +136,7 @@ export async function persistCandidateAcceptance(
     ? measurementDispositionBinding(options.measurement)
     : undefined;
   const semantic = {
-    formatVersion: 1 as const,
+    formatVersion: 2 as const,
     disposition: "accepted" as const,
     operationPath: options.operationPath,
     candidate,
@@ -196,7 +198,7 @@ export async function persistCandidateRejection(
     ? measurementDispositionBinding(options.measurement)
     : undefined;
   const semantic = {
-    formatVersion: 1 as const,
+    formatVersion: 2 as const,
     disposition: "rejected" as const,
     operationPath: options.operationPath,
     candidate,

@@ -99,9 +99,14 @@ and the agent hierarchy pauses rather than repeating an effect with an unknown o
 
 ## SQLite and process ownership
 
-Each run has one schema-version-2 SQLite database configured with WAL, foreign keys, full
+Each run has one schema-version-3 SQLite database configured with WAL, foreign keys, full
 synchronization, and a bounded busy timeout. State transitions use short `BEGIN IMMEDIATE`
 transactions and expected revisions. Unknown schema versions are rejected; there are no migrations.
+
+Candidate measurement observations remain pending until the exact measurement-bound `accept` or
+`reject` operation completes. That operation atomically records the disposition and transitions the
+whole cohort. Acceptance advances `current` and the grouped accepted-best reference together;
+rejection preserves the prior accepted reference.
 
 The coordinator is a deterministic systemd user service. Agents, commands, verifications, and
 measurements are separate transient services. The run's stored safety policy supplies `MemoryMax`,

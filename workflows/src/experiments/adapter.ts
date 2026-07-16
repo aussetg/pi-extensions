@@ -1,9 +1,7 @@
 import path from "node:path";
 import { ArtifactStore } from "../artifacts/store.js";
 import { describeOpaqueCandidateRef } from "../candidates/refs.js";
-import { candidateAuthorityBinding } from "../candidates/disposition.js";
 import { DEFINITION_LIMITS } from "../definition/limits.js";
-import type { OperationRecord } from "../runtime/durable-types.js";
 import type {
   SemanticEffectAdapter,
   SemanticEffectAdmissionRequest,
@@ -173,10 +171,7 @@ export class SemanticExperimentAdapter implements SemanticEffectAdapter {
       throw new TypeError("Experiment measurement is not bound to its candidate");
     }
     assertMeasurementValue(measurementInput, measurement.delta.observations);
-    const disposition = this.findDisposition(
-      candidateAuthorityBinding(candidate).authorityHash,
-      measurement.bindingHash,
-    );
+    const disposition = this.findDisposition(measurement.measurementId, candidate.candidateId);
     const learned = normalizeExperimentLearned(input.learned);
     const resolved: ResolvedExperiment = {
       candidateId: candidate.candidateId,
@@ -186,7 +181,7 @@ export class SemanticExperimentAdapter implements SemanticEffectAdapter {
       measurementId: measurement.measurementId,
       measurementBindingHash: measurement.bindingHash,
       dispositionOperationId: disposition.operationId,
-      disposition: disposition.kind === "accept" ? "accepted" : "rejected",
+      disposition: disposition.disposition,
       learned,
       semanticInput: {
         candidateId: candidate.candidateId,
@@ -195,7 +190,7 @@ export class SemanticExperimentAdapter implements SemanticEffectAdapter {
         measurementId: measurement.measurementId,
         measurementBindingHash: measurement.bindingHash,
         dispositionOperationId: disposition.operationId,
-        disposition: disposition.kind === "accept" ? "accepted" : "rejected",
+        disposition: disposition.disposition,
         learned,
       } as unknown as JsonValue,
     };
@@ -204,32 +199,14 @@ export class SemanticExperimentAdapter implements SemanticEffectAdapter {
   }
 
   private findDisposition(
-    candidateAuthorityHash: string,
-    measurementBindingHash: string,
-  ): OperationRecord & { kind: "accept" | "reject" } {
-    const operations: OperationRecord[] = [];
-    let afterOrdinal = -1;
-    while (true) {
-      const page = this.options.database.listOperations({ afterOrdinal, limit: 256 });
-      operations.push(...page);
-      if (page.length < 256) break;
-      afterOrdinal = page.at(-1)!.ordinal;
+    measurementId: string,
+    candidateId: string,
+  ): import("../measurements/records.js").MeasurementDispositionRecord {
+    const disposition = this.options.database.readMeasurementDisposition(measurementId);
+    if (!disposition || disposition.candidateId !== candidateId) {
+      throw new Error("Experiment requires one exact completed candidate disposition");
     }
-    const matching = operations.filter((operation): operation is OperationRecord & { kind: "accept" | "reject" } => {
-      if ((operation.kind !== "accept" && operation.kind !== "reject") || operation.status !== "completed") return false;
-      const value = operation.result?.value;
-      if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-      const candidate = value.candidate;
-      const measurement = value.measurement;
-      return Boolean(
-        candidate && typeof candidate === "object" && !Array.isArray(candidate)
-        && measurement && typeof measurement === "object" && !Array.isArray(measurement)
-        && candidate.authorityHash === candidateAuthorityHash
-        && measurement.bindingHash === measurementBindingHash,
-      );
-    });
-    if (matching.length !== 1) throw new Error("Experiment requires one exact completed candidate disposition");
-    return matching[0]!;
+    return disposition;
   }
 
   private summary(experimentId: string, resolved: ResolvedExperiment): ExperimentSummary {
@@ -238,7 +215,10 @@ export class SemanticExperimentAdapter implements SemanticEffectAdapter {
     const primaryObservation = measurement.delta.observations.find((observation) => definitions.get(observation.metricId)?.primary);
     const primaryState = primaryObservation ? this.options.database.readMetric(primaryObservation.metricId) : undefined;
     const primaryDefinition = primaryObservation ? definitions.get(primaryObservation.metricId) : undefined;
-    const reference = primaryState?.best;
+    const primaryPersisted = primaryObservation
+      ? primaryState?.recentObservations.find((entry) => entry.observationId === primaryObservation.observationId)
+      : undefined;
+    const reference = primaryPersisted?.bestReference;
     const absolute = primaryObservation && primaryDefinition && reference !== null && reference !== undefined
       ? (primaryDefinition.direction === "maximize" ? primaryObservation.value - reference : reference - primaryObservation.value)
       : undefined;

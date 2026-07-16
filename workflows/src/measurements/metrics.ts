@@ -64,6 +64,8 @@ export interface PersistedMetricObservation {
   outputId: string;
   value: number;
   status: "baseline" | "observational" | "pending" | "accepted" | "rejected";
+  /** Accepted-best reference used when this observation was measured. */
+  bestReference: number | null;
   improvementPassed: boolean | null;
   guardrailPassed: boolean | null;
 }
@@ -109,6 +111,8 @@ export interface MetricPolicyResult {
   secondary: Array<{ metricId: string; present: boolean }>;
   violations: string[];
 }
+
+export type MetricDisposition = "accepted" | "rejected";
 
 const METRIC_HANDLES = new WeakMap<object, RuntimeMetricState>();
 
@@ -308,6 +312,46 @@ export function applyMetricCohortDeltaToSnapshot(
   const result = [...states.values()].sort((left, right) => left.metricId.localeCompare(right.metricId));
   validateSinglePrimary(result);
   return result;
+}
+
+/** Finalize one candidate cohort without counting it as a new observation. */
+export function applyMetricDispositionToSnapshot(
+  current: readonly PersistedMetricState[],
+  deltaValue: unknown,
+  disposition: MetricDisposition,
+): PersistedMetricState[] {
+  const delta = candidateDispositionDelta(deltaValue);
+  const states = new Map(current.map((state) => [state.metricId, clonePersistedState(state)]));
+  const definitions = new Map(delta.definitions.map((entry) => [entry.metricId, entry]));
+  for (const observation of [...delta.observations].sort((left, right) => left.metricId.localeCompare(right.metricId))) {
+    const state = states.get(observation.metricId);
+    const definition = definitions.get(observation.metricId)!;
+    if (!state || state.definitionHash !== definition.definitionHash) {
+      throw new Error(`Metric ${observation.metricId} changed before measurement disposition`);
+    }
+    finalizeObservation(state, delta.measurementId, observation, disposition, false);
+  }
+  return [...states.values()].sort((left, right) => left.metricId.localeCompare(right.metricId));
+}
+
+/** Mirror a committed disposition into the workflow's incremental metric handles. */
+export function applyMetricDispositionToHandles(
+  handles: ReadonlyMap<string, unknown>,
+  deltaValue: unknown,
+  disposition: MetricDisposition,
+): void {
+  const delta = candidateDispositionDelta(deltaValue);
+  const definitions = new Map(delta.definitions.map((entry) => [entry.metricId, entry]));
+  for (const observation of [...delta.observations].sort((left, right) => left.metricId.localeCompare(right.metricId))) {
+    const handle = handles.get(observation.metricId);
+    if (!handle) throw new Error(`Measurement disposition has no registered metric ${observation.metricId}`);
+    const state = metricHandleState(handle) as RuntimeMetricState;
+    const definition = definitions.get(observation.metricId)!;
+    if (state.definitionHash !== definition.definitionHash) {
+      throw new Error(`Metric ${observation.metricId} changed before measurement disposition`);
+    }
+    finalizeObservation(state, delta.measurementId, observation, disposition, true);
+  }
 }
 
 export function normalizeMetricCohortDelta(value: unknown): MetricCohortDelta {
@@ -539,6 +583,7 @@ function applyObservation(
     outputId: observation.outputId,
     value: observation.value,
     status: observation.status,
+    bestReference: expectsBaseline ? null : state.best,
     improvementPassed,
     guardrailPassed,
   };
@@ -550,6 +595,60 @@ function applyObservation(
   if (state.observations) state.observations.push(persisted);
   state.recentObservations.push(persisted);
   if (state.recentObservations.length > DEFINITION_LIMITS.measurementRecentObservations) state.recentObservations.shift();
+}
+
+function candidateDispositionDelta(value: unknown): MetricCohortDelta {
+  const delta = normalizeMetricCohortDelta(value);
+  if (!delta.candidate || delta.observations.some((observation) => observation.status !== "pending")) {
+    throw new Error("Only a pending candidate measurement can receive a disposition");
+  }
+  return delta;
+}
+
+function finalizeObservation(
+  state: RuntimeMetricState | PersistedMetricState,
+  measurementId: string,
+  observation: MetricDeltaObservation,
+  disposition: MetricDisposition,
+  requireObservation: boolean,
+): void {
+  const full = "observations" in state ? state.observations : undefined;
+  const retained = full?.find((entry) => entry.observationId === observation.observationId)
+    ?? state.recentObservations.find((entry) => entry.observationId === observation.observationId);
+  if (requireObservation && !retained) {
+    throw new Error(`Metric ${state.metricId} has not observed ${observation.observationId}`);
+  }
+  if (retained && retained.measurementId !== measurementId) {
+    throw new Error(`Metric observation ${observation.observationId} changed measurement identity`);
+  }
+  if (retained && retained.status !== "pending") {
+    if (retained.status === disposition) return;
+    throw new Error(`Metric observation ${observation.observationId} is already ${retained.status}`);
+  }
+  if (state.baseline === null || state.best === null) {
+    throw new Error(`Metric ${state.metricId} has no accepted baseline for candidate disposition`);
+  }
+  replaceObservationStatus(state.recentObservations, observation.observationId, disposition);
+  if (full) replaceObservationStatus(full, observation.observationId, disposition);
+  if (disposition === "accepted") {
+    // best is the reference candidate accepted by control policy, not an
+    // independent per-metric extremum. This keeps grouped guardrails bound to
+    // the same accepted candidate as the primary metric.
+    state.current = observation.value;
+    state.best = observation.value;
+    state.relativeGain = state.baseline === 0
+      ? null
+      : goodChange(state.definition.direction, state.best, state.baseline) / Math.abs(state.baseline);
+  }
+}
+
+function replaceObservationStatus(
+  observations: PersistedMetricObservation[],
+  observationId: string,
+  status: MetricDisposition,
+): void {
+  const index = observations.findIndex((entry) => entry.observationId === observationId);
+  if (index >= 0) observations[index] = { ...observations[index]!, status };
 }
 
 function normalizeObservation(value: unknown): MetricObservation {
