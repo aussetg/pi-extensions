@@ -8,7 +8,9 @@ test("converts common notation", () => {
 	assert.equal(convertLatexToUnicode(String.raw`Euler: $e^{i\pi}+1=0$`).text, "Euler: e^(iπ)+1=0");
 	assert.equal(convertLatexToUnicode(String.raw`$\forall x \in \mathbb{R},\ x^2 \ge 0$`).text, "∀ x ∈ ℝ, x² ≥ 0");
 	assert.equal(convertLatexToUnicode(String.raw`$\sqrt[3]{x+1} + \frac{a+b}{c}$`).text, "∛(x+1) + (a+b)/c");
+	assert.equal(convertLatexToUnicode(String.raw`$\frac{1}{2}+\frac{1}{3}=\frac{5}{6}$`).text, "½+⅓=⅚");
 	assert.equal(convertLatexToUnicode(String.raw`$\not\in, \not\Rightarrow, \neq$`).text, "∉, ⇏, ≠");
+	assert.equal(convertLatexToUnicode(String.raw`$P \iff Q,\ P \implies Q,\ Q \impliedby P$`).text, "P ⇔ Q, P ⇒ Q, Q ⇐ P");
 	assert.equal(convertLatexToUnicode(String.raw`$x \equiv y \pmod n$`).text, String.raw`x ≡ y \pmod n`);
 	assert.equal(convertLatexToUnicode(String.raw`$x \equiv y \pmod{n}$`).text, "x ≡ y (mod n)");
 });
@@ -37,11 +39,37 @@ test("handles delimiters, matrices, cases, and text", () => {
 	assert.equal(convertLatexToUnicode(String.raw`$\left\langle x,y \right\rangle$`).text, "⟨ x,y ⟩");
 	assert.equal(
 		convertLatexToUnicode(String.raw`$\begin{bmatrix}a&b\\c&d\end{bmatrix}$`).text,
-		"[a  b\nc  d]",
+		"⎡a  b⎤\n⎣c  d⎦",
+	);
+	assert.equal(
+		convertLatexToUnicode(String.raw`$$
+\begin{bmatrix}a&b\\c&d\end{bmatrix}
+\begin{pmatrix}x\\y\end{pmatrix}
+=
+\begin{pmatrix}ax+by\\cx+dy\end{pmatrix}
+$$`).text,
+		"⎡a  b⎤\u00a0⎛x⎞\u00a0\u00a0\u00a0⎛ax+by⎞\n⎣c  d⎦ ⎝y⎠ = ⎝cx+dy⎠",
 	);
 	assert.equal(
 		convertLatexToUnicode(String.raw`$\begin{cases}x&\text{if }x>0\\-x&\text{otherwise}\end{cases}$`).text,
-		"{ x, if x>0\n  -x, otherwise",
+		"⎧ x, if x>0\n⎨\n⎩ -x, otherwise",
+	);
+});
+
+test("collapses source lines and draws stretchable notation as terminal layouts", () => {
+	assert.equal(
+		convertLatexToUnicode(String.raw`$$\langle\mathbf{u},\mathbf{v}\rangle
+=\mathbf{u}^{T}\mathbf{v},\qquad
+\mathbf{u}\perp\mathbf{v}\iff\langle\mathbf{u},\mathbf{v}\rangle=0$$`).text,
+		"⟨𝐮,𝐯⟩ =𝐮ᵀ𝐯,    𝐮⊥𝐯⇔⟨𝐮,𝐯⟩=0",
+	);
+	assert.equal(
+		convertLatexToUnicode(String.raw`$\overbrace{a+b+c}^{n\text{ terms}}$`).text,
+		"n terms\n╭──┴──╮\n\u00a0a+b+c",
+	);
+	assert.equal(
+		convertLatexToUnicode(String.raw`$\underbrace{x_1+\cdots+x_n}_{\text{sample}}$`).text,
+		"x₁+⋯+xₙ\n╰──┬──╯\n\u00a0sample",
 	);
 });
 

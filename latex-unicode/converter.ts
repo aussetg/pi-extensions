@@ -52,6 +52,7 @@ const relations: StringMap = {
 const arrows: StringMap = {
 	leftarrow: "←", gets: "←", rightarrow: "→", to: "→", leftrightarrow: "↔",
 	Leftarrow: "⇐", Rightarrow: "⇒", Leftrightarrow: "⇔", uparrow: "↑", downarrow: "↓",
+	iff: "⇔", implies: "⇒", impliedby: "⇐",
 	updownarrow: "↕", Uparrow: "⇑", Downarrow: "⇓", Updownarrow: "⇕",
 	nwarrow: "↖", nearrow: "↗", searrow: "↘", swarrow: "↙", mapsto: "↦",
 	longmapsto: "⟼", hookleftarrow: "↩", hookrightarrow: "↪", leftharpoonup: "↼",
@@ -321,18 +322,134 @@ function splitEnvironmentRows(body: string): string[][] {
 	return rows;
 }
 
-function renderEnvironment(name: string, body: string): string {
-	const rows = splitEnvironmentRows(body).map((row) => row.map((cell) => convertMathExpr(cell).trim()));
-	if (name === "cases") {
-		return rows.map((row, index) => `${index === 0 ? "{ " : "  "}${row.join(", ")}`).join("\n");
+const MATH_LAYOUT_START = "\uE000";
+const MATH_LAYOUT_END = "\uE001";
+const LAYOUT_SPACE = "\u00a0";
+
+interface MathLayout {
+	lines: string[];
+	baseline: number;
+}
+
+function encodeMathLayout(layout: MathLayout): string {
+	return `${MATH_LAYOUT_START}${JSON.stringify(layout)}${MATH_LAYOUT_END}`;
+}
+
+function horizontalLayout(left: MathLayout, right: MathLayout): MathLayout {
+	const baseline = Math.max(left.baseline, right.baseline);
+	const depth = Math.max(left.lines.length - left.baseline, right.lines.length - right.baseline);
+	const height = baseline + depth;
+	const leftWidth = Math.max(0, ...left.lines.map((line) => [...line].length));
+	const lines = Array.from({ length: height }, (_, row) => {
+		const leftRow = row - baseline + left.baseline;
+		const rightRow = row - baseline + right.baseline;
+		const leftLine = left.lines[leftRow] ?? "";
+		const rightLine = right.lines[rightRow] ?? "";
+		return leftLine + LAYOUT_SPACE.repeat(leftWidth - [...leftLine].length) + rightLine;
+	});
+	return { lines, baseline };
+}
+
+function resolveMathLayouts(text: string): string {
+	if (!text.includes(MATH_LAYOUT_START)) return text;
+	const parts: MathLayout[] = [];
+	let cursor = 0;
+	while (cursor < text.length) {
+		const start = text.indexOf(MATH_LAYOUT_START, cursor);
+		if (start === -1) {
+			const plain = text.slice(cursor).replace(/\s+/g, " ");
+			if (plain.trim()) parts.push({ lines: [plain], baseline: 0 });
+			break;
+		}
+		const plain = text.slice(cursor, start).replace(/\s+/g, " ");
+		if (plain && (parts.length > 0 || plain.trim())) parts.push({ lines: [plain], baseline: 0 });
+		const end = text.indexOf(MATH_LAYOUT_END, start + 1);
+		if (end === -1) return text;
+		parts.push(JSON.parse(text.slice(start + 1, end)) as MathLayout);
+		cursor = end + 1;
 	}
-	const rendered = rows.map((row) => row.join("  ")).join("\n");
+	if (parts.length === 0) return "";
+	const layout = parts.slice(1).reduce(horizontalLayout, parts[0]!);
+	return layout.lines.map((line) => line.trimEnd()).join("\n");
+}
+
+function matrixBrackets(name: string, row: number, rowCount: number): readonly [string, string] {
+	if (rowCount === 1) {
+		const wrappers: Readonly<Record<string, readonly [string, string]>> = {
+			pmatrix: ["(", ")"], bmatrix: ["[", "]"], Bmatrix: ["{", "}"],
+			vmatrix: ["|", "|"], Vmatrix: ["‖", "‖"],
+		};
+		return wrappers[name] ?? ["", ""];
+	}
+	const position = row === 0 ? 0 : row === rowCount - 1 ? 2 : 1;
 	const wrappers: Readonly<Record<string, readonly [string, string]>> = {
-		pmatrix: ["(", ")"], bmatrix: ["[", "]"], Bmatrix: ["{", "}"],
-		vmatrix: ["|", "|"], Vmatrix: ["‖", "‖"],
+		pmatrix: ["⎛⎜⎝"[position]!, "⎞⎟⎠"[position]!],
+		bmatrix: ["⎡⎢⎣"[position]!, "⎤⎥⎦"[position]!],
+		Bmatrix: ["⎧⎪⎩"[position]!, "⎫⎪⎭"[position]!],
+		vmatrix: ["│", "│"], Vmatrix: ["║", "║"],
 	};
-	const [left, right] = wrappers[name] ?? ["", ""];
-	return `${left}${rendered}${right}`;
+	return wrappers[name] ?? ["", ""];
+}
+
+function centerText(text: string, width: number): string {
+	const padding = Math.max(0, width - [...text].length);
+	const left = Math.ceil(padding / 2);
+	return LAYOUT_SPACE.repeat(left) + text + LAYOUT_SPACE.repeat(padding - left);
+}
+
+function braceRule(width: number, over: boolean): string {
+	const innerWidth = Math.max(1, width - 2);
+	const leftWidth = Math.floor((innerWidth - 1) / 2);
+	const rightWidth = innerWidth - leftWidth - 1;
+	return (over ? "╭" : "╰") + "─".repeat(leftWidth) + (over ? "┴" : "┬") +
+		"─".repeat(rightWidth) + (over ? "╮" : "╯");
+}
+
+function renderBrace(name: "overbrace" | "underbrace", body: string, annotation: string): string {
+	const width = Math.max(3, [...body].length, [...annotation].length);
+	const bodyLine = centerText(body, width);
+	const annotationLine = centerText(annotation, width);
+	const over = name === "overbrace";
+	const lines = over
+		? [annotationLine, braceRule(width, true), bodyLine]
+		: [bodyLine, braceRule(width, false), annotationLine];
+	return encodeMathLayout({ lines, baseline: over ? 2 : 0 });
+}
+
+function renderEnvironment(name: string, body: string): string {
+	const rows = splitEnvironmentRows(body).map((row) => row.map((cell) => convertMathExprRaw(cell).trim()));
+	if (name === "cases") {
+		const contents = rows.map((row) => row.join(", "));
+		if (contents.length === 1) return encodeMathLayout({ lines: [`{ ${contents[0]}`], baseline: 0 });
+		if (contents.length === 2) {
+			return encodeMathLayout({
+				lines: [`⎧ ${contents[0]}`, "⎨", `⎩ ${contents[1]}`],
+				baseline: 1,
+			});
+		}
+		const middle = Math.floor(contents.length / 2);
+		const lines = contents.map((content, row) => {
+			const bracket = row === 0 ? "⎧" : row === contents.length - 1 ? "⎩" : row === middle ? "⎨" : "⎪";
+			return `${bracket} ${content}`;
+		});
+		return encodeMathLayout({ lines, baseline: middle });
+	}
+	if (name === "aligned" || name === "align" || name === "alignedat") {
+		const lines = rows.map((row) => row.join("  "));
+		return encodeMathLayout({ lines, baseline: Math.floor(lines.length / 2) });
+	}
+	const columnCount = Math.max(0, ...rows.map((row) => row.length));
+	const widths = Array.from({ length: columnCount }, (_, column) =>
+		Math.max(0, ...rows.map((row) => [...(row[column] ?? "")].length)));
+	const lines = rows.map((row, rowIndex) => {
+		const cells = Array.from({ length: columnCount }, (_, column) => {
+			const cell = row[column] ?? "";
+			return column === columnCount - 1 ? cell : cell + " ".repeat(widths[column]! - [...cell].length);
+		});
+		const [left, right] = matrixBrackets(name, rowIndex, rows.length);
+		return `${left}${cells.join("  ")}${right}`;
+	});
+	return encodeMathLayout({ lines, baseline: Math.floor(lines.length / 2) });
 }
 
 interface CommandConversion {
@@ -372,8 +489,8 @@ function convertCommand(expression: string, slash: number): CommandConversion {
 		if (!denominator) {
 			return { text: expression.slice(slash, numerator.end), end: numerator.end };
 		}
-		const top = convertMathExpr(numerator.content).trim();
-		const bottom = convertMathExpr(denominator.content).trim();
+		const top = convertMathExprRaw(numerator.content).trim();
+		const bottom = convertMathExprRaw(denominator.content).trim();
 		const vulgar = vulgarFractions[`${top}/${bottom}`];
 		return {
 			text: vulgar ?? `${parenthesize(top)}/${parenthesize(bottom)}`,
@@ -386,12 +503,12 @@ function convertCommand(expression: string, slash: number): CommandConversion {
 		if (expression[argumentStart] === "[") {
 			const group = parseGroup(expression, argumentStart, "[", "]");
 			if (!group) return { text: expression.slice(slash), end: expression.length };
-			degree = convertMathExpr(group.content).trim();
+			degree = convertMathExprRaw(group.content).trim();
 			argumentStart = skipHorizontalSpace(expression, group.end);
 		}
 		const radicand = parseGroup(expression, argumentStart);
 		if (!radicand) return { text: "\\sqrt", end: command.end };
-		const inner = convertMathExpr(radicand.content).trim();
+		const inner = convertMathExprRaw(radicand.content).trim();
 		const radical = degree === "3" ? "∛" : degree === "4" ? "∜" : `${degree ? formatScript(degree, "^") : ""}√`;
 		return { text: `${radical}${parenthesize(inner)}`, end: radicand.end };
 	}
@@ -400,7 +517,7 @@ function convertCommand(expression: string, slash: number): CommandConversion {
 		const top = parseGroup(expression, argumentStart);
 		const bottom = top ? parseGroup(expression, skipHorizontalSpace(expression, top.end)) : null;
 		if (!top || !bottom) return { text: `\\${name}`, end: command.end };
-		return { text: `C(${convertMathExpr(top.content)}, ${convertMathExpr(bottom.content)})`, end: bottom.end };
+		return { text: `C(${convertMathExprRaw(top.content)}, ${convertMathExprRaw(bottom.content)})`, end: bottom.end };
 	}
 
 	if (name === "overset" || name === "underset" || name === "stackrel") {
@@ -409,7 +526,7 @@ function convertCommand(expression: string, slash: number): CommandConversion {
 		if (!annotation || !base) return { text: `\\${name}`, end: command.end };
 		const marker = name === "underset" ? "_" : "^";
 		return {
-			text: `${convertMathExpr(base.content)}${formatScript(convertMathExpr(annotation.content), marker)}`,
+			text: `${convertMathExprRaw(base.content)}${formatScript(convertMathExprRaw(annotation.content), marker)}`,
 			end: base.end,
 		};
 	}
@@ -424,14 +541,14 @@ function convertCommand(expression: string, slash: number): CommandConversion {
 	if (name === "pmod" || name === "pod") {
 		const group = parseGroup(expression, argumentStart);
 		if (!group) return { text: `\\${name}`, end: command.end };
-		const content = convertMathExpr(group.content);
+		const content = convertMathExprRaw(group.content);
 		return { text: name === "pmod" ? `(mod ${content})` : `(${content})`, end: group.end };
 	}
 
 	if (name === "substack") {
 		const group = parseGroup(expression, argumentStart);
 		if (!group) return { text: "\\substack", end: command.end };
-		return { text: group.content.split(/\\\\/).map((line) => convertMathExpr(line).trim()).join(", "), end: group.end };
+		return { text: group.content.split(/\\\\/).map((line) => convertMathExprRaw(line).trim()).join(", "), end: group.end };
 	}
 
 	const canonicalFont = fonts[name] ? name : fontAliases[name];
@@ -439,7 +556,7 @@ function convertCommand(expression: string, slash: number): CommandConversion {
 		const font = fonts[canonicalFont]!;
 		const group = parseGroup(expression, argumentStart);
 		if (group) {
-			return { text: applyFont(convertMathExpr(group.content), font), end: group.end };
+			return { text: applyFont(convertMathExprRaw(group.content), font), end: group.end };
 		}
 		const character = expression[argumentStart];
 		if (character && /[A-Za-z0-9]/.test(character)) {
@@ -451,14 +568,29 @@ function convertCommand(expression: string, slash: number): CommandConversion {
 	if (accents[name]) {
 		const group = parseGroup(expression, argumentStart);
 		if (!group) return { text: `\\${name}`, end: command.end };
-		return { text: applyAccent(convertMathExpr(group.content), accents[name]!), end: group.end };
+		return { text: applyAccent(convertMathExprRaw(group.content), accents[name]!), end: group.end };
 	}
 
 	if (name === "overbrace" || name === "underbrace") {
 		const group = parseGroup(expression, argumentStart);
 		if (!group) return { text: `\\${name}`, end: command.end };
-		const body = convertMathExpr(group.content);
-		return { text: name === "overbrace" ? `⏞${body}⏟` : `⏟${body}⏞`, end: group.end };
+		const body = convertMathExprRaw(group.content);
+		const marker = name === "overbrace" ? "^" : "_";
+		const scriptStart = skipHorizontalSpace(expression, group.end);
+		if (expression[scriptStart] !== marker) {
+			return { text: renderBrace(name, body, ""), end: group.end };
+		}
+		const annotationStart = skipHorizontalSpace(expression, scriptStart + 1);
+		const annotationGroup = parseGroup(expression, annotationStart);
+		if (annotationGroup) {
+			return {
+				text: renderBrace(name, body, convertMathExprRaw(annotationGroup.content).trim()),
+				end: annotationGroup.end,
+			};
+		}
+		const annotation = expression[annotationStart];
+		if (!annotation) return { text: renderBrace(name, body, ""), end: group.end };
+		return { text: renderBrace(name, body, annotation), end: annotationStart + 1 };
 	}
 
 	if (name === "not") {
@@ -501,7 +633,7 @@ function convertCommand(expression: string, slash: number): CommandConversion {
 		const color = parseGroup(expression, argumentStart);
 		const body = color ? parseGroup(expression, skipHorizontalSpace(expression, color.end)) : null;
 		if (!color || !body) return { text: `\\${name}`, end: command.end };
-		return { text: convertMathExpr(body.content), end: body.end };
+		return { text: convertMathExprRaw(body.content), end: body.end };
 	}
 
 	if (namedFunctions[name] !== undefined) return { text: namedFunctions[name]!, end: command.end };
@@ -521,11 +653,16 @@ function convertCommand(expression: string, slash: number): CommandConversion {
 	return { text: expression.slice(slash, unknownEnd), end: unknownEnd };
 }
 
-function convertMathExpr(expression: string): string {
+function convertMathExprRaw(expression: string): string {
 	let result = "";
 	let i = 0;
 	while (i < expression.length) {
 		const character = expression[i]!;
+		if (/\s/.test(character)) {
+			while (i < expression.length && /\s/.test(expression[i]!)) i += 1;
+			if (result && !result.endsWith(" ")) result += " ";
+			continue;
+		}
 		if (character === "\\") {
 			const converted = convertCommand(expression, i);
 			result += converted.text;
@@ -536,7 +673,7 @@ function convertMathExpr(expression: string): string {
 			const marker = character;
 			const group = parseGroup(expression, i + 1);
 			if (group) {
-				result += formatScript(convertMathExpr(group.content), marker);
+				result += formatScript(convertMathExprRaw(group.content), marker);
 				i = group.end;
 				continue;
 			}
@@ -555,7 +692,7 @@ function convertMathExpr(expression: string): string {
 		if (character === "{") {
 			const group = parseGroup(expression, i);
 			if (group) {
-				result += convertMathExpr(group.content);
+				result += convertMathExprRaw(group.content);
 				i = group.end;
 				continue;
 			}
@@ -571,6 +708,11 @@ function convertMathExpr(expression: string): string {
 		i += 1;
 	}
 	return result;
+}
+
+function convertMathExpr(expression: string): string {
+	const converted = convertMathExprRaw(expression);
+	return converted.includes(MATH_LAYOUT_START) ? resolveMathLayouts(converted) : converted.trim();
 }
 
 type SegmentKind = "text" | "inlineCode" | "fencedCode" | "inlineMath" | "displayMath";
@@ -812,7 +954,7 @@ export function convertLatexToUnicode(text: string): LatexUnicodeConversion {
 	const segments = scanSegments(text);
 	if (!segments.some(isMath)) return { text, changed: false };
 	const converted = segments.map((segment) => {
-		if (isMath(segment)) return convertMathExpr(segment.content ?? "").trim();
+		if (isMath(segment)) return convertMathExpr(segment.content ?? "");
 		if (segment.kind === "text") return convertBareCommands(segment.raw);
 		return segment.raw;
 	}).join("");
