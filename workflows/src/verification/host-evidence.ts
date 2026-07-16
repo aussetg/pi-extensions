@@ -4,7 +4,7 @@ import { ArtifactStore, createOpaqueArtifactRef } from "../artifacts/store.js";
 import { SemanticAgentAdapter } from "../agents/semantic-adapter.js";
 import type { PreparedWorkflowExecutionResources } from "../agents/resources.js";
 import type { HostCommandExecutor, HostCommandResult } from "../commands/executor.js";
-import { normalizeCommandProfile, type CommandProfileSnapshot } from "../commands/profiles.js";
+import type { CommandProfileSnapshot } from "../commands/profiles.js";
 import { DEFINITION_LIMITS } from "../definition/limits.js";
 import { RunDatabase, RunRevisionConflictError } from "../persistence/run-database.js";
 import { zeroUsage, type OperationRecord } from "../runtime/durable-types.js";
@@ -20,6 +20,11 @@ import type {
   SemanticVerificationContext,
   SemanticVerificationEvidenceProvider,
 } from "./semantic-adapter.js";
+import {
+  verificationCommandEnvironmentHash,
+  verificationCommandProfile,
+  verificationReviewerEnvironmentHash,
+} from "./environment.js";
 import type {
   VerificationCommandEvidence,
   VerificationEvidenceInput,
@@ -104,7 +109,7 @@ export class HostVerificationEvidenceProvider implements SemanticVerificationEvi
     const evidence: VerificationCommandEvidence[] = [];
     for (const [ordinal, command] of configured.entries()) {
       if (context.signal.aborted) throw context.signal.reason;
-      const profile = commandProfile(context.profile.id, gate, command);
+      const profile = verificationCommandProfile(context.profile.id, gate, command);
       const executionId = `command_${stableHash({
         runId: context.runId,
         operationId: context.operationId,
@@ -192,10 +197,10 @@ export class HostVerificationEvidenceProvider implements SemanticVerificationEvi
     return {
       agentSessionId: session.agentSessionId,
       finish: structuredClone(session.finish),
-      environmentHash: stableHash({
+      environmentHash: verificationReviewerEnvironmentHash({
         profileId: session.profileId,
         routeId: session.routeId,
-        reviewerAuthorityHash: this.options.resources.agentSelections.find((entry) => entry.operationId === sourceId)?.authorityHash,
+        authorityHash: requiredReviewerAuthority(this.options.resources, sourceId),
       }),
     };
   }
@@ -342,30 +347,6 @@ export class HostVerificationEvidenceProvider implements SemanticVerificationEvi
   }
 }
 
-function commandProfile(
-  verificationProfileId: string,
-  gate: "tests" | "diagnostics",
-  command: VerificationCommandProfile,
-): CommandProfileSnapshot {
-  const definition = normalizeCommandProfile({
-    name: `verify-${gate}-${command.id}`.slice(0, 64),
-    description: `Pinned ${gate} gate from ${verificationProfileId}`,
-    argv: command.argv,
-    ...(command.env ? { env: command.env } : {}),
-    timeoutMs: command.timeoutMs,
-    outputLimitBytes: 8 * 1024 * 1024,
-    effects: ["read-only"],
-  });
-  const hash = stableHash({ namespace: "builtin", definition });
-  return {
-    ...definition,
-    id: `builtin:${definition.name}`,
-    namespace: "builtin",
-    path: `<builtin:verification:${verificationProfileId}:${gate}:${command.id}>`,
-    hash,
-  };
-}
-
 function commandEvidence(
   command: VerificationCommandProfile,
   profile: CommandProfileSnapshot,
@@ -381,10 +362,7 @@ function commandEvidence(
     stdoutBytes: result.stdoutEvidence.bytes,
     stderrDigest: result.stderrEvidence.digest,
     stderrBytes: result.stderrEvidence.bytes,
-    environmentHash: stableHash({
-      profileHash: profile.hash,
-      executor: { id: executor.id, protocolVersion: executor.protocolVersion, sandbox: executor.sandbox },
-    }),
+    environmentHash: verificationCommandEnvironmentHash(profile, executor),
     startedAt: result.startedAt,
     completedAt: result.endedAt,
   };
@@ -420,6 +398,15 @@ async function reviewPath(root: string, relative: string): Promise<JsonValue> {
 
 function reviewerSourceId(profileName: string): string {
   return `verification-${profileName}`;
+}
+
+function requiredReviewerAuthority(
+  resources: PreparedWorkflowExecutionResources,
+  sourceId: string,
+): string {
+  const matches = resources.agentSelections.filter((entry) => entry.operationId === sourceId);
+  if (matches.length !== 1) throw new Error(`Verification reviewer ${sourceId} has no unique pinned authority`);
+  return matches[0]!.authorityHash;
 }
 
 function nextOperationOrdinal(database: RunDatabase): number {

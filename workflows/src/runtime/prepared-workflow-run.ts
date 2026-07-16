@@ -21,6 +21,7 @@ import { RunDatabase } from "../persistence/run-database.js";
 import type { JsonObject } from "../types.js";
 import { stableHash } from "../utils/hashes.js";
 import { stableJson } from "../utils/stable-json.js";
+import { CurrentVerificationAuthority } from "../verification/current-authority.js";
 import { SemanticVerificationAdapter } from "../verification/semantic-adapter.js";
 import { HostVerificationEvidenceProvider } from "../verification/host-evidence.js";
 import {
@@ -108,6 +109,12 @@ export async function executePreparedWorkflowRun(
     commandExecutor,
     agentAdapter,
   });
+  const currentVerificationAuthority = new CurrentVerificationAuthority({
+    projectCwd: resources.projectCwd,
+    resources,
+    commandExecutor,
+    agentExecutor,
+  });
   const measurementEnvironment = new HostMeasurementEnvironmentProvider();
   if (resources.measurementEnvironment
     && stableHash(resources.measurementEnvironment) !== stableHash(measurementEnvironment.describe())) {
@@ -143,7 +150,11 @@ export async function executePreparedWorkflowRun(
       launchWorkspace,
     }),
     new SemanticExperimentAdapter({ runDir, database }),
-    new SemanticApplyAdapter({ runDir, database }),
+    new SemanticApplyAdapter({
+      runDir,
+      database,
+      currentVerificationBinding: (verification) => currentVerificationAuthority.binding(verification),
+    }),
   ];
   const replaySourceRunDir = replaySource(runDir, run.runId, run.replay, replay);
   return await executeSequentialSemanticRun(runDir, database, parsed, {

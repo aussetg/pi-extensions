@@ -102,6 +102,38 @@ describe("candidate, verification, disposition, and apply semantic effects", () 
     expect(await fs.promises.readFile(path.join(fixture.project, "value.txt"), "utf8")).toBe("launch\n");
   });
 
+  it("rechecks verification authority after human approval", async () => {
+    const fixture = await createFixture("apply");
+    expect((await fixture.execute()).status).toBe("waiting");
+    const apply = fixture.database.listOperations({ limit: 32 }).find((operation) => operation.kind === "apply")!;
+    const plan = fixture.database.readApplyPlanByOperation(apply.operationId)!;
+    const approval = fixture.database.readApproval(plan.approvalId)!;
+    fixture.database.enqueueControlRequest({
+      requestId: "request_stale_authority",
+      runId: fixture.runId,
+      expectedRevision: fixture.database.readRun().revision,
+      requestedAt: new Date().toISOString(),
+      actor: "human:test",
+      kind: "approve",
+      approvalId: approval.approvalId,
+      challengeHash: approval.challenge.challengeHash,
+    });
+    expect(fixture.database.resolveApprovalControlRequest(
+      fixture.database.readRun().revision,
+      "request_stale_authority",
+      new Date().toISOString(),
+    ).acknowledgement.accepted).toBe(true);
+
+    fixture.currentVerificationBinding.gateEnvironmentHash = sha256("changed verification environment");
+    const outcome = await fixture.execute();
+    expect(outcome).toMatchObject({
+      status: "failed",
+      error: "Verification policy or required tool environment changed before apply; rerun affected gates",
+    });
+    expect(fixture.database.readApplyReceipt(plan.planId)).toBeUndefined();
+    expect(await fs.promises.readFile(path.join(fixture.project, "value.txt"), "utf8")).toBe("launch\n");
+  });
+
   it("recovers a crash after candidate freeze without rerunning a completed mutation", async () => {
     const fixture = await createFixture("reject");
     let crashed = false;
@@ -217,6 +249,7 @@ async function createFixture(mode: "apply" | "reject", options: FixtureOptions =
     builtins: [verificationProfile()],
   });
   const mutations = { value: 0 };
+  const currentVerificationBinding: { profileHash?: string; gateEnvironmentHash?: string } = {};
   const adapters: SemanticEffectAdapter[] = [
     new SemanticCandidateAdapter({ manager }),
     mutationAdapter(manager, mutations),
@@ -231,7 +264,14 @@ async function createFixture(mode: "apply" | "reject", options: FixtureOptions =
     }),
     new SemanticAcceptAdapter({ runDir, database }),
     new SemanticRejectAdapter({ runDir, database }),
-    new SemanticApplyAdapter({ runDir, database }),
+    new SemanticApplyAdapter({
+      runDir,
+      database,
+      currentVerificationBinding: (verification) => ({
+        profileHash: currentVerificationBinding.profileHash ?? verification.profileHash,
+        gateEnvironmentHash: currentVerificationBinding.gateEnvironmentHash ?? verification.gateEnvironmentHash,
+      }),
+    }),
   ];
   return {
     root,
@@ -241,6 +281,7 @@ async function createFixture(mode: "apply" | "reject", options: FixtureOptions =
     database,
     manager,
     mutations,
+    currentVerificationBinding,
     candidateRoot: () => {
       const workspace = database.listOperations({ limit: 32 }).find((operation) => operation.kind === "candidate")?.result?.value as any;
       const candidate = database.readCandidate(workspace.candidateId)!;

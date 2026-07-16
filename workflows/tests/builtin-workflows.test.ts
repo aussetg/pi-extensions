@@ -677,7 +677,14 @@ async function createFixture(
     );
   }
   if (name === "coding" || name === "goal" || name === "execute-plan" || name === "optimize") {
-    adapterFactories.push(() => new SemanticApplyAdapter({ runDir, database }));
+    adapterFactories.push(() => new SemanticApplyAdapter({
+      runDir,
+      database,
+      currentVerificationBinding: (verification) => ({
+        profileHash: verification.profileHash,
+        gateEnvironmentHash: verification.gateEnvironmentHash,
+      }),
+    }));
   }
   const snapshot = createOpaqueLaunchSnapshotRef({ runId, snapshotHash: manifest.treeHash });
   return {

@@ -25,6 +25,11 @@ import type {
   VerificationCommandProfile,
   VerificationProfileSnapshot,
 } from "./profiles.js";
+import {
+  verificationContaminationEnvironmentHash,
+  verificationDiffEnvironmentHash,
+  verificationNotApplicableEnvironmentHash,
+} from "./environment.js";
 
 export type VerificationCommandStatus =
   | "completed"
@@ -240,7 +245,8 @@ export class VerificationService {
     if ("notApplicable" in profile.adversarialReview) {
       if (supplied) throw new Error("Adversarial evidence was supplied to a not-applicable gate");
       return gate("adversarial-review", "not-applicable", profile.adversarialReview.notApplicable,
-        stableHash({ notApplicable: profile.adversarialReview.notApplicable }), { notApplicable: profile.adversarialReview.notApplicable });
+        verificationNotApplicableEnvironmentHash(profile.adversarialReview.notApplicable),
+        { notApplicable: profile.adversarialReview.notApplicable });
     }
     if (!supplied) throw new Error("Adversarial review requires a finish_work receipt");
     const session = this.database.readAgentSession(supplied.agentSessionId);
@@ -313,7 +319,8 @@ function commandGate(
   if (!Array.isArray(configured)) {
     if (supplied?.length) throw new Error(`${kind} evidence was supplied to a not-applicable gate`);
     return gate(kind, "not-applicable", configured.notApplicable,
-      stableHash({ notApplicable: configured.notApplicable }), { notApplicable: configured.notApplicable });
+      verificationNotApplicableEnvironmentHash(configured.notApplicable),
+      { notApplicable: configured.notApplicable });
   }
   if (!supplied || supplied.length !== configured.length) throw new Error(`${kind} evidence is incomplete`);
   const commands = configured.map((command, index) => validateCommandEvidence(command, supplied[index]!));
@@ -378,7 +385,7 @@ async function diffGate(
   } as unknown as JsonObject;
   return gate("diff-inspection", failures.length ? "failed" : "passed",
     failures.length ? failures[0]! : `${candidate.changedPaths.length} changed path${candidate.changedPaths.length === 1 ? "" : "s"} satisfy policy`,
-    stableHash({ implementation: "deterministic-diff-v1", policy }), details);
+    verificationDiffEnvironmentHash(policy), details);
 }
 
 function contaminationGate(
@@ -389,7 +396,7 @@ function contaminationGate(
   const passed = observed.treeHash === candidate.workspace.treeHash;
   return gate("contamination", passed ? "passed" : "blocked",
     passed ? "Frozen candidate tree is unchanged" : "Candidate changed during verification",
-    stableHash({ implementation: "candidate-contamination-v1" }), {
+    verificationContaminationEnvironmentHash(), {
       candidateTreeHash: candidate.workspace.treeHash,
       observedTreeHash: observed.treeHash,
       projectSnapshotHash: project.treeHash,

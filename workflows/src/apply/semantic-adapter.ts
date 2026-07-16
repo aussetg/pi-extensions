@@ -13,20 +13,22 @@ import type {
 import type { JsonValue } from "../types.js";
 import { stableHash } from "../utils/hashes.js";
 import { stableJson } from "../utils/stable-json.js";
+import type { CurrentVerificationBinding } from "../verification/current-authority.js";
 import { requireVerificationReceipt } from "../verification/semantic-adapter.js";
-import { VerifiedApplyService, type VerifiedApplyServiceOptions } from "./verified-apply.js";
+import {
+  ApplyStaleError,
+  VerifiedApplyService,
+  type VerifiedApplyServiceOptions,
+} from "./verified-apply.js";
 
 export interface SemanticApplyAdapterOptions {
   runDir: string;
   database: import("../persistence/run-database.js").RunDatabase;
   now?: () => Date;
   serviceOptions?: Omit<VerifiedApplyServiceOptions, "now">;
-  currentVerificationBinding?: (
+  currentVerificationBinding: (
     verification: import("../runtime/durable-types.js").VerificationRecord,
-  ) => { profileHash: string; gateEnvironmentHash: string } | Promise<{
-    profileHash: string;
-    gateEnvironmentHash: string;
-  }>;
+  ) => CurrentVerificationBinding | Promise<CurrentVerificationBinding>;
 }
 
 interface ResolvedApply {
@@ -63,6 +65,9 @@ export class SemanticApplyAdapter implements SemanticEffectAdapter {
     if (path.resolve(options.database.databasePath) !== path.join(this.runDir, "run.sqlite")) {
       throw new Error("Apply adapter and run database directories differ");
     }
+    if (typeof options.currentVerificationBinding !== "function") {
+      throw new Error("Apply adapter requires a current verification authority resolver");
+    }
     this.now = options.now ?? (() => new Date());
     this.service = new VerifiedApplyService(this.runDir, options.database, {
       ...options.serviceOptions,
@@ -89,14 +94,11 @@ export class SemanticApplyAdapter implements SemanticEffectAdapter {
 
   async execute(request: SemanticEffectRequest): Promise<SemanticEffectOutcome> {
     const resolved = this.resolve(request);
-    const currentBinding = await this.options.currentVerificationBinding?.(resolved.verification) ?? {
-      profileHash: resolved.verification.profileHash,
-      gateEnvironmentHash: resolved.verification.gateEnvironmentHash,
-    };
+    const currentBinding = await this.readCurrentVerificationBinding(resolved.verification);
     if (
       currentBinding.profileHash !== resolved.verification.profileHash
       || currentBinding.gateEnvironmentHash !== resolved.verification.gateEnvironmentHash
-    ) throw new Error("Verification policy or required tool environment changed before apply");
+    ) throw staleVerification();
     const attempt = this.admitAttempt(request, resolved.candidate);
     let plan = request.database.readApplyPlanByOperation(request.operation.operationId);
     let approval = plan ? request.database.readApproval(plan.approvalId) : undefined;
@@ -233,6 +235,29 @@ export class SemanticApplyAdapter implements SemanticEffectAdapter {
     if (!(value instanceof Date) || !Number.isFinite(value.getTime())) throw new Error("Apply clock is invalid");
     return value.toISOString();
   }
+
+  private async readCurrentVerificationBinding(
+    verification: import("../runtime/durable-types.js").VerificationRecord,
+  ): Promise<CurrentVerificationBinding> {
+    let binding: CurrentVerificationBinding;
+    try {
+      binding = await this.options.currentVerificationBinding(verification);
+    } catch {
+      throw staleVerification();
+    }
+    if (!isHash(binding?.profileHash) || !isHash(binding?.gateEnvironmentHash)) {
+      throw staleVerification();
+    }
+    return binding;
+  }
+}
+
+function staleVerification(): ApplyStaleError {
+  return new ApplyStaleError("Verification policy or required tool environment changed before apply; rerun affected gates");
+}
+
+function isHash(value: unknown): value is string {
+  return typeof value === "string" && /^sha256:[a-f0-9]{64}$/.test(value);
 }
 
 function findAcceptance(
