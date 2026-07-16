@@ -436,6 +436,7 @@ export class AgentProtocolServer implements AsyncDisposable {
         attemptId: binding.attemptId,
         outputRoot: binding.outputRoot,
         workspace: binding.workspace,
+        safety: this.database.readRun().safety,
         signal: binding.effectAbort.signal,
       }), {
         maxBytes: Math.min(this.database.readRun().safety.outputBytes, 1024 * 1024),
@@ -558,6 +559,7 @@ export class AgentProtocolServer implements AsyncDisposable {
       executionId: intent.executionId,
       operationId: binding.operationId,
       attemptId: binding.attemptId,
+      safety: this.database.readRun().safety,
     });
   }
 

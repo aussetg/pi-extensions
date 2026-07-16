@@ -150,6 +150,7 @@ export class SemanticCommandAdapter implements SemanticEffectAdapter {
       profile: resolved.profile,
       arguments: resolved.options.args,
       effect: resolved.options.effect,
+      safety: request.run.safety,
       maximumOutputBytes,
       inlineLimitBytes: maximumOutputBytes,
     }, request.signal);

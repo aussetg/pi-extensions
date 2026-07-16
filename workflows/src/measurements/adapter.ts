@@ -159,6 +159,7 @@ export class SemanticMeasurementAdapter implements SemanticEffectAdapter {
         profile: resolved.commandProfile,
         arguments: {},
         effect: "read-only",
+        safety: request.run.safety,
         maximumOutputBytes: Math.min(request.run.safety.outputBytes, DEFINITION_LIMITS.measurementStreamBytes),
         inlineLimitBytes: DEFINITION_LIMITS.measurementStreamBytes,
         unitKind: "measurement",

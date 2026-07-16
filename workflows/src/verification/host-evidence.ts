@@ -109,6 +109,7 @@ export class HostVerificationEvidenceProvider implements SemanticVerificationEvi
     const evidence: VerificationCommandEvidence[] = [];
     for (const [ordinal, command] of configured.entries()) {
       if (context.signal.aborted) throw context.signal.reason;
+      const safety = this.options.database.readRun().safety;
       const profile = verificationCommandProfile(context.profile.id, gate, command);
       const executionId = `command_${stableHash({
         runId: context.runId,
@@ -127,9 +128,10 @@ export class HostVerificationEvidenceProvider implements SemanticVerificationEvi
         profile,
         arguments: {},
         effect: "read-only",
-        maximumOutputBytes: Math.min(this.options.database.readRun().safety.outputBytes, profile.outputLimitBytes),
+        safety,
+        maximumOutputBytes: Math.min(safety.outputBytes, profile.outputLimitBytes),
         inlineLimitBytes: Math.min(
-          this.options.database.readRun().safety.outputBytes,
+          safety.outputBytes,
           profile.outputLimitBytes,
           DEFINITION_LIMITS.commandInlineBytes,
         ),

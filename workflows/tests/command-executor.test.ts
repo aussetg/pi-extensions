@@ -15,6 +15,8 @@ import {
   type CommandEffect,
   type CommandProfileSnapshot,
 } from "../src/commands/profiles.js";
+import type { SafetyConfiguration } from "../src/runtime/durable-types.js";
+import { WORKFLOW_UNIT_POLICIES } from "../src/systemd/unit-properties.js";
 import { sha256, stableHash } from "../src/utils/hashes.js";
 
 const roots: string[] = [];
@@ -75,6 +77,17 @@ describe("systemd + Bubblewrap command execution", () => {
     expect(timedOut).toMatchObject({ status: "timed-out", timedOut: true, unitCleaned: true });
     expect(timedOut.exitEvidence.kind).toBe("timeout");
 
+    const safetyLimited = await execute(fixture, commandProfile({
+      name: "safety-timeout",
+      argv: ["/usr/bin/sleep", "${seconds}"],
+      arguments: { seconds: { type: "integer", minimum: 1, maximum: 10 } },
+      timeoutMs: 5_000,
+      effects: ["read-only"],
+    }), { seconds: 5 }, "read-only", {
+      safety: commandSafety({ commandTimeoutMs: 100 }),
+    });
+    expect(safetyLimited).toMatchObject({ status: "timed-out", timedOut: true, unitCleaned: true });
+
     const cancellable = commandProfile({
       name: "cancellable",
       argv: ["/usr/bin/sleep", "${seconds}"],
@@ -83,11 +96,47 @@ describe("systemd + Bubblewrap command execution", () => {
       effects: ["read-only"],
     });
     const controller = new AbortController();
-    const cancelled = await execute(fixture, cancellable, { seconds: 5 }, "read-only", controller, () => {
-      setTimeout(() => controller.abort(new Error("test cancellation")), 50);
+    const cancelled = await execute(fixture, cancellable, { seconds: 5 }, "read-only", {
+      controller,
+      onStart: () => { setTimeout(() => controller.abort(new Error("test cancellation")), 50); },
     });
     expect(cancelled).toMatchObject({ status: "cancelled", timedOut: false, unitCleaned: true });
     expect(cancelled.exitEvidence.kind).toBe("cancelled");
+  }, 30_000);
+
+  it("applies stored run resources with the selected command service class", async () => {
+    const fixture = await setup("command-safety-");
+    const safety = commandSafety({
+      memoryBytes: 768 * 1024 * 1024,
+      tasks: 48,
+      cpuQuotaPercent: 200,
+      cpuWeight: 321,
+      commandTimeoutMs: 5_000,
+    });
+    let properties: Record<string, string> | undefined;
+    const result = await execute(fixture, commandProfile({
+      name: "resource-policy",
+      argv: ["/usr/bin/sleep", "1"],
+      timeoutMs: 5_000,
+      effects: ["read-only"],
+    }), {}, "read-only", {
+      safety,
+      unitKind: "measurement",
+      onStart: async (_pid, unit) => {
+        properties = await unitProperties(unit, [
+          "MemoryMax", "TasksMax", "CPUWeight", "CPUQuotaPerSecUSec", "IOWeight", "TimeoutStopUSec",
+        ]);
+      },
+    });
+    expect(result.status).toBe("completed");
+    expect(properties).toEqual({
+      MemoryMax: String(safety.memoryBytes),
+      TasksMax: String(safety.tasks),
+      CPUWeight: String(safety.cpuWeight),
+      CPUQuotaPerSecUSec: "2s",
+      IOWeight: String(WORKFLOW_UNIT_POLICIES.measurement.ioWeight),
+      TimeoutStopUSec: `${WORKFLOW_UNIT_POLICIES.measurement.timeoutStopMs / 1_000}s`,
+    });
   }, 30_000);
 
   it("keeps streams bounded, publishes overflow artifacts, and records exact exit evidence", async () => {
@@ -99,7 +148,10 @@ describe("systemd + Bubblewrap command execution", () => {
       outputLimitBytes: 16_384,
       effects: ["read-only"],
     });
-    const result = await execute(fixture, output, { bytes: 4_096 }, "read-only", undefined, undefined, 64, 16_384);
+    const result = await execute(fixture, output, { bytes: 4_096 }, "read-only", {
+      inlineLimitBytes: 64,
+      maximumOutputBytes: 16_384,
+    });
     expect(result).toMatchObject({ status: "completed", exitCode: 0, unitCleaned: true });
     expect(result.stdout).toHaveLength(64);
     expect(result.stdoutEvidence).toMatchObject({ bytes: 4_096, inlineBytes: 64, truncated: false });
@@ -112,9 +164,13 @@ describe("systemd + Bubblewrap command execution", () => {
     const limited = await execute(fixture, commandProfile({
       name: "limited-output",
       argv: ["/usr/bin/head", "-c", "4096", "/dev/zero"],
-      outputLimitBytes: 512,
+      outputLimitBytes: 4_096,
       effects: ["read-only"],
-    }), {}, "read-only", undefined, undefined, 64, 1_024);
+    }), {}, "read-only", {
+      inlineLimitBytes: 64,
+      maximumOutputBytes: 4_096,
+      safety: commandSafety({ outputBytes: 512 }),
+    });
     expect(limited).toMatchObject({ status: "output-limited", unitCleaned: true });
     expect(limited.stdoutEvidence).toMatchObject({ bytes: 512, inlineBytes: 64, truncated: true });
     expect(limited.stdoutEvidence.overflowArtifact).toMatchObject({ bytes: 512, truncated: true });
@@ -161,7 +217,7 @@ describe("systemd + Bubblewrap command execution", () => {
     await fs.promises.writeFile(wrapper, "#!/bin/sh\nexec /usr/bin/bwrap \"$@\"\n", { mode: 0o700 });
     const executor = new SandboxedCommandExecutor({ bwrapPath: wrapper });
     const descriptor = executor.describe();
-    expect(Object.keys(descriptor).sort()).toEqual(["containment", "executables", "id", "protocolVersion", "sandbox"]);
+    expect(Object.keys(descriptor).sort()).toEqual(["executables", "id", "protocolVersion", "sandbox"]);
     expect(descriptor.executables).toMatchObject({ bubblewrap: { path: wrapper, version: expect.stringContaining("bubblewrap") } });
     const changedDiagnostics = structuredClone(descriptor);
     changedDiagnostics.executables!.bubblewrap.version = "bubblewrap upgraded after command completion";
@@ -173,7 +229,7 @@ describe("systemd + Bubblewrap command execution", () => {
       name: "true",
       argv: ["/usr/bin/true"],
       effects: ["read-only"],
-    }), {}, "read-only", undefined, undefined, undefined, undefined, executor);
+    }), {}, "read-only", { executor });
     expect(result).toMatchObject({ status: "completed", exitCode: 0 });
   }, 30_000);
 });
@@ -194,12 +250,17 @@ async function execute(
   profile: CommandProfileSnapshot,
   args: Record<string, string | number | boolean>,
   effect: CommandEffect,
-  controller = new AbortController(),
-  onStart?: () => void,
-  inlineLimitBytes = 4_096,
-  maximumOutputBytes = 64 * 1024,
-  executor = fixture.executor,
+  options: {
+    controller?: AbortController;
+    onStart?: (pid: number, unit: string) => void | Promise<void>;
+    inlineLimitBytes?: number;
+    maximumOutputBytes?: number;
+    executor?: SandboxedCommandExecutor;
+    safety?: SafetyConfiguration;
+    unitKind?: HostCommandRequest["unitKind"];
+  } = {},
 ): Promise<HostCommandResult> {
+  const controller = options.controller ?? new AbortController();
   const executionId = `command_${(++executionSequence).toString(16).padStart(32, "0")}`;
   const request: HostCommandRequest = {
     runId: `flow_${"1".repeat(32)}`,
@@ -212,10 +273,26 @@ async function execute(
     profile,
     arguments: args,
     effect,
-    maximumOutputBytes,
-    inlineLimitBytes,
+    safety: options.safety ?? commandSafety(),
+    maximumOutputBytes: options.maximumOutputBytes ?? 64 * 1024,
+    inlineLimitBytes: options.inlineLimitBytes ?? 4_096,
+    ...(options.unitKind ? { unitKind: options.unitKind } : {}),
   };
-  return await executor.execute(request, controller.signal, async () => onStart?.());
+  return await (options.executor ?? fixture.executor).execute(request, controller.signal, options.onStart);
+}
+
+function commandSafety(patch: Partial<SafetyConfiguration> = {}): SafetyConfiguration {
+  return {
+    concurrency: 4,
+    maximumAgentLaunches: 100,
+    memoryBytes: 2 * 1024 * 1024 * 1024,
+    tasks: 256,
+    cpuQuotaPercent: 400,
+    cpuWeight: 100,
+    outputBytes: 64 * 1024,
+    commandTimeoutMs: 10_000,
+    ...patch,
+  };
 }
 
 function commandProfile(patch: {
@@ -253,6 +330,26 @@ async function unitLoadState(unit: string): Promise<string> {
     process.on("close", (code) => resolve({ code, stdout }));
   });
   return result.code === 0 ? result.stdout.trim() || "not-found" : "not-found";
+}
+
+async function unitProperties(unit: string, names: string[]): Promise<Record<string, string>> {
+  const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+    const child = spawn("/usr/bin/systemctl", [
+      "--user", "show", unit, ...names.map((name) => `--property=${name}`),
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout!.setEncoding("utf8");
+    child.stderr!.setEncoding("utf8");
+    child.stdout!.on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr!.on("data", (chunk: string) => { stderr += chunk; });
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+  if (result.code !== 0) throw new Error(`systemctl show failed: ${result.stderr.trim()}`);
+  return Object.fromEntries(result.stdout.trim().split("\n").filter(Boolean).map((line) => {
+    const separator = line.indexOf("=");
+    return [line.slice(0, separator), line.slice(separator + 1)];
+  }));
 }
 
 async function makeWritable(root: string): Promise<void> {

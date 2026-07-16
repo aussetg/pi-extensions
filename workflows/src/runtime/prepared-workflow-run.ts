@@ -92,7 +92,7 @@ export async function executePreparedWorkflowRun(
   const webKey = process.env.PI_WORKFLOW_KAGI_API_KEY ?? process.env.KAGI_API_KEY;
   const mediatedTools = new HostAgentMediatedToolExecutor({
     ...(webKey ? { web: new KagiWebMediator({ apiKey: webKey }) } : {}),
-    maximumCommandOutputBytes: Math.min(run.safety.outputBytes, 8 * 1024 * 1024),
+    maximumCommandOutputBytes: 8 * 1024 * 1024,
   });
   const agentAdapter = new SemanticAgentAdapter({
     runDir,

@@ -551,6 +551,7 @@ describe("logical agent session supervision", () => {
       attemptId: "attempt-worker-1",
       outputRoot: path.join(root, "outputs", "execution-worker-1"),
       workspace: { mode: "candidate", root: candidate, cwd: candidate },
+      safety: runRecord().safety,
       signal: new AbortController().signal,
     });
     expect(response).toMatchObject({ ok: true, exitCode: 0, network: "unshared", unitCleaned: true });
@@ -577,6 +578,7 @@ describe("logical agent session supervision", () => {
       attemptId: "attempt-worker-cancel",
       outputRoot: path.join(root, "outputs", "execution-worker-cancel"),
       workspace: { mode: "candidate", root: candidate, cwd: candidate },
+      safety: runRecord().safety,
       signal: controller.signal,
     });
     for (let retry = 0; retry < 100; retry += 1) {
@@ -588,6 +590,28 @@ describe("logical agent session supervision", () => {
     await expect(execution).rejects.toThrow(/test cancelled command/);
     await new Promise((resolve) => setTimeout(resolve, 250));
     expect(fs.existsSync(path.join(candidate, "late.txt"))).toBe(false);
+  }, 30_000);
+
+  it("caps mediated command duration with the stored run safety", async () => {
+    const root = await workerRoot();
+    const candidate = path.join(root, "candidate-command-timeout");
+    await fs.promises.mkdir(candidate);
+    const mediator = new HostAgentMediatedToolExecutor();
+    const safety = { ...runRecord().safety, commandTimeoutMs: 100 };
+    const response = await mediator.execute({
+      toolName: "workspace_command",
+      toolCallId: "safety-timeout-command",
+      payload: { argv: ["/usr/bin/sleep", "5"], timeoutMs: 10_000 },
+      runDir: root,
+      executionId: "execution-worker-timeout",
+      operationId: "operation-worker-timeout",
+      attemptId: "attempt-worker-timeout",
+      outputRoot: path.join(root, "outputs", "execution-worker-timeout"),
+      workspace: { mode: "candidate", root: candidate, cwd: candidate },
+      safety,
+      signal: new AbortController().signal,
+    });
+    expect(response).toMatchObject({ ok: false, timedOut: true, unitCleaned: true });
   }, 30_000);
 });
 
@@ -781,6 +805,7 @@ describe("private coordinator agent protocol", () => {
           expect(fixture.database.readAgentMediatedToolIntent(fixture.agentSessionId, request.toolCallId))
             .toMatchObject({ status: "started", toolName: request.toolName });
           expect(fixture.database.readAgentToolReceipt(fixture.agentSessionId, request.toolCallId)).toBeUndefined();
+          expect(request.safety).toEqual(runRecord().safety);
           calls.push(request.toolName);
           if (request.toolName === "web_search") return { results: [{ title: "Primary", url: "https://example.test/" }] } as JsonValue;
           if (request.toolName === "workspace_command") {

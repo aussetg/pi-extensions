@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { resolveCommandExecutionLimits } from "../commands/run-safety.js";
 import {
   SystemdUserUnitLauncher,
   workflowUnitName,
@@ -64,13 +65,19 @@ export class HostAgentMediatedToolExecutor implements AgentMediatedToolExecutor 
 
   async cancel(request: AgentMediatedToolCancellation): Promise<void> {
     if (request.toolName !== "workspace_command") return;
-    await this.launcher.stop(workflowUnitName("command", workspaceCommandId(request)), 1_000);
+    const grace = unitResourcePolicy("command", request.safety).timeoutStopMs;
+    await this.launcher.stop(workflowUnitName("command", workspaceCommandId(request)), grace);
   }
 
   private async workspaceCommand(request: AgentMediatedToolRequest): Promise<JsonValue> {
     const payload = request.payload as unknown as { argv: string[]; timeoutMs?: number };
     const argv = [...payload.argv];
-    const timeoutMs = payload.timeoutMs ?? 60_000;
+    const limits = resolveCommandExecutionLimits(
+      "command",
+      request.safety,
+      payload.timeoutMs ?? 60_000,
+      this.maximumCommandOutputBytes,
+    );
     await Promise.all([
       fs.promises.access(this.bwrapPath, fs.constants.X_OK),
       this.launcher.preflight(),
@@ -113,14 +120,14 @@ export class HostAgentMediatedToolExecutor implements AgentMediatedToolExecutor 
     let stopped: "timeout" | "output" | "cancel" | undefined;
     const append = (stream: "stdout" | "stderr", chunk: Buffer) => {
       const used = stdout.length + stderr.length;
-      const remaining = Math.max(0, this.maximumCommandOutputBytes - used);
+      const remaining = Math.max(0, limits.outputBytes - used);
       const retained = chunk.subarray(0, remaining);
       if (stream === "stdout") stdout = Buffer.concat([stdout, retained]);
       else stderr = Buffer.concat([stderr, retained]);
       if (retained.length !== chunk.length) {
         truncated = true;
         stopped ??= "output";
-        void service.stop(1_000);
+        void service.stop(limits.resourcePolicy.timeoutStopMs);
       }
     };
     service = await this.launcher.launch({
@@ -129,7 +136,7 @@ export class HostAgentMediatedToolExecutor implements AgentMediatedToolExecutor 
       argv: bwrap,
       workingDirectory: "/",
       pipe: true,
-      resourcePolicy: { ...unitResourcePolicy("command"), timeoutStopMs: 1_000 },
+      resourcePolicy: limits.resourcePolicy,
       onSpawn: (handle) => {
         service = handle;
         handle.stdout!.on("data", (chunk: Buffer) => append("stdout", Buffer.from(chunk)));
@@ -138,14 +145,14 @@ export class HostAgentMediatedToolExecutor implements AgentMediatedToolExecutor 
     });
     const abort = () => {
       stopped ??= "cancel";
-      void service.stop(1_000);
+      void service.stop(limits.resourcePolicy.timeoutStopMs);
     };
     request.signal.addEventListener("abort", abort, { once: true });
     if (request.signal.aborted) abort();
     const timer = setTimeout(() => {
       stopped ??= "timeout";
-      void service.stop(1_000);
-    }, timeoutMs);
+      void service.stop(limits.resourcePolicy.timeoutStopMs);
+    }, limits.timeoutMs);
     timer.unref?.();
     let completion: Awaited<ReturnType<WorkflowUnitHandle["wait"]>>;
     let cleanup: Awaited<ReturnType<WorkflowUnitHandle["collect"]>>;

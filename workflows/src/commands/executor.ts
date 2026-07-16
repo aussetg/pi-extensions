@@ -3,6 +3,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import { DEFINITION_LIMITS } from "../definition/limits.js";
+import type { SafetyConfiguration } from "../runtime/durable-types.js";
 import type { CgroupMetrics } from "../systemd/cgroup-metrics.js";
 import { discoverPhysicalCoreTopology, physicalCoreAffinity } from "../systemd/cpu-topology.js";
 import {
@@ -10,11 +11,7 @@ import {
   workflowUnitName,
   type WorkflowUnitHandle,
 } from "../systemd/launcher.js";
-import {
-  unitResourcePolicy,
-  type UnitResourcePolicy,
-  type WorkflowUnitKind,
-} from "../systemd/unit-properties.js";
+import type { WorkflowUnitKind } from "../systemd/unit-properties.js";
 import { bubblewrapProjectViewArgs } from "../workspaces/bubblewrap-project-view.js";
 import {
   resolveCommandInvocation,
@@ -22,6 +19,7 @@ import {
   type CommandProfileSnapshot,
   type ResolvedCommandInvocation,
 } from "./profiles.js";
+import { resolveCommandExecutionLimits } from "./run-safety.js";
 
 export interface HostCommandRequest {
   runId: string;
@@ -36,6 +34,8 @@ export interface HostCommandRequest {
   profile: CommandProfileSnapshot;
   arguments: CommandArgumentValues;
   effect: "read-only" | "temporary" | "candidate";
+  /** Host-owned limits persisted with the run; workflow source cannot set these. */
+  safety: SafetyConfiguration;
   /** Host safety may lower the profile's reviewed output ceiling. */
   maximumOutputBytes: number;
   /** Per-stream bytes returned inline before an immutable overflow artifact is used. */
@@ -119,31 +119,15 @@ export interface HostCommandExecutorDescriptor {
     systemdRun: CommandExecutableDiagnostic;
     systemctl: CommandExecutableDiagnostic;
   };
-  containment?: {
-    memoryMax: string;
-    memorySwapMax: "0";
-    memoryZSwapMax: "0";
-    cpuQuota: string;
-    cpuWeight: number;
-    ioWeight: number;
-    tasksMax: number;
-    killMode: "mixed";
-    timeoutStopMs: number;
-    collectMode: "inactive";
-  };
 }
 
 export interface SandboxedCommandExecutorOptions {
   bwrapPath?: string;
   systemdRunPath?: string;
   systemctlPath?: string;
-  memoryMax?: string;
-  cpuQuota?: string;
-  tasksMax?: number;
-  terminationGraceMs?: number;
 }
 
-/** Executable paths/versions and cgroup properties are evidence, not replay identity. */
+/** Executable diagnostics and run-owned safety are evidence, not replay identity. */
 export function sameCommandExecutorProtocol(
   left: HostCommandExecutorDescriptor,
   right: HostCommandExecutorDescriptor,
@@ -160,11 +144,6 @@ export class SandboxedCommandExecutor implements HostCommandExecutor {
   private readonly bwrap: string;
   private readonly systemdRun: string;
   private readonly systemctl: string;
-  private readonly memoryMax: string;
-  private readonly cpuQuota: string;
-  private readonly tasksMax: number;
-  private readonly terminationGraceMs: number;
-  private readonly resourcePolicy: UnitResourcePolicy;
   private readonly launcher: SystemdUserUnitLauncher;
   private readonly descriptor: HostCommandExecutorDescriptor;
 
@@ -172,22 +151,6 @@ export class SandboxedCommandExecutor implements HostCommandExecutor {
     this.bwrap = options.bwrapPath ?? "/usr/bin/bwrap";
     this.systemdRun = options.systemdRunPath ?? "/usr/bin/systemd-run";
     this.systemctl = options.systemctlPath ?? "/usr/bin/systemctl";
-    this.memoryMax = options.memoryMax ?? "4G";
-    this.cpuQuota = options.cpuQuota ?? "400%";
-    this.tasksMax = options.tasksMax ?? 512;
-    this.terminationGraceMs = options.terminationGraceMs ?? 1_000;
-    if (
-      !/^\d+(?:K|M|G)$/.test(this.memoryMax) || !/^\d{1,4}%$/.test(this.cpuQuota) ||
-      !Number.isSafeInteger(this.tasksMax) || this.tasksMax < 1 || this.tasksMax > 4_096 ||
-      !Number.isSafeInteger(this.terminationGraceMs) || this.terminationGraceMs < 1 || this.terminationGraceMs > 30_000
-    ) throw new Error("Invalid command containment limits");
-    this.resourcePolicy = {
-      ...unitResourcePolicy("command"),
-      memoryMaxBytes: parseMemoryBytes(this.memoryMax),
-      cpuQuotaPercent: Number.parseInt(this.cpuQuota, 10),
-      tasksMax: this.tasksMax,
-      timeoutStopMs: this.terminationGraceMs,
-    };
     this.launcher = new SystemdUserUnitLauncher({
       systemdRunPath: this.systemdRun,
       systemctlPath: this.systemctl,
@@ -200,18 +163,6 @@ export class SandboxedCommandExecutor implements HostCommandExecutor {
         bubblewrap: executableDiagnostic(this.bwrap, ["--version"]),
         systemdRun: executableDiagnostic(this.systemdRun, ["--version"]),
         systemctl: executableDiagnostic(this.systemctl, ["--version"]),
-      },
-      containment: {
-        memoryMax: this.memoryMax,
-        memorySwapMax: "0",
-        memoryZSwapMax: "0",
-        cpuQuota: this.cpuQuota,
-        cpuWeight: this.resourcePolicy.cpuWeight,
-        ioWeight: this.resourcePolicy.ioWeight,
-        tasksMax: this.tasksMax,
-        killMode: "mixed",
-        timeoutStopMs: this.terminationGraceMs,
-        collectMode: "inactive",
       },
     } satisfies HostCommandExecutorDescriptor);
   }
@@ -227,6 +178,14 @@ export class SandboxedCommandExecutor implements HostCommandExecutor {
   ): Promise<HostCommandResult> {
     validateRequest(request);
     const invocation = resolveCommandInvocation(request.profile, request.arguments, request.effect);
+    const unitKind = request.unitKind ?? "command";
+    const limits = resolveCommandExecutionLimits(
+      unitKind,
+      request.safety,
+      invocation.timeoutMs,
+      Math.min(invocation.outputLimitBytes, request.maximumOutputBytes),
+    );
+    const inlineLimitBytes = Math.min(request.inlineLimitBytes, limits.outputBytes);
     await Promise.all([assertExecutable(this.bwrap), this.launcher.preflight()]);
     await assertExecutionDirectories(request.runDir, request.workspaceRoot, request.cwd);
 
@@ -236,12 +195,11 @@ export class SandboxedCommandExecutor implements HostCommandExecutor {
     const home = path.join(scratchRoot, "home");
     const temporary = path.join(scratchRoot, "tmp");
     const outputRoot = path.join(request.runDir, "outputs", request.executionId);
-    const unitKind = request.unitKind ?? "command";
     const unitIdentity = `${unitKind}_${request.executionId.slice("command_".length)}`;
     const unit = workflowUnitName(unitKind, unitIdentity);
     const stale = await this.launcher.inspect(unit);
     if (["active", "activating", "deactivating", "reloading"].includes(stale.activeState)) {
-      await this.launcher.stop(unit, this.terminationGraceMs);
+      await this.launcher.stop(unit, limits.resourcePolicy.timeoutStopMs);
     } else if (stale.loadState !== "not-found") {
       await this.launcher.collect(unit);
     }
@@ -251,8 +209,8 @@ export class SandboxedCommandExecutor implements HostCommandExecutor {
     ]);
     await createExecutionDirectories(home, temporary, outputRoot);
 
-    const stdoutCapture = new StreamCapture("stdout", outputRoot, request.runDir, request.inlineLimitBytes);
-    const stderrCapture = new StreamCapture("stderr", outputRoot, request.runDir, request.inlineLimitBytes);
+    const stdoutCapture = new StreamCapture("stdout", outputRoot, request.runDir, inlineLimitBytes);
+    const stderrCapture = new StreamCapture("stderr", outputRoot, request.runDir, inlineLimitBytes);
     const projectView = request.effect === "candidate"
       ? ["--bind", request.workspaceRoot, "/workspace"]
       : bubblewrapProjectViewArgs(
@@ -301,7 +259,7 @@ export class SandboxedCommandExecutor implements HostCommandExecutor {
     let stopReason: "timeout" | "cancel" | "output" | undefined;
     let escalation: NodeJS.Timeout | undefined;
     let outputBytes = 0;
-    const maximumOutputBytes = Math.min(invocation.outputLimitBytes, request.maximumOutputBytes);
+    const maximumOutputBytes = limits.outputBytes;
     let service!: WorkflowUnitHandle;
     let stopPromise: Promise<unknown> | undefined;
     let timeout!: NodeJS.Timeout;
@@ -309,7 +267,7 @@ export class SandboxedCommandExecutor implements HostCommandExecutor {
 
     const killTree = async (reason: "timeout" | "cancel" | "output"): Promise<void> => {
       stopReason ??= reason;
-      stopPromise ??= service.stop(this.terminationGraceMs).catch(() => undefined);
+      stopPromise ??= service.stop(limits.resourcePolicy.timeoutStopMs).catch(() => undefined);
       await stopPromise;
     };
     const collect = (capture: StreamCapture, chunk: Buffer): void => {
@@ -335,13 +293,13 @@ export class SandboxedCommandExecutor implements HostCommandExecutor {
       argv: [this.bwrap, ...bwrapArgs],
       workingDirectory: "/",
       pipe: true,
-      resourcePolicy: this.resourcePolicy,
+      resourcePolicy: limits.resourcePolicy,
       ...(cpuAffinity ? { cpuAffinity } : {}),
       onSpawn: (spawned) => {
         service = spawned;
         spawned.stdout!.on("data", (chunk: Buffer) => collect(stdoutCapture, Buffer.from(chunk)));
         spawned.stderr!.on("data", (chunk: Buffer) => collect(stderrCapture, Buffer.from(chunk)));
-        timeout = setTimeout(() => void killTree("timeout"), invocation.timeoutMs);
+        timeout = setTimeout(() => void killTree("timeout"), limits.timeoutMs);
         timeout.unref?.();
         signal.addEventListener("abort", abort, { once: true });
         if (signal.aborted) abort();
@@ -598,15 +556,6 @@ function executableDiagnostic(filePath: string, args: string[]): CommandExecutab
   const result = spawnSync(filePath, args, { encoding: "utf8", timeout: 2_000, maxBuffer: 8_192 });
   const firstLine = `${result.stdout ?? ""}${result.stderr ?? ""}`.split(/\r?\n/, 1)[0]?.trim();
   return { path: filePath, ...(firstLine ? { version: firstLine.slice(0, 512) } : {}) };
-}
-
-function parseMemoryBytes(value: string): number {
-  const match = /^(\d+)(K|M|G)$/.exec(value);
-  if (!match) throw new Error("Invalid command MemoryMax");
-  const multiplier = match[2] === "K" ? 1024 : match[2] === "M" ? 1024 ** 2 : 1024 ** 3;
-  const bytes = Number(match[1]) * multiplier;
-  if (!Number.isSafeInteger(bytes)) throw new Error("Command MemoryMax exceeds exact integer range");
-  return bytes;
 }
 
 async function settleCommandTimers(

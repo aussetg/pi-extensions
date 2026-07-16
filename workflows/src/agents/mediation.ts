@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { AgentMediatedToolName } from "../runtime/durable-types.js";
+import type { AgentMediatedToolName, SafetyConfiguration } from "../runtime/durable-types.js";
 import type { JsonValue } from "../types.js";
 
 export interface AgentProtocolWorkspaceAuthority {
@@ -19,6 +19,7 @@ export interface AgentMediatedToolRequest {
   attemptId: string;
   outputRoot: string;
   workspace: AgentProtocolWorkspaceAuthority;
+  safety: SafetyConfiguration;
   signal: AbortSignal;
 }
 
@@ -29,6 +30,7 @@ export interface AgentMediatedToolCancellation {
   executionId: string;
   operationId: string;
   attemptId: string;
+  safety: SafetyConfiguration;
 }
 
 export interface AgentMediatedToolExecutor {

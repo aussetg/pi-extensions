@@ -100,10 +100,11 @@ synchronization, and a bounded busy timeout. State transitions use short `BEGIN 
 transactions and expected revisions. Unknown schema versions are rejected; there are no migrations.
 
 The coordinator is a deterministic systemd user service. Agents, commands, verifications, and
-measurements are separate transient services with fixed `MemoryMax`, no swap/zswap, `TasksMax`, CPU
-and I/O weights/quotas, mixed process-tree kill, bounded stop timeout, and inactive collection.
-Cancellation sends TERM, waits, then sends KILL. Cgroup CPU, I/O, memory, process, and pressure data
-is read before collection.
+measurements are separate transient services. The run's stored safety policy supplies `MemoryMax`,
+`TasksMax`, CPU quota/weight, output, and command-duration limits; service classes retain distinct
+I/O weights and bounded stop timeouts. Swap/zswap stay disabled, kill mode is mixed, and inactive
+units are collected. Cancellation sends TERM, waits, then sends KILL. Cgroup CPU, I/O, memory,
+process, and pressure data is read before collection.
 
 SQLite is the ordinary control transport. An interrupted `running` row is paused on reopen rather
 than silently continued. Extension shutdown does not stop services.
