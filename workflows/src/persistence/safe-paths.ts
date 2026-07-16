@@ -23,7 +23,8 @@ export async function readBoundedTextFile(filePath: string, maxBytes: number): P
       if (total > maxBytes) throw new Error(`file exceeds ${maxBytes} bytes: ${filePath}`);
       chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
     }
-    return Buffer.concat(chunks, total).toString("utf8");
+    try { return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, total)); }
+    catch { throw new Error(`file is not valid UTF-8: ${filePath}`); }
   } finally {
     await handle.close();
   }

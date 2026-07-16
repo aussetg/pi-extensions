@@ -1,0 +1,588 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`Phase 28 workflow rendering > renders exact draft and apply confirmation bindings 1`] = `
+{
+  "apply": {
+    "narrow": [
+      "Apply builtin:coding · run waiting · revision 7",
+      "operation    operation_1",
+      "approval     approval_1",
+      "challenge    sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaa…",
+      "binding      sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaa…",
+      "candidate    candidate_1",
+      "tree         sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaa…",
+      "lineage      sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaa…",
+      "write scope  sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaa…",
+      "verification verification_1 · sha256:aaaaaaaaaa…",
+      "summary      sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaa…",
+      "paths        2 · src/parser.ts, tests/parser.te…",
+      "This exact verified delta changes working-tree …",
+    ],
+    "wide": [
+      "Apply builtin:coding · run waiting · revision 7",
+      "operation    operation_1",
+      "approval     approval_1",
+      "challenge    sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "binding      sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "candidate    candidate_1",
+      "tree         sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "lineage      sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "write scope  sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "verification verification_1 · sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "summary      sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa · 412 bytes",
+      "paths        2 · src/parser.ts, tests/parser.test.ts",
+      "This exact verified delta changes working-tree files only.",
+    ],
+  },
+  "draft": {
+    "narrow": [
+      "Promote user:demo → /workflows/demo.flow.js",
+      "draft      sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaa…",
+      "installed  none",
+      "review     sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaa…",
+      "challenge  sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaa…",
+      "authority  read-project",
+      "profiles   builtin:researcher",
+      "commands   none",
+      "operations 1 static · host limit 100",
+      "+ flow.stage()",
+    ],
+    "wide": [
+      "Promote user:demo → /workflows/demo.flow.js",
+      "draft      sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "installed  none",
+      "review     sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "challenge  sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "authority  read-project",
+      "profiles   builtin:researcher",
+      "commands   none",
+      "operations 1 static · host limit 100",
+      "+ flow.stage()",
+    ],
+  },
+}
+`;
+
+exports[`Phase 28 workflow rendering > snapshots every Phase 27 state at narrow, normal, and wide widths 1`] = `
+{
+  "approval": {
+    "narrow": {
+      "inspector": [
+        "Flow Verified coding · waiting · wa…",
+        "overview · Tab views · ↑↓ focus · ←…",
+        "  attention · approval/apply-approv…",
+        "  apply waiting · candidate candida…",
+        "    run/stage:implement/agent:coder…",
+        "  usage · 15700 tokens · 5 calls · …",
+      ],
+      "widget": [
+        "! Verified coding · waiting · apply…",
+        "! apply requires an exact human dec…",
+        "! run/stage:implement/agent:coder ·…",
+      ],
+    },
+    "normal": {
+      "inspector": [
+        "Flow Verified coding · waiting · waiting · r7",
+        "overview · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "  attention · approval/apply-approval-waiting · apply requires an e…",
+        "  apply waiting · candidate candidate_1 · 2 paths · challenge aaaaa…",
+        "    run/stage:implement/agent:coder · agent · waiting",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "! Verified coding · waiting · apply approval waiting",
+        "! apply requires an exact human decision · /flow approve waiting",
+        "! run/stage:implement/agent:coder · agent",
+        "apply waiting · 2 paths · candidate candidate_1 · /flow approve wai…",
+        "15.7k tokens · 5 calls · 1m23s · operations 0 running",
+      ],
+    },
+    "wide": {
+      "inspector": [
+        "Flow Verified coding · waiting · waiting · r7",
+        "[overview]  operations  logs  artifacts  measurements  events · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "  attention · approval/apply-approval-waiting · apply requires an exact human decision",
+        "  apply waiting · candidate candidate_1 · 2 paths · challenge aaaaaaaaaaaa",
+        "    run/stage:implement/agent:coder · agent · waiting",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "! Verified coding · waiting                                                               apply approval waiting",
+        "! apply requires an exact human decision · /flow approve waiting",
+        "! run/stage:implement/agent:coder · agent",
+        "apply waiting · 2 paths · candidate candidate_1 · /flow approve waiting",
+        "15.7k tokens · 5 calls · 1m23s · operations 0 running",
+      ],
+    },
+  },
+  "checkpoint": {
+    "narrow": {
+      "inspector": [
+        "Flow Verified coding · waiting · wa…",
+        "overview · Tab views · ↑↓ focus · ←…",
+        "  attention · human-input/checkpoin…",
+        "  checkpoint waiting · Choose the d…",
+        "    run/stage:implement/agent:coder…",
+        "  usage · 15700 tokens · 5 calls · …",
+      ],
+      "widget": [
+        "! Verified coding · waiting · check…",
+        "! Choose the deployment region · /f…",
+        "! run/stage:implement/agent:coder ·…",
+      ],
+    },
+    "normal": {
+      "inspector": [
+        "Flow Verified coding · waiting · waiting · r7",
+        "overview · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "  attention · human-input/checkpoint-waiting · Choose the deploymen…",
+        "  checkpoint waiting · Choose the deployment region · checkpoint_1",
+        "    run/stage:implement/agent:coder · agent · waiting",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "! Verified coding · waiting · checkpoint waiting",
+        "! Choose the deployment region · /flow respond waiting checkpoint_1",
+        "! run/stage:implement/agent:coder · agent",
+        "checkpoint · Choose the deployment region · /flow respond waiting c…",
+        "15.7k tokens · 5 calls · 1m23s · operations 0 running",
+      ],
+    },
+    "wide": {
+      "inspector": [
+        "Flow Verified coding · waiting · waiting · r7",
+        "[overview]  operations  logs  artifacts  measurements  events · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "  attention · human-input/checkpoint-waiting · Choose the deployment region",
+        "  checkpoint waiting · Choose the deployment region · checkpoint_1",
+        "    run/stage:implement/agent:coder · agent · waiting",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "! Verified coding · waiting                                                                   checkpoint waiting",
+        "! Choose the deployment region · /flow respond waiting checkpoint_1",
+        "! run/stage:implement/agent:coder · agent",
+        "checkpoint · Choose the deployment region · /flow respond waiting checkpoint_1",
+        "15.7k tokens · 5 calls · 1m23s · operations 0 running",
+      ],
+    },
+  },
+  "completed": {
+    "narrow": {
+      "inspector": [
+        "Flow Verified coding · complete · c…",
+        "overview · Tab views · ↑↓ focus · ←…",
+        "    run/stage:implement/agent:coder…",
+        "  usage · 15700 tokens · 5 calls · …",
+      ],
+      "widget": [
+        "✓ Verified coding · complete · comp…",
+        "15.7k tokens · 5 calls · 1m23s · op…",
+      ],
+    },
+    "normal": {
+      "inspector": [
+        "Flow Verified coding · complete · completed · r7",
+        "overview · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "    run/stage:implement/agent:coder · agent · completed",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "✓ Verified coding · complete · completed",
+        "15.7k tokens · 5 calls · 1m23s · operations 0 running",
+      ],
+    },
+    "wide": {
+      "inspector": [
+        "Flow Verified coding · complete · completed · r7",
+        "[overview]  operations  logs  artifacts  measurements  events · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "    run/stage:implement/agent:coder · agent · completed",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "✓ Verified coding · complete                                                                           completed",
+        "15.7k tokens · 5 calls · 1m23s · operations 0 running",
+      ],
+    },
+  },
+  "failed": {
+    "narrow": {
+      "inspector": [
+        "Flow Verified coding · failed · fai…",
+        "overview · Tab views · ↑↓ focus · ←…",
+        "  attention · workflow/run-failed ·…",
+        "    run/stage:implement/agent:coder…",
+        "  usage · 15700 tokens · 5 calls · …",
+      ],
+      "widget": [
+        "× Verified coding · failed · run fa…",
+        "! Verification failed · /flow open …",
+        "15.7k tokens · 5 calls · 1m23s · op…",
+      ],
+    },
+    "normal": {
+      "inspector": [
+        "Flow Verified coding · failed · failed · r7",
+        "overview · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "  attention · workflow/run-failed · Verification failed",
+        "    run/stage:implement/agent:coder · agent · failed",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "× Verified coding · failed · run failed",
+        "! Verification failed · /flow open failed",
+        "15.7k tokens · 5 calls · 1m23s · operations 0 running",
+      ],
+    },
+    "wide": {
+      "inspector": [
+        "Flow Verified coding · failed · failed · r7",
+        "[overview]  operations  logs  artifacts  measurements  events · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "  attention · workflow/run-failed · Verification failed",
+        "    run/stage:implement/agent:coder · agent · failed",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "× Verified coding · failed                                                                            run failed",
+        "! Verification failed · /flow open failed",
+        "15.7k tokens · 5 calls · 1m23s · operations 0 running",
+      ],
+    },
+  },
+  "progress": {
+    "narrow": {
+      "inspector": [
+        "Flow Verified coding · running · ru…",
+        "overview · Tab views · ↑↓ focus · ←…",
+        "  agent builtin:implementer · runni…",
+        "    metrics · tests=41passed · elap…",
+        "    cgroup · cpu 3500000µs · mem 26…",
+        "    log · Parser tests now pass · a…",
+        "    run/stage:implement/agent:coder…",
+        "  artifact test-report · 412 bytes …",
+        "  usage · 15700 tokens · 5 calls · …",
+      ],
+      "widget": [
+        "◆ Verified coding · running · runni…",
+        "▶ Reviewing parser edge cases 3/5 ·…",
+        "turn 4 · 7 tools · 1 retries · test…",
+      ],
+    },
+    "normal": {
+      "inspector": [
+        "Flow Verified coding · running · running · r7",
+        "overview · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "  agent builtin:implementer · running · Reviewing parser edge cases…",
+        "    metrics · tests=41passed · elapsed=83s",
+        "    cgroup · cpu 3500000µs · mem 268435456B · peak 402653184B · io …",
+        "    log · Parser tests now pass · artifact test-report aaaaaaaaaaaa",
+        "    run/stage:implement/agent:coder · agent · running",
+        "  artifact test-report · 412 bytes · aaaaaaaaaaaa",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "◆ Verified coding · running · running",
+        "▶ Reviewing parser edge cases 3/5 · tool workspace_command",
+        "turn 4 · 7 tools · 1 retries · tests 41 passed · cpu 4s · mem 256.0…",
+        "log · Parser tests now pass · artifact test-report aaaaaaaaaa",
+        "artifacts 1 · latest test-report",
+      ],
+    },
+    "wide": {
+      "inspector": [
+        "Flow Verified coding · running · running · r7",
+        "[overview]  operations  logs  artifacts  measurements  events · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "  agent builtin:implementer · running · Reviewing parser edge cases · tool workspace_command",
+        "    metrics · tests=41passed · elapsed=83s",
+        "    cgroup · cpu 3500000µs · mem 268435456B · peak 402653184B · io 1572864B · tasks 12",
+        "    log · Parser tests now pass · artifact test-report aaaaaaaaaaaa",
+        "    run/stage:implement/agent:coder · agent · running",
+        "  artifact test-report · 412 bytes · aaaaaaaaaaaa",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "◆ Verified coding · running                                                                              running",
+        "▶ Reviewing parser edge cases 3/5 · tool workspace_command",
+        "turn 4 · 7 tools · 1 retries · tests 41 passed · cpu 4s · mem 256.0MiB · peak 384.0MiB · io 1.5MiB",
+        "log · Parser tests now pass · artifact test-report aaaaaaaaaa",
+        "artifacts 1 · latest test-report",
+        "15.7k tokens · 5 calls · 1m23s · operations 1 running",
+      ],
+    },
+  },
+  "providerBackoff": {
+    "narrow": {
+      "inspector": [
+        "Flow Verified coding · paused · pau…",
+        "overview · Tab views · ↑↓ focus · ←…",
+        "  attention · provider/provider-bac…",
+        "    run/stage:implement/agent:coder…",
+        "  usage · 15700 tokens · 5 calls · …",
+      ],
+      "widget": [
+        "‖ Verified coding · paused · provid…",
+        "! Provider retry after 30 seconds ·…",
+        "15.7k tokens · 5 calls · 1m23s · op…",
+      ],
+    },
+    "normal": {
+      "inspector": [
+        "Flow Verified coding · paused · paused · r7",
+        "overview · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "  attention · provider/provider-backoff · Provider retry after 30 s…",
+        "    run/stage:implement/agent:coder · agent · paused",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "‖ Verified coding · paused · provider backoff",
+        "! Provider retry after 30 seconds · /flow resume paused",
+        "15.7k tokens · 5 calls · 1m23s · operations 0 running",
+      ],
+    },
+    "wide": {
+      "inspector": [
+        "Flow Verified coding · paused · paused · r7",
+        "[overview]  operations  logs  artifacts  measurements  events · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "  attention · provider/provider-backoff · Provider retry after 30 seconds",
+        "    run/stage:implement/agent:coder · agent · paused",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "‖ Verified coding · paused                                                                      provider backoff",
+        "! Provider retry after 30 seconds · /flow resume paused",
+        "15.7k tokens · 5 calls · 1m23s · operations 0 running",
+      ],
+    },
+  },
+  "queued": {
+    "narrow": {
+      "inspector": [
+        "Flow Verified coding · queued · que…",
+        "overview · Tab views · ↑↓ focus · ←…",
+        "    run/stage:implement/agent:coder…",
+        "  usage · 15700 tokens · 5 calls · …",
+      ],
+      "widget": [
+        "○ Verified coding · queued · queued",
+        "15.7k tokens · 5 calls · 1m23s · op…",
+      ],
+    },
+    "normal": {
+      "inspector": [
+        "Flow Verified coding · queued · queued · r7",
+        "overview · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "    run/stage:implement/agent:coder · agent · queued",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "○ Verified coding · queued · queued",
+        "15.7k tokens · 5 calls · 1m23s · operations 0 running, 1 queued",
+      ],
+    },
+    "wide": {
+      "inspector": [
+        "Flow Verified coding · queued · queued · r7",
+        "[overview]  operations  logs  artifacts  measurements  events · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "    run/stage:implement/agent:coder · agent · queued",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "○ Verified coding · queued                                                                                queued",
+        "15.7k tokens · 5 calls · 1m23s · operations 0 running, 1 queued",
+      ],
+    },
+  },
+  "replay": {
+    "narrow": {
+      "inspector": [
+        "Flow Verified coding · running · ru…",
+        "overview · Tab views · ↑↓ focus · ←…",
+        "  replay · 4 hits · first miss 5 ca…",
+        "    run/stage:implement/agent:coder…",
+        "  usage · 15700 tokens · 5 calls · …",
+      ],
+      "widget": [
+        "◆ Verified coding · running · runni…",
+        "▶ run/stage:implement/agent:coder ·…",
+        "replay · 4 matched · miss @5 call-k…",
+      ],
+    },
+    "normal": {
+      "inspector": [
+        "Flow Verified coding · running · running · r7",
+        "overview · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "  replay · 4 hits · first miss 5 call-key-mismatch",
+        "    run/stage:implement/agent:coder · agent · running",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "◆ Verified coding · running · running",
+        "▶ run/stage:implement/agent:coder · agent",
+        "replay · 4 matched · miss @5 call-key-mismatch",
+        "15.7k tokens · 5 calls · 1m23s · operations 1 running",
+      ],
+    },
+    "wide": {
+      "inspector": [
+        "Flow Verified coding · running · running · r7",
+        "[overview]  operations  logs  artifacts  measurements  events · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "  replay · 4 hits · first miss 5 call-key-mismatch",
+        "    run/stage:implement/agent:coder · agent · running",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "◆ Verified coding · running                                                                              running",
+        "▶ run/stage:implement/agent:coder · agent",
+        "replay · 4 matched · miss @5 call-key-mismatch",
+        "15.7k tokens · 5 calls · 1m23s · operations 1 running",
+      ],
+    },
+  },
+  "running": {
+    "narrow": {
+      "inspector": [
+        "Flow Verified coding · running · ru…",
+        "overview · Tab views · ↑↓ focus · ←…",
+        "    run/stage:implement/agent:coder…",
+        "  usage · 15700 tokens · 5 calls · …",
+      ],
+      "widget": [
+        "◆ Verified coding · running · runni…",
+        "▶ run/stage:implement/agent:coder ·…",
+        "15.7k tokens · 5 calls · 1m23s · op…",
+      ],
+    },
+    "normal": {
+      "inspector": [
+        "Flow Verified coding · running · running · r7",
+        "overview · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "    run/stage:implement/agent:coder · agent · running",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "◆ Verified coding · running · running",
+        "▶ run/stage:implement/agent:coder · agent",
+        "15.7k tokens · 5 calls · 1m23s · operations 1 running",
+      ],
+    },
+    "wide": {
+      "inspector": [
+        "Flow Verified coding · running · running · r7",
+        "[overview]  operations  logs  artifacts  measurements  events · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "    run/stage:implement/agent:coder · agent · running",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "◆ Verified coding · running                                                                              running",
+        "▶ run/stage:implement/agent:coder · agent",
+        "15.7k tokens · 5 calls · 1m23s · operations 1 running",
+      ],
+    },
+  },
+  "stopped": {
+    "narrow": {
+      "inspector": [
+        "Flow Verified coding · stopped · st…",
+        "overview · Tab views · ↑↓ focus · ←…",
+        "  attention · control/run-stopped ·…",
+        "    run/stage:implement/agent:coder…",
+        "  usage · 15700 tokens · 5 calls · …",
+      ],
+      "widget": [
+        "× Verified coding · stopped · run s…",
+        "! Workflow was stopped · /flow open…",
+        "15.7k tokens · 5 calls · 1m23s · op…",
+      ],
+    },
+    "normal": {
+      "inspector": [
+        "Flow Verified coding · stopped · stopped · r7",
+        "overview · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "  attention · control/run-stopped · Workflow was stopped",
+        "    run/stage:implement/agent:coder · agent · stopped",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "× Verified coding · stopped · run stopped",
+        "! Workflow was stopped · /flow open stopped",
+        "15.7k tokens · 5 calls · 1m23s · operations 0 running",
+      ],
+    },
+    "wide": {
+      "inspector": [
+        "Flow Verified coding · stopped · stopped · r7",
+        "[overview]  operations  logs  artifacts  measurements  events · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "  attention · control/run-stopped · Workflow was stopped",
+        "    run/stage:implement/agent:coder · agent · stopped",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "× Verified coding · stopped                                                                          run stopped",
+        "! Workflow was stopped · /flow open stopped",
+        "15.7k tokens · 5 calls · 1m23s · operations 0 running",
+      ],
+    },
+  },
+  "threeStrikes": {
+    "narrow": {
+      "inspector": [
+        "Flow Verified coding · paused · pau…",
+        "overview · Tab views · ↑↓ focus · ←…",
+        "  attention · agent-protocol/receip…",
+        "  agent builtin:implementer · pause…",
+        "    metrics · tests=41passed · elap…",
+        "    cgroup · cpu 3500000µs · mem 26…",
+        "    log · Parser tests now pass · a…",
+        "    run/stage:implement/agent:coder…",
+        "  usage · 15700 tokens · 5 calls · …",
+      ],
+      "widget": [
+        "‖ Verified coding · paused · receip…",
+        "! Agent paused after three clean re…",
+        "▶ Reviewing parser edge cases 3/5 ·…",
+      ],
+    },
+    "normal": {
+      "inspector": [
+        "Flow Verified coding · paused · paused · r7",
+        "overview · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "  attention · agent-protocol/receiptless-three-strikes · Agent paus…",
+        "  agent builtin:implementer · paused · Reviewing parser edge cases …",
+        "    metrics · tests=41passed · elapsed=83s",
+        "    cgroup · cpu 3500000µs · mem 268435456B · peak 402653184B · io …",
+        "    log · Parser tests now pass · artifact test-report aaaaaaaaaaaa",
+        "    run/stage:implement/agent:coder · agent · paused",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "‖ Verified coding · paused · receiptless three strikes",
+        "! Agent paused after three clean receiptless yields · /flow resume …",
+        "▶ Reviewing parser edge cases 3/5 · tool workspace_command",
+        "turn 4 · 7 tools · 1 retries · tests 41 passed · cpu 4s · mem 256.0…",
+        "log · Parser tests now pass · artifact test-report aaaaaaaaaa",
+      ],
+    },
+    "wide": {
+      "inspector": [
+        "Flow Verified coding · paused · paused · r7",
+        "[overview]  operations  logs  artifacts  measurements  events · Tab views · ↑↓ focus · ←→ pages · Esc close",
+        "  attention · agent-protocol/receiptless-three-strikes · Agent paused after three clean receiptless yields",
+        "  agent builtin:implementer · paused · Reviewing parser edge cases · tool workspace_command",
+        "    metrics · tests=41passed · elapsed=83s",
+        "    cgroup · cpu 3500000µs · mem 268435456B · peak 402653184B · io 1572864B · tasks 12",
+        "    log · Parser tests now pass · artifact test-report aaaaaaaaaaaa",
+        "    run/stage:implement/agent:coder · agent · paused",
+        "  usage · 15700 tokens · 5 calls · 83000ms",
+      ],
+      "widget": [
+        "‖ Verified coding · paused                                                             receiptless three strikes",
+        "! Agent paused after three clean receiptless yields · /flow resume paused",
+        "▶ Reviewing parser edge cases 3/5 · tool workspace_command",
+        "turn 4 · 7 tools · 1 retries · tests 41 passed · cpu 4s · mem 256.0MiB · peak 384.0MiB · io 1.5MiB",
+        "log · Parser tests now pass · artifact test-report aaaaaaaaaa",
+        "15.7k tokens · 5 calls · 1m23s · operations 0 running",
+      ],
+    },
+  },
+}
+`;

@@ -1,5 +1,6 @@
-import { RENDER_LIMITS } from "../constants.js";
-import { padToWidth, sanitizeLine, sanitizeRenderedLine } from "../utils/truncate.js";
+import { padToWidth, sanitizeRenderedLine } from "../utils/truncate.js";
+
+const MAX_RENDERED_LINES = 2_000;
 
 export interface ComponentLike {
   render(width: number): string[];
@@ -20,7 +21,7 @@ export class StaticTextComponent implements ComponentLike {
   render(width: number): string[] {
     if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
     const raw = Array.isArray(this.text) ? this.text : this.text.split("\n");
-    this.cachedLines = raw.slice(0, RENDER_LIMITS.pagerLines).map((line) => padToWidth(sanitizeRenderedLine(line, 16_384, { preserveAnsi: this.options.preserveAnsi }), width));
+    this.cachedLines = raw.slice(0, MAX_RENDERED_LINES).map((line) => padToWidth(sanitizeRenderedLine(line, 16_384, { preserveAnsi: this.options.preserveAnsi }), width));
     this.cachedWidth = width;
     return this.cachedLines;
   }
@@ -28,29 +29,5 @@ export class StaticTextComponent implements ComponentLike {
   invalidate(): void {
     this.cachedWidth = undefined;
     this.cachedLines = undefined;
-  }
-}
-
-export class PagerComponent implements ComponentLike {
-  private cachedWidth?: number;
-  private cachedLines?: string[];
-
-  constructor(private readonly title: string, private readonly lines: string[]) {}
-
-  render(width: number): string[] {
-    if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
-    const body = this.lines.slice(0, RENDER_LIMITS.pagerLines).map((line) => padToWidth(sanitizeRenderedLine(line), width));
-    this.cachedLines = [
-      padToWidth(`◆ ${sanitizeLine(this.title, 500)}`, width),
-      padToWidth("", width),
-      ...body,
-    ];
-    this.cachedWidth = width;
-    return this.cachedLines;
-  }
-
-  invalidate(): void {
-    this.cachedLines = undefined;
-    this.cachedWidth = undefined;
   }
 }

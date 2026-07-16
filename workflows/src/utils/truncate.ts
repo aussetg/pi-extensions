@@ -9,34 +9,9 @@ export function truncateBytes(text: string, maxBytes: number, suffix = "…"): s
   return out + suffix;
 }
 
-export function truncateLines(text: string, maxLines: number): string {
-  const lines = text.split("\n");
-  if (lines.length <= maxLines) return text;
-  return `${lines.slice(0, maxLines).join("\n")}\n… ${lines.length - maxLines} more line(s)`;
-}
-
-export function truncateForChat(value: unknown, maxBytes: number): string {
-  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  return truncateBytes(truncateLines(text ?? "", 200), maxBytes);
-}
-
 export function stripAnsi(text: string): string {
   // CSI + OSC-ish control sequences, enough for sanitizing untrusted workflow text.
   return text.replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
-}
-
-export function sanitizeText(value: unknown, maxBytes = 16_384): string {
-  const text = stripAnsi(String(value ?? ""))
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "�")
-    .replace(/\r/g, "");
-  return truncateBytes(text, maxBytes);
-}
-
-export function sanitizeLine(value: unknown, maxBytes = 16_384): string {
-  return sanitizeText(value, maxBytes)
-    .replace(/\t/g, " ")
-    .replace(/\n+/g, " ↵ ")
-    .replace(/ {2,}/g, " ");
 }
 
 export interface SanitizeRenderedLineOptions {
@@ -57,42 +32,6 @@ export function sanitizeRenderedLine(value: unknown, maxBytes = 16_384, options:
     .replace(/\n+/g, " ↵ ");
   const truncated = truncateBytes(sanitized, maxBytes);
   return options.preserveAnsi ? appendSgrResetIfOpen(stripAnsiExceptSgr(truncated), maxBytes) : truncated;
-}
-
-export class BoundedTextAccumulator {
-  private readonly chunks: string[] = [];
-  private bytes = 0;
-  private truncated = false;
-
-  constructor(private readonly maxBytes: number, private readonly suffix = "\n… truncated …") {}
-
-  append(value: string): void {
-    if (this.truncated || this.maxBytes <= 0 || value.length === 0) return;
-    const remaining = this.maxBytes - this.bytes;
-    if (byteLength(value) <= remaining) {
-      this.chunks.push(value);
-      this.bytes += byteLength(value);
-      return;
-    }
-
-    const room = Math.max(0, remaining - byteLength(this.suffix));
-    if (room > 0) this.chunks.push(truncateBytes(value, room, ""));
-    if (remaining >= byteLength(this.suffix)) this.chunks.push(this.suffix);
-    this.bytes = this.maxBytes;
-    this.truncated = true;
-  }
-
-  byteLength(): number {
-    return this.bytes;
-  }
-
-  wasTruncated(): boolean {
-    return this.truncated;
-  }
-
-  toString(): string {
-    return this.chunks.join("");
-  }
 }
 
 export function visibleWidth(text: string): number {

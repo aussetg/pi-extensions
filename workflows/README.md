@@ -1,138 +1,286 @@
-# workflows
+# Workflows
 
-Pi extension for constrained JavaScript workflows with one manually enabled model tool (`workflow`)
-and one slash command (`/workflow`).
+Durable named workflows for Pi. A reviewed JavaScript definition describes deterministic control
+flow; one coordinator owns each run; agents and host effects return through typed receipts. The
+primary Pi session launches and controls runs but does not own their lifetime.
 
-The extension provides:
+This extension is intentionally local and Linux-only. It has no compatibility layer for old run or
+definition formats and no portability fallback.
 
-- durable run directories under `~/.pi/agent/workflows/runs/<cwd-hash>/`;
-- Pi subagents launched through `agent()`;
-- `parallel()`, `pipeline()`, `apply()`, `phase()`, `log()`, `workflow()`, `args`, `budget`,
-  and `cwd` globals;
-- explicit read-only, shared, and isolated-patch workspaces;
-- bounded journals, logs, outputs, and patch artifacts;
-- restart-from-script resume with lineage metadata;
-- `/workflow` management and live controls.
+## Host requirements
 
-The model tool is off by default. Use `/workflow enable` when it is useful and `/workflow disable`
-afterward.
+- Node 22 or newer, including `node:sqlite` and TypeScript type stripping
+- a systemd user manager on cgroup v2
+- Btrfs, with the project and workflow run root on the same filesystem
+- `/usr/bin/bwrap`, `/usr/bin/systemd-run`, and `/usr/bin/systemctl`
+- unprivileged user namespaces
 
-## Workflow scripts
+On Arch/CachyOS, the non-base package is:
 
-Scripts are top-level async JavaScript. They begin with a literal metadata declaration and then
-contain statements directly:
+```bash
+sudo pacman -S bubblewrap
+```
+
+The extension deliberately fails when these assumptions are not met. Project snapshots and
+candidate checkpoints require reflinks; commands never fall back to an uncontained process.
+
+## Public surface
+
+The model receives two tools:
+
+- `workflow({ name, args, mode? })` launches an installed definition. It cannot provide source,
+  choose a model or tools, inject a command, or approve an apply.
+- `workflow_draft({ action, namespace, name, source?, expectedDraftHash? })` creates, replaces, or
+  validates inert source. It cannot install that source.
+
+`mode` is `await` by default and may be `async` in TUI/RPC sessions. Async completion appends one
+bounded notification to the primary session.
+
+The human command surface is:
+
+```text
+/flow list [--active] [--namespace builtin|user|project]
+/flow explain NAME
+/flow run NAME [--await|--async] [--args JSON]
+/flow status [RUN]
+/flow open RUN
+/flow pause RUN
+/flow resume RUN
+/flow stop RUN
+/flow stop-effect RUN OPERATION
+/flow respond RUN [CHECKPOINT] [--challenge HASH] [--value JSON_OR_CHOICE]
+/flow approve RUN [--challenge HASH]
+/flow reject RUN [--challenge HASH]
+/flow replay RUN [--await|--async] [--args JSON]
+/flow fresh-run RUN [--await|--async] [--args JSON]
+/flow drafts [user:NAME|project:NAME] [--namespace user|project]
+/flow validate user:NAME|project:NAME
+/flow promote user:NAME|project:NAME [--challenge HASH]
+/flow discard-draft user:NAME|project:NAME [--expected-hash HASH]
+/flow delete RUN [--challenge HASH]
+```
+
+`/goal TEXT` and `/execute-plan TEXT` are only friendly parsers for `builtin:goal` and
+`builtin:execute-plan`. They use the same registry, launch path, database, coordinator, and UI as
+`/flow run`.
+
+## Built-ins
+
+| Name | Input summary | Purpose |
+| --- | --- | --- |
+| `builtin:research` | `question`, optional `angles` | Parallel source gathering, synthesis, and critique |
+| `builtin:package-audit` | `packages` | Concurrent package inventory, risk review, and test planning |
+| `builtin:coding` | `objective` | Candidate implementation, verification, approval, and apply |
+| `builtin:optimize` | `objective`, `writePaths` | Measured candidate experiments and verified apply |
+| `builtin:goal` | `objective` | Fresh-agent handoffs with optional shared candidate work |
+| `builtin:execute-plan` | `objective` | Structured planning and sequential candidate point work |
+
+Use `/flow explain NAME` for the exact input/output schemas and derived authority summary.
+
+## Authoring
+
+Definitions are ordinary `.flow.js` files:
+
+- user: `~/.pi/agent/workflows/NAME.flow.js`
+- trusted project: `<project>/.pi/workflows/NAME.flow.js`
+
+The filename must match `name`. Namespace-qualified selectors (`user:name`, `project:name`) avoid
+ambiguity. Project definitions and profiles are ignored until Pi marks the project trusted.
 
 ```js
-export const meta = {
-  name: "review_and_fix",
-  description: "Review independent areas, apply isolated fixes, then verify",
-  phases: [
-    { title: "Review" },
-    { title: "Apply" },
-    { title: "Verify" },
-  ],
+const answerSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["answer", "sources"],
+  properties: {
+    answer: { type: "string", minLength: 1, maxLength: 12000 },
+    sources: {
+      type: "array",
+      maxItems: 32,
+      items: { type: "string", minLength: 1, maxLength: 2000 },
+    },
+  },
 };
 
-phase("Review");
-const candidates = await parallel(
-  args.tasks.map((task) => async () =>
-    await agent(`Review and fix ${task}`, {
-      label: task,
-      workspace: "patch",
-    }),
-  ),
-);
-
-phase("Apply");
-for (const candidate of candidates) await apply(candidate.patch);
-
-phase("Verify");
-return await agent("Run the relevant checks and review the resulting diff.", {
-  label: "verification",
-  workspace: "shared",
+export default defineWorkflow({
+  name: "answer-question",
+  description: "Research and answer one question.",
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["question"],
+    properties: { question: { type: "string", minLength: 1, maxLength: 20000 } },
+  },
+  outputSchema: answerSchema,
+  capabilities: ["read-project", "mediated-network"],
+  modelVisible: true,
+  maxParallelism: 2,
+  async run(flow, args) {
+    return await flow.agent("research", {
+      profile: "builtin:researcher",
+      prompt: `Answer with primary sources: ${args.question}`,
+      network: "research",
+      outputSchema: answerSchema,
+    });
+  },
 });
 ```
 
-Do not use `export default`, imports, `globalThis`, ambient time/randomness (`Date.now()`,
-`Math.random()`, argless `new Date()`), `require`, `process`, filesystem modules, `fetch`, or network
-APIs in the control script. Subagents may use their allowed Pi tools.
-
-## Workspace modes
-
-- Direct `agent()` calls default to `workspace: "shared"` and may edit the project.
-- Agents inside `parallel()` and `pipeline()` default to `workspace: "readOnly"`. Their tool list is
-  restricted to `read`, `grep`, `find`, `ls`, `web_search`, `web_fetch`, and `view_image` when those
-  tools are active in the parent.
-- `workspace: "patch"` runs an editing agent in a disposable git worktree and returns
-  `{ result, patch }`.
-- `await apply(patch)` checks and applies an opaque patch produced by the current run. Applications
-  are serialized, abortable, conflict-checked, and one-shot.
-
-Ignored outputs created in patch worktrees are retained as bounded artifacts for inspection but are
-not copied into the project.
-
-`agent(prompt, options)` accepts only:
-
-- `label`, `phase`, `schema`, `model`, `thinking`, `workspace`, and `stallMs`;
-- thinking levels `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`;
-- workspace modes `shared`, `readOnly`, and `patch`.
-
-Subagents inherit the launching model and the active Pi tool allowlist with `workflow` removed. If no
-permitted tools remain, the child runs with `--no-tools`. Unless explicitly overridden, subagent
-thinking is one level below the launching session.
-
-`parallel()` and `pipeline()` fail fast. Catch errors inside a branch or stage when best-effort
-behavior is intentional.
-
-## Progress and results
-
-Workflow scripts do not define UI. The extension derives one bounded progress/result view directly
-from execution:
-
-- metadata phases and the current `phase()`;
-- agent calls dynamically created by loops, branches, `parallel()`, and `pipeline()`;
-- call state, model, usage, elapsed time, and recent `log()` entries;
-- final result, error, and artifact path.
-
-This keeps presentation synchronized with what actually ran. Generic JavaScript control flow that
-does not launch an agent or emit a phase/log event intentionally creates no separate UI state.
-
-## Resume
-
-`/workflow resume <runId>` starts a new run from the persisted script and arguments. It never replays
-completed agent results. `resumeFromRunId` records lineage only.
-
-## Commands
+The available operations are:
 
 ```text
-/workflow
-/workflow enable|disable|toggle|status
-/workflow list [--running|--completed|--all]
-/workflow run <name|scriptPath> [--args <json>] [--await|--async]
-/workflow save <runId> [--scope project|user] [--name <slug>]
-/workflow resume <runId> [--script <scriptPath>] [--args <json>] [--await|--async]
-/workflow pause|continue|stop <runId>
-/workflow skip-agent <runId> <callId>
-/workflow open <runId> [result|script|journal|transcripts]
-/workflow delete <runId>
+flow.stage       flow.loop          flow.parallel      flow.fanOut
+flow.agent       flow.command       flow.checkpoint    flow.measure
+flow.candidate   flow.verify        flow.accept        flow.reject
+flow.recordExperiment               flow.apply
 ```
 
-`run` and `resume` default to async mode when Pi has a UI and await mode otherwise.
+Operation IDs, profile selectors, command selectors, and authority-bearing options must be
+statically reviewable. The parser rejects imports, ambient Node access, clocks, random values,
+dynamic operation identity, code generation, and undeclared authority. A definition may request
+less parallelism than the machine ceiling, never more. A running workflow cannot launch another
+workflow.
 
-## Isolation requirements
+The complete editor contract is [`workflow-api.d.ts`](workflow-api.d.ts). Built-ins under
+[`src/builtins/`](src/builtins/) are complete examples and are checked with
+`npm run typecheck:flows`.
 
-The control child runs through `systemd-run --user --scope` and `bwrap`, with a private network
-namespace, a small filesystem view, and cgroup limits. Launch fails rather than falling back to an
-unsandboxed control child.
+### Drafts and promotion
 
-Required host tools:
+Agent- or user-authored text follows draft → validate → exact human promotion. Validation performs
+static parsing, schema compilation, profile/route resolution, authority derivation, operation-count
+analysis, and a definition-only control load. It launches no workflow effects.
 
-- `/usr/bin/systemd-run` from systemd;
-- `/usr/bin/bwrap` from bubblewrap.
+Promotion binds the draft source hash, target namespace/path, installed preimage, and review hash.
+Changing either the draft or installed file invalidates the challenge. TUI promotion uses a human
+confirmation; RPC/headless use a two-step exact challenge.
 
-On Arch/CachyOS: `sudo pacman -S systemd bubblewrap`.
+### Agent profiles and routes
 
-Subagents are separate Pi processes. Patch worktrees isolate repository edits, but shared subagents
-are intentionally normal coding agents in the project workspace.
+Semantic profiles live in `~/.pi/agent/agents/*.md` or trusted
+`<project>/.pi/agents/*.md`. They describe role and maximum tool policy only:
 
-Run `npm install` in this directory after checkout, then `/reload` Pi.
+```md
+---
+name: dependency-auditor
+description: Reviews dependency and supply-chain risk
+tools: [read, grep, find, ls, web_search, web_fetch]
+---
+Inspect the supplied project snapshot and artifacts. Cite exact paths and primary URLs.
+```
+
+Exact provider routing is machine policy in `~/.pi/agent/workflow-routes.json`:
+
+```json
+{
+  "formatVersion": 1,
+  "routes": {
+    "user:dependency-auditor": {
+      "model": "anthropic/claude-sonnet-4",
+      "thinking": "medium"
+    }
+  }
+}
+```
+
+Local routes override the current Pi model defaults and are snapshotted at launch. Credential
+contents are neither semantic identity nor persisted evidence.
+
+Agents receive the intersection of their profile policy, operation authority, and the fixed host
+catalog. Inspection, candidate editing, mediated research, and workspace commands are independent
+sets, so a candidate agent may also receive mediated research. Raw workspace commands always run
+without network.
+
+Agent completion requires a valid, durably acknowledged `finish_work` call. `report_progress`,
+`log_result`, and `publish_artifact` update evidence and projections while the agent runs. Assistant
+text is evidence only. After a clean yield without a finish receipt, the same Pi session is reopened
+with one fixed protocol reminder. Three consecutive non-progressing yields pause the operation.
+
+### Command profiles
+
+User command profiles are `~/.pi/agent/commands/*.json`; trusted project profiles are
+`<project>/.pi/commands/*.json`. Workflow source names a profile and supplies only declared scalar
+arguments. A placeholder occupies a complete argv token; no shell parses it.
+
+```json
+{
+  "name": "focused-check",
+  "description": "Run one reviewed check target",
+  "argv": ["/usr/bin/node", "scripts/check.mjs", "${suite}"],
+  "arguments": {
+    "suite": { "type": "string", "enum": ["unit", "integration"] }
+  },
+  "timeoutMs": 30000,
+  "outputLimitBytes": 1048576,
+  "effects": ["read-only", "temporary", "candidate"]
+}
+```
+
+Every command runs as argv in Bubblewrap inside a transient systemd service. Read-only commands see
+the immutable snapshot, temporary commands get a discarded tmp-overlay, and candidate commands bind
+only the candidate tree. Stdout/stderr are bounded and overflow is retained as artifact evidence.
+
+### Measurement and verification profiles
+
+Measurement profiles live under `measurements/` and verification profiles under `verifications/`
+in the same user/project configuration roots. Both are strict JSON and own their exact argv,
+environment, timeouts, extractors, and gate policy. Workflow arguments cannot supply profile bodies
+or raw commands.
+
+Measurements support protocol, JSON-path, and regex extraction, grouped samples, CPU affinity,
+primary/guardrail metric policy, and cgroup/pressure diagnostics. Verification binds ordered tests,
+diagnostics, diff policy, adversarial review, candidate tree/lineage/write scope, project snapshot,
+and environment evidence.
+
+## Persistence and recovery
+
+Runs live at `~/.pi/agent/workflow-runs/flow_<32 hex>/`:
+
+```text
+run.sqlite
+source.flow.js
+context/
+  invocation.json
+  project-manifest.json
+  identity.json
+  resources.json
+  project/
+sessions/
+workspaces/
+  candidates/
+  checkpoints/
+  overlays/
+artifacts/<sha256>/
+  body
+  metadata.json
+outputs/<execution-id>/
+```
+
+`run.sqlite` is the only state authority. It uses WAL, foreign keys, full synchronization, bounded
+busy waiting, short immediate transactions, and revision checks. Immediate run directories are the
+catalog; there is no second global index. Artifact bodies are immutable and content-addressed.
+
+The launch snapshot is one Btrfs reflink tree hashed from admitted destination bytes. Writable
+agents use disposable candidates; every successful mutation gets a restorable reflink checkpoint.
+Replay of a mutating result is impossible without the matching restored checkpoint.
+
+Same-run resume returns already committed operations. Explicit `/flow replay` consumes the exact
+matching journal prefix from a selected earlier run and stops at the first semantic mismatch.
+`/flow fresh-run` deliberately ignores that prefix. Live apply is never replayed as a mutation.
+
+Coordinator, agent, command, verification, and measurement processes use deterministic transient
+systemd services. SQLite carries ordinary control requests. Reloading or closing Pi drops only local
+rendering/polling state; it does not stop active services.
+
+## Development
+
+```bash
+npm install
+npm run check
+```
+
+`npm run check` runs TypeScript, authoring-interface checks, built-in flow checks, and Vitest. Real
+machine trials are separate; see [`benchmark/README.md`](benchmark/README.md).
+
+Security details are in [`SECURITY.md`](SECURITY.md). Projection and storage costs are in
+[`PERFORMANCE.md`](PERFORMANCE.md).
