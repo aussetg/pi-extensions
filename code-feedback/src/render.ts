@@ -1,17 +1,27 @@
 import * as path from "node:path";
 import { formatTouchedRange } from "./diagnostics/ranges.ts";
 import { countDiagnosticSnapshotDiagnostics, flattenDiagnosticSnapshot } from "./diagnostics/snapshots.ts";
-import { displayPathFromRoot } from "./paths.ts";
+import { uriToFilePath } from "./lsp/positions.ts";
+import { displayPathFromRoot, projectRelativeText } from "./paths.ts";
+import type { PiCommandContext } from "./pi.ts";
 import type { CodeFeedbackRuntime } from "./runtime.ts";
-import { LSP_METHODS, type CompletedEdit, type DelayedDiagnosticFeedback, type DiagnosticFilterResult, type DiagnosticSeverity, type DiagnosticSnapshot, type FormatServiceStatus, type FormatterSummary, type LinkedDiagnostic, type LspDiagnostic, type LspServiceStatus, type TouchedRangeComputation, type WorkspaceDiagnosticScanResult } from "./types.ts";
+import { LSP_METHODS, type CompletedEdit, type DelayedDiagnosticFeedback, type DiagnosticFilterResult, type DiagnosticSeverity, type DiagnosticSnapshot, type FormatServiceStatus, type FormatterSummary, type LinkedDiagnostic, type LspDiagnostic, type LspServiceStatus, type TouchedRangeComputation, type WorkspaceDiagnosticDelta, type WorkspaceDiagnosticScanResult } from "./types.ts";
 
 export interface ExplicitDiagnosticRefreshStatus {
   outcome: "fresh" | "timed-out" | "unavailable";
   durationMs?: number;
 }
 
+export function updateFooterStatus(
+  ctx: PiCommandContext,
+  runtime: CodeFeedbackRuntime,
+  lspStatus: LspServiceStatus,
+): void {
+  ctx.ui.setStatus("code-feedback-lsp", renderFooterStatus(runtime, ctx.ui.theme, lspStatus));
+}
+
 export interface FooterTheme {
-  fg?: (color: string, text: string) => string;
+  fg(color: string, text: string): string;
 }
 
 export function renderStatus(runtime: CodeFeedbackRuntime, lspStatus?: LspServiceStatus, formatStatus?: FormatServiceStatus): string {
@@ -20,6 +30,7 @@ export function renderStatus(runtime: CodeFeedbackRuntime, lspStatus?: LspServic
     "code-feedback / LSP status",
     `  extension: ${config.enabled ? "enabled" : "disabled"}`,
     `  lsp feedback: ${config.lsp.enabled ? "enabled" : "disabled"}`,
+    `  lsp client budget: ${formatClientResourceSummary(lspStatus, config.lsp.maxActiveClients, config.lsp.initializationConcurrency)}`,
     `  diagnostic refresh concurrency: ${config.lsp.diagnosticRefreshConcurrency}${formatDiagnosticRefreshSummary(lspStatus)}`,
     `  inline diagnostics: ${config.diagnostics.inline}`,
     `  auto format: ${config.autoFormat ? "immediate" : "disabled"}`,
@@ -50,8 +61,13 @@ export function renderStatus(runtime: CodeFeedbackRuntime, lspStatus?: LspServic
       const last = client.lastDiagnosticsAt ? ` last_diag=${formatTimestamp(client.lastDiagnosticsAt)}` : "";
       const latency = formatClientDiagnosticLatency(client);
       const environment = client.environment ? ` env=${client.environment}` : "";
-      lines.push(`    ${client.id}: ${client.state}${pid} docs=${client.openDocuments} diag_files=${client.diagnosticFiles}${environment}${last}${latency ? ` diag_latency=${latency}` : ""}`);
+      const root = displayPathFromRoot(client.root, runtime.projectRoot);
+      const busy = client.busy ? " busy" : "";
+      lines.push(`    ${client.id}: ${client.state}${busy} role=${client.role} root=${root}${pid} docs=${client.openDocuments} diag_files=${client.diagnosticFiles}${environment}${last}${latency ? ` diag_latency=${latency}` : ""}`);
       if (client.lastError) lines.push(`      error: ${client.lastError}`);
+      if (client.initializationRetryAt && client.initializationRetryAt > Date.now()) {
+        lines.push(`      initialization retry after: ${formatTimestamp(client.initializationRetryAt)}`);
+      }
       if (client.lastServerLog) lines.push(`      server ${client.lastServerLog.level}: ${client.lastServerLog.message}`);
     }
   }
@@ -124,7 +140,8 @@ export function renderCapabilities(runtime: CodeFeedbackRuntime, lspStatus?: Lsp
     lines.push("", "  clients:");
     for (const client of lspStatus.clients) {
       const environment = client.environment ? ` [${client.environment}]` : "";
-      lines.push(`    ${client.id}: ${client.state} ${client.command} ${client.args.join(" ")}${environment}`.trimEnd());
+      const root = displayPathFromRoot(client.root, runtime.projectRoot);
+      lines.push(`    ${client.id}: ${client.state} role=${client.role} root=${root} ${client.command} ${client.args.join(" ")}${environment}`.trimEnd());
     }
   }
 
@@ -142,7 +159,7 @@ export function renderDiagnosticsStatus(
   workspaceScan?: WorkspaceDiagnosticScanResult,
   refresh?: ExplicitDiagnosticRefreshStatus,
 ): string {
-  const targetPath = target && target !== "all" && target !== "all (cached)" ? path.resolve(runtime.projectRoot, target) : undefined;
+  const targetPath = target && target !== "all" ? path.resolve(runtime.projectRoot, target) : undefined;
   const lines = [
     "code-feedback / diagnostics",
     `  target: ${target ?? "current session"}`,
@@ -173,6 +190,7 @@ export function renderDiagnosticsStatus(
     lines.push(
       `  scan: ${completeness} (${summary.durationMs}ms)`,
       `  files: ${summary.selectedFiles} selected · ${summary.freshFiles} fresh · ${summary.timedOutFiles} timed out · ${summary.unavailableFiles} unavailable · ${summary.skippedFiles} skipped`,
+      `  protocol: ${summary.workspacePullRequests} workspace pull${summary.workspacePullRequests === 1 ? "" : "s"} · ${summary.workspacePullFiles} pull-covered · ${summary.documentRefreshFiles} document fallback · ${summary.workspacePullFailures} pull failure${summary.workspacePullFailures === 1 ? "" : "s"}`,
       `  bounds: ${bounds}`,
     );
     if (excluded) lines.push(`  excluded: ${excluded}`);
@@ -225,6 +243,10 @@ export function renderDiagnosticsStatus(
       const summary = edit.diagnosticFilter.summary;
       lines.push(`      diagnostics: ${summary.shownDiagnostics}/${summary.linkedDiagnostics} linked shown, ${summary.hiddenUnrelated} unrelated hidden`);
     }
+    if (edit.workspaceDelta) {
+      const summary = edit.workspaceDelta.summary;
+      lines.push(`      possible workspace impact: ${summary.shownDiagnostics}/${summary.totalNewOrWorsened} new or worsened cross-file diagnostics shown (not attributed)`);
+    }
   }
 
   return lines.join("\n");
@@ -236,16 +258,10 @@ function formatExplicitDiagnosticRefresh(refresh: ExplicitDiagnosticRefreshStatu
     case "fresh":
       return `fresh${duration}`;
     case "timed-out":
-      return `timed out${duration} — cached diagnostics shown; not authoritative`;
+      return `timed out${duration} — no diagnostics returned`;
     case "unavailable":
-      return "unavailable — cached diagnostics shown; not authoritative";
+      return "unavailable — no diagnostics returned";
   }
-}
-
-function projectRelativeText(text: string, projectRoot: string): string {
-  const root = path.resolve(projectRoot);
-  const prefix = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
-  return text.split(prefix).join("");
 }
 
 function diagnosticTargetContainsFile(targetPath: string, filePath: string, includeDescendants: boolean): boolean {
@@ -275,9 +291,10 @@ function formatRangeComputation(computation: TouchedRangeComputation | undefined
 export function renderInlineDiagnosticFeedback(runtime: CodeFeedbackRuntime, edit: CompletedEdit): string | undefined {
   const filter = edit.diagnosticFilter;
   const hasLinkedDiagnostics = Boolean(filter && filter.linked.length > 0);
+  const hasWorkspaceDelta = Boolean(edit.workspaceDelta?.diagnostics.length);
   const hasFormatterFeedback = Boolean(edit.formatter?.changed || edit.formatter?.errors.length);
   const hasSkippedFeedback = Boolean(edit.skippedReason?.startsWith("skipped "));
-  if (!hasLinkedDiagnostics && !hasFormatterFeedback && !hasSkippedFeedback) return undefined;
+  if (!hasLinkedDiagnostics && !hasWorkspaceDelta && !hasFormatterFeedback && !hasSkippedFeedback) return undefined;
 
   const lines = ["code-feedback:"];
 
@@ -290,7 +307,7 @@ export function renderInlineDiagnosticFeedback(runtime: CodeFeedbackRuntime, edi
   }
 
   if (filter && filter.linked.length > 0) {
-    const severityCounts = countSeverities(filter.linked);
+    const severityCounts = countDiagnosticSeverities(filter.linked.map((linked) => linked.diagnostic));
     const label = runtime.config.diagnostics.inline === "all" ? "diagnostics" : "touched diagnostics";
     lines.push(`  ${label}: ${formatSeverityCounts(severityCounts)}`);
 
@@ -298,8 +315,12 @@ export function renderInlineDiagnosticFeedback(runtime: CodeFeedbackRuntime, edi
       lines.push("", ...formatLinkedDiagnostic(runtime.projectRoot, linked));
     }
 
-    const hiddenText = formatHiddenDiagnostics(filter);
+    const hiddenText = formatHiddenDiagnostics(filter, edit.workspaceDelta?.summary.totalNewOrWorsened ?? 0);
     if (hiddenText) lines.push("", `  hidden: ${hiddenText}`);
+  }
+
+  if (hasWorkspaceDelta && edit.workspaceDelta) {
+    lines.push("", ...formatWorkspaceDelta(runtime.projectRoot, edit.workspaceDelta));
   }
 
   return lines.join("\n");
@@ -307,22 +328,28 @@ export function renderInlineDiagnosticFeedback(runtime: CodeFeedbackRuntime, edi
 
 export function renderDelayedDiagnosticFeedback(runtime: CodeFeedbackRuntime, edit: CompletedEdit): string | undefined {
   const filter = edit.diagnosticFilter;
-  if (!filter || filter.linked.length === 0) return undefined;
+  const hasLinkedDiagnostics = Boolean(filter?.linked.length);
+  const hasWorkspaceDelta = Boolean(edit.workspaceDelta?.diagnostics.length);
+  if (!hasLinkedDiagnostics && !hasWorkspaceDelta) return undefined;
 
   const relative = displayPathFromRoot(edit.filePath, runtime.projectRoot);
-  const severityCounts = countSeverities(filter.linked);
   const scope = runtime.config.diagnostics.inline === "all" ? "all files" : relative;
-  const lines = [
-    "code-feedback delayed LSP diagnostics:",
-    `  ${scope}: ${formatSeverityCounts(severityCounts)}`,
-  ];
+  const lines = ["code-feedback delayed LSP diagnostics:"];
 
-  for (const linked of filter.linked) {
-    lines.push("", ...formatLinkedDiagnostic(runtime.projectRoot, linked));
+  if (hasLinkedDiagnostics && filter) {
+    const severityCounts = countDiagnosticSeverities(filter.linked.map((linked) => linked.diagnostic));
+    lines.push(`  ${scope}: ${formatSeverityCounts(severityCounts)}`);
+    for (const linked of filter.linked) {
+      lines.push("", ...formatLinkedDiagnostic(runtime.projectRoot, linked));
+    }
+
+    const hiddenText = formatHiddenDiagnostics(filter, edit.workspaceDelta?.summary.totalNewOrWorsened ?? 0);
+    if (hiddenText) lines.push("", `  hidden: ${hiddenText}`);
   }
 
-  const hiddenText = formatHiddenDiagnostics(filter);
-  if (hiddenText) lines.push("", `  hidden: ${hiddenText}`);
+  if (hasWorkspaceDelta && edit.workspaceDelta) {
+    lines.push("", ...formatWorkspaceDelta(runtime.projectRoot, edit.workspaceDelta));
+  }
   return lines.join("\n");
 }
 
@@ -337,7 +364,7 @@ export function renderDelayedContextMessage(feedback: DelayedDiagnosticFeedback[
 
 export function renderFooterStatus(runtime: CodeFeedbackRuntime, theme?: FooterTheme, lspStatus?: LspServiceStatus): string {
   const text = footerStatusText(runtime, lspStatus);
-  return theme?.fg?.("dim", text) ?? text;
+  return theme ? theme.fg("dim", text) : text;
 }
 
 function footerStatusText(runtime: CodeFeedbackRuntime, lspStatus?: LspServiceStatus): string {
@@ -346,7 +373,7 @@ function footerStatusText(runtime: CodeFeedbackRuntime, lspStatus?: LspServiceSt
   if (!runtime.config.enabled || !runtime.config.lsp.enabled) return `lsp: off${trusted}`;
 
   const clients = (lspStatus?.clients ?? [])
-    .filter((client) => client.state === "ready" || client.state === "starting")
+    .filter((client) => client.state === "ready" || client.state === "starting" || client.state === "queued")
     .sort(compareFooterClients);
   if (clients.length === 0) return `lsp: idle${trusted}`;
 
@@ -370,7 +397,7 @@ function formatClientSummary(lspStatus?: LspServiceStatus): string {
   for (const client of lspStatus.clients) {
     counts.set(client.state, (counts.get(client.state) ?? 0) + 1);
   }
-  const ordered = ["ready", "starting", "failed", "stopped"]
+  const ordered = ["ready", "starting", "queued", "failed", "stopped"]
     .map((state) => [state, counts.get(state) ?? 0] as const)
     .filter(([, count]) => count > 0)
     .map(([state, count]) => `${count} ${state}`)
@@ -388,10 +415,29 @@ function formatDiagnosticRefreshSummary(lspStatus?: LspServiceStatus): string {
   return busy ? ` (${busy})` : "";
 }
 
+function formatClientResourceSummary(
+  lspStatus: LspServiceStatus | undefined,
+  configuredMax: number,
+  configuredInitializationConcurrency: number,
+): string {
+  const resources = lspStatus?.clientResources;
+  if (!resources) return `max=${configuredMax}, initializing max=${configuredInitializationConcurrency}`;
+  return [
+    `idle=${resources.idleTimeoutMs}ms`,
+    `active=${resources.activeClients}/${resources.maxActiveClients}`,
+    `initializing=${resources.initializingClients}/${resources.initializationConcurrency}`,
+    `queued=${resources.queuedStarts}`,
+    `starts=${resources.starts}`,
+    `restarts=${resources.restarts}`,
+    `evictions=${resources.evictions}(idle=${resources.idleEvictions},capacity=${resources.capacityEvictions})`,
+    `cooldowns=${resources.initializationCooldowns}`,
+  ].join(" ");
+}
+
 function formatFooterClient(client: LspServiceStatus["clients"][number]): string {
   const label = footerClientLabel(client);
   const latency = formatClientDiagnosticLatency(client);
-  const state = client.state === "starting" ? " starting" : "";
+  const state = client.state === "starting" ? " starting" : client.state === "queued" ? " queued" : "";
   return `${label}${latency ? ` (${latency})` : state}`;
 }
 
@@ -425,7 +471,7 @@ function formatTimestamp(ms: number): string {
 }
 
 function formatDiagnostic(projectRoot: string, diagnostic: LspDiagnostic, indentColumns: number): string[] {
-  const filePath = filePathFromUri(diagnostic.uri);
+  const filePath = uriToFilePath(diagnostic.uri);
   const displayPath = filePath ? displayPathFromRoot(filePath, projectRoot) : diagnostic.uri;
   const sourceCode = [diagnostic.source, diagnostic.code].filter((part) => part !== undefined && part !== "").join("/");
   const suffix = sourceCode ? ` ${sourceCode}` : "";
@@ -448,7 +494,7 @@ function indent(text: string, spaces: number): string {
 
 function formatLinkedDiagnostic(projectRoot: string, linked: LinkedDiagnostic): string[] {
   const diagnostic = linked.diagnostic;
-  const filePath = filePathFromUri(diagnostic.uri);
+  const filePath = uriToFilePath(diagnostic.uri);
   const displayPath = filePath ? displayPathFromRoot(filePath, projectRoot) : diagnostic.uri;
   const sourceCode = [diagnostic.source, diagnostic.code].filter((part) => part !== undefined && part !== "").join("/");
   const location = `${displayPath}:${diagnostic.range.start.line}:${diagnostic.range.start.character}`;
@@ -461,10 +507,25 @@ function formatLinkedDiagnostic(projectRoot: string, linked: LinkedDiagnostic): 
   ];
 }
 
-function formatHiddenDiagnostics(filter: DiagnosticFilterResult): string | undefined {
+function formatWorkspaceDelta(projectRoot: string, delta: WorkspaceDiagnosticDelta): string[] {
+  const counts = countDiagnosticSeverities(delta.diagnostics);
+  const lines = [
+    `  possible workspace impact (not attributed): ${formatSeverityCounts(counts)}`,
+  ];
+  for (const diagnostic of delta.diagnostics) {
+    lines.push("", ...formatDiagnostic(projectRoot, diagnostic, 2));
+  }
+  if (delta.summary.hiddenByLimit > 0) {
+    lines.push("", `  possible impact hidden: ${delta.summary.hiddenByLimit} beyond inline limit`);
+  }
+  return lines;
+}
+
+function formatHiddenDiagnostics(filter: DiagnosticFilterResult, separatelyShownUnrelated = 0): string | undefined {
   const parts: string[] = [];
-  if (filter.summary.hiddenUnrelated > 0) {
-    parts.push(`${filter.summary.hiddenUnrelated} unrelated`);
+  const hiddenUnrelated = Math.max(0, filter.summary.hiddenUnrelated - separatelyShownUnrelated);
+  if (hiddenUnrelated > 0) {
+    parts.push(`${hiddenUnrelated} unrelated`);
   }
   if (filter.summary.hiddenByLimit > 0) {
     parts.push(`${filter.summary.hiddenByLimit} linked beyond inline limit`);
@@ -486,10 +547,10 @@ function formatFormatterSummary(formatter: FormatterSummary, projectRoot?: strin
   return parts.join("; ");
 }
 
-function countSeverities(diagnostics: LinkedDiagnostic[]): Record<DiagnosticSeverity, number> {
+function countDiagnosticSeverities(diagnostics: LspDiagnostic[]): Record<DiagnosticSeverity, number> {
   return diagnostics.reduce<Record<DiagnosticSeverity, number>>(
-    (counts, linked) => {
-      counts[linked.diagnostic.severity] += 1;
+    (counts, diagnostic) => {
+      counts[diagnostic.severity] += 1;
       return counts;
     },
     { error: 0, warning: 0, information: 0, hint: 0 },
@@ -504,13 +565,3 @@ function formatSeverityCounts(counts: Record<DiagnosticSeverity, number>): strin
   if (counts.hint > 0) parts.push(`${counts.hint} hint${counts.hint === 1 ? "" : "s"}`);
   return parts.length > 0 ? parts.join(", ") : "none";
 }
-
-function filePathFromUri(uri: string): string | undefined {
-  try {
-    if (!uri.startsWith("file:")) return undefined;
-    return decodeURIComponent(new URL(uri).pathname);
-  } catch {
-    return undefined;
-  }
-}
-

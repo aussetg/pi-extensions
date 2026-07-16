@@ -67,8 +67,9 @@ test("/lsp trust persists trusted roots without registering a separate /trust co
     assert.ok(commands.has("lsp"));
     assert.equal(commands.has("trust"), false);
 
-    await commands.get("lsp").handler(["trust", "add", external], {
+    await commands.get("lsp").handler(`trust add ${external}`, {
       cwd: root,
+      isProjectTrusted: () => true,
       ui: { notify() {}, setStatus() {} },
     });
 

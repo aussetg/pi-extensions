@@ -1,97 +1,82 @@
-import { renderCapabilities, renderDiagnosticsStatus, renderFooterStatus, renderStatus } from "../render.ts";
+import { renderCapabilities, renderDiagnosticsStatus, renderStatus, updateFooterStatus } from "../render.ts";
 import type { FormatService } from "../format/service.ts";
 import type { LspService } from "../lsp/service.ts";
 import { normalizeToolPath } from "../paths.ts";
-import { restartLsp, setLspEnabled, setProjectRoot, setProjectTrust, type CodeFeedbackRuntime } from "../runtime.ts";
-import type { PiApi, PiCommandContext } from "../pi.ts";
-import { contextInjectionArgumentCompletions, handleContextInjectionCommand } from "./context-injection.ts";
-import { handleTrustCommand, trustArgumentCompletions } from "./trust.ts";
+import { configureFeedbackServices, restartLsp, setLspEnabled, setProjectRoot, setProjectTrust, type CodeFeedbackRuntime } from "../runtime.ts";
+import type { PiApi } from "../pi.ts";
+import { CONTEXT_INJECTION_SUBCOMMANDS, handleContextInjectionCommand } from "./context-injection.ts";
+import { handleTrustCommand, TRUST_SUBCOMMANDS } from "./trust.ts";
 
 const SUBCOMMANDS = ["status", "enable", "disable", "restart", "diagnostics", "capabilities", "context", "trust", "help"] as const;
 
-export function registerLspCommand(pi: PiApi, runtime: CodeFeedbackRuntime, lspService: LspService, formatService?: FormatService): void {
+export function registerLspCommand(pi: PiApi, runtime: CodeFeedbackRuntime, lspService: LspService, formatService: FormatService): void {
   pi.registerCommand("lsp", {
     description: "Manage code-feedback LSP feedback. Usage: /lsp status | enable | disable | restart | diagnostics | capabilities | context | trust",
     getArgumentCompletions: (prefix) => {
       const trimmed = prefix.trimStart();
-      if (trimmed.toLowerCase().startsWith("context ")) return contextInjectionArgumentCompletions(trimmed.slice("context ".length));
-      if (trimmed.toLowerCase().startsWith("trust ")) return trustArgumentCompletions(trimmed.slice("trust ".length));
-      const needle = trimmed.toLowerCase();
-      return SUBCOMMANDS
-        .filter((command) => command.startsWith(needle))
-        .map((command) => ({ value: command, label: command }));
+      if (trimmed.toLowerCase().startsWith("context ")) return completeSubcommands(CONTEXT_INJECTION_SUBCOMMANDS, trimmed.slice("context ".length));
+      if (trimmed.toLowerCase().startsWith("trust ")) return completeSubcommands(TRUST_SUBCOMMANDS, trimmed.slice("trust ".length));
+      return completeSubcommands(SUBCOMMANDS, trimmed);
     },
     handler: async (args, ctx) => {
       setProjectRoot(runtime, ctx.cwd);
       setProjectTrust(runtime, ctx);
-      lspService.configure({
-        projectRoot: runtime.projectRoot,
-        trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
-        idleTimeoutMs: runtime.config.lsp.idleTimeoutMs,
-        diagnosticRefreshConcurrency: runtime.config.lsp.diagnosticRefreshConcurrency,
-      });
-      formatService?.configure({
-        projectRoot: runtime.projectRoot,
-        trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
-      });
-      const [subcommand = "status", ...rest] = normalizeArgs(args);
+      configureFeedbackServices(runtime, lspService, formatService);
+      const [subcommand = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
 
       switch (subcommand.toLowerCase()) {
         case "status":
-          notify(ctx, renderStatus(runtime, lspService.getStatus(), runtime.projectTrusted ? formatService?.getStatus() : undefined), "info");
+          ctx.ui.notify(renderStatus(runtime, lspService.getStatus(), runtime.projectTrusted ? formatService.getStatus() : undefined), "info");
           return;
 
         case "enable":
-        case "on":
           if (!runtime.config.enabled) {
-            notify(ctx, "code-feedback is disabled for this session; LSP feedback cannot be enabled.", "warning");
+            ctx.ui.notify("code-feedback is disabled for this session; LSP feedback cannot be enabled.", "warning");
             return;
           }
           setLspEnabled(runtime, true);
-          setFooterStatus(ctx, runtime, lspService);
-          notify(ctx, "code-feedback LSP feedback enabled for this session. Use /lsp status to inspect it.", "info");
+          updateFooterStatus(ctx, runtime, lspService.getStatus());
+          ctx.ui.notify("code-feedback LSP feedback enabled for this session. Use /lsp status to inspect it.", "info");
           return;
 
         case "disable":
-        case "off":
           setLspEnabled(runtime, false);
           await lspService.shutdownAll();
-          setFooterStatus(ctx, runtime, lspService);
-          notify(ctx, "code-feedback LSP feedback disabled for this session. Use /lsp enable to turn it back on.", "warning");
+          updateFooterStatus(ctx, runtime, lspService.getStatus());
+          ctx.ui.notify("code-feedback LSP feedback disabled for this session. Use /lsp enable to turn it back on.", "warning");
           return;
 
         case "restart":
-        case "reload":
           if (!runtime.config.enabled) {
-            notify(ctx, "code-feedback is disabled for this session; LSP clients will not be restarted.", "warning");
+            ctx.ui.notify("code-feedback is disabled for this session; LSP clients will not be restarted.", "warning");
             return;
           }
           if (!runtime.projectTrusted) {
             await lspService.shutdownAll();
-            setFooterStatus(ctx, runtime, lspService);
-            notify(ctx, "Project is not trusted; LSP clients are paused until project trust is approved.", "warning");
+            updateFooterStatus(ctx, runtime, lspService.getStatus());
+            ctx.ui.notify("Project is not trusted; LSP clients are paused until project trust is approved.", "warning");
             return;
           }
           restartLsp(runtime, "human command");
           await lspService.restart();
-          setFooterStatus(ctx, runtime, lspService);
-          notify(ctx, "code-feedback LSP clients restarted and config will be reused on demand.", "info");
+          updateFooterStatus(ctx, runtime, lspService.getStatus());
+          ctx.ui.notify("code-feedback LSP clients restarted and config will be reused on demand.", "info");
           return;
 
         case "capabilities":
           if (!runtime.config.enabled || !runtime.config.lsp.enabled) {
-            notify(ctx, renderCapabilities(runtime, lspService.getStatus()), "warning");
+            ctx.ui.notify(renderCapabilities(runtime, lspService.getStatus()), "warning");
             return;
           }
           if (!runtime.projectTrusted) {
-            notify(ctx, "Project is not trusted; LSP capabilities are unavailable until project trust is approved.", "warning");
+            ctx.ui.notify("Project is not trusted; LSP capabilities are unavailable until project trust is approved.", "warning");
             return;
           }
-          notify(ctx, renderCapabilities(runtime, lspService.getStatus(), await lspService.capabilities(normalizeOptionalPath(rest[0]))), "info");
+          ctx.ui.notify(renderCapabilities(runtime, lspService.getStatus(), await lspService.capabilities(normalizeOptionalPath(rest[0]))), "info");
           return;
 
         case "diagnostics":
-          notify(ctx, renderDiagnosticsStatus(runtime, normalizeOptionalPath(rest[0]), lspService.cachedDiagnostics(normalizeOptionalPath(rest[0]))), "info");
+          ctx.ui.notify(renderDiagnosticsStatus(runtime, normalizeOptionalPath(rest[0]), lspService.cachedDiagnostics(normalizeOptionalPath(rest[0]))), "info");
           return;
 
         case "context":
@@ -99,30 +84,16 @@ export function registerLspCommand(pi: PiApi, runtime: CodeFeedbackRuntime, lspS
           return;
 
         case "trust":
-          if (!formatService) {
-            notify(ctx, "Formatter service is unavailable; cannot update trusted environment roots.", "warning");
-            return;
-          }
           await handleTrustCommand(pi, runtime, lspService, formatService, rest, ctx);
           return;
 
         case "help":
         default:
-          notify(ctx, renderHelp(subcommand), subcommand === "help" ? "info" : "warning");
+          ctx.ui.notify(renderHelp(subcommand), subcommand === "help" ? "info" : "warning");
           return;
       }
     },
   });
-}
-
-function normalizeArgs(args: unknown): string[] {
-  if (Array.isArray(args)) {
-    return args.filter((arg): arg is string => typeof arg === "string" && arg.length > 0);
-  }
-  if (typeof args === "string") {
-    return args.trim().split(/\s+/).filter(Boolean);
-  }
-  return [];
 }
 
 function normalizeOptionalPath(value: string | undefined): string | undefined {
@@ -131,12 +102,11 @@ function normalizeOptionalPath(value: string | undefined): string | undefined {
   return normalized.length > 0 ? normalized : undefined;
 }
 
-function notify(ctx: PiCommandContext, message: string, level: "info" | "warning" | "error"): void {
-  ctx.ui.notify(message, level);
-}
-
-function setFooterStatus(ctx: PiCommandContext, runtime: CodeFeedbackRuntime, lspService: LspService): void {
-  ctx.ui.setStatus?.("code-feedback-lsp", renderFooterStatus(runtime, ctx.ui.theme, lspService.getStatus()));
+function completeSubcommands(commands: readonly string[], prefix: string): Array<{ value: string; label: string }> {
+  const needle = prefix.trim().toLowerCase();
+  return commands
+    .filter((command) => command.startsWith(needle))
+    .map((command) => ({ value: command, label: command }));
 }
 
 function renderHelp(command: string): string {

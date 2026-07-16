@@ -6,6 +6,7 @@ import {
   isLspRange,
   lspPositionToExternal,
   lspRangeToExternal,
+  resolveExternalPositionTarget,
 } from "../src/lsp/positions.ts";
 import { renderLspMethodResult } from "../src/lsp/render.ts";
 
@@ -50,6 +51,61 @@ test("LSP range conversion rejects malformed and backwards ranges", () => {
 test("position-scoped requests reject coordinates outside the LSP uinteger range", () => {
   assert.deepEqual(externalPositionToLsp(2_147_483_648, 1), { line: 2_147_483_647, character: 0 });
   assert.equal(externalPositionToLsp(2_147_483_649, 1), undefined);
+});
+
+test("symbol position targets resolve exact case-sensitive occurrences with LSP UTF-16 offsets", () => {
+  const content = "targetLong target = target;\n😀 café = café;\r\n#field = 1\n";
+
+  assert.deepEqual(resolveExternalPositionTarget(content, { line: 1, symbol: "target" }), {
+    line: 0,
+    character: 11,
+  });
+  assert.deepEqual(resolveExternalPositionTarget(content, { line: 1, symbol: "target", occurrence: 2 }), {
+    line: 0,
+    character: 20,
+  });
+  assert.deepEqual(resolveExternalPositionTarget(content, { line: 2, symbol: "café", occurrence: 2 }), {
+    line: 1,
+    character: 10,
+  });
+  assert.deepEqual(resolveExternalPositionTarget(content, { line: 3, symbol: "#field" }), {
+    line: 2,
+    character: 0,
+  });
+
+  assert.throws(
+    () => resolveExternalPositionTarget(content, { line: 1, symbol: "Target" }),
+    /cannot find exact symbol "Target" on line 1/,
+  );
+});
+
+test("symbol position targets reject ambiguous and invalid inputs", () => {
+  const content = "one one\n";
+
+  assert.throws(
+    () => resolveExternalPositionTarget(content, { line: 1, column: 1, symbol: "one" }),
+    /accepts either column or symbol, not both/,
+  );
+  assert.throws(
+    () => resolveExternalPositionTarget(content, { line: 1, occurrence: 2 }),
+    /requires symbol when occurrence is provided/,
+  );
+  assert.throws(
+    () => resolveExternalPositionTarget(content, { line: 1, symbol: "one", occurrence: 0 }),
+    /requires occurrence to be a 1-based integer/,
+  );
+  assert.throws(
+    () => resolveExternalPositionTarget(content, { line: 1, symbol: "one", occurrence: 3 }),
+    /cannot find occurrence 3 .* found 2/,
+  );
+  assert.throws(
+    () => resolveExternalPositionTarget(content, { line: 3, symbol: "one" }),
+    /cannot resolve symbol on line 3; file has 2 lines/,
+  );
+  assert.throws(
+    () => resolveExternalPositionTarget(content, { line: 1, symbol: "\n" }),
+    /requires symbol to be a non-empty single-line string/,
+  );
 });
 
 test("rendering drops locations with malformed LSP ranges", () => {

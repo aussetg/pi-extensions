@@ -13,6 +13,7 @@ function runtime(overrides = {}) {
 function client(overrides) {
   return {
     id: "typescript",
+    role: "language",
     root: "/tmp/project",
     command: "typescript-language-server",
     args: [],
@@ -119,4 +120,44 @@ test("status reports trusted language-server config sources and parse failures",
   assert.match(rendered, /^  server config: user=loaded, project=invalid$/m);
   assert.match(rendered, /^  configured server entries: gleam$/m);
   assert.match(rendered, /server config errors:\n    \/tmp\/project\/\.pi\/code-feedback\.json: invalid JSON/);
+});
+
+test("status identifies client roles and nested workspace roots", () => {
+  const rt = runtime();
+  rt.projectRoot = "/tmp/project";
+  const status = {
+    activeClients: 1,
+    clients: [client({ id: "python-ruff", role: "linter", root: "/tmp/project/packages/api" })],
+    unavailableServers: [],
+  };
+
+  const rendered = renderStatus(rt, status);
+  assert.match(rendered, /^    python-ruff: ready role=linter root=packages\/api /m);
+});
+
+test("status reports bounded client resources and lifecycle counters", () => {
+  const rt = runtime();
+  const status = {
+    activeClients: 1,
+    clients: [client({ busy: true })],
+    unavailableServers: [],
+    clientResources: {
+      idleTimeoutMs: 240_000,
+      maxActiveClients: 8,
+      initializationConcurrency: 2,
+      activeClients: 1,
+      initializingClients: 1,
+      queuedStarts: 3,
+      starts: 5,
+      restarts: 1,
+      evictions: 2,
+      idleEvictions: 1,
+      capacityEvictions: 1,
+      initializationCooldowns: 4,
+    },
+  };
+
+  const rendered = renderStatus(rt, status);
+  assert.match(rendered, /^  lsp client budget: idle=240000ms active=1\/8 initializing=1\/2 queued=3 starts=5 restarts=1 evictions=2\(idle=1,capacity=1\) cooldowns=4$/m);
+  assert.match(rendered, /^    typescript: ready busy role=language /m);
 });

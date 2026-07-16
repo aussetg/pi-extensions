@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { LspServerConfigurationSourceStatus, LspServerConfigurationStatus } from "../types.ts";
+import { errorMessage, isErrorCode } from "../errors.ts";
+import { isRecord, type LspServerConfigurationSourceStatus, type LspServerConfigurationStatus } from "../types.ts";
 
 export const LANGUAGE_SERVER_CONFIG_FILE = "code-feedback.json";
 const MAX_CONFIG_BYTES = 1_048_576;
@@ -11,10 +12,14 @@ const SERVER_FIELDS = new Set([
   "extensions",
   "languageId",
   "languageIds",
+  "rootMarkers",
+  "role",
   "env",
   "initializationOptions",
   "workspaceConfiguration",
 ]);
+
+export type LanguageServerRole = "language" | "linter";
 
 export interface EnabledLanguageServerConfig {
   disabled?: false;
@@ -22,6 +27,8 @@ export interface EnabledLanguageServerConfig {
   extensions: readonly string[];
   languageId?: string;
   languageIds?: Record<string, string>;
+  rootMarkers?: readonly string[];
+  role?: LanguageServerRole;
   env?: Record<string, string>;
   initializationOptions?: unknown;
   workspaceConfiguration?: Record<string, unknown>;
@@ -83,10 +90,10 @@ function readConfigSource(scope: "user" | "project", filePath: string): ParsedCo
   try {
     stat = fs.statSync(filePath);
   } catch (error) {
-    if (isMissingFileError(error)) {
+    if (isErrorCode(error, "ENOENT")) {
       return { servers: {}, status: { scope, path: filePath, state: "missing" } };
     }
-    return invalidSource(scope, filePath, `cannot stat file: ${formatError(error)}`);
+    return invalidSource(scope, filePath, `cannot stat file: ${errorMessage(error)}`);
   }
 
   if (!stat.isFile()) return invalidSource(scope, filePath, "path is not a regular file");
@@ -98,7 +105,7 @@ function readConfigSource(scope: "user" | "project", filePath: string): ParsedCo
   try {
     text = fs.readFileSync(filePath, "utf8");
   } catch (error) {
-    return invalidSource(scope, filePath, `cannot read file: ${formatError(error)}`);
+    return invalidSource(scope, filePath, `cannot read file: ${errorMessage(error)}`);
   }
   const bytes = Buffer.byteLength(text, "utf8");
   if (bytes > MAX_CONFIG_BYTES) {
@@ -111,7 +118,7 @@ function readConfigSource(scope: "user" | "project", filePath: string): ParsedCo
       status: { scope, path: filePath, state: "loaded" },
     };
   } catch (error) {
-    return invalidSource(scope, filePath, formatError(error));
+    return invalidSource(scope, filePath, errorMessage(error));
   }
 }
 
@@ -128,7 +135,7 @@ function parseConfig(text: string): Record<string, ConfiguredLanguageServer> {
   try {
     value = JSON.parse(text);
   } catch (error) {
-    throw new Error(`invalid JSON: ${formatError(error)}`);
+    throw new Error(`invalid JSON: ${errorMessage(error)}`);
   }
 
   if (!isRecord(value)) throw new Error("config must be a JSON object");
@@ -162,7 +169,7 @@ function parseServer(id: string, value: unknown): ConfiguredLanguageServer {
     if (ignoredFields.length > 0) {
       throw new Error(`servers.${id} is disabled and may not define: ${ignoredFields.join(", ")}`);
     }
-    return freezeServer({ disabled: true });
+    return Object.freeze({ disabled: true });
   }
   const command = value.command === undefined
     ? undefined
@@ -179,21 +186,62 @@ function parseServer(id: string, value: unknown): ConfiguredLanguageServer {
   const languageIds = value.languageIds === undefined
     ? undefined
     : parseLanguageIds(id, value.languageIds, extensions);
+  const rootMarkers = value.rootMarkers === undefined
+    ? undefined
+    : parseRootMarkers(id, value.rootMarkers);
+  const role = value.role === undefined
+    ? undefined
+    : parseServerRole(id, value.role);
   const env = value.env === undefined ? undefined : parseEnvironment(id, value.env);
   const workspaceConfiguration = value.workspaceConfiguration === undefined
     ? undefined
     : parseObject(value.workspaceConfiguration, `servers.${id}.workspaceConfiguration`);
 
-  return freezeServer({
+  return Object.freeze({
     disabled: false,
     command,
     extensions,
     languageId,
     languageIds,
+    rootMarkers,
+    role,
     env,
     initializationOptions: value.initializationOptions,
     workspaceConfiguration,
   });
+}
+
+function parseRootMarkers(id: string, value: unknown): readonly string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`servers.${id}.rootMarkers must be a non-empty string array`);
+  }
+  const markers = value.map((entry, index) => parseRootMarker(entry, `servers.${id}.rootMarkers[${index}]`));
+  if (new Set(markers).size !== markers.length) throw new Error(`servers.${id}.rootMarkers contains duplicates`);
+  return Object.freeze(markers);
+}
+
+function parseRootMarker(value: unknown, label: string): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.trim() !== value ||
+    value === "." ||
+    value === ".." ||
+    value.includes("/") ||
+    value.includes("\\") ||
+    value.includes("\0") ||
+    Buffer.byteLength(value, "utf8") > 255
+  ) {
+    throw new Error(`${label} must be a trimmed basename no longer than 255 UTF-8 bytes`);
+  }
+  return value;
+}
+
+function parseServerRole(id: string, value: unknown): LanguageServerRole {
+  if (value !== "language" && value !== "linter") {
+    throw new Error(`servers.${id}.role must be "language" or "linter"`);
+  }
+  return value;
 }
 
 function parseCommand(id: string, value: unknown): readonly string[] {
@@ -269,20 +317,4 @@ function validateServerId(id: string): void {
   if (!SERVER_ID_PATTERN.test(id)) {
     throw new Error(`invalid server id ${JSON.stringify(id)}; use letters, numbers, dot, underscore, and hyphen`);
   }
-}
-
-function freezeServer<T extends ConfiguredLanguageServer>(server: T): T {
-  return Object.freeze(server);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isMissingFileError(error: unknown): boolean {
-  return isRecord(error) && error.code === "ENOENT";
-}
-
-function formatError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

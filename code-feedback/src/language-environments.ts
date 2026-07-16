@@ -1,6 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { walkUpInsideProject } from "./command-path.ts";
+import { statIfExists } from "./fs.ts";
+import { displayPathFromRoot, isInsideOrEqual } from "./paths.ts";
 
 export type LanguageEnvironmentKind = "venv" | "uv" | "conda";
 
@@ -30,13 +32,6 @@ const PYTHON_ENV_SCRUB_KEYS = [
   "PYTHONUSERBASE",
   "VIRTUAL_ENV",
 ];
-
-export function resolveLanguageEnvironment(language: "python", filePath: string, projectRoot: string, trustedRoots: string[] = []): LanguageEnvironment | undefined {
-  switch (language) {
-    case "python":
-      return resolvePythonEnvironment(filePath, projectRoot, trustedRoots);
-  }
-}
 
 export function resolvePythonEnvironment(filePath: string, projectRoot: string, trustedRoots: string[] = []): LanguageEnvironment | undefined {
   const startDir = directoryForPath(filePath);
@@ -128,7 +123,7 @@ function createPythonEnvironment(root: string, projectRoot: string): LanguageEnv
     env.VIRTUAL_ENV = root;
   }
 
-  const displayPath = displayPathInsideProject(root, projectRoot);
+  const displayPath = displayPathFromRoot(root, projectRoot);
   return {
     language: "python",
     kind,
@@ -163,12 +158,6 @@ function directoryForPath(filePath: string): string {
   return stat?.isDirectory() ? resolved : path.dirname(resolved);
 }
 
-function displayPathInsideProject(filePath: string, projectRoot: string): string {
-  const relative = path.relative(projectRoot, filePath);
-  if (relative === "") return ".";
-  return relative.startsWith("..") || path.isAbsolute(relative) ? filePath : relative;
-}
-
 function containingSearchRoots(startDir: string, projectRoot: string, trustedRoots: string[]): string[] {
   const candidates = [projectRoot, ...trustedRoots].map((candidate) => path.resolve(candidate));
   const unique = [...new Set(candidates)].filter((candidate) => isInsideOrEqual(startDir, candidate));
@@ -193,17 +182,4 @@ function isDirectory(filePath: string): boolean {
 
 function isFile(filePath: string): boolean {
   return statIfExists(filePath)?.isFile() === true;
-}
-
-function statIfExists(filePath: string): fs.Stats | undefined {
-  try {
-    return fs.statSync(filePath);
-  } catch {
-    return undefined;
-  }
-}
-
-function isInsideOrEqual(child: string, parent: string): boolean {
-  const relative = path.relative(path.resolve(parent), path.resolve(child));
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }

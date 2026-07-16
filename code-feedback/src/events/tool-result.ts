@@ -1,18 +1,37 @@
 import * as path from "node:path";
-import { linkDiagnosticsToTouchedRanges } from "../diagnostics/provenance.ts";
+import { linkDiagnosticsToTouchedRanges, workspaceDiagnosticDelta } from "../diagnostics/provenance.ts";
 import { computeTouchedRanges } from "../diagnostics/ranges.ts";
-import { diagnosticSeverityRank, flattenDiagnosticSnapshot, readDiagnosticSnapshotFromDetails } from "../diagnostics/snapshots.ts";
+import { diagnosticSeverityRank, flattenDiagnosticSnapshot } from "../diagnostics/snapshots.ts";
+import { errorMessage } from "../errors.ts";
 import { mapTouchedRangesThroughFormatting } from "../format/mapping.ts";
 import type { FormatService } from "../format/service.ts";
 import { DEFAULT_TRACKED_FILE_MAX_BYTES, formatBytes, readUtf8IfSmall, type ReadUtf8Result } from "../fs.ts";
+import type { LspFileMutation } from "../lsp/file-mutations.ts";
+import { uriToFilePath } from "../lsp/positions.ts";
 import type { LspService } from "../lsp/service.ts";
 import { displayPathFromRoot, resolveInputPath, shouldTrackFile } from "../paths.ts";
 import { addTimingPhase, createTimingRecorder, type TimingRecorder } from "../perf.ts";
 import type { PiToolResult } from "../pi.ts";
 import { renderDelayedDiagnosticFeedback, renderInlineDiagnosticFeedback } from "../render.ts";
-import { discardPendingEditsForToolCall, enqueueDelayedFeedback, hasPendingEditForFile, nextWriteIndex, recordCompletedEdit, takePendingEdit, takePendingEditById, type CodeFeedbackRuntime } from "../runtime.ts";
+import {
+  contentHash,
+  discardPendingEditsForToolCall,
+  enqueueDelayedFeedback,
+  fileContentMatchesHash,
+  finishDelayedDiagnosticRequest,
+  hasPendingEditForFile,
+  isFileMutationCurrent,
+  nextWriteIndex,
+  recordCompletedEdit,
+  recordFileMutation,
+  startDelayedDiagnosticRequest,
+  takePendingEdit,
+  type CodeFeedbackRuntime,
+  type FileMutationToken,
+} from "../runtime.ts";
 import {
   CODE_FEEDBACK_DETAILS_KEY,
+  isRecord,
   type CodeFeedbackEditDetails,
   type CodeFeedbackToolDetails,
   type CompletedEdit,
@@ -27,8 +46,8 @@ import {
 import { applyPatchOperationId, readApplyPatchOperations } from "./tool-call.ts";
 
 export interface ToolResultEvent {
-  toolName?: string;
-  toolCallId?: string;
+  toolName: string;
+  toolCallId: string;
   input?: unknown;
   details?: unknown;
   content?: PiToolResult["content"];
@@ -36,12 +55,16 @@ export interface ToolResultEvent {
 }
 
 export interface ToolResultContext {
-  cwd?: string;
+  cwd: string;
+  signal?: AbortSignal;
 }
+
+type FeedbackResultSource = Pick<ToolResultEvent, "content" | "details">;
 
 export interface AppliedLspFileMutation {
   id: string;
   filePath: string;
+  originalPath?: string;
   beforeContent: string;
   afterAgentContent: string;
   beforeDiagnostics?: DiagnosticSnapshot;
@@ -52,21 +75,48 @@ export async function processAppliedLspFileMutations(
   result: PiToolResult,
   mutations: readonly AppliedLspFileMutation[],
   runtime: CodeFeedbackRuntime,
-  lspService?: LspService,
-  formatService?: FormatService,
+  lspService: LspService,
+  formatService: FormatService,
   signal?: AbortSignal,
 ): Promise<PiToolResult> {
   const completedEdits: CompletedEdit[] = [];
   const timingsByEditId = new Map<string, TimingRecorder>();
+  const mutationTokens = mutations.map((mutation) => {
+    const finalTracked = shouldTrackFile(mutation.filePath, runtime.projectRoot);
+    const originalTracked = mutation.originalPath !== undefined && shouldTrackFile(mutation.originalPath, runtime.projectRoot);
+    if (originalTracked && mutation.originalPath && !pathEquals(mutation.originalPath, mutation.filePath)) {
+      recordFileMutation(runtime, mutation.originalPath);
+    }
+    return finalTracked ? recordFileMutation(runtime, mutation.filePath) : undefined;
+  });
+  notifyLspFileMutations(
+    lspService,
+    runtime,
+    mutations.flatMap((mutation): LspFileMutation[] => {
+      const finalTracked = shouldTrackFile(mutation.filePath, runtime.projectRoot);
+      const originalTracked = mutation.originalPath !== undefined && shouldTrackFile(mutation.originalPath, runtime.projectRoot);
+      if (mutation.originalPath && !pathEquals(mutation.originalPath, mutation.filePath)) {
+        if (originalTracked && finalTracked) {
+          return [{ type: "renamed", oldFilePath: mutation.originalPath, newFilePath: mutation.filePath }];
+        }
+        if (originalTracked) return [{ type: "deleted", filePath: mutation.originalPath }];
+        if (finalTracked) return [{ type: "created", filePath: mutation.filePath }];
+        return [];
+      }
+      return finalTracked ? [{ type: "changed", filePath: mutation.filePath }] : [];
+    }),
+  );
 
-  for (const mutation of mutations) {
+  for (const [mutationIndex, mutation] of mutations.entries()) {
     if (!shouldTrackFile(mutation.filePath, runtime.projectRoot)) continue;
+    const mutationToken = mutationTokens[mutationIndex];
+    if (!mutationToken) continue;
 
     const timing = createTimingRecorder();
     const writeIndex = nextWriteIndex(runtime);
     const skippedReason = appliedMutationSkippedReason(mutation);
     if (skippedReason) {
-      lspService?.forgetFile(mutation.filePath);
+      lspService.forgetFile(mutation.filePath);
       const completed: CompletedEdit = {
         id: mutation.id,
         toolName: "lsp",
@@ -80,6 +130,7 @@ export async function processAppliedLspFileMutations(
         startedAt: mutation.startedAt ?? Date.now(),
         completedAt: Date.now(),
         skippedReason,
+        originalPath: mutation.originalPath,
       };
       completed.timing = timing.snapshot();
       timing.measure("tool_result.record_completed", () => recordCompletedEdit(runtime, completed));
@@ -96,6 +147,7 @@ export async function processAppliedLspFileMutations(
       toolName: "lsp",
     }));
     let touchedRanges = rangeComputationResult.ranges;
+    let rangeComputation = rangeComputationResult.computation;
 
     const formatter = await timing.measureAsync("tool_result.format", () => maybeFormatFile(
       formatService,
@@ -112,6 +164,25 @@ export async function processAppliedLspFileMutations(
         finalContent,
         touchedRanges,
       ));
+      timing.measure("tool_result.notify_file_mutation", () => notifyLspFileMutations(
+        lspService,
+        runtime,
+        [{ type: "changed", filePath: mutation.filePath }],
+      ));
+    }
+    if (
+      touchedRanges.length === 0 &&
+      mutation.originalPath !== undefined &&
+      !pathEquals(mutation.originalPath, mutation.filePath)
+    ) {
+      const identityChange = timing.measure("tool_result.rename_identity_range", () => computeTouchedRanges({
+        filePath: mutation.filePath,
+        beforeContent: undefined,
+        afterContent: finalContent,
+        toolName: "lsp",
+      }));
+      touchedRanges = identityChange.ranges;
+      rangeComputation = identityChange.computation;
     }
 
     const completed: CompletedEdit = {
@@ -126,8 +197,9 @@ export async function processAppliedLspFileMutations(
       writeIndex,
       startedAt: mutation.startedAt ?? Date.now(),
       completedAt: Date.now(),
-      rangeComputation: rangeComputationResult.computation,
+      rangeComputation,
       formatter: summarizeFormatter(formatter),
+      originalPath: mutation.originalPath,
     };
 
     const afterRefresh = await timing.measureAsync("tool_result.after_diagnostics", () => captureAfterDiagnosticRefresh(
@@ -148,7 +220,7 @@ export async function processAppliedLspFileMutations(
     completed.timing = timing.snapshot();
     timing.measure("tool_result.record_completed", () => recordCompletedEdit(runtime, completed));
     completed.timing = timing.snapshot();
-    scheduleDelayedDiagnosticsIfNeeded(afterRefresh, lspService, runtime, completed, mutation.beforeDiagnostics, finalContent);
+    scheduleDelayedDiagnosticsIfNeeded(afterRefresh, lspService, runtime, completed, mutation.beforeDiagnostics, finalContent, mutationToken);
     completedEdits.push(completed);
     timingsByEditId.set(completed.id, timing);
   }
@@ -173,11 +245,15 @@ export async function handleToolResult(
   event: ToolResultEvent,
   ctx: ToolResultContext,
   runtime: CodeFeedbackRuntime,
-  lspService?: LspService,
-  formatService?: FormatService,
+  lspService: LspService,
+  formatService: FormatService,
 ): Promise<PiToolResult | void> {
   if (!runtime.config.enabled) return;
   if (!runtime.projectTrusted) return;
+  if (event.toolName === "bash") {
+    await reconcileExternalMutations(event, ctx, runtime, lspService);
+    return;
+  }
   if (event.toolName === "apply_patch") {
     return handleApplyPatchToolResult(event, ctx, runtime, lspService, formatService);
   }
@@ -185,12 +261,13 @@ export async function handleToolResult(
   if (event.toolName !== "write" && event.toolName !== "edit") return;
   const toolName = event.toolName;
 
-  const filePath = resolveInputPath(event.input, ctx.cwd, runtime.projectRoot);
+  const filePath = resolveInputPath(event.input, ctx.cwd);
   if (!filePath || !shouldTrackFile(filePath, runtime.projectRoot)) return;
 
-  const pending = takePendingEdit(runtime, event.toolCallId, filePath, toolName);
+  const pending = takePendingEdit(runtime, event.toolCallId);
   const timing = createTimingRecorder(pending?.timing);
   if (event.isError) return;
+  const mutationToken = recordFileMutation(runtime, filePath);
 
   const afterRead = timing.measure("tool_result.read_after", () => readUtf8IfSmall(filePath));
   const afterAgentContent = afterRead.content;
@@ -198,10 +275,15 @@ export async function handleToolResult(
     const skippedReason = fileReadSkippedReason(afterRead);
     if (!skippedReason) return;
 
-    lspService?.forgetFile(filePath);
+    timing.measure("tool_result.notify_file_mutation", () => notifyLspFileMutations(
+      lspService,
+      runtime,
+      [simpleToolFileMutation(toolName, filePath, pending)],
+    ));
+    lspService.forgetFile(filePath);
     const completed = completedEditWithSkippedExactFeedback({
       pending,
-      id: pending?.id ?? event.toolCallId ?? `${runtime.turnIndex}:${runtime.writeIndex}:${toolName}:${filePath}:result`,
+      id: pending?.id ?? event.toolCallId,
       toolName,
       filePath,
       runtime,
@@ -228,9 +310,14 @@ export async function handleToolResult(
   if (formatter?.changed) {
     touchedRanges = timing.measure("tool_result.format_map", () => mapTouchedRangesThroughFormatting(filePath, afterAgentContent, finalContent, touchedRanges));
   }
+  timing.measure("tool_result.notify_file_mutation", () => notifyLspFileMutations(
+    lspService,
+    runtime,
+    [simpleToolFileMutation(toolName, filePath, pending)],
+  ));
 
   const completed: CompletedEdit = {
-    id: pending?.id ?? event.toolCallId ?? `${runtime.turnIndex}:${runtime.writeIndex}:${toolName}:${filePath}:result`,
+    id: pending?.id ?? event.toolCallId,
     toolName,
     filePath,
     beforeContent: pending?.beforeContent,
@@ -246,51 +333,82 @@ export async function handleToolResult(
   };
 
   const afterRefresh = await timing.measureAsync("tool_result.after_diagnostics", () => captureAfterDiagnosticRefresh(lspService, filePath, finalContent, runtime));
-  const afterDiagnostics = afterRefresh?.fresh
-    ? afterRefresh.snapshot
-    : readDiagnosticSnapshotFromDetails(event.details, ["afterDiagnostics", "postDiagnostics", "diagnostics"]);
-  timing.measure("tool_result.filter_diagnostics", () => attachDiagnosticFilter(event, pending, completed, runtime, afterDiagnostics));
+  if (afterRefresh?.fresh) {
+    timing.measure("tool_result.filter_diagnostics", () => attachDiagnosticFilterFromSnapshots(
+      pending?.beforeDiagnostics,
+      completed,
+      runtime,
+      afterRefresh.snapshot,
+    ));
+  }
   completed.timing = timing.snapshot();
   timing.measure("tool_result.record_completed", () => recordCompletedEdit(runtime, completed));
   completed.timing = timing.snapshot();
-  scheduleDelayedDiagnosticsIfNeeded(afterRefresh, lspService, runtime, completed, pending?.beforeDiagnostics, finalContent);
+  scheduleDelayedDiagnosticsIfNeeded(afterRefresh, lspService, runtime, completed, pending?.beforeDiagnostics, finalContent, mutationToken);
   return appendInlineFeedback(event, completed, runtime, timing);
+}
+
+async function reconcileExternalMutations(
+  event: ToolResultEvent,
+  ctx: ToolResultContext,
+  runtime: CodeFeedbackRuntime,
+  lspService: LspService,
+): Promise<void> {
+  if (event.isError || !runtime.config.lsp.enabled) return;
+
+  try {
+    const result = await lspService.reconcileOpenDocuments({ signal: ctx.signal });
+    for (const mutation of result.mutations) {
+      if (mutation.type === "renamed") {
+        recordFileMutation(runtime, mutation.oldFilePath);
+        recordFileMutation(runtime, mutation.newFilePath);
+      } else {
+        recordFileMutation(runtime, mutation.filePath);
+      }
+    }
+  } catch (error) {
+    if (ctx.signal?.aborted) return;
+    runtime.lastError = errorMessage(error);
+  }
 }
 
 async function handleApplyPatchToolResult(
   event: ToolResultEvent,
   ctx: ToolResultContext,
   runtime: CodeFeedbackRuntime,
-  lspService?: LspService,
-  formatService?: FormatService,
+  lspService: LspService,
+  formatService: FormatService,
 ): Promise<PiToolResult | void> {
   if (event.isError) {
     discardApplyPatchPendingBatch(event, runtime);
     return;
   }
-  const results = readApplyPatchResults(event.details);
-  if (results.length === 0) {
+  const indexedResults = readApplyPatchResults(event.details);
+  if (indexedResults.length === 0) {
     discardApplyPatchPendingBatch(event, runtime);
     return;
   }
 
   const completedEdits: CompletedEdit[] = [];
   const timingsByEditId = new Map<string, TimingRecorder>();
+  const recordedMutations = recordApplyPatchMutations(event, ctx, runtime, indexedResults);
+  const mutationTokens = recordedMutations.tokens;
+  notifyLspFileMutations(lspService, runtime, recordedMutations.fileMutations);
 
-  for (const [index, result] of results.entries()) {
+  for (const { operationIndex, result } of indexedResults) {
     if (result.status === "completed") continue;
-    takeApplyPatchPendingEdit(event, ctx, runtime, index, result.path);
+    takeApplyPatchPendingEdit(event, runtime, operationIndex);
   }
 
   try {
-    for (const [index, result] of results.entries()) {
+    for (const { operationIndex: index, result } of indexedResults) {
       if (result.status !== "completed") continue;
 
-      const resultPath = resolveInputPath({ path: result.path }, ctx.cwd, runtime.projectRoot);
-      const pending = takeApplyPatchPendingEdit(event, ctx, runtime, index, result.path, resultPath);
+      const resultPath = resolveInputPath({ path: result.path }, ctx.cwd);
+      const pending = takeApplyPatchPendingEdit(event, runtime, index);
       if (!resultPath) continue;
 
-      const pendingId = applyPatchOperationId(event.toolCallId, runtime.turnIndex, runtime.writeIndex, index);
+      const pendingId = applyPatchOperationId(event.toolCallId, index);
       const timing = createTimingRecorder(pending?.timing);
       const filePath = pending?.filePath ?? resultPath;
       if (!shouldTrackFile(filePath, runtime.projectRoot)) {
@@ -304,7 +422,7 @@ async function handleApplyPatchToolResult(
       const afterAgentContent = afterRead?.content;
       if (result.type !== "delete_file" && afterAgentContent === undefined) {
         const skippedReason = fileReadSkippedReason(afterRead);
-        if (skippedReason) lspService?.forgetFile(filePath);
+        if (skippedReason) lspService.forgetFile(filePath);
         if (skippedReason) {
           const completed = completedEditWithSkippedExactFeedback({
             pending,
@@ -341,6 +459,11 @@ async function handleApplyPatchToolResult(
       const finalContent = formatter?.finalContent ?? afterAgentContent;
       if (formatter?.changed && afterAgentContent !== undefined && finalContent !== undefined) {
         touchedRanges = timing.measure("tool_result.format_map", () => mapTouchedRangesThroughFormatting(filePath, afterAgentContent, finalContent, touchedRanges));
+        timing.measure("tool_result.notify_file_mutation", () => notifyLspFileMutations(
+          lspService,
+          runtime,
+          [{ type: "changed", filePath }],
+        ));
       }
 
       const completed: CompletedEdit = {
@@ -365,17 +488,24 @@ async function handleApplyPatchToolResult(
       const afterRefresh = finalContent === undefined
         ? undefined
         : await timing.measureAsync("tool_result.after_diagnostics", () => captureAfterDiagnosticRefresh(lspService, filePath, finalContent, runtime));
-      const afterDiagnostics = afterRefresh?.fresh
-        ? afterRefresh.snapshot
-        : readDiagnosticSnapshotFromDetails(event.details, ["afterDiagnostics", "postDiagnostics", "diagnostics"]);
-      timing.measure("tool_result.filter_diagnostics", () => attachDiagnosticFilter(event, pending, completed, runtime, afterDiagnostics));
+      if (afterRefresh?.fresh) {
+        timing.measure("tool_result.filter_diagnostics", () => attachDiagnosticFilterFromSnapshots(
+          pending?.beforeDiagnostics,
+          completed,
+          runtime,
+          afterRefresh.snapshot,
+        ));
+      }
       completed.timing = timing.snapshot();
       timing.measure("tool_result.record_completed", () => recordCompletedEdit(runtime, completed));
       completed.timing = timing.snapshot();
       forgetOriginalPathIfMoved(lspService, pending, filePath);
-      if (result.type === "delete_file") lspService?.forgetFile(filePath);
+      if (result.type === "delete_file") lspService.forgetFile(filePath);
       if (finalContent !== undefined) {
-        scheduleDelayedDiagnosticsIfNeeded(afterRefresh, lspService, runtime, completed, pending?.beforeDiagnostics, finalContent);
+        const mutationToken = mutationTokens.get(index);
+        if (mutationToken) {
+          scheduleDelayedDiagnosticsIfNeeded(afterRefresh, lspService, runtime, completed, pending?.beforeDiagnostics, finalContent, mutationToken);
+        }
       }
       completedEdits.push(completed);
       timingsByEditId.set(completed.id, timing);
@@ -387,30 +517,96 @@ async function handleApplyPatchToolResult(
   return appendInlineFeedbackForEdits(event, completedEdits, runtime, timingsByEditId);
 }
 
-function takeApplyPatchPendingEdit(
+function recordApplyPatchMutations(
   event: ToolResultEvent,
   ctx: ToolResultContext,
   runtime: CodeFeedbackRuntime,
+  indexedResults: readonly IndexedApplyPatchResultInput[],
+): { tokens: Map<number, FileMutationToken>; fileMutations: LspFileMutation[] } {
+  const tokens = new Map<number, FileMutationToken>();
+  const fileMutations: LspFileMutation[] = [];
+  const operations = readApplyPatchOperations(event.input);
+  for (const { operationIndex: index, result } of indexedResults) {
+    if (result.status !== "completed") continue;
+
+    const pendingId = applyPatchOperationId(event.toolCallId, index);
+    const pending = runtime.pendingEdits.get(pendingId);
+    const resultPath = resolveInputPath({ path: result.path }, ctx.cwd);
+    const operation = operations[index];
+    const operationPath = operation
+      ? resolveInputPath({ path: operation.path }, ctx.cwd)
+      : undefined;
+    const requestedFinalPath = operation?.type === "update_file" && operation.move_path
+      ? resolveInputPath({ path: operation.move_path }, ctx.cwd)
+      : operationPath;
+    const finalPath = pending?.filePath ?? resultPath ?? requestedFinalPath;
+    if (finalPath && shouldTrackFile(finalPath, runtime.projectRoot)) {
+      tokens.set(index, recordFileMutation(runtime, finalPath));
+    }
+
+    const originalPath = pending?.originalPath ?? operationPath;
+    if (
+      originalPath &&
+      (!finalPath || !pathEquals(originalPath, finalPath)) &&
+      shouldTrackFile(originalPath, runtime.projectRoot)
+    ) {
+      recordFileMutation(runtime, originalPath);
+    }
+
+    const finalTracked = finalPath !== undefined && shouldTrackFile(finalPath, runtime.projectRoot);
+    const originalTracked = originalPath !== undefined && shouldTrackFile(originalPath, runtime.projectRoot);
+    const moved = originalPath !== undefined && finalPath !== undefined && !pathEquals(originalPath, finalPath);
+    if (result.type === "delete_file") {
+      if (originalTracked && originalPath) fileMutations.push({ type: "deleted", filePath: originalPath });
+    } else if (moved && originalPath && finalPath) {
+      if (originalTracked && finalTracked) {
+        fileMutations.push({ type: "renamed", oldFilePath: originalPath, newFilePath: finalPath });
+      } else if (originalTracked) {
+        fileMutations.push({ type: "deleted", filePath: originalPath });
+      } else if (finalTracked) {
+        fileMutations.push({ type: "created", filePath: finalPath });
+      }
+    } else if (finalTracked && finalPath) {
+      fileMutations.push({ type: result.type === "create_file" ? "created" : "changed", filePath: finalPath });
+    }
+  }
+  return { tokens, fileMutations };
+}
+
+function simpleToolFileMutation(
+  toolName: "write" | "edit",
+  filePath: string,
+  pending: PendingEdit | undefined,
+): LspFileMutation {
+  return {
+    type: toolName === "write" && pending?.beforeFileExisted === false ? "created" : "changed",
+    filePath,
+  };
+}
+
+function notifyLspFileMutations(
+  lspService: LspService,
+  runtime: CodeFeedbackRuntime,
+  mutations: readonly LspFileMutation[],
+): void {
+  if (!runtime.config.lsp.enabled || mutations.length === 0) return;
+  lspService.notifyFileMutations(mutations);
+}
+
+function takeApplyPatchPendingEdit(
+  event: ToolResultEvent,
+  runtime: CodeFeedbackRuntime,
   operationIndex: number,
-  rawPath: string | undefined,
-  resolvedPath = rawPath ? resolveInputPath({ path: rawPath }, ctx.cwd, runtime.projectRoot) : undefined,
 ): PendingEdit | undefined {
-  const pendingId = applyPatchOperationId(event.toolCallId, runtime.turnIndex, runtime.writeIndex, operationIndex);
-  const byId = takePendingEditById(runtime, pendingId);
-  if (byId || !resolvedPath) return byId;
-  return takePendingEdit(runtime, undefined, resolvedPath, "apply_patch");
+  return takePendingEdit(runtime, applyPatchOperationId(event.toolCallId, operationIndex));
 }
 
 function discardApplyPatchPendingBatch(event: ToolResultEvent, runtime: CodeFeedbackRuntime): void {
   discardPendingEditsForToolCall(runtime, event.toolCallId, "apply_patch");
-  const operations = readApplyPatchOperations(event.input);
-  for (const [index] of operations.entries()) {
-    takePendingEditById(runtime, applyPatchOperationId(event.toolCallId, runtime.turnIndex, runtime.writeIndex, index));
-  }
 }
 
-function forgetOriginalPathIfMoved(lspService: LspService | undefined, pending: PendingEdit | undefined, finalPath: string): void {
-  if (!lspService || !pending?.originalPath) return;
+function forgetOriginalPathIfMoved(lspService: LspService, pending: PendingEdit | undefined, finalPath: string): void {
+  if (!pending?.originalPath) return;
   if (pathEquals(pending.originalPath, finalPath)) return;
   lspService.forgetFile(pending.originalPath);
 }
@@ -465,17 +661,18 @@ function completedEditWithSkippedExactFeedback(input: {
 }
 
 async function captureAfterDiagnosticRefresh(
-  lspService: LspService | undefined,
+  lspService: LspService,
   filePath: string,
   content: string,
   runtime: CodeFeedbackRuntime,
   signal?: AbortSignal,
 ): Promise<DiagnosticRefreshResult | undefined> {
-  if (!lspService) return undefined;
   if (!runtime.config.lsp.enabled) return undefined;
   return lspService.diagnosticsForFileDetailed(filePath, content, {
-    timeoutMs: inlineDiagnosticTimeoutMs(runtime),
-    settleMs: inlineDiagnosticSettleMs(runtime),
+    timeoutMs: runtime.config.strict
+      ? runtime.config.diagnostics.timeoutMs
+      : Math.min(runtime.config.diagnostics.inlineTimeoutMs, runtime.config.diagnostics.timeoutMs),
+    settleMs: runtime.config.strict ? runtime.config.diagnostics.settleMs : 0,
     snapshotScope: inlineDiagnosticSnapshotScope(runtime),
     signal,
   });
@@ -487,23 +684,13 @@ function inlineDiagnosticSnapshotScope(runtime: CodeFeedbackRuntime): "file" | "
     : "file";
 }
 
-function inlineDiagnosticTimeoutMs(runtime: CodeFeedbackRuntime): number {
-  if (runtime.config.strict) return runtime.config.diagnostics.timeoutMs;
-  return Math.min(runtime.config.diagnostics.inlineTimeoutMs, runtime.config.diagnostics.timeoutMs);
-}
-
-function inlineDiagnosticSettleMs(runtime: CodeFeedbackRuntime): number {
-  return runtime.config.strict ? runtime.config.diagnostics.settleMs : 0;
-}
-
 async function maybeFormatFile(
-  formatService: FormatService | undefined,
+  formatService: FormatService,
   runtime: CodeFeedbackRuntime,
   filePath: string,
   content: string,
   changedByTool: boolean,
 ): Promise<FormatterResult | undefined> {
-  if (!formatService) return undefined;
   if (!runtime.config.autoFormat) return undefined;
   if (!changedByTool) {
     return {
@@ -537,20 +724,6 @@ function summarizeFormatter(result: FormatterResult | undefined): FormatterSumma
   };
 }
 
-function attachDiagnosticFilter(
-  event: ToolResultEvent,
-  pending: PendingEdit | undefined,
-  completed: CompletedEdit,
-  runtime: CodeFeedbackRuntime,
-  afterDiagnostics: DiagnosticSnapshot | undefined,
-): void {
-  if (!afterDiagnostics) return;
-  if (runtime.config.diagnostics.inline === "off") return;
-
-  const beforeDiagnostics = readDiagnosticSnapshotFromDetails(event.details, ["beforeDiagnostics", "preDiagnostics"]);
-  attachDiagnosticFilterFromSnapshots(beforeDiagnostics ?? pending?.beforeDiagnostics, completed, runtime, afterDiagnostics);
-}
-
 function attachDiagnosticFilterFromSnapshots(
   beforeDiagnostics: DiagnosticSnapshot | undefined,
   completed: CompletedEdit,
@@ -569,40 +742,63 @@ function attachDiagnosticFilterFromSnapshots(
     maxInline: runtime.config.diagnostics.maxInline,
     includeCrossFileRelated: runtime.config.diagnostics.includeCrossFileRelated,
   });
+  if (runtime.config.diagnostics.includeCrossFileRelated) {
+    completed.workspaceDelta = workspaceDiagnosticDelta({
+      beforeSnapshot: beforeDiagnostics,
+      afterSnapshot: afterDiagnostics,
+      touchedRanges: completed.touchedRanges,
+      linkedDiagnostics: completed.diagnosticFilter.allLinked,
+      maxDiagnostics: runtime.config.diagnostics.maxInline,
+    });
+  }
 }
 
 function scheduleDelayedDiagnosticsIfNeeded(
   firstRefresh: DiagnosticRefreshResult | undefined,
-  lspService: LspService | undefined,
+  lspService: LspService,
   runtime: CodeFeedbackRuntime,
   completed: CompletedEdit,
   beforeDiagnostics: DiagnosticSnapshot | undefined,
   finalContent: string,
+  mutationToken: FileMutationToken,
 ): void {
-  if (!lspService || !runtime.config.lsp.enabled) return;
+  if (!runtime.config.lsp.enabled) return;
   if (runtime.config.diagnostics.inline === "off") return;
   if (!firstRefresh || firstRefresh.fresh) return;
   if (completed.touchedRanges.length === 0) return;
   if (completed.diagnosticFilter?.linked.length) return;
+  if (!isFileMutationCurrent(runtime, mutationToken)) return;
+
+  const controller = startDelayedDiagnosticRequest(runtime, mutationToken);
+  if (!controller) return;
+  const finalContentHash = contentHash(finalContent);
 
   const delayedStartedAt = Date.now();
   void lspService.diagnosticsForFileDetailed(completed.filePath, finalContent, {
     timeoutMs: Math.max(runtime.config.diagnostics.delayedTimeoutMs, runtime.config.diagnostics.timeoutMs),
     settleMs: runtime.config.diagnostics.settleMs,
     snapshotScope: inlineDiagnosticSnapshotScope(runtime),
+    signal: controller.signal,
   }).then((refresh) => {
     completed.timing = addTimingPhase(completed.timing, "delayed.diagnostics", Date.now() - delayedStartedAt);
     if (!runtime.config.enabled || !runtime.config.lsp.enabled) return;
+    if (!isFileMutationCurrent(runtime, mutationToken)) return;
+    if (!fileContentMatchesHash(completed.filePath, finalContentHash)) return;
     if (!refresh?.fresh) return;
 
     attachDiagnosticFilterFromSnapshots(beforeDiagnostics, completed, runtime, refresh.snapshot);
     const text = renderDelayedDiagnosticFeedback(runtime, completed);
     if (!text) return;
+    const validationContentHashes = delayedFeedbackValidationHashes(completed, runtime.projectRoot);
+    if (!validationContentHashes) return;
 
     enqueueDelayedFeedback(runtime, {
       id: `delayed:${completed.id}`,
       editId: completed.id,
       filePath: completed.filePath,
+      mutationGeneration: mutationToken.generation,
+      contentHash: finalContentHash,
+      validationContentHashes,
       turnIndex: completed.turnIndex,
       writeIndex: completed.writeIndex,
       queuedAt: Date.now(),
@@ -610,8 +806,40 @@ function scheduleDelayedDiagnosticsIfNeeded(
     });
   }).catch((error) => {
     completed.timing = addTimingPhase(completed.timing, "delayed.diagnostics", Date.now() - delayedStartedAt);
-    runtime.lastError = error instanceof Error ? error.message : String(error);
+    if (controller.signal.aborted) return;
+    runtime.lastError = errorMessage(error);
+  }).finally(() => {
+    finishDelayedDiagnosticRequest(runtime, mutationToken, controller);
   });
+}
+
+const MAX_DELAYED_VALIDATION_FILES = 32;
+
+function delayedFeedbackValidationHashes(
+  completed: CompletedEdit,
+  projectRoot: string,
+): Array<{ filePath: string; contentHash: string }> | undefined {
+  const diagnosticUris = [
+    ...(completed.diagnosticFilter?.linked.map((entry) => entry.diagnostic.uri) ?? []),
+    ...(completed.workspaceDelta?.diagnostics.map((diagnostic) => diagnostic.uri) ?? []),
+  ];
+  const paths = new Set<string>();
+  for (const uri of diagnosticUris) {
+    const filePath = uriToFilePath(uri);
+    if (!filePath) return undefined;
+    if (pathEquals(filePath, completed.filePath)) continue;
+    if (!shouldTrackFile(filePath, projectRoot)) return undefined;
+    paths.add(path.resolve(filePath));
+    if (paths.size > MAX_DELAYED_VALIDATION_FILES) return undefined;
+  }
+
+  const hashes: Array<{ filePath: string; contentHash: string }> = [];
+  for (const filePath of paths) {
+    const content = readUtf8IfSmall(filePath).content;
+    if (content === undefined) return undefined;
+    hashes.push({ filePath, contentHash: contentHash(content) });
+  }
+  return hashes;
 }
 
 function allDiagnosticsFilter(snapshot: DiagnosticSnapshot, maxInline: number): DiagnosticFilterResult {
@@ -649,7 +877,7 @@ function compareDiagnostics(left: LspDiagnostic, right: LspDiagnostic): number {
   );
 }
 
-function appendInlineFeedback(event: ToolResultEvent, completed: CompletedEdit, runtime: CodeFeedbackRuntime, timing?: TimingRecorder): PiToolResult | void {
+function appendInlineFeedback(event: FeedbackResultSource, completed: CompletedEdit, runtime: CodeFeedbackRuntime, timing?: TimingRecorder): PiToolResult | void {
   const feedback = timing
     ? timing.measure("tool_result.render", () => renderInlineDiagnosticFeedback(runtime, completed))
     : renderInlineDiagnosticFeedback(runtime, completed);
@@ -666,7 +894,7 @@ function appendInlineFeedback(event: ToolResultEvent, completed: CompletedEdit, 
 }
 
 function appendInlineFeedbackForEdits(
-  event: ToolResultEvent,
+  event: FeedbackResultSource,
   completedEdits: CompletedEdit[],
   runtime: CodeFeedbackRuntime,
   timingsByEditId?: Map<string, TimingRecorder>,
@@ -711,16 +939,12 @@ function appendCodeFeedbackDetails(
   if (details === undefined) {
     return { [CODE_FEEDBACK_DETAILS_KEY]: feedback };
   }
-  if (!isObjectDetails(details)) return undefined;
+  if (!isRecord(details)) return undefined;
 
   return {
     ...details,
     [CODE_FEEDBACK_DETAILS_KEY]: feedback,
   };
-}
-
-function isObjectDetails(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function toCodeFeedbackEditDetails(runtime: CodeFeedbackRuntime, edit: CompletedEdit): CodeFeedbackEditDetails {
@@ -742,25 +966,28 @@ function toCodeFeedbackEditDetails(runtime: CodeFeedbackRuntime, edit: Completed
           summary: filter.summary,
         }
       : undefined,
+    workspaceDelta: edit.workspaceDelta,
   };
 }
 
 function readDetailsDiff(details: unknown): string | undefined {
-  if (!details || typeof details !== "object") return undefined;
-  const diff = (details as { diff?: unknown }).diff;
+  if (!isRecord(details)) return undefined;
+  const diff = details.diff;
   return typeof diff === "string" && diff.length > 0 ? diff : undefined;
 }
 
-function readApplyPatchResults(details: unknown): ApplyPatchResultInput[] {
-  if (!details || typeof details !== "object") return [];
-  const done = details as { stage?: unknown; results?: unknown };
+function readApplyPatchResults(details: unknown): IndexedApplyPatchResultInput[] {
+  if (!isRecord(details)) return [];
+  const done = details;
   if (done.stage !== "done" || !Array.isArray(done.results)) return [];
-  return done.results.filter(isApplyPatchResultInput);
+  return done.results.flatMap((result, operationIndex) => (
+    isApplyPatchResultInput(result) ? [{ operationIndex, result }] : []
+  ));
 }
 
 function isApplyPatchResultInput(value: unknown): value is ApplyPatchResultInput {
-  if (!value || typeof value !== "object") return false;
-  const result = value as { type?: unknown; path?: unknown; status?: unknown; change?: unknown };
+  if (!isRecord(value)) return false;
+  const result = value;
   return (
     (result.type === "create_file" || result.type === "update_file" || result.type === "delete_file") &&
     typeof result.path === "string" &&
@@ -770,8 +997,8 @@ function isApplyPatchResultInput(value: unknown): value is ApplyPatchResultInput
 }
 
 function isApplyPatchChangeInput(value: unknown): value is ApplyPatchChangeInput {
-  if (!value || typeof value !== "object") return false;
-  const change = value as { type?: unknown; content?: unknown; unifiedDiff?: unknown; movePath?: unknown };
+  if (!isRecord(value)) return false;
+  const change = value;
   if (change.type === "add" || change.type === "delete") {
     return typeof change.content === "string";
   }
@@ -789,6 +1016,11 @@ interface ApplyPatchResultInput {
   path: string;
   status: "completed" | "failed";
   change?: ApplyPatchChangeInput;
+}
+
+interface IndexedApplyPatchResultInput {
+  operationIndex: number;
+  result: ApplyPatchResultInput;
 }
 
 type ApplyPatchChangeInput =

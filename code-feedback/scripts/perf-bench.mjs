@@ -47,6 +47,10 @@ const scenarioSpecs = [
   ["lsp/fake-cold", () => runFakeLspScenario({ name: "lsp/fake-cold", iterations: 1, warmup: 0 })],
   ["lsp/fake-warm", () => runFakeLspScenario({ name: "lsp/fake-warm", iterations: baseIterations, warmup: 2 })],
   ["lsp/fake-pull-clean", () => runFakeLspScenario({ name: "lsp/fake-pull-clean", iterations: baseIterations, warmup: 2, mode: "pull-clean", expectInline: false })],
+  ["lsp/watched-no-client", () => runWatchedFilesScenario({ name: "lsp/watched-no-client", iterations: baseIterations * 100, active: false })],
+  ["lsp/watched-active", () => runWatchedFilesScenario({ name: "lsp/watched-active", iterations: baseIterations * 100, active: true })],
+  ["lsp/reconcile-no-client", () => runExternalReconciliationScenario({ name: "lsp/reconcile-no-client", iterations: baseIterations * 100, active: false })],
+  ["lsp/reconcile-open-change", () => runExternalReconciliationScenario({ name: "lsp/reconcile-open-change", iterations: baseIterations, active: true })],
   ["lsp/workspace-pull-clean-20", () => runFakeWorkspaceLspScenario(Math.max(3, Math.ceil(baseIterations / 10)))],
   ["lsp/fake-delay-200", () => runFakeLspScenario({ name: "lsp/fake-delay-200", iterations: Math.max(3, Math.ceil(baseIterations / 10)), warmup: 1, mode: "diagnostics-delay-200", inlineTimeoutMs: 80, expectInline: false })],
   ["lsp/fake-timeout-80", () => runFakeLspScenario({ name: "lsp/fake-timeout-80", iterations: Math.max(3, Math.ceil(baseIterations / 10)), warmup: 0, mode: "no-diagnostics", timeoutMs: 80, inlineTimeoutMs: 80, inline: "off" })],
@@ -134,7 +138,7 @@ async function runNontrackedToolScenario(iterations) {
     iterations,
     notes: "tool_call/tool_result for a tool this extension must ignore",
     operation: async (index) => {
-      const event = { toolName: "bash", toolCallId: `bash-${index}`, input: { command: "true" }, content: [{ type: "text", text: "" }] };
+      const event = { toolName: "read", toolCallId: `read-${index}`, input: { path: "ignored.ts" }, content: [{ type: "text", text: "" }] };
       const call = await timed("tool_call", () => handleToolCall(event, { cwd: process.cwd() }, runtime));
       const result = await timed("tool_result", () => handleToolResult(event, { cwd: process.cwd() }, runtime));
       return withTotal([call, result]);
@@ -286,7 +290,7 @@ async function runFakeWorkspaceLspScenario(iterations) {
     serverOverrides: {
       typescript: {
         command: process.execPath,
-        args: [fakeLspServer, "fake-ts", "TS100", "1", "", "pull-clean"],
+        args: [fakeLspServer, "fake-ts", "TS100", "1", "", "workspace-pull-clean"],
       },
     },
   });
@@ -296,7 +300,7 @@ async function runFakeWorkspaceLspScenario(iterations) {
       name: "lsp/workspace-pull-clean-20",
       iterations,
       warmup: 1,
-      notes: `${fileCount}-file active workspace scan through four workers; fake pull server returns authoritative clean reports`,
+      notes: `${fileCount}-file active workspace scan; one fake workspace pull returns authoritative clean reports without document fallback`,
       resources: () => lspRootPids(lspService),
       operation: async () => {
         const scan = await timed("workspace_diagnostics", () => lspService.diagnosticsForWorkspace(".", {
@@ -305,10 +309,106 @@ async function runFakeWorkspaceLspScenario(iterations) {
           settleMs: 0,
           server: "typescript",
         }));
-        if (scan.value.summary.selectedFiles !== fileCount || scan.value.summary.freshFiles !== fileCount) {
-          throw new Error("benchmark sanity check failed: expected every workspace file to refresh cleanly");
+        if (
+          scan.value.summary.selectedFiles !== fileCount ||
+          scan.value.summary.freshFiles !== fileCount ||
+          scan.value.summary.workspacePullRequests !== 1 ||
+          scan.value.summary.documentRefreshFiles !== 0
+        ) {
+          throw new Error("benchmark sanity check failed: expected one authoritative workspace pull without document fallback");
         }
         return withTotal([scan]);
+      },
+    });
+  } finally {
+    await lspService.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function runWatchedFilesScenario(options) {
+  const root = await mkdtemp(path.join(os.tmpdir(), `pi-code-feedback-perf-${sanitizeName(options.name)}-`));
+  const filePath = path.join(root, "probe.ts");
+  await writeFile(filePath, makeTsContent(0, 30), "utf8");
+  const lspService = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: options.active
+      ? {
+          typescript: {
+            command: process.execPath,
+            args: [fakeLspServer, "fake-ts", "TS100", "1", "", "diagnostics"],
+          },
+        }
+      : undefined,
+  });
+
+  try {
+    if (options.active) await lspService.capabilities(filePath);
+    return await runScenario({
+      name: options.name,
+      iterations: options.iterations,
+      notes: options.active
+        ? "one changed-file notification to an already-ready fake LSP client; no request/response wait"
+        : "one changed-file notification with no client; must not resolve or launch a language server",
+      resources: () => lspRootPids(lspService),
+      operation: async () => {
+        const notification = await timed("watched_files", () => lspService.notifyFileMutations([{ type: "changed", filePath }]));
+        return withTotal([notification]);
+      },
+    });
+  } finally {
+    await lspService.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function runExternalReconciliationScenario(options) {
+  const root = await mkdtemp(path.join(os.tmpdir(), `pi-code-feedback-perf-${sanitizeName(options.name)}-`));
+  const filePath = path.join(root, "probe.ts");
+  await writeFile(filePath, makeTsContent(0, 30), "utf8");
+  const runtime = makeRuntime(root, { enabled: true, lsp: true, format: false });
+  const lspService = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: options.active
+      ? {
+          typescript: {
+            command: process.execPath,
+            args: [fakeLspServer, "fake-ts", "TS100", "1", "", "diagnostics"],
+          },
+        }
+      : undefined,
+  });
+
+  try {
+    if (options.active) {
+      await lspService.diagnosticsForFileDetailed(filePath, makeTsContent(0, 30), { timeoutMs: 1000, settleMs: 0 });
+    }
+    return await runScenario({
+      name: options.name,
+      iterations: options.iterations,
+      notes: options.active
+        ? "successful bash-result reconciliation of one externally changed open document; file write excluded"
+        : "successful bash-result reconciliation with no open client; must not resolve or launch a language server",
+      resources: () => lspRootPids(lspService),
+      operation: async (index) => {
+        if (options.active) await writeFile(filePath, makeTsContent(index + 1, 30), "utf8");
+        const generationBefore = runtime.fileMutationCounter;
+        const reconciliation = await timed("external_reconciliation", () => handleToolResult({
+          toolName: "bash",
+          toolCallId: `bash-${index}`,
+          input: { command: "external mutation benchmark" },
+          isError: false,
+        }, { cwd: root }, runtime, lspService));
+        const expectedIncrement = options.active ? 1 : 0;
+        if (runtime.fileMutationCounter !== generationBefore + expectedIncrement) {
+          throw new Error("benchmark sanity check failed: external mutation reconciliation count did not match");
+        }
+        if (!options.active && lspService.getStatus().clients.length !== 0) {
+          throw new Error("benchmark sanity check failed: reconciliation launched a language server");
+        }
+        return withTotal([reconciliation]);
       },
     });
   } finally {
@@ -476,7 +576,7 @@ async function runTypeScriptHoverScenario(iterations) {
       counters: () => summarizeLspProxyCounters(logPath),
       resources: () => lspRootPids(lspService),
       operation: async () => {
-        const hover = await timed("hover", () => lspService.hover(filePath, 1, 15));
+        const hover = await timed("hover", () => lspService.hover(filePath, { line: 1, column: 15 }));
         assertHoverResult(hover.value);
         return withTotal([hover]);
       },
@@ -517,9 +617,11 @@ async function runTypeScriptCancelScenario(iterations) {
   };
   const client = new LspClient({
     id: "typescript",
+    role: "language",
     command: process.execPath,
     args: [lspStdioProxy, logPath, "--", tsLanguageServer, "--stdio"],
     extensions: [".ts"],
+    rootMarkers: [],
     languageId: () => "typescript",
   }, root);
 

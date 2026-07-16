@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const source = process.argv[2] ?? "fake";
 const code = process.argv[3] ?? "FAKE";
@@ -7,6 +9,12 @@ const stderrMode = process.argv[5] ?? "";
 const mode = process.argv[6] ?? "diagnostics";
 const logPath = process.argv[7];
 const delayedFirstInitialization = claimDelayedFirstInitialization(mode, logPath);
+const fixedInitializationDelay = fixedInitializeDelayMs(mode);
+const exitAfterFirstInitialization = claimFirstProcess(mode, "exit-after-initialize-once", logPath, "exit-claimed");
+
+if (mode === "initialize-error" || fixedInitializationDelay > 0 || mode === "exit-after-initialize-once" || /^hover-delay-\d+$/.test(mode)) {
+  log({ method: "process/start", pid: process.pid });
+}
 
 if (delayedFirstInitialization) {
   // Exercise clients that must detach a failed process before its late output
@@ -23,6 +31,7 @@ if (stderrMode === "warn") {
 }
 
 let buffer = Buffer.alloc(0);
+let workspaceSourceUriCache = [];
 
 process.stdin.on("data", (chunk) => {
   buffer = Buffer.concat([buffer, chunk]);
@@ -53,14 +62,40 @@ function drainMessages() {
 }
 
 function handleMessage(message) {
+  if (mode === "position-log" && message.id !== undefined && isPositionScopedMethod(message.method)) {
+    log({ method: message.method, params: message.params });
+  }
+
   if (message.id === "configuration-log-1" && ("result" in message || "error" in message)) {
     log({ method: "workspace/configuration/response", result: message.result, error: message.error });
     return;
   }
 
+  if (mode === "server-requests-log" && typeof message.id === "string" && message.id.startsWith("server-request-") && ("result" in message || "error" in message)) {
+    log({ method: "server/response", id: message.id, result: message.result, error: message.error });
+    return;
+  }
+
+  if (mode === "request-id-collision" && typeof message.id === "number" && message.method === undefined && ("result" in message || "error" in message)) {
+    log({ method: "server/colliding-response", id: message.id, result: message.result, error: message.error });
+    return;
+  }
+
   if (message.id !== undefined && message.method === "initialize") {
+    if (mode === "initialize-error") {
+      send({
+        jsonrpc: "2.0",
+        id: message.id,
+        error: { code: -32002, message: "fake deterministic initialization failure" },
+      });
+      return;
+    }
     const diagnosticProvider = diagnosticProviderCapability(mode);
-    if (diagnosticProvider) log({ method: message.method, params: message.params });
+    const workspaceRootPath = typeof message.params?.rootUri === "string"
+      ? fileURLToPath(message.params.rootUri)
+      : undefined;
+    workspaceSourceUriCache = collectWorkspaceSourceUris(workspaceRootPath);
+    if (diagnosticProvider || mode === "workspace-files-log") log({ method: message.method, params: message.params });
     const response = {
       jsonrpc: "2.0",
       id: message.id,
@@ -71,12 +106,23 @@ function handleMessage(message) {
           codeActionProvider: codeActionProviderCapability(mode),
           hoverProvider: true,
           renameProvider: true,
+          ...(fileRenameProviderCapability(mode) ? {
+            workspace: {
+              fileOperations: {
+                willRename: fileRenameProviderCapability(mode),
+              },
+            },
+          } : {}),
         },
       },
     };
-    const delayMs = delayedFirstInitialization ? initializeDelayMs(mode) : 0;
+    const delayMs = delayedFirstInitialization ? initializeDelayMs(mode) : fixedInitializationDelay;
     if (delayMs > 0) {
-      setTimeout(() => send(response), delayMs);
+      if (fixedInitializationDelay > 0) log({ method: "initialize/start", pid: process.pid });
+      setTimeout(() => {
+        if (fixedInitializationDelay > 0) log({ method: "initialize/end", pid: process.pid });
+        send(response);
+      }, delayMs);
     } else {
       send(response);
     }
@@ -125,6 +171,24 @@ function handleMessage(message) {
     return;
   }
 
+  if (message.id !== undefined && message.method === "workspace/diagnostic") {
+    log({ method: message.method, params: message.params });
+    if (mode === "workspace-pull-unsupported") {
+      send({
+        jsonrpc: "2.0",
+        id: message.id,
+        error: { code: -32601, message: "Method not found: workspace/diagnostic" },
+      });
+      return;
+    }
+
+    const delayMs = workspaceDiagnosticDelayMs(mode);
+    const respond = () => sendWorkspaceDiagnosticResponse(message);
+    if (delayMs > 0) setTimeout(respond, delayMs);
+    else respond();
+    return;
+  }
+
   if (message.id !== undefined && message.method === "textDocument/codeAction") {
     const diagnostics = message.params?.context?.diagnostics;
     const hasDiagnostics = Array.isArray(diagnostics) && diagnostics.length > 0;
@@ -147,12 +211,29 @@ function handleMessage(message) {
     return;
   }
 
+  if (message.id !== undefined && message.method === "workspace/willRenameFiles") {
+    log({ method: message.method, params: message.params });
+    const result = fileRenameEdit(message.params?.files, mode);
+    send({ jsonrpc: "2.0", id: message.id, result });
+    return;
+  }
+
   if (message.id !== undefined && message.method === "textDocument/hover") {
     const response = {
       jsonrpc: "2.0",
       id: message.id,
       result: mode === "empty" ? null : { contents: hoverContents() },
     };
+    if (mode === "request-id-collision") {
+      send({
+        jsonrpc: "2.0",
+        id: message.id,
+        method: "window/showDocument",
+        params: { uri: "file:///tmp/collision.ts" },
+      });
+      setImmediate(() => send(response));
+      return;
+    }
     const delayMs = hoverDelayMs(mode);
     if (delayMs > 0) setTimeout(() => send(response), delayMs);
     else send(response);
@@ -160,6 +241,7 @@ function handleMessage(message) {
   }
 
   if (message.id !== undefined) {
+    if (mode === "stdin-gate") log({ method: message.method, id: message.id });
     send({ jsonrpc: "2.0", id: message.id, result: null });
     return;
   }
@@ -169,20 +251,37 @@ function handleMessage(message) {
   }
 
   if (message.method === "$/cancelRequest") {
-    if (shouldLogCancel(mode)) log({ method: message.method, params: message.params });
+    if (shouldLogCancel(mode) || mode === "stdin-gate") log({ method: message.method, params: message.params });
+    return;
+  }
+
+  if (message.method === "initialized") {
+    if (exitAfterFirstInitialization) setTimeout(() => process.exit(1), 10);
+    if (mode === "server-requests-log") setImmediate(sendServerRequests);
+    if (mode === "stdin-gate") pauseStdinUntilReleased();
+    if (mode === "oversized-inbound") {
+      setTimeout(() => process.stdout.write("Content-Length: 99999999\r\n\r\n"), 20);
+    }
+    if (mode === "non-object-inbound") {
+      setTimeout(() => send(null), 20);
+    }
+    if (mode === "close-stdin") {
+      fs.closeSync(0);
+      log({ method: "stdin/closed", pid: process.pid });
+    }
     return;
   }
 
   if (message.method === "textDocument/didOpen") {
     const document = message.params?.textDocument;
-    if (mode === "sync-log") log({ method: message.method, params: message.params });
+    if (logsDocumentSync(mode)) log({ method: message.method, params: message.params });
     publishDiagnostics(document?.uri, document?.version);
     return;
   }
 
   if (message.method === "textDocument/didChange") {
     const document = message.params?.textDocument;
-    if (mode === "incremental-log" || mode === "sync-log") {
+    if (mode === "incremental-log" || logsDocumentSync(mode)) {
       log({ method: message.method, params: message.params });
     }
     publishDiagnostics(document?.uri, document?.version);
@@ -190,8 +289,32 @@ function handleMessage(message) {
   }
 
   if (message.method === "textDocument/didSave") {
-    if (mode === "sync-log") log({ method: message.method, params: message.params });
+    if (logsDocumentSync(mode)) log({ method: message.method, params: message.params });
+    return;
   }
+
+  if (
+    (mode === "workspace-files-log" || mode === "file-rename-log") &&
+    (message.method === "workspace/didChangeWatchedFiles" ||
+      message.method === "workspace/didRenameFiles" ||
+      message.method === "textDocument/didClose")
+  ) {
+    log({ method: message.method, params: message.params });
+  }
+}
+
+function isPositionScopedMethod(method) {
+  return method === "textDocument/hover" ||
+    method === "textDocument/definition" ||
+    method === "textDocument/references" ||
+    method === "textDocument/implementation" ||
+    method === "textDocument/typeDefinition" ||
+    method === "textDocument/codeAction" ||
+    method === "textDocument/rename";
+}
+
+function logsDocumentSync(value) {
+  return value === "sync-log" || value === "workspace-files-log" || value === "file-rename-log" || /^workspace-pull-delay-\d+$/.test(value);
 }
 
 function hoverContents() {
@@ -225,6 +348,44 @@ function sendWorkspaceConfigurationRequest() {
   });
 }
 
+function sendServerRequests() {
+  send({
+    jsonrpc: "2.0",
+    id: "server-request-show-document",
+    method: "window/showDocument",
+    params: { uri: "file:///tmp/fake.ts", takeFocus: true },
+  });
+  send({
+    jsonrpc: "2.0",
+    id: "server-request-refresh",
+    method: "workspace/diagnostic/refresh",
+  });
+  send({
+    jsonrpc: "2.0",
+    id: "server-request-apply-edit",
+    method: "workspace/applyEdit",
+    params: { edit: { changes: {} } },
+  });
+  send({
+    jsonrpc: "2.0",
+    id: "server-request-unknown",
+    method: "fake/unknownServerRequest",
+  });
+}
+
+function pauseStdinUntilReleased() {
+  process.stdin.pause();
+  log({ method: "stdin/paused", pid: process.pid });
+  const releasePath = `${logPath}.release`;
+  const interval = setInterval(() => {
+    if (!fs.existsSync(releasePath)) return;
+    clearInterval(interval);
+    process.stdin.resume();
+    log({ method: "stdin/resumed", pid: process.pid });
+  }, 5);
+  interval.unref?.();
+}
+
 function codeAction(uri, options = {}) {
   return {
     title: `${source} fix ${code}`,
@@ -252,12 +413,123 @@ function codeActionProviderCapability(value) {
 }
 
 function diagnosticProviderCapability(value) {
+  if (value.startsWith("workspace-pull-")) {
+    return {
+      identifier: "fake-workspace-pull",
+      interFileDependencies: true,
+      workspaceDiagnostics: true,
+    };
+  }
   if (!value.startsWith("pull-")) return undefined;
   return {
     identifier: "fake-pull",
     interFileDependencies: false,
     workspaceDiagnostics: false,
   };
+}
+
+function sendWorkspaceDiagnosticResponse(message) {
+  const reports = workspaceDiagnosticReports(message.params?.previousResultIds);
+  if (mode === "workspace-pull-malformed") {
+    send({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: {
+        items: reports.length > 0
+          ? [{ ...reports[0], kind: "full", items: [{}] }]
+          : [{ uri: "", version: null, kind: "full", items: [] }],
+      },
+    });
+    return;
+  }
+
+  if (mode === "workspace-pull-missing") {
+    send({ jsonrpc: "2.0", id: message.id, result: { items: reports.slice(0, 1) } });
+    return;
+  }
+
+  if (mode === "workspace-pull-partial") {
+    const split = Math.ceil(reports.length / 2);
+    send({
+      jsonrpc: "2.0",
+      method: "$/progress",
+      params: {
+        token: message.params?.partialResultToken,
+        value: { items: reports.slice(0, split) },
+      },
+    });
+    send({ jsonrpc: "2.0", id: message.id, result: { items: reports.slice(split) } });
+    return;
+  }
+
+  if (mode === "workspace-pull-partial-overflow") {
+    send({
+      jsonrpc: "2.0",
+      method: "$/progress",
+      params: {
+        token: message.params?.partialResultToken,
+        value: { items: Array.from({ length: 10_001 }, () => reports[0]) },
+      },
+    });
+    send({ jsonrpc: "2.0", id: message.id, result: { items: [] } });
+    return;
+  }
+
+  send({ jsonrpc: "2.0", id: message.id, result: { items: reports } });
+}
+
+function workspaceDiagnosticReports(previousResultIds) {
+  const previous = new Map(
+    Array.isArray(previousResultIds)
+      ? previousResultIds
+        .filter((entry) => typeof entry?.uri === "string" && typeof entry?.value === "string")
+        .map((entry) => [entry.uri, entry.value])
+      : [],
+  );
+  return workspaceSourceUris().map((uri, index) => {
+    if (mode === "workspace-pull-unchanged" && previous.has(uri)) {
+      return {
+        uri,
+        version: null,
+        kind: "unchanged",
+        resultId: `fake-workspace-${index}-unchanged`,
+      };
+    }
+    return {
+      uri,
+      version: null,
+      kind: "full",
+      resultId: `fake-workspace-${index}-full`,
+      items: mode === "workspace-pull-clean" ? [] : diagnosticItems(),
+    };
+  });
+}
+
+function workspaceSourceUris() {
+  return workspaceSourceUriCache;
+}
+
+function collectWorkspaceSourceUris(rootPath) {
+  if (typeof rootPath !== "string") return [];
+  const files = [];
+  const pending = [rootPath];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (entry.name === ".git" || entry.name === "node_modules") continue;
+      const candidate = `${directory}/${entry.name}`;
+      if (entry.isDirectory()) pending.push(candidate);
+      else if (entry.isFile() && /\.(?:c|cc|cpp|css|go|gleam|h|hs|html|js|json|jsx|lua|py|rs|ts|tsx|yaml|yml)$/.test(entry.name)) {
+        files.push(pathToFileURL(candidate).href);
+      }
+    }
+  }
+  return files.sort();
+}
+
+function workspaceDiagnosticDelayMs(value) {
+  const match = /^workspace-pull-delay-(\d+)$/.exec(value);
+  return match ? Number.parseInt(match[1], 10) : 0;
 }
 
 function codeActionsRequireDiagnostics(value) {
@@ -320,6 +592,49 @@ function renameEdit(uri, newName, serverMode) {
           [uri]: edits,
         },
       };
+}
+
+function fileRenameProviderCapability(value) {
+  if (!value.startsWith("file-rename-") || value === "file-rename-unsupported") return undefined;
+  return {
+    filters: [{
+      scheme: "file",
+      pattern: { glob: value === "file-rename-filter-miss" ? "**/*.rs" : "**/*", matches: "file" },
+    }],
+  };
+}
+
+function fileRenameEdit(files, serverMode) {
+  if (serverMode === "file-rename-no-edits") return null;
+  if (serverMode === "file-rename-malformed") return "malformed";
+  const pair = Array.isArray(files) ? files[0] : undefined;
+  if (typeof pair?.oldUri !== "string" || typeof pair?.newUri !== "string") return null;
+  if (serverMode === "file-rename-resource-operation") {
+    return {
+      documentChanges: [{ kind: "create", uri: new URL("generated.py", pair.oldUri).href }],
+    };
+  }
+
+  const destinationStem = path.basename(fileURLToPath(pair.newUri), path.extname(fileURLToPath(pair.newUri)));
+  const consumerUri = new URL("consumer.py", pair.oldUri).href;
+  return {
+    changes: {
+      [pair.oldUri]: [{
+        range: {
+          start: { line: 0, character: 0 },
+          end: { line: 0, character: 0 },
+        },
+        newText: "# moved by py\n",
+      }],
+      [consumerUri]: [{
+        range: {
+          start: { line: 0, character: 5 },
+          end: { line: 0, character: 11 },
+        },
+        newText: destinationStem,
+      }],
+    },
+  };
 }
 
 function publishDiagnostics(uri, version) {
@@ -403,11 +718,16 @@ function hoverDelayMs(value) {
 }
 
 function shouldLogCancel(value) {
-  return value === "cancel-log" || /^hover-delay-\d+$/.test(value);
+  return value === "cancel-log" || /^hover-delay-\d+$/.test(value) || /^workspace-pull-delay-\d+$/.test(value);
 }
 
 function initializeDelayMs(value) {
   const match = /^initialize-delay-once-(\d+)$/.exec(value);
+  return match ? Number.parseInt(match[1], 10) : 0;
+}
+
+function fixedInitializeDelayMs(value) {
+  const match = /^initialize-delay-(\d+)$/.exec(value);
   return match ? Number.parseInt(match[1], 10) : 0;
 }
 
@@ -425,6 +745,18 @@ function claimDelayedFirstInitialization(value, filePath) {
 
   fs.appendFileSync(filePath, `${JSON.stringify({ method: "process/start", pid: process.pid, delayedInitialization: first })}\n`, "utf8");
   return first;
+}
+
+function claimFirstProcess(value, expectedMode, filePath, suffix) {
+  if (value !== expectedMode || typeof filePath !== "string" || filePath.length === 0) return false;
+  try {
+    const claim = fs.openSync(`${filePath}.${suffix}`, "wx");
+    fs.closeSync(claim);
+    return true;
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    return false;
+  }
 }
 
 function send(message) {

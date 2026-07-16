@@ -205,7 +205,7 @@ function rangeConfidence(ranges: TouchedRange[], fallback: RangeConfidence): Ran
   return confidence;
 }
 
-function weakerConfidence(left: RangeConfidence, right: RangeConfidence): RangeConfidence {
+export function weakerConfidence(left: RangeConfidence, right: RangeConfidence): RangeConfidence {
   if (left === "approximate" || right === "approximate") return "approximate";
   if (left === "expanded" || right === "expanded") return "expanded";
   return "exact";
@@ -278,13 +278,13 @@ function makeRange(
   };
 }
 
-function splitLines(content: string): string[] {
+export function splitLines(content: string): string[] {
   const lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
   if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
   return lines;
 }
 
-function clampLine(line: number, maxLine: number): number {
+export function clampLine(line: number, maxLine: number): number {
   if (!Number.isFinite(line)) return 1;
   return Math.min(Math.max(1, Math.floor(line)), Math.max(1, maxLine));
 }

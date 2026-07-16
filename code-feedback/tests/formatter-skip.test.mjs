@@ -7,6 +7,7 @@ import { createDefaultConfig } from "../src/config.ts";
 import { handleToolCall } from "../src/events/tool-call.ts";
 import { handleToolResult } from "../src/events/tool-result.ts";
 import { beginTurn, createRuntime, setProjectRoot } from "../src/runtime.ts";
+import { inactiveLspService } from "./helpers/inactive-services.mjs";
 
 test("formatter is skipped when a tool result leaves file content unchanged", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-format-skip-"));
@@ -32,7 +33,7 @@ test("formatter is skipped when a tool result leaves file content unchanged", as
 
   try {
     beginTurn(runtime);
-    await handleToolCall({ toolName: "edit", toolCallId: "edit-unchanged", input: { path: "probe.ts" } }, { cwd: root }, runtime);
+    await handleToolCall({ toolName: "edit", toolCallId: "edit-unchanged", input: { path: "probe.ts" } }, { cwd: root }, runtime, inactiveLspService);
     await writeFile(filePath, content, "utf8");
     await handleToolResult(
       {
@@ -44,7 +45,7 @@ test("formatter is skipped when a tool result leaves file content unchanged", as
       },
       { cwd: root },
       runtime,
-      undefined,
+      inactiveLspService,
       formatService,
     );
 
@@ -52,7 +53,7 @@ test("formatter is skipped when a tool result leaves file content unchanged", as
     assert.equal(runtime.completedEdits.at(-1)?.formatter?.skippedReason, "unchanged by tool");
 
     beginTurn(runtime);
-    await handleToolCall({ toolName: "edit", toolCallId: "edit-changed", input: { path: "probe.ts" } }, { cwd: root }, runtime);
+    await handleToolCall({ toolName: "edit", toolCallId: "edit-changed", input: { path: "probe.ts" } }, { cwd: root }, runtime, inactiveLspService);
     await writeFile(filePath, "export const value = 2;\n", "utf8");
     await handleToolResult(
       {
@@ -67,7 +68,7 @@ test("formatter is skipped when a tool result leaves file content unchanged", as
       },
       { cwd: root },
       runtime,
-      undefined,
+      inactiveLspService,
       formatService,
     );
 

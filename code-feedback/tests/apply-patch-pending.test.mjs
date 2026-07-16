@@ -7,6 +7,7 @@ import { createDefaultConfig } from "../src/config.ts";
 import { handleToolCall } from "../src/events/tool-call.ts";
 import { handleToolResult } from "../src/events/tool-result.ts";
 import { createRuntime, setProjectRoot } from "../src/runtime.ts";
+import { inactiveFormatService, inactiveLspService } from "./helpers/inactive-services.mjs";
 
 test("failed apply_patch results discard pending edits", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-apply-patch-failed-"));
@@ -22,7 +23,7 @@ test("failed apply_patch results discard pending edits", async () => {
   };
 
   try {
-    await handleToolCall({ toolName: "apply_patch", toolCallId: "patch-1", input }, { cwd: root }, runtime);
+    await handleToolCall({ toolName: "apply_patch", toolCallId: "patch-1", input }, { cwd: root }, runtime, inactiveLspService);
     assert.equal(runtime.pendingEdits.size, 2);
 
     await handleToolResult(
@@ -41,9 +42,12 @@ test("failed apply_patch results discard pending edits", async () => {
       },
       { cwd: root },
       runtime,
+      inactiveLspService,
+      inactiveFormatService,
     );
 
     assert.equal(runtime.pendingEdits.size, 0);
+    assert.equal(runtime.fileMutationCounter, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -57,15 +61,64 @@ test("errored or malformed apply_patch results discard the pending batch", async
   const input = { operations: [{ type: "update_file", path: "probe.ts" }] };
 
   try {
-    await handleToolCall({ toolName: "apply_patch", toolCallId: "patch-error", input }, { cwd: root }, runtime);
+    await handleToolCall({ toolName: "apply_patch", toolCallId: "patch-error", input }, { cwd: root }, runtime, inactiveLspService);
     assert.equal(runtime.pendingEdits.size, 1);
-    await handleToolResult({ toolName: "apply_patch", toolCallId: "patch-error", input, isError: true }, { cwd: root }, runtime);
+    await handleToolResult({ toolName: "apply_patch", toolCallId: "patch-error", input, isError: true }, { cwd: root }, runtime, inactiveLspService, inactiveFormatService);
     assert.equal(runtime.pendingEdits.size, 0);
+    assert.equal(runtime.fileMutationCounter, 0);
 
-    await handleToolCall({ toolName: "apply_patch", toolCallId: "patch-empty", input }, { cwd: root }, runtime);
+    await handleToolCall({ toolName: "apply_patch", toolCallId: "patch-empty", input }, { cwd: root }, runtime, inactiveLspService);
     assert.equal(runtime.pendingEdits.size, 1);
-    await handleToolResult({ toolName: "apply_patch", toolCallId: "patch-empty", input, details: {}, isError: false }, { cwd: root }, runtime);
+    await handleToolResult({ toolName: "apply_patch", toolCallId: "patch-empty", input, details: {}, isError: false }, { cwd: root }, runtime, inactiveLspService, inactiveFormatService);
     assert.equal(runtime.pendingEdits.size, 0);
+    assert.equal(runtime.fileMutationCounter, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("malformed apply_patch results do not shift later operation indexes", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-apply-patch-index-"));
+  for (const name of ["a.ts", "b.ts", "c.ts"]) {
+    await writeFile(path.join(root, name), `export const value = ${JSON.stringify(name)};\n`, "utf8");
+  }
+
+  const runtime = runtimeFor(root);
+  const input = {
+    operations: ["a.ts", "b.ts", "c.ts"].map((filePath) => ({ type: "update_file", path: filePath })),
+  };
+
+  try {
+    await handleToolCall({ toolName: "apply_patch", toolCallId: "patch-index", input }, { cwd: root }, runtime, inactiveLspService);
+    assert.equal(runtime.pendingEdits.size, 3);
+    await writeFile(path.join(root, "c.ts"), "export const value = 3;\n", "utf8");
+
+    await handleToolResult(
+      {
+        toolName: "apply_patch",
+        toolCallId: "patch-index",
+        input,
+        details: {
+          stage: "done",
+          results: [
+            { type: "update_file", path: "a.ts", status: "failed" },
+            null,
+            { type: "update_file", path: "c.ts", status: "completed" },
+          ],
+        },
+        isError: false,
+      },
+      { cwd: root },
+      runtime,
+      inactiveLspService,
+      inactiveFormatService,
+    );
+
+    assert.equal(runtime.pendingEdits.size, 0);
+    assert.equal(runtime.completedEdits.length, 1);
+    assert.equal(runtime.completedEdits[0].filePath, path.join(root, "c.ts"));
+    assert.equal(runtime.completedEdits[0].applyPatchOperationIndex, 2);
+    assert.deepEqual([...runtime.fileMutationGenerations.keys()], [path.join(root, "c.ts")]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -80,7 +133,7 @@ test("completed apply_patch results use persisted unifiedDiff changes", async ()
   const input = { operations: [{ type: "update_file", path: "probe.ts" }] };
 
   try {
-    await handleToolCall({ toolName: "apply_patch", toolCallId: "patch-change", input }, { cwd: root }, runtime);
+    await handleToolCall({ toolName: "apply_patch", toolCallId: "patch-change", input }, { cwd: root }, runtime, inactiveLspService);
     await writeFile(filePath, "export const a = 1;\nexport const b = 2;\n", "utf8");
 
     await handleToolResult(
@@ -114,6 +167,8 @@ test("completed apply_patch results use persisted unifiedDiff changes", async ()
       },
       { cwd: root },
       runtime,
+      inactiveLspService,
+      inactiveFormatService,
     );
 
     assert.equal(runtime.completedEdits.length, 1);

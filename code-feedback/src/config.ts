@@ -1,6 +1,15 @@
 import type { FeedbackConfig } from "./types.ts";
 import type { PiApi } from "./pi.ts";
-import { DEFAULT_DIAGNOSTIC_REFRESH_CONCURRENCY, normalizeDiagnosticRefreshConcurrency } from "./lsp/diagnostic-refresh.ts";
+import {
+  DEFAULT_LSP_INITIALIZATION_CONCURRENCY,
+  DEFAULT_DIAGNOSTIC_REFRESH_CONCURRENCY,
+  DEFAULT_MAX_ACTIVE_LSP_CLIENTS,
+  MAX_ACTIVE_LSP_CLIENTS,
+  MAX_LSP_INITIALIZATION_CONCURRENCY,
+  normalizeLspInitializationConcurrency,
+  normalizeDiagnosticRefreshConcurrency,
+  normalizeMaxActiveLspClients,
+} from "./lsp/client-resources.ts";
 
 export function createDefaultConfig(): FeedbackConfig {
   return {
@@ -20,79 +29,101 @@ export function createDefaultConfig(): FeedbackConfig {
     lsp: {
       enabled: true,
       idleTimeoutMs: 240_000,
+      maxActiveClients: DEFAULT_MAX_ACTIVE_LSP_CLIENTS,
+      initializationConcurrency: DEFAULT_LSP_INITIALIZATION_CONCURRENCY,
       diagnosticRefreshConcurrency: DEFAULT_DIAGNOSTIC_REFRESH_CONCURRENCY,
     },
   };
 }
 
 export function registerFlags(pi: PiApi): void {
-  pi.registerFlag?.("no-code-feedback", {
+  pi.registerFlag("no-code-feedback", {
     description: "Disable code-feedback for this session.",
     type: "boolean",
     default: false,
   });
 
-  pi.registerFlag?.("code-feedback-no-lsp", {
+  pi.registerFlag("code-feedback-no-lsp", {
     description: "Disable code-feedback LSP clients and inline LSP diagnostics.",
     type: "boolean",
     default: false,
   });
 
-  pi.registerFlag?.("code-feedback-no-format", {
+  pi.registerFlag("code-feedback-no-format", {
     description: "Disable code-feedback automatic formatter pass.",
     type: "boolean",
     default: false,
   });
 
-  pi.registerFlag?.("code-feedback-no-context", {
+  pi.registerFlag("code-feedback-no-context", {
     description: "Disable delayed LSP diagnostics injection into model context while keeping LSP feedback and formatting active.",
     type: "boolean",
     default: false,
   });
 
-  pi.registerFlag?.("code-feedback-strict", {
+  pi.registerFlag("code-feedback-strict", {
     description: "Treat linked error diagnostics as edit errors.",
     type: "boolean",
     default: false,
   });
 
-  pi.registerFlag?.("code-feedback-all-diagnostics", {
+  pi.registerFlag("code-feedback-all-diagnostics", {
     description: "Inline all diagnostics instead of only touched/provenance-linked diagnostics.",
     type: "boolean",
     default: false,
   });
 
-  pi.registerFlag?.("code-feedback-lsp-concurrency", {
+  pi.registerFlag("code-feedback-lsp-concurrency", {
     description: `Max concurrent LSP diagnostic refreshes across different files (1-16, default ${DEFAULT_DIAGNOSTIC_REFRESH_CONCURRENCY}).`,
     type: "string",
     default: String(DEFAULT_DIAGNOSTIC_REFRESH_CONCURRENCY),
+  });
+
+  pi.registerFlag("code-feedback-lsp-max-clients", {
+    description: `Max simultaneously active LSP client processes (1-${MAX_ACTIVE_LSP_CLIENTS}, default ${DEFAULT_MAX_ACTIVE_LSP_CLIENTS}).`,
+    type: "string",
+    default: String(DEFAULT_MAX_ACTIVE_LSP_CLIENTS),
+  });
+
+  pi.registerFlag("code-feedback-lsp-start-concurrency", {
+    description: `Max simultaneous LSP initializations (1-${MAX_LSP_INITIALIZATION_CONCURRENCY}, default ${DEFAULT_LSP_INITIALIZATION_CONCURRENCY}).`,
+    type: "string",
+    default: String(DEFAULT_LSP_INITIALIZATION_CONCURRENCY),
   });
 }
 
 export function resolveConfig(pi: PiApi): FeedbackConfig {
   const config = createDefaultConfig();
 
-  if (pi.getFlag?.("no-code-feedback")) {
+  if (pi.getFlag("no-code-feedback")) {
     config.enabled = false;
   }
-  if (pi.getFlag?.("code-feedback-no-lsp")) {
+  if (pi.getFlag("code-feedback-no-lsp")) {
     config.lsp.enabled = false;
   }
-  if (pi.getFlag?.("code-feedback-no-format")) {
+  if (pi.getFlag("code-feedback-no-format")) {
     config.autoFormat = false;
   }
-  if (pi.getFlag?.("code-feedback-no-context")) {
+  if (pi.getFlag("code-feedback-no-context")) {
     config.contextInjection = false;
   }
-  if (pi.getFlag?.("code-feedback-strict")) {
+  if (pi.getFlag("code-feedback-strict")) {
     config.strict = true;
   }
-  if (pi.getFlag?.("code-feedback-all-diagnostics")) {
+  if (pi.getFlag("code-feedback-all-diagnostics")) {
     config.diagnostics.inline = "all";
   }
   config.lsp.diagnosticRefreshConcurrency = normalizeDiagnosticRefreshConcurrency(
-    pi.getFlag?.("code-feedback-lsp-concurrency"),
+    pi.getFlag("code-feedback-lsp-concurrency"),
     config.lsp.diagnosticRefreshConcurrency,
+  );
+  config.lsp.maxActiveClients = normalizeMaxActiveLspClients(
+    pi.getFlag("code-feedback-lsp-max-clients"),
+    config.lsp.maxActiveClients,
+  );
+  config.lsp.initializationConcurrency = normalizeLspInitializationConcurrency(
+    pi.getFlag("code-feedback-lsp-start-concurrency"),
+    config.lsp.initializationConcurrency,
   );
 
   return config;

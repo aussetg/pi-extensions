@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import { uriToFilePath } from "../lsp/positions.ts";
 import { diagnosticSeverityRank, flattenDiagnosticSnapshot } from "./snapshots.ts";
 import type {
   DiagnosticFilterResult,
@@ -8,9 +8,15 @@ import type {
   LinkedDiagnostic,
   LspDiagnostic,
   TouchedRange,
+  WorkspaceDiagnosticDelta,
 } from "../types.ts";
 
 const NEARBY_TOUCHED_LINES = 2;
+export const MAX_WORKSPACE_DELTA_DIAGNOSTICS = 20;
+const MAX_WORKSPACE_DELTA_URI_CHARS = 2_048;
+const MAX_WORKSPACE_DELTA_MESSAGE_CHARS = 1_000;
+const MAX_WORKSPACE_DELTA_SOURCE_CHARS = 128;
+const MAX_WORKSPACE_DELTA_CODE_CHARS = 256;
 
 export interface LinkDiagnosticsInput {
   beforeSnapshot?: DiagnosticSnapshot;
@@ -58,9 +64,72 @@ export function linkDiagnosticsToTouchedRanges(input: LinkDiagnosticsInput): Dia
   };
 }
 
+export interface WorkspaceDiagnosticDeltaInput {
+  beforeSnapshot?: DiagnosticSnapshot;
+  afterSnapshot: DiagnosticSnapshot;
+  touchedRanges: TouchedRange[];
+  linkedDiagnostics?: LinkedDiagnostic[];
+  maxDiagnostics: number;
+}
+
+/**
+ * Returns a bounded, deliberately non-causal view of diagnostics that appeared
+ * or worsened on files other than the edited file. These are useful project
+ * signals, but they must not be treated as touched-range attribution.
+ */
+export function workspaceDiagnosticDelta(input: WorkspaceDiagnosticDeltaInput): WorkspaceDiagnosticDelta | undefined {
+  if (!input.beforeSnapshot || input.touchedRanges.length === 0) return undefined;
+
+  const beforeSeverityByIdentity = buildBeforeSeverityMap(input.beforeSnapshot);
+  const linked = new Set((input.linkedDiagnostics ?? []).map((entry) => entry.diagnostic));
+  const seen = new Set<string>();
+  const candidates: LspDiagnostic[] = [];
+
+  for (const diagnostic of flattenDiagnosticSnapshot(input.afterSnapshot)) {
+    if (linked.has(diagnostic)) continue;
+    if (input.touchedRanges.some((range) => sameLocation(diagnostic.uri, range.uri, range.filePath))) continue;
+    if (!diagnosticIsNewOrWorsened(diagnostic, beforeSeverityByIdentity, true)) continue;
+
+    const identity = diagnosticIdentity(diagnostic);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    candidates.push(diagnostic);
+  }
+
+  if (candidates.length === 0) return undefined;
+  candidates.sort(compareDiagnostics);
+  const limit = Math.min(MAX_WORKSPACE_DELTA_DIAGNOSTICS, Math.max(0, Math.floor(input.maxDiagnostics)));
+  const diagnostics = candidates.slice(0, limit);
+  return {
+    label: "possible workspace impact",
+    diagnostics: diagnostics.map(boundWorkspaceDeltaDiagnostic),
+    summary: {
+      totalNewOrWorsened: candidates.length,
+      shownDiagnostics: diagnostics.length,
+      hiddenByLimit: Math.max(0, candidates.length - diagnostics.length),
+    },
+  };
+}
+
+function boundWorkspaceDeltaDiagnostic(diagnostic: LspDiagnostic): LspDiagnostic {
+  return {
+    uri: truncateText(diagnostic.uri, MAX_WORKSPACE_DELTA_URI_CHARS),
+    range: diagnostic.range,
+    severity: diagnostic.severity,
+    message: truncateText(diagnostic.message, MAX_WORKSPACE_DELTA_MESSAGE_CHARS),
+    source: diagnostic.source === undefined ? undefined : truncateText(diagnostic.source, MAX_WORKSPACE_DELTA_SOURCE_CHARS),
+    code: typeof diagnostic.code === "string" ? truncateText(diagnostic.code, MAX_WORKSPACE_DELTA_CODE_CHARS) : diagnostic.code,
+    version: diagnostic.version,
+  };
+}
+
+function truncateText(value: string, maxChars: number): string {
+  return value.length <= maxChars ? value : `${value.slice(0, Math.max(0, maxChars - 1))}…`;
+}
+
 export function diagnosticOverlapsTouchedRange(diagnostic: LspDiagnostic, touchedRange: TouchedRange): boolean {
   if (!sameLocation(diagnostic.uri, touchedRange.uri, touchedRange.filePath)) return false;
-  const diagnosticRange = diagnosticLineRange(diagnostic);
+  const diagnosticRange = externalRangeLineSpan(diagnostic.range);
   return diagnosticRange.startLine <= touchedRange.endLine && diagnosticRange.endLine >= touchedRange.startLine;
 }
 
@@ -91,7 +160,7 @@ function findDiagnosticLink(
 
   for (const touchedRange of touchedRanges) {
     if (!sameLocation(diagnostic.uri, touchedRange.uri, touchedRange.filePath)) continue;
-    const diagnosticRange = diagnosticLineRange(diagnostic);
+    const diagnosticRange = externalRangeLineSpan(diagnostic.range);
     if (diagnosticRange.startLine <= touchedRange.endLine + NEARBY_TOUCHED_LINES && diagnosticRange.endLine >= touchedRange.startLine - NEARBY_TOUCHED_LINES) {
       return { reason: "new-on-touched-file", touchedRange };
     }
@@ -151,9 +220,20 @@ function compareLinkedDiagnostics(left: LinkedDiagnostic, right: LinkedDiagnosti
     diagnosticSeverityRank(right.diagnostic.severity) - diagnosticSeverityRank(left.diagnostic.severity) ||
     linkReasonRank(left.linkReason) - linkReasonRank(right.linkReason) ||
     normalizeUri(left.diagnostic.uri).localeCompare(normalizeUri(right.diagnostic.uri)) ||
-    diagnosticLineRange(left.diagnostic).startLine - diagnosticLineRange(right.diagnostic).startLine ||
+    externalRangeLineSpan(left.diagnostic.range).startLine - externalRangeLineSpan(right.diagnostic.range).startLine ||
     String(left.diagnostic.code ?? "").localeCompare(String(right.diagnostic.code ?? "")) ||
     left.diagnostic.message.localeCompare(right.diagnostic.message)
+  );
+}
+
+function compareDiagnostics(left: LspDiagnostic, right: LspDiagnostic): number {
+  return (
+    diagnosticSeverityRank(right.severity) - diagnosticSeverityRank(left.severity) ||
+    normalizeUri(left.uri).localeCompare(normalizeUri(right.uri)) ||
+    externalRangeLineSpan(left.range).startLine - externalRangeLineSpan(right.range).startLine ||
+    normalizeLine(left.range.start.character) - normalizeLine(right.range.start.character) ||
+    String(left.code ?? "").localeCompare(String(right.code ?? "")) ||
+    left.message.localeCompare(right.message)
   );
 }
 
@@ -170,10 +250,6 @@ function linkReasonRank(reason: DiagnosticLinkReason): number {
     case "all-diagnostics":
       return 4;
   }
-}
-
-function diagnosticLineRange(diagnostic: LspDiagnostic): { startLine: number; endLine: number } {
-  return externalRangeLineSpan(diagnostic.range);
 }
 
 function externalRangeLineSpan(range: LspDiagnostic["range"]): { startLine: number; endLine: number } {
@@ -212,12 +288,7 @@ function normalizeUri(uri: string): string {
 }
 
 function uriToPath(uri: string): string | undefined {
-  try {
-    if (uri.startsWith("file:")) return fileURLToPath(uri);
-  } catch {
-    return undefined;
-  }
-  return path.isAbsolute(uri) ? uri : undefined;
+  return uriToFilePath(uri) ?? (path.isAbsolute(uri) ? uri : undefined);
 }
 
 function normalizeLine(line: number): number {

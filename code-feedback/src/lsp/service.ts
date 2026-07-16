@@ -1,22 +1,44 @@
 import { createHash } from "node:crypto";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { countDiagnosticSnapshotDiagnostics, createDiagnosticSnapshot, flattenDiagnosticSnapshot } from "../diagnostics/snapshots.ts";
-import { DEFAULT_LSP_SOURCE_FILE_MAX_BYTES, formatBytes, readUtf8IfSmall } from "../fs.ts";
+import { errorMessage, isErrorCode } from "../errors.ts";
+import { DEFAULT_LSP_SOURCE_FILE_MAX_BYTES, formatBytes, readDescriptorUpTo, readUtf8IfSmall, realpathIfExists } from "../fs.ts";
 import { resolveWorkspaceRootForPath } from "../language-environments.ts";
-import { LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY, type DiagnosticRefreshResult, type DiagnosticSnapshot, type LspDiagnostic, type LspServiceStatus, type LspUnavailableServer, type WorkspaceDiagnosticFileResult, type WorkspaceDiagnosticScanResult } from "../types.ts";
+import { isInsideOrEqual } from "../paths.ts";
+import { contentHash } from "../runtime.ts";
+import { isRecord, LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY, type DiagnosticRefreshResult, type DiagnosticSnapshot, type LspDiagnostic, type LspServiceStatus, type LspUnavailableServer, type WorkspaceDiagnosticFileResult, type WorkspaceDiagnosticScanResult } from "../types.ts";
 import { abortError, isCancellation, throwIfAborted } from "./cancellation.ts";
-import { LspClient, type DiagnosticSnapshotScope } from "./client.ts";
-import { normalizeDiagnosticRefreshConcurrency } from "./diagnostic-refresh.ts";
-import { externalPositionToLsp, filePathToUri, oneLineLspRange, type LspPosition } from "./positions.ts";
+import { LspClient, type DiagnosticSnapshotScope, type OpenDocumentState } from "./client.ts";
+import { normalizeDiagnosticRefreshConcurrency, normalizeLspInitializationConcurrency, normalizeMaxActiveLspClients } from "./client-resources.ts";
+import {
+  lspFileMutationPaths,
+  MAX_RECONCILED_OPEN_DOCUMENT_BYTES,
+  MAX_RECONCILED_OPEN_DOCUMENT_TOTAL_BYTES,
+  MAX_RECONCILED_OPEN_DOCUMENTS,
+  type LspFileMutation,
+  type OpenDocumentReconciliationOptions,
+  type OpenDocumentReconciliationResult,
+} from "./file-mutations.ts";
+import { externalPositionToLsp, filePathToUri, oneLineLspRange, resolveExternalPositionTarget, type ExternalPositionTarget, type LspPosition } from "./positions.ts";
 import type { LanguageServerConfiguration } from "./server-config.ts";
-import { configuredLanguageServerIds, languageServerExtensions, resolveLanguageServers, type LanguageServerDefinition, type ResolvedLanguageServer } from "./servers.ts";
-import { discoverWorkspaceDiagnosticFiles, MAX_WORKSPACE_DIAGNOSTIC_ENTRIES, normalizeWorkspaceDiagnosticFileLimit, readWorkspaceDiagnosticSource, type WorkspaceDiagnosticSourceReadResult } from "./workspace-diagnostics.ts";
-import { canResolveCodeActionOnApply } from "./workspace-edit.ts";
+import { configuredLanguageServerIds, languageServerExtensions, languageServerRootMarkers, resolveLanguageServers, type LanguageServerDefinition, type LanguageServerRootCache, type ResolvedLanguageServer } from "./servers.ts";
+import {
+  discoverWorkspaceDiagnosticFiles,
+  MAX_WORKSPACE_DIAGNOSTIC_ENTRIES,
+  normalizeWorkspaceDiagnosticFileLimit,
+  readWorkspaceDiagnosticSource,
+  type WorkspaceDiagnosticDiscovery,
+  type WorkspaceDiagnosticSourceReadResult,
+} from "./workspace-diagnostics.ts";
+import { canResolveCodeActionOnApply, resolveFileRenameOperation } from "./workspace-edit.ts";
 
 export interface LspServiceConfiguration {
   projectRoot: string;
   trustedEnvironmentRoots?: string[];
   idleTimeoutMs: number;
+  maxActiveClients?: number;
+  initializationConcurrency?: number;
   diagnosticRefreshConcurrency?: number;
   serverConfiguration?: LanguageServerConfiguration;
 }
@@ -29,6 +51,7 @@ export interface DiagnosticsForFileOptions {
   timeoutMs: number;
   settleMs: number;
   snapshotScope?: DiagnosticSnapshotScope;
+  forceFresh?: boolean;
   server?: string;
   signal?: AbortSignal;
 }
@@ -41,12 +64,18 @@ export interface WorkspaceDiagnosticsOptions {
   signal?: AbortSignal;
 }
 
-const CODE_ACTION_DIAGNOSTIC_TIMEOUT_MS = 1200;
+export const EXPLICIT_LSP_DIAGNOSTIC_TIMEOUT_MS = 10_000;
 
 interface ClientRequestResult {
   client: LspClient;
   result?: unknown;
   error?: string;
+}
+
+interface PositionedDocument {
+  filePath: string;
+  content: string;
+  position: LspPosition;
 }
 
 interface DiagnosticRefreshJob {
@@ -70,38 +99,186 @@ interface DiagnosticRefreshWaiter {
   onAbort?: () => void;
 }
 
+interface ClientStartWaiter {
+  client: LspClient;
+  resolve: (release: () => void) => void;
+  reject: (error: Error) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+  settled: boolean;
+}
+
+interface WorkspaceDiagnosticFilePlan {
+  index: number;
+  filePath: string;
+  uri: string;
+  content: string;
+  contentHash: string;
+  clients: LspClient[];
+}
+
+interface WorkspaceDiagnosticClientFileResult {
+  outcome: "fresh" | "timed-out" | "unavailable";
+  snapshot?: DiagnosticSnapshot;
+  reason?: string;
+  contentHash?: string;
+  protocol?: "workspace-pull" | "document-refresh";
+}
+
+interface WorkspaceDiagnosticFallbackPlan {
+  plan: WorkspaceDiagnosticFilePlan;
+  content: string;
+  contentHash: string;
+}
+
+interface WorkspaceDiagnosticExecutionStats {
+  workspacePullRequests: number;
+  workspacePullFailures: number;
+  workspacePullFiles: Set<string>;
+  documentRefreshFiles: Set<string>;
+}
+
+interface AsyncPermitWaiter {
+  resolve: (release: () => void) => void;
+  reject: (error: Error) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+  settled: boolean;
+}
+
+class AsyncPermitPool {
+  private active = 0;
+  private readonly waiters: AsyncPermitWaiter[] = [];
+  private readonly limit: number;
+
+  constructor(limit: number) {
+    this.limit = limit;
+  }
+
+  async run<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const release = await this.acquire(signal);
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  private acquire(signal?: AbortSignal): Promise<() => void> {
+    throwIfAborted(signal);
+    if (this.active < this.limit) {
+      this.active += 1;
+      return Promise.resolve(this.releasePermit());
+    }
+
+    return new Promise((resolve, reject) => {
+      const waiter: AsyncPermitWaiter = { resolve, reject, signal, settled: false };
+      if (signal) {
+        waiter.onAbort = () => {
+          if (waiter.settled) return;
+          waiter.settled = true;
+          signal.removeEventListener("abort", waiter.onAbort!);
+          reject(abortError(signal));
+        };
+        signal.addEventListener("abort", waiter.onAbort, { once: true });
+      }
+      this.waiters.push(waiter);
+      if (signal?.aborted) waiter.onAbort?.();
+    });
+  }
+
+  private releasePermit(): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      while (this.waiters.length > 0) {
+        const waiter = this.waiters.shift()!;
+        if (waiter.settled) continue;
+        waiter.settled = true;
+        if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+        waiter.resolve(this.releasePermit());
+        return;
+      }
+      this.active = Math.max(0, this.active - 1);
+    };
+  }
+}
+
+type ClientEvictionReason = "idle" | "capacity";
+
 export class LspService {
   private projectRoot: string;
   private readonly serverOverrides: Record<string, unknown>;
   private serverConfiguration?: LanguageServerConfiguration;
   private trustedEnvironmentRoots: string[];
   private idleTimeoutMs: number;
+  private maxActiveClients: number;
+  private initializationConcurrency: number;
   private diagnosticRefreshConcurrency: number;
   private clients = new Map<string, LspClient>();
   private unavailableServers = new Map<string, LspUnavailableServer>();
+  private rootCache: LanguageServerRootCache = new Map();
+  private rootMarkerNames: Set<string>;
   private idleTimer?: NodeJS.Timeout;
+  private idleSweepRunning = false;
+  private startQueue: ClientStartWaiter[] = [];
+  private initializingClients = new Set<LspClient>();
+  private evictingClients = new Set<LspClient>();
+  private resourcePumpScheduled = false;
+  private resourcePumpRunning = false;
+  private resourcePumpRequested = false;
+  private startsPaused = false;
+  private clientStartCount = 0;
+  private clientRestartCount = 0;
+  private clientEvictionCount = 0;
+  private idleEvictionCount = 0;
+  private capacityEvictionCount = 0;
+  private initializationCooldownCount = 0;
   private diagnosticQueue: DiagnosticRefreshJob[] = [];
   private queuedDiagnosticRefreshes = new Map<string, DiagnosticRefreshJob>();
   private runningDiagnosticRefreshes = new Map<string, DiagnosticRefreshJob>();
   private runningDiagnosticRefreshFiles = new Set<string>();
   private diagnosticPumpScheduled = false;
+  private workspaceDiagnosticClients = new Set<LspClient>();
+  private openDocumentReconciliationCursor = 0;
 
   constructor(options: LspServiceOptions) {
     this.projectRoot = path.resolve(options.projectRoot);
     this.serverOverrides = options.serverOverrides ?? {};
     this.serverConfiguration = options.serverConfiguration;
+    this.rootMarkerNames = languageServerRootMarkers(options.serverConfiguration?.servers);
     this.trustedEnvironmentRoots = options.trustedEnvironmentRoots?.map((root) => path.resolve(root)) ?? [];
     this.idleTimeoutMs = options.idleTimeoutMs;
+    this.maxActiveClients = normalizeMaxActiveLspClients(options.maxActiveClients);
+    this.initializationConcurrency = normalizeLspInitializationConcurrency(options.initializationConcurrency);
     this.diagnosticRefreshConcurrency = normalizeDiagnosticRefreshConcurrency(options.diagnosticRefreshConcurrency);
   }
 
   configure(options: LspServiceConfiguration): void {
-    this.projectRoot = path.resolve(options.projectRoot);
-    if (options.serverConfiguration !== undefined) this.serverConfiguration = options.serverConfiguration;
-    this.trustedEnvironmentRoots = options.trustedEnvironmentRoots?.map((root) => path.resolve(root)) ?? [];
+    const projectRoot = path.resolve(options.projectRoot);
+    const trustedEnvironmentRoots = options.trustedEnvironmentRoots?.map((root) => path.resolve(root)) ?? [];
+    const serverConfigurationChanged = options.serverConfiguration !== undefined && options.serverConfiguration !== this.serverConfiguration;
+    if (
+      projectRoot !== this.projectRoot ||
+      serverConfigurationChanged ||
+      !samePaths(trustedEnvironmentRoots, this.trustedEnvironmentRoots)
+    ) {
+      this.rootCache.clear();
+      this.openDocumentReconciliationCursor = 0;
+    }
+    this.projectRoot = projectRoot;
+    if (options.serverConfiguration !== undefined) {
+      this.serverConfiguration = options.serverConfiguration;
+      this.rootMarkerNames = languageServerRootMarkers(options.serverConfiguration.servers);
+    }
+    this.trustedEnvironmentRoots = trustedEnvironmentRoots;
     this.idleTimeoutMs = options.idleTimeoutMs;
+    this.maxActiveClients = normalizeMaxActiveLspClients(options.maxActiveClients, this.maxActiveClients);
+    this.initializationConcurrency = normalizeLspInitializationConcurrency(options.initializationConcurrency, this.initializationConcurrency);
     this.diagnosticRefreshConcurrency = normalizeDiagnosticRefreshConcurrency(options.diagnosticRefreshConcurrency, this.diagnosticRefreshConcurrency);
     this.armIdleTimer();
+    this.scheduleResourcePump();
     this.scheduleDiagnosticPump();
   }
 
@@ -119,8 +296,10 @@ export class LspService {
     if (finalContent === undefined) {
       const now = Date.now();
       return {
-        snapshot: diagnosticSnapshotForClients(clients, filePathToUri(resolved), options.snapshotScope),
-        fresh: true,
+        snapshot: options.forceFresh
+          ? createDiagnosticSnapshot([])
+          : diagnosticSnapshotForClients(clients, filePathToUri(resolved), options.snapshotScope),
+        fresh: options.forceFresh !== true,
         timedOut: false,
         requestedAt: now,
         completedAt: now,
@@ -152,65 +331,99 @@ export class LspService {
     });
     const files = new Array<WorkspaceDiagnosticFileResult>(discovery.files.length);
     const snapshots = new Array<DiagnosticSnapshot | undefined>(discovery.files.length);
-    let nextIndex = 0;
+    const plans: WorkspaceDiagnosticFilePlan[] = [];
+    const plansByClient = new Map<LspClient, WorkspaceDiagnosticFilePlan[]>();
 
-    const worker = async () => {
-      while (true) {
-        throwIfAborted(options.signal);
-        const index = nextIndex++;
-        if (index >= discovery.files.length) return;
-        const filePath = discovery.files[index];
-        const source = readWorkspaceDiagnosticSource(discovery, filePath, DEFAULT_LSP_SOURCE_FILE_MAX_BYTES);
-        if (source.content === undefined) {
-          files[index] = {
-            filePath,
-            outcome: "skipped",
-            diagnostics: 0,
-            reason: workspaceSourceSkipReason(source),
-          };
-          continue;
-        }
+    for (let index = 0; index < discovery.files.length; index += 1) {
+      throwIfAborted(options.signal);
+      const filePath = discovery.files[index];
+      const source = readWorkspaceDiagnosticSource(discovery, filePath, DEFAULT_LSP_SOURCE_FILE_MAX_BYTES);
+      if (source.content === undefined) {
+        files[index] = {
+          filePath,
+          outcome: "skipped",
+          diagnostics: 0,
+          reason: workspaceSourceSkipReason(source),
+        };
+        continue;
+      }
 
-        try {
-          const refresh = await this.diagnosticsForFileDetailed(filePath, source.content, {
-            timeoutMs: options.timeoutMs,
-            settleMs: options.settleMs,
-            snapshotScope: "file",
-            server: options.server,
-            signal: options.signal,
-          });
-          if (!refresh) {
-            files[index] = {
-              filePath,
-              outcome: "unavailable",
-              diagnostics: 0,
-              reason: "no available language server matched the file",
-            };
-            continue;
-          }
-
-          snapshots[index] = refresh.snapshot;
-          files[index] = {
-            filePath,
-            outcome: refresh.fresh ? "fresh" : refresh.timedOut ? "timed-out" : "unavailable",
-            diagnostics: countDiagnosticSnapshotDiagnostics(refresh.snapshot),
-            ...(!refresh.fresh && !refresh.timedOut ? { reason: "diagnostic refresh was not authoritative" } : {}),
-          };
-        } catch (error) {
-          if (isCancellation(error, options.signal)) throw error;
+      try {
+        const clients = this.getOrCreateClients(filePath, options.server, options.server !== undefined);
+        if (clients.length === 0) {
           files[index] = {
             filePath,
             outcome: "unavailable",
             diagnostics: 0,
-            reason: error instanceof Error ? error.message : String(error),
+            reason: "no available language server matched the file",
           };
+          continue;
         }
-      }
-    };
 
-    const workerCount = Math.min(this.diagnosticRefreshConcurrency, discovery.files.length);
-    await Promise.all(Array.from({ length: workerCount }, worker));
+        const plan: WorkspaceDiagnosticFilePlan = {
+          index,
+          filePath,
+          uri: filePathToUri(filePath),
+          content: source.content,
+          contentHash: contentHash(source.content),
+          clients,
+        };
+        plans.push(plan);
+        for (const client of clients) {
+          const clientPlans = plansByClient.get(client) ?? [];
+          clientPlans.push(plan);
+          plansByClient.set(client, clientPlans);
+        }
+      } catch (error) {
+        if (isCancellation(error, options.signal)) throw error;
+        files[index] = {
+          filePath,
+          outcome: "unavailable",
+          diagnostics: 0,
+          reason: errorMessage(error),
+        };
+      }
+    }
+
+    const clientResults = new Map<LspClient, Map<string, WorkspaceDiagnosticClientFileResult>>();
+    const executionStats: WorkspaceDiagnosticExecutionStats = {
+      workspacePullRequests: 0,
+      workspacePullFailures: 0,
+      workspacePullFiles: new Set(),
+      documentRefreshFiles: new Set(),
+    };
+    await this.executeWorkspaceDiagnosticPlans(discovery, plansByClient, clientResults, executionStats, options);
     throwIfAborted(options.signal);
+    this.revalidateWorkspaceDiagnosticResults(discovery, plans, clientResults, executionStats, options.signal);
+
+    for (const plan of plans) {
+      const results = plan.clients
+        .map((client) => clientResults.get(client)?.get(plan.filePath))
+        .filter((result): result is WorkspaceDiagnosticClientFileResult => result !== undefined);
+      if (results.length === 0) {
+        files[plan.index] = {
+          filePath: plan.filePath,
+          outcome: "unavailable",
+          diagnostics: 0,
+          reason: workspaceDiagnosticUnavailableReason(results),
+        };
+        continue;
+      }
+
+      const freshResults = results.filter((result) => result.outcome === "fresh" && result.snapshot !== undefined);
+      const timedOut = results.some((result) => result.outcome === "timed-out");
+      const unavailable = results.length < plan.clients.length ||
+        results.some((result) => result.outcome === "unavailable" || (result.outcome === "fresh" && result.snapshot === undefined)) ||
+        (!timedOut && freshResults.length === 0);
+      const snapshot = mergeSnapshots(freshResults.map((result) => result.snapshot!));
+      if (freshResults.length > 0) snapshots[plan.index] = snapshot;
+      files[plan.index] = {
+        filePath: plan.filePath,
+        outcome: timedOut ? "timed-out" : unavailable ? "unavailable" : "fresh",
+        diagnostics: countDiagnosticSnapshotDiagnostics(snapshot),
+        ...(!timedOut && unavailable ? { reason: workspaceDiagnosticUnavailableReason(results) } : {}),
+      };
+    }
 
     const snapshot = mergeSnapshots(snapshots.filter((entry): entry is DiagnosticSnapshot => entry !== undefined));
     const freshFiles = files.filter((file) => file.outcome === "fresh").length;
@@ -234,6 +447,10 @@ export class LspService {
         unavailableFiles,
         skippedFiles,
         diagnostics: countDiagnosticSnapshotDiagnostics(snapshot),
+        workspacePullRequests: executionStats.workspacePullRequests,
+        workspacePullFailures: executionStats.workspacePullFailures,
+        workspacePullFiles: executionStats.workspacePullFiles.size,
+        documentRefreshFiles: executionStats.documentRefreshFiles.size,
         ignoredDirectories: discovery.ignoredDirectories,
         symlinksSkipped: discovery.symlinksSkipped,
         boundaryEntriesSkipped: discovery.boundaryEntriesSkipped,
@@ -247,6 +464,181 @@ export class LspService {
     };
   }
 
+  private async executeWorkspaceDiagnosticPlans(
+    discovery: WorkspaceDiagnosticDiscovery,
+    plansByClient: Map<LspClient, WorkspaceDiagnosticFilePlan[]>,
+    clientResults: Map<LspClient, Map<string, WorkspaceDiagnosticClientFileResult>>,
+    stats: WorkspaceDiagnosticExecutionStats,
+    options: WorkspaceDiagnosticsOptions,
+  ): Promise<void> {
+    const entries = [...plansByClient.entries()];
+    const documentRefreshPermits = new AsyncPermitPool(this.diagnosticRefreshConcurrency);
+    let nextIndex = 0;
+    const worker = async () => {
+      while (true) {
+        throwIfAborted(options.signal);
+        const entry = entries[nextIndex++];
+        if (!entry) return;
+        const [client, plans] = entry;
+        this.workspaceDiagnosticClients.add(client);
+        try {
+          const resultByFile = new Map<string, WorkspaceDiagnosticClientFileResult>();
+          clientResults.set(client, resultByFile);
+          const pull = await client.pullWorkspaceDiagnostics({
+            uris: new Set(plans.map((plan) => plan.uri)),
+            timeoutMs: options.timeoutMs,
+            settleMs: options.settleMs,
+            signal: options.signal,
+          });
+          if (pull.attempted) {
+            stats.workspacePullRequests += 1;
+            if (pull.outcome !== "fresh") stats.workspacePullFailures += 1;
+          }
+
+          const coveredUris = pull.outcome === "fresh" ? pull.coveredUris : new Set<string>();
+          const fallbackPlans: WorkspaceDiagnosticFallbackPlan[] = [];
+          for (const plan of plans) {
+            const source = readWorkspaceDiagnosticSource(discovery, plan.filePath, DEFAULT_LSP_SOURCE_FILE_MAX_BYTES);
+            if (source.content === undefined) {
+              if (coveredUris.has(plan.uri)) client.invalidateDiagnosticsForFile(plan.filePath);
+              resultByFile.set(plan.filePath, {
+                outcome: "unavailable",
+                reason: `source could not be revalidated during workspace diagnostics: ${workspaceSourceSkipReason(source)}`,
+              });
+              continue;
+            }
+
+            const currentContentHash = contentHash(source.content);
+            if (coveredUris.has(plan.uri) && currentContentHash === plan.contentHash) {
+              resultByFile.set(plan.filePath, {
+                outcome: "fresh",
+                snapshot: client.snapshotForUri(plan.uri),
+                contentHash: currentContentHash,
+                protocol: "workspace-pull",
+              });
+              stats.workspacePullFiles.add(plan.filePath);
+            } else {
+              if (coveredUris.has(plan.uri)) client.invalidateDiagnosticsForFile(plan.filePath);
+              fallbackPlans.push({ plan, content: source.content, contentHash: currentContentHash });
+              stats.documentRefreshFiles.add(plan.filePath);
+            }
+          }
+
+          await Promise.all(fallbackPlans.map(async (fallback) => {
+            const { plan } = fallback;
+            try {
+              const refresh = await documentRefreshPermits.run(
+                () => this.enqueueDiagnosticRefresh(plan.filePath, fallback.content, [client], {
+                  timeoutMs: options.timeoutMs,
+                  settleMs: options.settleMs,
+                  snapshotScope: "file",
+                  forceFresh: true,
+                  server: options.server,
+                  signal: options.signal,
+                }),
+                options.signal,
+              );
+
+              if (refresh?.fresh) {
+                const source = readWorkspaceDiagnosticSource(discovery, plan.filePath, DEFAULT_LSP_SOURCE_FILE_MAX_BYTES);
+                if (source.content === undefined || contentHash(source.content) !== fallback.contentHash) {
+                  client.invalidateDiagnosticsForFile(plan.filePath);
+                  resultByFile.set(plan.filePath, {
+                    outcome: "unavailable",
+                    reason: source.content === undefined
+                      ? `source could not be revalidated after diagnostic refresh: ${workspaceSourceSkipReason(source)}`
+                      : "source file changed during diagnostic refresh",
+                  });
+                  return;
+                }
+              }
+
+              resultByFile.set(plan.filePath, refresh
+                ? {
+                    outcome: refresh.fresh ? "fresh" : refresh.timedOut ? "timed-out" : "unavailable",
+                    ...(refresh.fresh ? { snapshot: refresh.snapshot } : {}),
+                    ...(refresh.fresh ? { contentHash: fallback.contentHash, protocol: "document-refresh" as const } : {}),
+                    ...(!refresh.fresh && !refresh.timedOut ? { reason: "diagnostic refresh was not authoritative" } : {}),
+                  }
+                : {
+                    outcome: "unavailable",
+                    reason: "language server did not produce a diagnostic refresh",
+                  });
+            } catch (error) {
+              if (isCancellation(error, options.signal)) throw error;
+              resultByFile.set(plan.filePath, {
+                outcome: "unavailable",
+                reason: errorMessage(error),
+              });
+            }
+          }));
+        } catch (error) {
+          if (isCancellation(error, options.signal)) throw error;
+          this.markClientInstanceError(plans[0]?.filePath ?? this.projectRoot, client, error);
+          const reason = errorMessage(error);
+          const resultByFile = clientResults.get(client) ?? new Map<string, WorkspaceDiagnosticClientFileResult>();
+          clientResults.set(client, resultByFile);
+          for (const plan of plans) {
+            if (!resultByFile.has(plan.filePath)) resultByFile.set(plan.filePath, { outcome: "unavailable", reason });
+          }
+        } finally {
+          this.workspaceDiagnosticClients.delete(client);
+          this.armIdleTimer();
+          this.scheduleResourcePump();
+        }
+      }
+    };
+
+    const workerCount = Math.min(entries.length, this.maxActiveClients, Math.max(1, this.initializationConcurrency));
+    await Promise.all(Array.from({ length: workerCount }, worker));
+  }
+
+  private revalidateWorkspaceDiagnosticResults(
+    discovery: WorkspaceDiagnosticDiscovery,
+    plans: WorkspaceDiagnosticFilePlan[],
+    clientResults: Map<LspClient, Map<string, WorkspaceDiagnosticClientFileResult>>,
+    stats: WorkspaceDiagnosticExecutionStats,
+    signal?: AbortSignal,
+  ): void {
+    for (const plan of plans) {
+      throwIfAborted(signal);
+      const freshResults: Array<{
+        client: LspClient;
+        resultByFile: Map<string, WorkspaceDiagnosticClientFileResult>;
+        result: WorkspaceDiagnosticClientFileResult;
+      }> = [];
+      for (const client of plan.clients) {
+        const resultByFile = clientResults.get(client);
+        const result = resultByFile?.get(plan.filePath);
+        if (resultByFile && result?.outcome === "fresh") freshResults.push({ client, resultByFile, result });
+      }
+      if (freshResults.length === 0) continue;
+
+      const source = readWorkspaceDiagnosticSource(discovery, plan.filePath, DEFAULT_LSP_SOURCE_FILE_MAX_BYTES);
+      const currentContentHash = source.content === undefined ? undefined : contentHash(source.content);
+      for (const { client, resultByFile, result } of freshResults) {
+        if (currentContentHash !== undefined && result.contentHash === currentContentHash) continue;
+        client.invalidateDiagnosticsForFile(plan.filePath);
+        resultByFile.set(plan.filePath, {
+          outcome: "unavailable",
+          reason: source.content === undefined
+            ? `source could not be revalidated after workspace diagnostics: ${workspaceSourceSkipReason(source)}`
+            : "source file changed after its diagnostic refresh",
+        });
+      }
+    }
+
+    stats.workspacePullFiles.clear();
+    for (const plan of plans) {
+      if (plan.clients.some((client) => {
+        const result = clientResults.get(client)?.get(plan.filePath);
+        return result?.outcome === "fresh" && result.protocol === "workspace-pull";
+      })) {
+        stats.workspacePullFiles.add(plan.filePath);
+      }
+    }
+  }
+
   cachedDiagnostics(pathOrAll?: string, server?: string): DiagnosticSnapshot {
     if (server !== undefined) this.assertKnownServerSelector(server);
     if (!pathOrAll || pathOrAll === "all") return this.snapshotAll(server);
@@ -256,14 +648,17 @@ export class LspService {
     return this.cachedDiagnosticsForUri(uri, server);
   }
 
-  cachedDiagnosticsIfKnown(filePath: string, server?: string): DiagnosticSnapshot | undefined {
+  cachedDiagnosticsIfKnown(
+    filePath: string,
+    server?: string,
+    snapshotScope: DiagnosticSnapshotScope = "file",
+  ): DiagnosticSnapshot | undefined {
     const resolved = path.resolve(this.projectRoot, filePath);
     const uri = filePathToUri(resolved);
     const clients = this.cachedClientsForFile(resolved, server);
     if (!clients) return undefined;
 
-    const diagnostics = clients.flatMap((client) => client.diagnosticsForUri(uri));
-    return createDiagnosticSnapshot(diagnostics);
+    return diagnosticSnapshotForClients(clients, uri, snapshotScope);
   }
 
   private cachedDiagnosticsForUri(uri: string, server?: string): DiagnosticSnapshot {
@@ -292,6 +687,172 @@ export class LspService {
     for (const client of this.clients.values()) client.forgetDocument(resolved);
   }
 
+  notifyFileMutations(mutations: readonly LspFileMutation[]): void {
+    const normalized = normalizeFileMutations(mutations, this.projectRoot);
+    if (normalized.length === 0) return;
+    if (normalized.some((mutation) => lspFileMutationPaths(mutation).some((filePath) => this.rootMarkerNames.has(path.basename(filePath))))) {
+      this.rootCache.clear();
+    }
+
+    let notified = false;
+    for (const client of this.clients.values()) {
+      if (client.getStatus().state !== "ready") continue;
+      const relevant = normalized.filter((mutation) => (
+        lspFileMutationPaths(mutation).some((filePath) => isInsideOrEqual(filePath, client.root))
+      ));
+      if (relevant.length === 0) continue;
+      notified = client.notifyFileMutations(relevant) || notified;
+    }
+    if (notified) this.armIdleTimer();
+  }
+
+  async reconcileOpenDocuments(options: OpenDocumentReconciliationOptions = {}): Promise<OpenDocumentReconciliationResult> {
+    throwIfAborted(options.signal);
+    const candidates = new Map<string, Array<{ client: LspClient; document: OpenDocumentState }>>();
+    for (const client of this.clients.values()) {
+      if (client.getStatus().state !== "ready") continue;
+      for (const document of client.openDocumentsForReconciliation()) {
+        const filePath = path.resolve(document.filePath);
+        if (!isInsideOrEqual(filePath, this.projectRoot)) continue;
+        const entries = candidates.get(filePath) ?? [];
+        entries.push({ client, document });
+        candidates.set(filePath, entries);
+      }
+    }
+
+    const limit = normalizeOpenDocumentReconciliationLimit(options.limit);
+    const candidatePaths = [...candidates.keys()].sort((left, right) => left.localeCompare(right));
+    const selectionStart = candidatePaths.length === 0 ? 0 : this.openDocumentReconciliationCursor % candidatePaths.length;
+    const selected = circularSlice(candidatePaths, selectionStart, limit);
+    const mutations: LspFileMutation[] = [];
+    const readableChanges = new Map<string, string>();
+    const closePaths = new Set<string>();
+    let inspectedFiles = 0;
+    let skippedFiles = 0;
+    let bytesRead = 0;
+    let byteLimitReached = false;
+    let processedFiles = 0;
+    const projectRealRoot = selected.length > 0
+      ? realpathIfExists(this.projectRoot) ?? this.projectRoot
+      : this.projectRoot;
+
+    for (const filePath of selected) {
+      throwIfAborted(options.signal);
+      let descriptor: number;
+      try {
+        descriptor = fs.openSync(
+          filePath,
+          fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
+        );
+      } catch (error) {
+        inspectedFiles += 1;
+        processedFiles += 1;
+        if (isErrorCode(error, "ENOENT")) {
+          mutations.push({ type: "deleted", filePath });
+        } else {
+          mutations.push({ type: "changed", filePath });
+          closePaths.add(filePath);
+          skippedFiles += 1;
+        }
+        continue;
+      }
+
+      let processedThisFile = true;
+      try {
+        inspectedFiles += 1;
+        const stat = fs.fstatSync(descriptor);
+        if (!stat.isFile() || !openedFileHasExpectedProjectPath(descriptor, filePath, this.projectRoot, projectRealRoot)) {
+          mutations.push({ type: "changed", filePath });
+          closePaths.add(filePath);
+          skippedFiles += 1;
+          continue;
+        }
+        if (stat.size > MAX_RECONCILED_OPEN_DOCUMENT_BYTES) {
+          mutations.push({ type: "changed", filePath });
+          closePaths.add(filePath);
+          skippedFiles += 1;
+          continue;
+        }
+        if (bytesRead + stat.size > MAX_RECONCILED_OPEN_DOCUMENT_TOTAL_BYTES) {
+          byteLimitReached = true;
+          processedThisFile = false;
+          break;
+        }
+
+        const bytes = readDescriptorUpTo(descriptor, MAX_RECONCILED_OPEN_DOCUMENT_BYTES + 1);
+        if (bytes.length > MAX_RECONCILED_OPEN_DOCUMENT_BYTES) {
+          mutations.push({ type: "changed", filePath });
+          closePaths.add(filePath);
+          skippedFiles += 1;
+          continue;
+        }
+        const content = bytes.toString("utf8");
+        if (content.includes("\0")) {
+          mutations.push({ type: "changed", filePath });
+          closePaths.add(filePath);
+          skippedFiles += 1;
+          continue;
+        }
+
+        bytesRead += bytes.length;
+        const changed = candidates.get(filePath)?.some(({ document }) => document.content !== content) ?? false;
+        if (!changed) continue;
+        mutations.push({ type: "changed", filePath });
+        readableChanges.set(filePath, content);
+      } catch {
+        mutations.push({ type: "changed", filePath });
+        closePaths.add(filePath);
+        skippedFiles += 1;
+      } finally {
+        try {
+          fs.closeSync(descriptor);
+        } catch {
+          // The reconciliation result is already determined.
+        }
+        if (processedThisFile) processedFiles += 1;
+      }
+    }
+
+    if (candidatePaths.length > 0) {
+      this.openDocumentReconciliationCursor = (selectionStart + processedFiles) % candidatePaths.length;
+    } else {
+      this.openDocumentReconciliationCursor = 0;
+    }
+
+    this.notifyFileMutations(mutations);
+    let resynchronizedDocuments = 0;
+    for (const [filePath, content] of readableChanges) {
+      for (const { client } of candidates.get(filePath) ?? []) {
+        if (client.reconcileOpenDocument(filePath, content)) resynchronizedDocuments += 1;
+      }
+    }
+
+    let closedDocuments = mutations
+      .filter((mutation) => mutation.type === "deleted")
+      .reduce((count, mutation) => count + (candidates.get(mutation.filePath)?.length ?? 0), 0);
+    for (const filePath of closePaths) {
+      for (const { client } of candidates.get(filePath) ?? []) {
+        client.forgetDocument(filePath);
+        closedDocuments += 1;
+      }
+    }
+
+    if (mutations.length > 0) this.armIdleTimer();
+    return {
+      candidateFiles: candidates.size,
+      inspectedFiles,
+      changedFiles: mutations.filter((mutation) => mutation.type === "changed").length,
+      deletedFiles: mutations.filter((mutation) => mutation.type === "deleted").length,
+      skippedFiles,
+      resynchronizedDocuments,
+      closedDocuments,
+      bytesRead,
+      fileLimitReached: candidates.size > selected.length,
+      byteLimitReached,
+      mutations,
+    };
+  }
+
   snapshotAll(server?: string): DiagnosticSnapshot {
     const diagnostics = [...this.clients.values()]
       .filter((client) => server === undefined || client.id === server)
@@ -313,41 +874,36 @@ export class LspService {
         return { serverId: client.id, capabilities: client.getCapabilities() };
       } catch (error) {
         if (isCancellation(error, signal)) throw error;
-        return { serverId: client.id, error: error instanceof Error ? error.message : String(error) };
+        return { serverId: client.id, error: errorMessage(error) };
       }
     }));
     return servers.length === 1 && !servers[0].error ? servers[0].capabilities : { servers };
   }
 
-  async hover(filePath: string, line: unknown, character: unknown, signal?: AbortSignal, server?: string): Promise<unknown> {
-    const position = externalPositionToLsp(line, character);
-    if (!position) throw new Error("hover requires 1-based line and column");
-    const results = await this.documentRequests(filePath, "textDocument/hover", { position }, signal, server);
+  async hover(filePath: string, target: ExternalPositionTarget, signal?: AbortSignal, server?: string): Promise<unknown> {
+    const document = this.positionedDocument(filePath, target, "hover");
+    const results = await this.documentRequestsForContent(document.filePath, document.content, "textDocument/hover", { position: document.position }, signal, server);
     return results.map((result) => result.result).find(hasHoverContent);
   }
 
-  async definition(filePath: string, line: unknown, character: unknown, signal?: AbortSignal, server?: string): Promise<unknown> {
-    const position = externalPositionToLsp(line, character);
-    if (!position) throw new Error("definition requires 1-based line and column");
-    return mergeArrayLikeResults(await this.documentRequests(filePath, "textDocument/definition", { position }, signal, server));
+  async definition(filePath: string, target: ExternalPositionTarget, signal?: AbortSignal, server?: string): Promise<unknown> {
+    const document = this.positionedDocument(filePath, target, "definition");
+    return mergeArrayLikeResults(await this.documentRequestsForContent(document.filePath, document.content, "textDocument/definition", { position: document.position }, signal, server));
   }
 
-  async references(filePath: string, line: unknown, character: unknown, signal?: AbortSignal, server?: string): Promise<unknown> {
-    const position = externalPositionToLsp(line, character);
-    if (!position) throw new Error("references requires 1-based line and column");
-    return mergeArrayLikeResults(await this.documentRequests(filePath, "textDocument/references", { position, context: { includeDeclaration: true } }, signal, server));
+  async references(filePath: string, target: ExternalPositionTarget, signal?: AbortSignal, server?: string): Promise<unknown> {
+    const document = this.positionedDocument(filePath, target, "references");
+    return mergeArrayLikeResults(await this.documentRequestsForContent(document.filePath, document.content, "textDocument/references", { position: document.position, context: { includeDeclaration: true } }, signal, server));
   }
 
-  async implementation(filePath: string, line: unknown, character: unknown, signal?: AbortSignal, server?: string): Promise<unknown> {
-    const position = externalPositionToLsp(line, character);
-    if (!position) throw new Error("implementation requires 1-based line and column");
-    return mergeArrayLikeResults(await this.documentRequests(filePath, "textDocument/implementation", { position }, signal, server));
+  async implementation(filePath: string, target: ExternalPositionTarget, signal?: AbortSignal, server?: string): Promise<unknown> {
+    const document = this.positionedDocument(filePath, target, "implementation");
+    return mergeArrayLikeResults(await this.documentRequestsForContent(document.filePath, document.content, "textDocument/implementation", { position: document.position }, signal, server));
   }
 
-  async typeDefinition(filePath: string, line: unknown, character: unknown, signal?: AbortSignal, server?: string): Promise<unknown> {
-    const position = externalPositionToLsp(line, character);
-    if (!position) throw new Error("type_definition requires 1-based line and column");
-    return mergeArrayLikeResults(await this.documentRequests(filePath, "textDocument/typeDefinition", { position }, signal, server));
+  async typeDefinition(filePath: string, target: ExternalPositionTarget, signal?: AbortSignal, server?: string): Promise<unknown> {
+    const document = this.positionedDocument(filePath, target, "type definition");
+    return mergeArrayLikeResults(await this.documentRequestsForContent(document.filePath, document.content, "textDocument/typeDefinition", { position: document.position }, signal, server));
   }
 
   async documentSymbols(filePath: string, signal?: AbortSignal, server?: string): Promise<unknown> {
@@ -358,25 +914,25 @@ export class LspService {
     throwIfAborted(signal);
     if (typeof query !== "string") throw new Error("workspace_symbols requires query");
     const clients = filePath
-      ? this.getOrCreateClients(path.resolve(this.projectRoot, filePath), server, server !== undefined)
-      : this.readyOrAnyClients(server);
+      ? this.getOrCreateClients(path.resolve(this.projectRoot, filePath), server, server !== undefined, true)
+      : this.readyOrAnyClients(server, true);
     if (clients.length === 0) throw new Error(server
       ? `No active LSP client for server ${JSON.stringify(server)}. Pass path to choose and start that language server.`
       : "No active LSP client. Open a file with lsp diagnostics first, or pass path to choose a language server.");
     return mergeArrayResults(await this.clientRequests(clients, "workspace/symbol", { query }, signal));
   }
 
-  async codeActions(filePath: string, line: unknown, character: unknown, signal?: AbortSignal, server?: string): Promise<unknown> {
-    const position = externalPositionToLsp(line, character);
-    if (!position) throw new Error("code_actions requires 1-based line and column");
-    const range = oneLineLspRange(position);
-    const resolved = path.resolve(this.projectRoot, filePath);
-    const content = readLspSourceFile(resolved);
+  async codeActions(filePath: string, target: ExternalPositionTarget, signal?: AbortSignal, server?: string): Promise<unknown> {
+    const document = this.positionedDocument(filePath, target, "code actions");
+    const range = oneLineLspRange(document.position);
+    const resolved = document.filePath;
+    const content = document.content;
 
     await this.diagnosticsForFileDetailed(resolved, content, {
-      timeoutMs: CODE_ACTION_DIAGNOSTIC_TIMEOUT_MS,
+      timeoutMs: EXPLICIT_LSP_DIAGNOSTIC_TIMEOUT_MS,
       settleMs: 0,
       snapshotScope: "file",
+      forceFresh: true,
       server,
       signal,
     }).catch((error) => {
@@ -426,12 +982,38 @@ export class LspService {
     return decorateCodeAction(client, mergeCodeActionResolution(action, resolvedAction));
   }
 
-  async rename(filePath: string, line: unknown, character: unknown, newName: unknown, signal?: AbortSignal, server?: string): Promise<unknown> {
-    const position = externalPositionToLsp(line, character);
-    if (!position) throw new Error("rename requires 1-based line and column");
+  async rename(filePath: string, target: ExternalPositionTarget, newName: unknown, signal?: AbortSignal, server?: string): Promise<unknown> {
     if (typeof newName !== "string" || newName.length === 0) throw new Error("rename requires newName");
-    const { result, client } = await this.documentRequest(filePath, "textDocument/rename", { position, newName }, signal, server);
+    const document = this.positionedDocument(filePath, target, "rename");
+    const { result, client } = await this.documentRequest(document.filePath, document.content, "textDocument/rename", { position: document.position, newName }, signal, server);
     return decorateWorkspaceEdit(client, result);
+  }
+
+  async prepareFileRename(oldFilePath: string, newFilePath: string, signal?: AbortSignal, server?: string): Promise<unknown> {
+    throwIfAborted(signal);
+    const rename = resolveFileRenameOperation(oldFilePath, newFilePath, this.projectRoot);
+    if (!rename.ok) throw new Error(rename.reason);
+
+    const content = readLspSourceFile(rename.oldFilePath);
+    const client = this.getOrCreateSingleClient(rename.oldFilePath, server);
+    if (!client) throw new Error(`No semantic language server configured for ${rename.oldFilePath}`);
+
+    await client.start(signal);
+    if (!client.canRenameFiles(rename.oldFilePath, rename.newFilePath)) {
+      throw new Error(`Language server ${JSON.stringify(client.id)} does not support workspace/willRenameFiles for ${rename.oldFilePath}`);
+    }
+
+    const result = await client.requestForDocument(rename.oldFilePath, content, "workspace/willRenameFiles", {
+      files: [{
+        oldUri: filePathToUri(rename.oldFilePath),
+        newUri: filePathToUri(rename.newFilePath),
+      }],
+    }, 10_000, signal);
+    if (result !== null && result !== undefined && !isRecord(result)) {
+      throw new Error(`Language server ${JSON.stringify(client.id)} returned a malformed workspace/willRenameFiles result`);
+    }
+    this.armIdleTimer();
+    return decorateWorkspaceEdit(client, result ?? { changes: {} });
   }
 
   documentVersion(filePath: string, serverId: string | undefined, serverSessionId: string | undefined): number | undefined {
@@ -455,6 +1037,20 @@ export class LspService {
       clients,
       unavailableServers: [...this.unavailableServers.values()].filter((unavailable) => server === undefined || unavailable.id === server),
       serverConfiguration: this.serverConfiguration?.status,
+      clientResources: {
+        idleTimeoutMs: this.idleTimeoutMs,
+        maxActiveClients: this.maxActiveClients,
+        initializationConcurrency: this.initializationConcurrency,
+        activeClients: this.activeClientCount(),
+        initializingClients: this.initializingClients.size,
+        queuedStarts: this.startQueue.filter((waiter) => !waiter.settled).length,
+        starts: this.clientStartCount,
+        restarts: this.clientRestartCount,
+        evictions: this.clientEvictionCount,
+        idleEvictions: this.idleEvictionCount,
+        capacityEvictions: this.capacityEvictionCount,
+        initializationCooldowns: this.initializationCooldownCount,
+      },
       diagnosticRefreshes: {
         concurrency: this.diagnosticRefreshConcurrency,
         active: this.runningDiagnosticRefreshes.size,
@@ -466,35 +1062,68 @@ export class LspService {
 
   async restart(signal?: AbortSignal): Promise<void> {
     throwIfAborted(signal);
-    const clients = [...this.clients.values()];
+    this.startsPaused = true;
+    this.cancelStartWaiters("LSP service is restarting");
+    const clients = [...new Set([...this.clients.values(), ...this.evictingClients])];
     this.clients.clear();
     this.unavailableServers.clear();
+    this.rootCache.clear();
+    this.openDocumentReconciliationCursor = 0;
     this.finishDiagnosticRefreshWaiters(undefined);
-    await Promise.allSettled(clients.map((client) => client.shutdown(signal)));
-    throwIfAborted(signal);
-    this.armIdleTimer();
+    try {
+      await Promise.allSettled(clients.map((client) => client.shutdown(signal)));
+      throwIfAborted(signal);
+    } finally {
+      this.startsPaused = false;
+      this.armIdleTimer();
+      this.scheduleResourcePump();
+    }
   }
 
   async shutdownAll(signal?: AbortSignal): Promise<void> {
-    const clients = [...this.clients.values()];
+    this.startsPaused = true;
+    this.cancelStartWaiters("LSP service is stopping");
+    const clients = [...new Set([...this.clients.values(), ...this.evictingClients])];
     this.clients.clear();
     this.unavailableServers.clear();
+    this.rootCache.clear();
+    this.openDocumentReconciliationCursor = 0;
     this.finishDiagnosticRefreshWaiters(undefined);
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = undefined;
-    await Promise.allSettled(clients.map((client) => client.shutdown(signal)));
+    try {
+      await Promise.allSettled(clients.map((client) => client.shutdown(signal)));
+    } finally {
+      this.startsPaused = false;
+      this.scheduleResourcePump();
+    }
+  }
+
+  private positionedDocument(filePath: string, target: ExternalPositionTarget, operation: string): PositionedDocument {
+    const resolved = path.resolve(this.projectRoot, filePath);
+    const content = readLspSourceFile(resolved);
+    try {
+      return {
+        filePath: resolved,
+        content,
+        position: resolveExternalPositionTarget(content, target),
+      };
+    } catch (error) {
+      const message = errorMessage(error);
+      throw new Error(`${operation} ${message}`);
+    }
   }
 
   private async documentRequest(
     filePath: string,
+    content: string,
     method: string,
     extraParams: Record<string, unknown>,
     signal?: AbortSignal,
     server?: string,
   ): Promise<{ result: unknown; client: LspClient }> {
     throwIfAborted(signal);
-    const resolved = path.resolve(this.projectRoot, filePath);
-    const content = readLspSourceFile(resolved);
+    const resolved = path.resolve(filePath);
 
     const client = this.getOrCreateSingleClient(resolved, server);
     if (!client) throw new Error(`No language server configured for ${resolved}`);
@@ -651,7 +1280,7 @@ export class LspService {
     this.armIdleTimer();
     return {
       snapshot: mergeSnapshots(successful.map((result) => result.snapshot)),
-      fresh: successful.every((result) => result.fresh),
+      fresh: successful.length === clients.length && successful.every((result) => result.fresh),
       timedOut: successful.some((result) => result.timedOut),
       requestedAt: Math.min(...successful.map((result) => result.requestedAt)),
       completedAt: Math.max(...successful.map((result) => result.completedAt)),
@@ -662,7 +1291,7 @@ export class LspService {
     waiter.timeout = setTimeout(() => {
       this.resolveDiagnosticWaiter(job, waiter, timedOutDiagnosticRefresh(job, waiter));
     }, Math.max(0, waiter.options.timeoutMs));
-    waiter.timeout.unref?.();
+    waiter.timeout.unref();
   }
 
   private armDiagnosticWaiterAbort(job: DiagnosticRefreshJob, waiter: DiagnosticRefreshWaiter): void {
@@ -729,8 +1358,22 @@ export class LspService {
     const resolved = path.resolve(this.projectRoot, filePath);
     const content = readLspSourceFile(resolved);
 
-    const clients = this.getOrCreateClients(resolved, server, server !== undefined);
-    if (clients.length === 0) throw new Error(`No language server configured for ${resolved}`);
+    return this.documentRequestsForContent(resolved, content, method, extraParams, signal, server);
+  }
+
+  private async documentRequestsForContent(
+    filePath: string,
+    content: string,
+    method: string,
+    extraParams: Record<string, unknown>,
+    signal?: AbortSignal,
+    server?: string,
+  ): Promise<ClientRequestResult[]> {
+    throwIfAborted(signal);
+    const resolved = path.resolve(filePath);
+
+    const clients = this.getOrCreateClients(resolved, server, server !== undefined, true);
+    if (clients.length === 0) throw new Error(`No semantic language server configured for ${resolved}`);
 
     const uri = filePathToUri(resolved);
     const params = {
@@ -756,7 +1399,7 @@ export class LspService {
         return { client, result: await run(client) };
       } catch (error) {
         if (isCancellation(error, signal)) throw error;
-        return { client, error: error instanceof Error ? error.message : String(error) };
+        return { client, error: errorMessage(error) };
       }
     }));
 
@@ -791,12 +1434,11 @@ export class LspService {
 
   private existingClientsForFile(filePath: string): LspClient[] {
     const resolved = path.resolve(this.projectRoot, filePath);
-    const root = this.workspaceRootForFile(resolved);
     const clients: LspClient[] = [];
 
     for (const resolvedServer of this.resolveServers(resolved)) {
       if (!resolvedServer.available) continue;
-      const client = this.clients.get(clientKey(root, resolvedServer.definition));
+      const client = this.clients.get(clientKey(resolvedServer.root, resolvedServer.definition));
       if (client) clients.push(client);
     }
 
@@ -804,18 +1446,17 @@ export class LspService {
   }
 
   private getOrCreateSingleClient(filePath: string, server?: string): LspClient | undefined {
-    const clients = this.getOrCreateClients(filePath, server, server !== undefined);
+    const clients = this.getOrCreateClients(filePath, server, server !== undefined, true);
     if (clients.length > 1 && server === undefined) {
       throw new Error(`Multiple language servers support ${path.resolve(filePath)}: ${clients.map((client) => client.id).join(", ")}. Pass server to select one.`);
     }
     return clients[0];
   }
 
-  private getOrCreateClients(filePath: string, server?: string, requireSelected = false): LspClient[] {
+  private getOrCreateClients(filePath: string, server?: string, requireSelected = false, semanticOnly = false): LspClient[] {
     const resolved = path.resolve(filePath);
-    const root = this.workspaceRootForFile(resolved);
     const clients: LspClient[] = [];
-    const resolvedServers = this.resolveServers(resolved, server);
+    const resolvedServers = this.resolveServers(resolved, server, semanticOnly);
 
     for (const resolvedServer of resolvedServers) {
       if (!resolvedServer.available) {
@@ -823,12 +1464,20 @@ export class LspService {
         continue;
       }
 
-      const key = clientKey(root, resolvedServer.definition);
+      const key = clientKey(resolvedServer.root, resolvedServer.definition);
       let client = this.clients.get(key);
       if (!client) {
-        client = new LspClient(resolvedServer.definition, root);
+        let created!: LspClient;
+        created = new LspClient(resolvedServer.definition, resolvedServer.root, {
+          acquireStartPermit: (signal) => this.acquireClientStartPermit(created, signal),
+          onResourceChange: () => this.onClientResourceChange(),
+          onLifecycleEvent: (event) => this.recordClientLifecycleEvent(event),
+        });
+        client = created;
         this.clients.set(key, client);
+        this.armIdleTimer();
       }
+      this.forgetDocumentFromOtherRoots(resolved, client);
       clients.push(client);
     }
 
@@ -841,13 +1490,12 @@ export class LspService {
 
   private cachedClientsForFile(filePath: string, server?: string): LspClient[] | undefined {
     const resolved = path.resolve(filePath);
-    const root = this.workspaceRootForFile(resolved);
     const uri = filePathToUri(resolved);
     const clients: LspClient[] = [];
 
     for (const resolvedServer of this.resolveServers(resolved, server)) {
       if (!resolvedServer.available) continue;
-      const key = clientKey(root, resolvedServer.definition);
+      const key = clientKey(resolvedServer.root, resolvedServer.definition);
       const client = this.clients.get(key);
       if (!client || !client.hasDiagnosticsForUri(uri)) return undefined;
       clients.push(client);
@@ -856,18 +1504,22 @@ export class LspService {
     return clients.length > 0 ? clients : undefined;
   }
 
-  private resolveServers(filePath: string, server?: string): ResolvedLanguageServer[] {
+  private resolveServers(filePath: string, server?: string, semanticOnly = false): ResolvedLanguageServer[] {
     if (server !== undefined) this.assertKnownServerSelector(server);
 
-    const root = this.workspaceRootForFile(filePath);
+    const root = this.workspaceBoundaryForFile(filePath);
     const resolved = resolveLanguageServers(filePath, {
       serverOverrides: this.serverOverrides,
       serverConfiguration: this.serverConfiguration?.servers,
       projectRoot: root,
       trustedEnvironmentRoots: this.trustedEnvironmentRoots,
       server,
+      rootCache: this.rootCache,
     });
-    if (server === undefined || resolved.length > 0) return resolved;
+    const routed = semanticOnly && server === undefined
+      ? resolved.filter((entry) => entry.definition.role === "language")
+      : resolved;
+    if (server === undefined || routed.length > 0) return routed;
 
     const configured = this.serverConfiguration?.servers[server];
     if (configured?.disabled) throw new Error(`Language server ${JSON.stringify(server)} is disabled by config.`);
@@ -886,7 +1538,7 @@ export class LspService {
   }
 
   private recordUnavailableServer(filePath: string, resolvedServer: ResolvedLanguageServer): void {
-    this.unavailableServers.set(resolvedServer.definition.id, {
+    this.unavailableServers.set(unavailableServerKey(resolvedServer.definition.id, resolvedServer.root), {
       id: resolvedServer.definition.id,
       command: resolvedServer.definition.command,
       filePath,
@@ -894,34 +1546,249 @@ export class LspService {
     });
   }
 
-  private workspaceRootForFile(filePath: string): string {
+  private workspaceBoundaryForFile(filePath: string): string {
     return resolveWorkspaceRootForPath(filePath, this.projectRoot, this.trustedEnvironmentRoots);
   }
 
-  private readyOrAnyClients(server?: string): LspClient[] {
+  private readyOrAnyClients(server?: string, semanticOnly = false): LspClient[] {
     if (server !== undefined) this.assertKnownServerSelector(server);
-    const clients = [...this.clients.values()].filter((client) => server === undefined || client.id === server);
+    const clients = [...this.clients.values()]
+      .filter((client) => server === undefined || client.id === server)
+      .filter((client) => !semanticOnly || server !== undefined || client.definition.role === "language");
     const ready = clients.filter((client) => client.getStatus().state === "ready");
     return ready.length > 0 ? ready : clients;
   }
 
   private markClientInstanceError(filePath: string, client: LspClient, error: unknown): void {
     const status = client.getStatus();
-    this.unavailableServers.set(status.id, {
+    this.unavailableServers.set(unavailableServerKey(status.id, client.root), {
       id: status.id,
       command: status.command,
       filePath,
-      reason: error instanceof Error ? error.message : String(error),
+      reason: errorMessage(error),
     });
+  }
+
+  private forgetDocumentFromOtherRoots(filePath: string, selected: LspClient): void {
+    for (const client of this.clients.values()) {
+      if (client === selected || client.id !== selected.id || client.root === selected.root) continue;
+      client.forgetDocument(filePath);
+    }
   }
 
   private armIdleTimer(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = undefined;
     if (this.idleTimeoutMs <= 0 || this.clients.size === 0) return;
+
+    const now = Date.now();
+    let nextDeadline = Number.POSITIVE_INFINITY;
+    for (const client of this.clients.values()) {
+      if (client.hasActiveWork()) continue;
+      const retryAt = client.getStatus().initializationRetryAt ?? 0;
+      const deadline = Math.max(client.getLastActivityAt() + this.idleTimeoutMs, retryAt);
+      nextDeadline = Math.min(nextDeadline, deadline);
+    }
+    if (!Number.isFinite(nextDeadline)) return;
+
     this.idleTimer = setTimeout(() => {
-      void this.shutdownAll();
-    }, this.idleTimeoutMs);
-    this.idleTimer.unref?.();
+      this.idleTimer = undefined;
+      void this.evictIdleClients();
+    }, Math.max(0, nextDeadline - now));
+    this.idleTimer.unref();
+  }
+
+  private async evictIdleClients(): Promise<void> {
+    if (this.idleSweepRunning || this.idleTimeoutMs <= 0) return;
+    this.idleSweepRunning = true;
+    try {
+      const now = Date.now();
+      const candidates = [...this.clients.values()]
+        .filter((client) => this.canEvictClient(client))
+        .filter((client) => {
+          const retryAt = client.getStatus().initializationRetryAt ?? 0;
+          return retryAt <= now && client.getLastActivityAt() + this.idleTimeoutMs <= now;
+        })
+        .sort((left, right) => left.getLastActivityAt() - right.getLastActivityAt());
+      for (const client of candidates) await this.evictClient(client, "idle");
+    } finally {
+      this.idleSweepRunning = false;
+      this.armIdleTimer();
+      this.scheduleResourcePump();
+    }
+  }
+
+  private acquireClientStartPermit(client: LspClient, signal?: AbortSignal): Promise<() => void> {
+    throwIfAborted(signal);
+    if (this.startsPaused) return Promise.reject(transientResourceError("LSP service is stopping"));
+
+    return new Promise((resolve, reject) => {
+      const waiter: ClientStartWaiter = { client, resolve, reject, signal, settled: false };
+      if (signal) {
+        waiter.onAbort = () => this.rejectClientStartWaiter(waiter, abortError(signal));
+        signal.addEventListener("abort", waiter.onAbort, { once: true });
+      }
+      this.startQueue.push(waiter);
+      if (signal?.aborted) waiter.onAbort?.();
+      this.scheduleResourcePump();
+    });
+  }
+
+  private scheduleResourcePump(): void {
+    this.resourcePumpRequested = true;
+    if (this.resourcePumpRunning || this.resourcePumpScheduled) return;
+    this.resourcePumpScheduled = true;
+    queueMicrotask(() => {
+      this.resourcePumpScheduled = false;
+      void this.runResourcePump();
+    });
+  }
+
+  private async runResourcePump(): Promise<void> {
+    if (this.resourcePumpRunning) return;
+    this.resourcePumpRunning = true;
+    try {
+      while (this.resourcePumpRequested) {
+        this.resourcePumpRequested = false;
+        await this.rebalanceClientBudget();
+        await this.grantClientStartPermits();
+      }
+    } finally {
+      this.resourcePumpRunning = false;
+      this.armIdleTimer();
+      if (this.resourcePumpRequested) this.scheduleResourcePump();
+    }
+  }
+
+  private async rebalanceClientBudget(): Promise<void> {
+    while (this.activeClientCount() > this.maxActiveClients) {
+      const victim = this.leastRecentlyUsedEvictableClient();
+      if (!victim || !await this.evictClient(victim, "capacity")) return;
+    }
+  }
+
+  private async grantClientStartPermits(): Promise<void> {
+    while (!this.startsPaused && this.initializingClients.size < this.initializationConcurrency) {
+      const waiter = this.takeNextClientStartWaiter();
+      if (!waiter) return;
+
+      while (this.activeClientCount() >= this.maxActiveClients) {
+        const victim = this.leastRecentlyUsedEvictableClient(waiter.client);
+        if (!victim) {
+          this.startQueue.unshift(waiter);
+          return;
+        }
+        if (!await this.evictClient(victim, "capacity")) {
+          this.startQueue.unshift(waiter);
+          return;
+        }
+      }
+
+      this.initializingClients.add(waiter.client);
+      this.resolveClientStartWaiter(waiter, this.clientStartPermitRelease(waiter.client));
+    }
+  }
+
+  private takeNextClientStartWaiter(): ClientStartWaiter | undefined {
+    while (this.startQueue.length > 0) {
+      const waiter = this.startQueue.shift();
+      if (!waiter || waiter.settled) continue;
+      if (waiter.signal?.aborted) {
+        this.rejectClientStartWaiter(waiter, abortError(waiter.signal));
+        continue;
+      }
+      return waiter;
+    }
+    return undefined;
+  }
+
+  private clientStartPermitRelease(client: LspClient): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.initializingClients.delete(client);
+      this.onClientResourceChange();
+    };
+  }
+
+  private resolveClientStartWaiter(waiter: ClientStartWaiter, release: () => void): void {
+    if (waiter.settled) {
+      release();
+      return;
+    }
+    waiter.settled = true;
+    if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+    waiter.resolve(release);
+  }
+
+  private rejectClientStartWaiter(waiter: ClientStartWaiter, error: Error): void {
+    if (waiter.settled) return;
+    waiter.settled = true;
+    if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+    waiter.reject(error);
+    this.scheduleResourcePump();
+  }
+
+  private cancelStartWaiters(message: string): void {
+    const error = transientResourceError(message);
+    const waiters = this.startQueue.splice(0);
+    for (const waiter of waiters) this.rejectClientStartWaiter(waiter, error);
+  }
+
+  private activeClientCount(): number {
+    const active = new Set<LspClient>([...this.initializingClients, ...this.evictingClients]);
+    for (const client of [...this.clients.values(), ...this.evictingClients]) {
+      const state = client.getStatus().state;
+      if (state === "ready" || state === "starting") active.add(client);
+    }
+    return active.size;
+  }
+
+  private leastRecentlyUsedEvictableClient(exclude?: LspClient): LspClient | undefined {
+    return [...this.clients.values()]
+      .filter((client) => client !== exclude && client.getStatus().state === "ready" && this.canEvictClient(client))
+      .sort((left, right) => left.getLastActivityAt() - right.getLastActivityAt())[0];
+  }
+
+  private canEvictClient(client: LspClient): boolean {
+    return !client.hasActiveWork() &&
+      !this.clientHasQueuedDiagnosticRefresh(client) &&
+      !this.workspaceDiagnosticClients.has(client) &&
+      !this.evictingClients.has(client);
+  }
+
+  private clientHasQueuedDiagnosticRefresh(client: LspClient): boolean {
+    return [...this.queuedDiagnosticRefreshes.values()].some((job) => job.clients.includes(client));
+  }
+
+  private async evictClient(client: LspClient, reason: ClientEvictionReason): Promise<boolean> {
+    if (!this.canEvictClient(client)) return false;
+    const entry = [...this.clients.entries()].find(([, candidate]) => candidate === client);
+    if (!entry) return false;
+
+    this.clients.delete(entry[0]);
+    this.evictingClients.add(client);
+    try {
+      await client.shutdown();
+      this.clientEvictionCount += 1;
+      if (reason === "idle") this.idleEvictionCount += 1;
+      else this.capacityEvictionCount += 1;
+      return true;
+    } finally {
+      this.evictingClients.delete(client);
+      this.scheduleResourcePump();
+    }
+  }
+
+  private onClientResourceChange(): void {
+    this.scheduleResourcePump();
+  }
+
+  private recordClientLifecycleEvent(event: "start" | "restart" | "cooldown"): void {
+    if (event === "start") this.clientStartCount += 1;
+    else if (event === "restart") this.clientRestartCount += 1;
+    else this.initializationCooldownCount += 1;
   }
 }
 
@@ -940,6 +1807,7 @@ function mergeDiagnosticRefreshOptions(left: DiagnosticsForFileOptions, right: D
     timeoutMs: Math.max(left.timeoutMs, right.timeoutMs),
     settleMs: Math.max(left.settleMs, right.settleMs),
     snapshotScope: mergeDiagnosticSnapshotScope(left.snapshotScope, right.snapshotScope),
+    forceFresh: left.forceFresh === true || right.forceFresh === true,
     server: left.server ?? right.server,
   };
 }
@@ -949,6 +1817,7 @@ function diagnosticJobOptions(options: DiagnosticsForFileOptions): DiagnosticsFo
     timeoutMs: options.timeoutMs,
     settleMs: options.settleMs,
     snapshotScope: options.snapshotScope,
+    forceFresh: options.forceFresh,
     server: options.server,
   };
 }
@@ -959,6 +1828,7 @@ function mergeDiagnosticSnapshotScope(left: DiagnosticSnapshotScope | undefined,
 
 function canShareRunningDiagnosticJob(job: DiagnosticRefreshJob, options: DiagnosticsForFileOptions): boolean {
   if (options.snapshotScope === "workspace" && job.options.snapshotScope !== "workspace") return false;
+  if (options.forceFresh === true && job.options.forceFresh !== true) return false;
   return options.timeoutMs <= job.options.timeoutMs && options.settleMs <= job.options.settleMs;
 }
 
@@ -987,16 +1857,65 @@ function snapshotForUri(snapshot: DiagnosticSnapshot, uri: string): DiagnosticSn
 }
 
 function diagnosticRefreshKey(filePath: string, content: string, clients: LspClient[]): string {
-  const serverIds = clients.map((client) => client.id).sort((left, right) => left.localeCompare(right)).join("\0");
-  return `${path.resolve(filePath)}\0${serverIds}\0${content.length}\0${hashString(content)}`;
+  const serverIds = clients
+    .map((client) => `${client.id}\0${client.root}`)
+    .sort((left, right) => left.localeCompare(right))
+    .join("\0");
+  return `${path.resolve(filePath)}\0${serverIds}\0${content.length}\0${contentHash(content)}`;
 }
 
-function hashString(value: string): string {
-  let hash = 5381;
-  for (let index = 0; index < value.length; index += 1) {
-    hash = ((hash << 5) + hash + value.charCodeAt(index)) | 0;
+function normalizeFileMutations(mutations: readonly LspFileMutation[], projectRoot: string): LspFileMutation[] {
+  const normalized: LspFileMutation[] = [];
+  for (const mutation of mutations) {
+    if (mutation.type === "renamed") {
+      const oldFilePath = path.resolve(mutation.oldFilePath);
+      const newFilePath = path.resolve(mutation.newFilePath);
+      if (!isInsideOrEqual(oldFilePath, projectRoot) || !isInsideOrEqual(newFilePath, projectRoot)) continue;
+      normalized.push({ type: "renamed", oldFilePath, newFilePath });
+      continue;
+    }
+
+    const filePath = path.resolve(mutation.filePath);
+    if (!isInsideOrEqual(filePath, projectRoot)) continue;
+    normalized.push({ type: mutation.type, filePath });
   }
-  return (hash >>> 0).toString(36);
+  return normalized;
+}
+
+function openedFileHasExpectedProjectPath(
+  descriptor: number,
+  filePath: string,
+  projectRoot: string,
+  projectRealRoot: string,
+): boolean {
+  try {
+    const openedRealPath = fs.readlinkSync(`/proc/self/fd/${descriptor}`);
+    const expectedRealPath = path.resolve(projectRealRoot, path.relative(projectRoot, filePath));
+    return isInsideOrEqual(openedRealPath, projectRealRoot) && path.resolve(openedRealPath) === expectedRealPath;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeOpenDocumentReconciliationLimit(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return MAX_RECONCILED_OPEN_DOCUMENTS;
+  return Math.min(MAX_RECONCILED_OPEN_DOCUMENTS, Math.max(1, Math.floor(value)));
+}
+
+function circularSlice<T>(values: readonly T[], start: number, limit: number): T[] {
+  if (values.length === 0 || limit <= 0) return [];
+  const count = Math.min(values.length, limit);
+  return Array.from({ length: count }, (_, index) => values[(start + index) % values.length]);
+}
+
+function transientResourceError(message: string): Error {
+  const error = new Error(message);
+  error.name = "AbortError";
+  return error;
+}
+
+function samePaths(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((entry, index) => entry === right[index]);
 }
 
 function mergeArrayResults(results: ClientRequestResult[]): unknown[] {
@@ -1227,12 +2146,17 @@ function workspaceSourceSkipReason(result: WorkspaceDiagnosticSourceReadResult):
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+function workspaceDiagnosticUnavailableReason(results: WorkspaceDiagnosticClientFileResult[]): string {
+  const reasons = [...new Set(results.map((result) => result.reason).filter((reason): reason is string => reason !== undefined))];
+  return reasons.join("; ") || "no language server produced an authoritative diagnostic refresh";
 }
 
 function clientKey(root: string, definition: LanguageServerDefinition): string {
   return `${path.resolve(root)}\0${definition.id}\0${definition.command}\0${definition.args.join("\0")}\0${definition.environment?.key ?? ""}\0${definition.configurationKey ?? ""}`;
+}
+
+function unavailableServerKey(id: string, root: string): string {
+  return `${id}\0${path.resolve(root)}`;
 }
 
 export function createLspService(options: LspServiceOptions): LspService {

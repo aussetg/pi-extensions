@@ -1,4 +1,5 @@
 import { pathToFileURL } from "node:url";
+import { clampLine, splitLines, weakerConfidence } from "../diagnostics/ranges.ts";
 import type { RangeConfidence, TouchedRange } from "../types.ts";
 
 const MAX_EXACT_MAPPING_CELLS = 1_000_000;
@@ -236,23 +237,6 @@ function makeMappedRange(filePath: string, startLine: number, endLine: number, c
   };
 }
 
-function splitLines(content: string): string[] {
-  const lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
-  return lines;
-}
-
 function rangesOverlap(leftStart: number, leftEnd: number, rightStart: number, rightEnd: number): boolean {
   return leftStart <= rightEnd && leftEnd >= rightStart;
-}
-
-function clampLine(line: number, maxLine: number): number {
-  if (!Number.isFinite(line)) return 1;
-  return Math.min(Math.max(1, Math.floor(line)), Math.max(1, maxLine));
-}
-
-function weakerConfidence(left: RangeConfidence, right: RangeConfidence): RangeConfidence {
-  if (left === "approximate" || right === "approximate") return "approximate";
-  if (left === "expanded" || right === "expanded") return "expanded";
-  return "exact";
 }

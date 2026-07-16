@@ -2,20 +2,25 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { createDefaultConfig } from "../src/config.ts";
 import { createDiagnosticSnapshot } from "../src/diagnostics/snapshots.ts";
 import { DEFAULT_LSP_SOURCE_FILE_MAX_BYTES } from "../src/fs.ts";
 import { createLspService } from "../src/lsp/service.ts";
-import { renderLspToolResult } from "../src/lsp/tool-renderer.ts";
+import { renderLspToolCall, renderLspToolResult } from "../src/lsp/tool-renderer.ts";
 import { registerLspTool } from "../src/lsp/tool.ts";
 import { LSP_TOOL_DETAILS_MAX_BYTES, formatLspToolJson, limitLspToolDetails, limitLspToolText } from "../src/lsp/tool-output.ts";
 import { createRuntime, setProjectRoot } from "../src/runtime.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fakeServer = path.join(here, "fixtures", "fake-lsp-server.mjs");
+const directMutationQueue = (_filePath, run) => run();
+const inactiveFormatService = {
+  configure() {},
+  getStatus() { return { recentRuns: [], commands: [] }; },
+};
 
 test("lsp status explains lazy clients instead of exposing an ambiguous active-client count", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-status-"));
@@ -47,11 +52,17 @@ test("lsp agent schema excludes legacy aliases and unrestricted methods", async 
     assert.equal(properties.method.enum.includes("raw/request"), false);
     assert.equal(properties.method.enum.includes("codeAction/apply"), false);
     assert.equal(properties.method.enum.includes("workspaceEdit/apply"), true);
+    assert.equal(properties.method.enum.includes("workspace/renameFile"), true);
+    assert.equal(properties.newPath.type, "string");
     assert.equal(properties.server.type, "string");
     assert.equal(properties.server.minLength, 1);
     assert.equal(properties.limit.type, "number");
     assert.equal(properties.limit.minimum, 1);
     assert.equal(properties.limit.maximum, 200);
+    assert.equal(properties.symbol.type, "string");
+    assert.equal(properties.symbol.maxLength, 512);
+    assert.equal(properties.occurrence.type, "number");
+    assert.equal(properties.occurrence.minimum, 1);
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });
@@ -80,7 +91,8 @@ test("lsp tool preserves trusted roots when reconfiguring services", async () =>
   registerLspTool({
     registerTool(definition) { tool = definition; },
     registerCommand() {},
-  }, runtime, lspService, formatService);
+    on() {},
+  }, runtime, lspService, formatService, directMutationQueue);
 
   try {
     await tool.execute("lsp-1", { method: "server/status" }, undefined, undefined, { cwd: root });
@@ -96,6 +108,7 @@ test("lsp tool blocks project-local LSP work when Pi project trust is declined",
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-untrusted-"));
   const runtime = createRuntime(createDefaultConfig());
   setProjectRoot(runtime, root);
+  runtime.projectTrusted = false;
 
   let hoverCalled = false;
   const lspService = {
@@ -108,7 +121,8 @@ test("lsp tool blocks project-local LSP work when Pi project trust is declined",
   registerLspTool({
     registerTool(definition) { tool = definition; },
     registerCommand() {},
-  }, runtime, lspService);
+    on() {},
+  }, runtime, lspService, inactiveFormatService, directMutationQueue);
 
   try {
     const result = await tool.execute("lsp-untrusted", {
@@ -116,7 +130,7 @@ test("lsp tool blocks project-local LSP work when Pi project trust is declined",
       path: "probe.py",
       line: 1,
       column: 1,
-    }, undefined, undefined, { cwd: root, isProjectTrusted: () => false });
+    }, undefined, undefined, { cwd: root });
 
     assert.equal(hoverCalled, false);
     assert.equal(result.isError, true);
@@ -127,21 +141,30 @@ test("lsp tool blocks project-local LSP work when Pi project trust is declined",
   }
 });
 
-test("explicit diagnostic timeouts are rendered as non-authoritative", async () => {
+test("explicit diagnostic timeouts fail without returning cached diagnostics", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-diagnostic-timeout-"));
   const runtime = createRuntime(createDefaultConfig());
   setProjectRoot(runtime, root);
-  const snapshot = createDiagnosticSnapshot([]);
+  let requestedTimeoutMs;
+  const snapshot = createDiagnosticSnapshot([{
+    uri: pathToFileURL(path.join(root, "probe.py")).href,
+    range: { start: { line: 1, character: 1 }, end: { line: 1, character: 2 } },
+    severity: "error",
+    source: "stale-cache",
+    code: "STALE",
+    message: "stale diagnostic must not leak",
+  }]);
   const lspService = {
     configure() {},
     getStatus() { return { activeClients: 0, clients: [], unavailableServers: [] }; },
-    async diagnosticsForFileDetailed() {
+    async diagnosticsForFileDetailed(_filePath, _content, options) {
+      requestedTimeoutMs = options.timeoutMs;
       return {
         snapshot,
         fresh: false,
         timedOut: true,
         requestedAt: 100,
-        completedAt: 1300,
+        completedAt: 10_100,
       };
     },
   };
@@ -149,7 +172,8 @@ test("explicit diagnostic timeouts are rendered as non-authoritative", async () 
   registerLspTool({
     registerTool(definition) { tool = definition; },
     registerCommand() {},
-  }, runtime, lspService);
+    on() {},
+  }, runtime, lspService, inactiveFormatService, directMutationQueue);
 
   try {
     const result = await tool.execute("lsp-timeout", {
@@ -157,13 +181,16 @@ test("explicit diagnostic timeouts are rendered as non-authoritative", async () 
       path: "probe.py",
     }, undefined, undefined, { cwd: root });
 
-    assert.equal(result.isError, undefined);
-    assert.equal(result.details.ok, true);
+    assert.equal(result.isError, true);
+    assert.equal(result.details.ok, false);
     assert.equal(result.details.authoritative, false);
+    assert.equal(result.details.diagnosticsReturned, false);
     assert.equal(result.details.diagnosticRefresh.outcome, "timed-out");
-    assert.equal(result.details.diagnosticRefresh.durationMs, 1200);
-    assert.match(result.content[0].text, /^  refresh: timed out \(1200ms\) — cached diagnostics shown; not authoritative$/m);
-    assert.match(result.details.hint, /diagnostic refresh timed out/);
+    assert.equal(result.details.diagnosticRefresh.durationMs, 10_000);
+    assert.equal(requestedTimeoutMs, 10_000);
+    assert.match(result.content[0].text, /timed out after 10000ms; no diagnostics returned/);
+    assert.match(result.details.hint, /never substitute cached or stale diagnostics/);
+    assert.doesNotMatch(result.content[0].text, /stale diagnostic must not leak|STALE/);
 
     const theme = {
       fg: (color, text) => `<${color}>${text}</${color}>`,
@@ -172,8 +199,18 @@ test("explicit diagnostic timeouts are rendered as non-authoritative", async () 
     const rendered = renderLspToolResult(result, { expanded: false }, theme, {
       args: { method: "textDocument/diagnostic", path: "probe.py" },
     }).render(500).join("\n");
-    assert.match(rendered, /^<warning>Diagnostics<\/warning>/);
+    assert.match(rendered, /^<error>lsp textDocument\/diagnostic/);
     assert.match(rendered, /timed out/);
+
+    lspService.diagnosticsForFileDetailed = async () => undefined;
+    const unavailable = await tool.execute("lsp-unavailable", {
+      method: "textDocument/diagnostic",
+      path: "probe.py",
+    }, undefined, undefined, { cwd: root });
+    assert.equal(unavailable.isError, true);
+    assert.equal(unavailable.details.diagnosticsReturned, false);
+    assert.equal(unavailable.details.diagnosticRefresh.outcome, "unavailable");
+    assert.match(unavailable.content[0].text, /was unavailable; no diagnostics returned/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -246,6 +283,7 @@ test("lsp WorkspaceEdit application runs formatting before inline diagnostics", 
 
   const formatService = {
     configure() {},
+    getStatus() { return { recentRuns: [], commands: [] }; },
     async formatFile(target, content) {
       const finalContent = `${content}# formatted\n`;
       await writeFile(target, finalContent, "utf8");
@@ -431,6 +469,227 @@ test("lsp rename WorkspaceEdit ids reject stale targets", async () => {
   }
 });
 
+test("lsp file rename previews server edits and applies one safe transaction", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-file-rename-"));
+  const sourcePath = path.join(root, "source.py");
+  const destinationPath = path.join(root, "renamed.py");
+  const consumerPath = path.join(root, "consumer.py");
+  const logPath = path.join(root, "lsp.jsonl");
+  await writeFile(sourcePath, "value = 1\n", "utf8");
+  await writeFile(consumerPath, "from source import value\n", "utf8");
+  const { tool, service, runtime } = createRegisteredTool(root, "file-rename-log", logPath);
+
+  try {
+    const previewResult = await tool.execute("lsp-file-rename-preview", {
+      method: "workspace/renameFile",
+      path: "source.py",
+      newPath: "renamed.py",
+    }, undefined, undefined, { cwd: root });
+
+    assert.equal(previewResult.isError, undefined);
+    const previewPayload = JSON.parse(previewResult.content[0].text);
+    assert.equal(previewPayload.workspaceEdit.kind, "fileRename");
+    assert.equal(previewPayload.workspaceEdit.applyable, true);
+    assert.equal(previewPayload.workspaceEdit.oldPath, "source.py");
+    assert.equal(previewPayload.workspaceEdit.newPath, "renamed.py");
+    assert.equal(previewPayload.workspaceEdit.editSummary, "2 text edits across 2 files");
+    assert.match(previewPayload.workspaceEdit.id, /^we_[0-9a-z]{4}$/);
+    assert.equal(await readFile(sourcePath, "utf8"), "value = 1\n");
+    await assert.rejects(readFile(destinationPath, "utf8"), (error) => error?.code === "ENOENT");
+
+    const previewLog = await waitForJsonLog(logPath, (entries) => entries.some((entry) => entry.method === "workspace/willRenameFiles"));
+    assert.deepEqual(previewLog.find((entry) => entry.method === "workspace/willRenameFiles")?.params, {
+      files: [{
+        oldUri: pathToFileURL(sourcePath).href,
+        newUri: pathToFileURL(destinationPath).href,
+      }],
+    });
+
+    const applied = await tool.execute("lsp-file-rename-apply", {
+      method: "workspaceEdit/apply",
+      id: previewPayload.workspaceEdit.id,
+    }, undefined, undefined, { cwd: root });
+
+    assert.equal(applied.isError, undefined);
+    const appliedPayload = JSON.parse(applied.content[0].text);
+    assert.equal(appliedPayload.ok, true);
+    assert.equal(appliedPayload.kind, "fileRename");
+    assert.equal(appliedPayload.editCount, 2);
+    assert.deepEqual(appliedPayload.changedFiles, ["consumer.py", "renamed.py"]);
+    assert.deepEqual(appliedPayload.renamedFile, { oldPath: "source.py", newPath: "renamed.py" });
+    assert.equal(await readFile(destinationPath, "utf8"), "# moved by py\nvalue = 1\n");
+    assert.equal(await readFile(consumerPath, "utf8"), "from renamed import value\n");
+    await assert.rejects(readFile(sourcePath, "utf8"), (error) => error?.code === "ENOENT");
+    assert.equal(runtime.completedEdits.length, 2);
+    assert.equal(runtime.completedEdits[0].filePath, destinationPath);
+    assert.equal(runtime.completedEdits[0].originalPath, sourcePath);
+
+    const appliedLog = await waitForJsonLog(logPath, (entries) => (
+      entries.some((entry) => entry.method === "workspace/didRenameFiles") &&
+      entries.some((entry) => entry.method === "workspace/didChangeWatchedFiles")
+    ));
+    const didRename = appliedLog.find((entry) => entry.method === "workspace/didRenameFiles");
+    assert.deepEqual(didRename?.params?.files, [{
+      oldUri: pathToFileURL(sourcePath).href,
+      newUri: pathToFileURL(destinationPath).href,
+    }]);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("lsp file rename safely supports an authoritative empty server edit", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-file-rename-empty-"));
+  const sourcePath = path.join(root, "source.py");
+  const destinationPath = path.join(root, "renamed.py");
+  await writeFile(sourcePath, "value = 1\n", "utf8");
+  const { tool, service, runtime } = createRegisteredTool(root, "file-rename-no-edits");
+
+  try {
+    const preview = await tool.execute("lsp-file-rename-preview", {
+      method: "workspace/renameFile",
+      path: "source.py",
+      newPath: "renamed.py",
+    }, undefined, undefined, { cwd: root });
+    const previewPayload = JSON.parse(preview.content[0].text);
+    assert.equal(previewPayload.workspaceEdit.applyable, true);
+    assert.equal(previewPayload.workspaceEdit.editSummary, "0 text edits across 0 files");
+
+    const applied = await tool.execute("lsp-file-rename-apply", {
+      method: "workspaceEdit/apply",
+      id: previewPayload.workspaceEdit.id,
+    }, undefined, undefined, { cwd: root });
+    const payload = JSON.parse(applied.content[0].text);
+    assert.equal(payload.ok, true);
+    assert.equal(payload.editCount, 0);
+    assert.deepEqual(payload.changedFiles, ["renamed.py"]);
+    assert.equal(await readFile(destinationPath, "utf8"), "value = 1\n");
+    await assert.rejects(readFile(sourcePath, "utf8"), (error) => error?.code === "ENOENT");
+    assert.deepEqual(runtime.completedEdits[0]?.touchedRanges.map((range) => ({
+      path: range.filePath,
+      lines: [range.startLine, range.endLine],
+      source: range.source,
+    })), [{ path: destinationPath, lines: [1, 1], source: "whole-file" }]);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("lsp file rename rejects unsupported servers and stale destinations without moving files", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-file-rename-guard-"));
+  const sourcePath = path.join(root, "source.py");
+  const destinationPath = path.join(root, "renamed.py");
+  await writeFile(sourcePath, "value = 1\n", "utf8");
+
+  const unsupported = createRegisteredTool(root, "file-rename-unsupported");
+  try {
+    const result = await unsupported.tool.execute("lsp-file-rename-unsupported", {
+      method: "workspace/renameFile",
+      path: "source.py",
+      newPath: "renamed.py",
+    }, undefined, undefined, { cwd: root });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /does not support workspace\/willRenameFiles/);
+    assert.equal(await readFile(sourcePath, "utf8"), "value = 1\n");
+  } finally {
+    await unsupported.service.shutdownAll();
+  }
+
+  const filterMiss = createRegisteredTool(root, "file-rename-filter-miss");
+  try {
+    const result = await filterMiss.tool.execute("lsp-file-rename-filter-miss", {
+      method: "workspace/renameFile",
+      path: "source.py",
+      newPath: "renamed.py",
+    }, undefined, undefined, { cwd: root });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /does not support workspace\/willRenameFiles/);
+    assert.equal(await readFile(sourcePath, "utf8"), "value = 1\n");
+  } finally {
+    await filterMiss.service.shutdownAll();
+  }
+
+  const supported = createRegisteredTool(root, "file-rename-no-edits");
+  try {
+    const preview = await supported.tool.execute("lsp-file-rename-preview", {
+      method: "workspace/renameFile",
+      path: "source.py",
+      newPath: "renamed.py",
+    }, undefined, undefined, { cwd: root });
+    const id = JSON.parse(preview.content[0].text).workspaceEdit.id;
+    await writeFile(destinationPath, "occupied\n", "utf8");
+
+    const applied = await supported.tool.execute("lsp-file-rename-apply", {
+      method: "workspaceEdit/apply",
+      id,
+    }, undefined, undefined, { cwd: root });
+    assert.equal(applied.isError, true);
+    assert.match(applied.content[0].text, /stale: file state changed since workspace\/renameFile: renamed\.py/);
+    assert.equal(await readFile(sourcePath, "utf8"), "value = 1\n");
+    assert.equal(await readFile(destinationPath, "utf8"), "occupied\n");
+  } finally {
+    await supported.service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("lsp file rename rejects server resource operations and expired source sessions", async () => {
+  const resourceRoot = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-file-rename-resource-"));
+  const resourceSource = path.join(resourceRoot, "source.py");
+  await writeFile(resourceSource, "value = 1\n", "utf8");
+  const resource = createRegisteredTool(resourceRoot, "file-rename-resource-operation");
+
+  try {
+    const preview = await resource.tool.execute("lsp-file-rename-resource", {
+      method: "workspace/renameFile",
+      path: "source.py",
+      newPath: "renamed.py",
+    }, undefined, undefined, { cwd: resourceRoot });
+    const previewPayload = JSON.parse(preview.content[0].text);
+    assert.equal(previewPayload.workspaceEdit.applyable, false);
+    assert.match(previewPayload.workspaceEdit.editSummary, /1 resource operation/);
+
+    const applied = await resource.tool.execute("lsp-file-rename-resource-apply", {
+      method: "workspaceEdit/apply",
+      id: previewPayload.workspaceEdit.id,
+    }, undefined, undefined, { cwd: resourceRoot });
+    assert.equal(applied.isError, true);
+    assert.match(applied.content[0].text, /is not safely applyable/);
+    assert.equal(await readFile(resourceSource, "utf8"), "value = 1\n");
+  } finally {
+    await resource.service.shutdownAll();
+    await rm(resourceRoot, { recursive: true, force: true });
+  }
+
+  const sessionRoot = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-file-rename-session-"));
+  const sessionSource = path.join(sessionRoot, "source.py");
+  await writeFile(sessionSource, "value = 1\n", "utf8");
+  const session = createRegisteredTool(sessionRoot, "file-rename-no-edits");
+
+  try {
+    const preview = await session.tool.execute("lsp-file-rename-session", {
+      method: "workspace/renameFile",
+      path: "source.py",
+      newPath: "renamed.py",
+    }, undefined, undefined, { cwd: sessionRoot });
+    const id = JSON.parse(preview.content[0].text).workspaceEdit.id;
+    await session.service.restart();
+
+    const applied = await session.tool.execute("lsp-file-rename-session-apply", {
+      method: "workspaceEdit/apply",
+      id,
+    }, undefined, undefined, { cwd: sessionRoot });
+    assert.equal(applied.isError, true);
+    assert.match(applied.content[0].text, /source language-server session is no longer live/);
+    assert.equal(await readFile(sessionSource, "utf8"), "value = 1\n");
+  } finally {
+    await session.service.shutdownAll();
+    await rm(sessionRoot, { recursive: true, force: true });
+  }
+});
+
 test("lsp tool text is truncated and saved to a temp file", async () => {
   const huge = Array.from({ length: 2100 }, (_, index) => `line ${index + 1}`).join("\n");
   const result = limitLspToolText(huge);
@@ -613,13 +872,16 @@ test("lsp position inputs reject non-1-based values instead of clamping", async 
       { method: "textDocument/hover", path: "probe.py", line: 1 },
       { method: "textDocument/definition", path: "probe.py", line: 1.5, column: 1 },
       { method: "textDocument/codeAction", path: "probe.py", line: 0, column: 1 },
+      { method: "textDocument/hover", path: "probe.py", line: 1, column: 1, symbol: "value" },
+      { method: "textDocument/hover", path: "probe.py", line: 1, occurrence: 1 },
+      { method: "textDocument/hover", path: "probe.py", line: 1, symbol: "value", occurrence: 0 },
     ];
 
     for (const input of cases) {
       const result = await tool.execute("lsp-invalid-position", input, undefined, undefined, { cwd: root });
       assert.equal(result.isError, true, JSON.stringify(input));
-      assert.match(result.content[0].text, /requires 1-based line and column/, JSON.stringify(input));
-      assert.match(result.content[0].text, /hint: Pass line and column as 1-based numbers\./, JSON.stringify(input));
+      assert.match(result.content[0].text, /requires 1-based line and column|accepts either column or symbol|requires symbol when occurrence|requires occurrence to be/, JSON.stringify(input));
+      assert.match(result.content[0].text, /hint: Pass a 1-based line with either a 1-based column or exact symbol/, JSON.stringify(input));
     }
 
     const removedCharacterResult = await tool.execute("lsp-removed-character", {
@@ -630,6 +892,63 @@ test("lsp position inputs reject non-1-based values instead of clamping", async 
     }, undefined, undefined, { cwd: root });
     assert.equal(removedCharacterResult.isError, true);
     assert.match(removedCharacterResult.content[0].text, /requires 1-based line and column/);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("lsp position methods resolve exact symbols and explicit occurrences", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-symbol-position-"));
+  const logPath = path.join(root, "lsp.jsonl");
+  await writeFile(path.join(root, "probe.py"), "targetLong target = target;\n", "utf8");
+  const { tool, service } = createRegisteredTool(root, "position-log", logPath);
+  const methods = [
+    "textDocument/hover",
+    "textDocument/definition",
+    "textDocument/references",
+    "textDocument/implementation",
+    "textDocument/typeDefinition",
+    "textDocument/codeAction",
+    "textDocument/rename",
+  ];
+
+  try {
+    for (const method of methods) {
+      const result = await tool.execute(`lsp-symbol-${method}`, {
+        method,
+        path: "probe.py",
+        line: 1,
+        symbol: "target",
+        occurrence: 2,
+        ...(method === "textDocument/rename" ? { newName: "renamed" } : {}),
+      }, undefined, undefined, { cwd: root });
+      assert.equal(result.isError, undefined, method);
+    }
+
+    const entries = await waitForJsonLog(logPath, (items) => (
+      methods.every((method) => items.some((entry) => entry.method === method))
+    ));
+    for (const method of methods) {
+      const entry = entries.find((item) => item.method === method);
+      assert.deepEqual(entry?.params?.position ?? entry?.params?.range?.start, {
+        line: 0,
+        character: 20,
+      }, method);
+    }
+
+    const codeAction = entries.find((entry) => entry.method === "textDocument/codeAction");
+    assert.deepEqual(codeAction?.params?.range?.end, { line: 0, character: 20 });
+
+    const missing = await tool.execute("lsp-symbol-missing", {
+      method: "textDocument/hover",
+      path: "probe.py",
+      line: 1,
+      symbol: "Target",
+    }, undefined, undefined, { cwd: root });
+    assert.equal(missing.isError, true);
+    assert.match(missing.content[0].text, /cannot find exact symbol "Target" on line 1/);
+    assert.match(missing.content[0].text, /hint: Check the exact case-sensitive symbol text/);
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });
@@ -677,6 +996,36 @@ test("lsp error renderer handles structured JSON errors even when isError is abs
     .join("\n");
 
   assert.equal(rendered, "<error>broken</error>\n<dim>try again</dim>");
+});
+
+test("lsp call renderer shows symbol occurrences without pretending they are columns", () => {
+  const theme = {
+    fg: (_color, text) => text,
+    bold: (text) => text,
+  };
+  const rendered = renderLspToolCall({
+    method: "textDocument/references",
+    path: "probe.ts",
+    line: 7,
+    symbol: "target",
+    occurrence: 2,
+  }, theme).render(500).join("\n");
+
+  assert.equal(rendered, "lsp textDocument/references probe.ts 7:\"target\"#2");
+});
+
+test("lsp call renderer shows file rename source and destination", () => {
+  const theme = {
+    fg: (_color, text) => text,
+    bold: (text) => text,
+  };
+  const rendered = renderLspToolCall({
+    method: "workspace/renameFile",
+    path: "src/old.ts",
+    newPath: "src/new.ts",
+  }, theme).render(500).join("\n");
+
+  assert.equal(rendered, "lsp workspace/renameFile src/old.ts → src/new.ts");
 });
 
 test("lsp collapsed expand hint uses the normal hint color", () => {
@@ -788,7 +1137,8 @@ test("lsp tool server selects one matching language server", async () => {
   registerLspTool({
     registerTool(definition) { tool = definition; },
     registerCommand() {},
-  }, runtime, service);
+    on() {},
+  }, runtime, service, inactiveFormatService, directMutationQueue);
 
   try {
     const result = await tool.execute("lsp-1", {
@@ -818,7 +1168,7 @@ test("lsp tool server selects one matching language server", async () => {
   }
 });
 
-test("lsp workspace diagnostics actively scan a bounded path and retain a cached mode", async () => {
+test("lsp workspace diagnostics require an active path and return fresh-only scan results", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-workspace-"));
   await writeFile(path.join(root, "a.py"), "a = 1\n", "utf8");
   await writeFile(path.join(root, "b.py"), "b = 2\n", "utf8");
@@ -830,11 +1180,11 @@ test("lsp workspace diagnostics actively scan a bounded path and retain a cached
     serverOverrides: {
       python: {
         command: process.execPath,
-        args: [fakeServer, "ty", "T100", "1", "", "pull-diagnostics"],
+        args: [fakeServer, "ty", "T100", "1", "", "workspace-pull-diagnostics"],
       },
       "python-ruff": {
         command: process.execPath,
-        args: [fakeServer, "ruff", "R100", "2", "", "pull-diagnostics"],
+        args: [fakeServer, "ruff", "R100", "2", "", "workspace-pull-diagnostics"],
       },
     },
   });
@@ -842,7 +1192,8 @@ test("lsp workspace diagnostics actively scan a bounded path and retain a cached
   registerLspTool({
     registerTool(definition) { tool = definition; },
     registerCommand() {},
-  }, runtime, service);
+    on() {},
+  }, runtime, service, inactiveFormatService, directMutationQueue);
 
   try {
     const active = await tool.execute("lsp-workspace-active", {
@@ -857,12 +1208,17 @@ test("lsp workspace diagnostics actively scan a bounded path and retain a cached
     assert.match(active.content[0].text, /known LSP diagnostics: 1/);
     assert.match(active.content[0].text, /scan: bounded\/incomplete/);
     assert.match(active.content[0].text, /files: 1 selected · 1 fresh · 0 timed out · 0 unavailable · 0 skipped/);
+    assert.match(active.content[0].text, /protocol: 1 workspace pull · 1 pull-covered · 0 document fallback · 0 pull failures/);
     assert.equal(active.details.ok, true);
     assert.equal(active.details.method, "workspace/diagnostic");
     assert.equal(active.details.mode, "workspace");
     assert.equal(active.details.server, "python-ruff");
+    assert.equal(active.details.freshDiagnosticsOnly, true);
     assert.equal(active.details.workspaceScan.selectedFiles, 1);
     assert.equal(active.details.workspaceScan.fileLimitReached, true);
+    assert.equal(active.details.workspaceScan.workspacePullRequests, 1);
+    assert.equal(active.details.workspaceScan.workspacePullFiles, 1);
+    assert.equal(active.details.workspaceScan.documentRefreshFiles, 0);
     assert.equal(active.details.workspaceScan.files[0].outcome, "fresh");
     assert.deepEqual(service.getStatus().clients.map((client) => client.id), ["python-ruff"]);
 
@@ -875,15 +1231,16 @@ test("lsp workspace diagnostics actively scan a bounded path and retain a cached
     assert.match(invalidLimit.content[0].text, /file limit must be at most 200/);
     assert.match(invalidLimit.content[0].text, /hint: Pass limit as an integer from 1 to 200/);
 
-    const cached = await tool.execute("lsp-workspace-cached", {
+    const missingPath = await tool.execute("lsp-workspace-missing-path", {
       method: "workspace/diagnostic",
       server: "python-ruff",
-    }, undefined, undefined, { cwd: root, isProjectTrusted: () => false });
-    assert.equal(cached.isError, undefined);
-    assert.equal(cached.details.mode, "cached");
-    assert.equal(cached.details.workspaceScan, undefined);
-    assert.match(cached.content[0].text, /target: all \(cached\)/);
+    }, undefined, undefined, { cwd: root });
+    assert.equal(missingPath.isError, true);
+    assert.equal(missingPath.details.ok, false);
+    assert.match(missingPath.content[0].text, /workspace\/diagnostic requires path for an active fresh scan/);
+    assert.match(missingPath.content[0].text, /hint: Pass path="\."/);
 
+    runtime.projectTrusted = false;
     const untrustedActive = await tool.execute("lsp-workspace-untrusted", {
       method: "workspace/diagnostic",
       path: ".",
@@ -918,7 +1275,7 @@ async function readJsonLog(filePath) {
   }
 }
 
-function createRegisteredTool(root, mode = "actions-require-diagnostics", logPath = undefined, mutationQueue = undefined, formatService = undefined) {
+function createRegisteredTool(root, mode = "actions-require-diagnostics", logPath = undefined, mutationQueue = directMutationQueue, formatService = undefined) {
   const runtime = createRuntime(createDefaultConfig());
   setProjectRoot(runtime, root);
   runtime.config.autoFormat = formatService !== undefined;
@@ -942,7 +1299,8 @@ function createRegisteredTool(root, mode = "actions-require-diagnostics", logPat
       tool = definition;
     },
     registerCommand() {},
-  }, runtime, service, formatService, mutationQueue);
+    on() {},
+  }, runtime, service, formatService ?? inactiveFormatService, mutationQueue);
 
   assert.ok(tool);
   return { runtime, service, tool };

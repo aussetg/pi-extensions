@@ -10,6 +10,7 @@ import { handleToolCall } from "../src/events/tool-call.ts";
 import { handleContext } from "../src/events/context.ts";
 import { handleToolResult } from "../src/events/tool-result.ts";
 import { createRuntime, setProjectRoot } from "../src/runtime.ts";
+import { inactiveFormatService } from "./helpers/inactive-services.mjs";
 
 test("slow after diagnostics use the inline budget and arrive through delayed context", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-delayed-"));
@@ -38,6 +39,7 @@ test("slow after diagnostics use the inline budget and arrive through delayed co
 
   const refreshOptions = [];
   const lspService = {
+    notifyFileMutations() {},
     cachedDiagnosticsIfKnown() {
       return createDiagnosticSnapshot([]);
     },
@@ -87,6 +89,7 @@ test("slow after diagnostics use the inline budget and arrive through delayed co
       { cwd: root },
       runtime,
       lspService,
+      inactiveFormatService,
     );
 
     assert.equal(result, undefined);
@@ -126,6 +129,7 @@ test("strict mode keeps the full after-diagnostic wait budget", async () => {
 
   const refreshOptions = [];
   const lspService = {
+    notifyFileMutations() {},
     cachedDiagnosticsIfKnown() {
       return createDiagnosticSnapshot([]);
     },
@@ -166,6 +170,7 @@ test("strict mode keeps the full after-diagnostic wait budget", async () => {
       { cwd: root },
       runtime,
       lspService,
+      inactiveFormatService,
     );
 
     assert.equal(refreshOptions[0].timeoutMs, 500);

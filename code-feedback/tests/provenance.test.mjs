@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { computeTouchedRanges } from "../src/diagnostics/ranges.ts";
 import { createDiagnosticSnapshot } from "../src/diagnostics/snapshots.ts";
-import { diagnosticOverlapsTouchedRange, linkDiagnosticsToTouchedRanges } from "../src/diagnostics/provenance.ts";
+import { diagnosticOverlapsTouchedRange, linkDiagnosticsToTouchedRanges, workspaceDiagnosticDelta } from "../src/diagnostics/provenance.ts";
 import { createDefaultConfig } from "../src/config.ts";
 import { renderDiagnosticsStatus } from "../src/render.ts";
 import { createRuntime, setProjectRoot } from "../src/runtime.ts";
@@ -94,6 +94,71 @@ test("cross-file related diagnostics only cascade when new and enabled", () => {
     includeCrossFileRelated: true,
   });
   assert.equal(notKnownNew.linked.length, 0);
+});
+
+test("workspace diagnostic deltas are bounded, cross-file, and explicitly separate from attribution", () => {
+  const touchedPath = "/tmp/pi-code-feedback-delta-source.ts";
+  const targetPath = "/tmp/pi-code-feedback-delta-target.ts";
+  const otherPath = "/tmp/pi-code-feedback-delta-other.ts";
+  const existing = diagnostic(targetPath, {
+    start: { line: 2, character: 1 },
+    end: { line: 2, character: 5 },
+  }, { severity: "warning", code: "OLD", message: "existing warning" });
+  const worsened = { ...existing, severity: "error" };
+  const possible = diagnostic(otherPath, {
+    start: { line: 4, character: 1 },
+    end: { line: 4, character: 5 },
+  }, { severity: "warning", code: "NEW", message: "new cross-file failure" });
+  const attributed = diagnostic(targetPath, {
+    start: { line: 8, character: 1 },
+    end: { line: 8, character: 5 },
+  }, { code: "RELATED", message: "attributed cascade" });
+  const touchedDiagnostic = diagnostic(touchedPath, {
+    start: { line: 10, character: 1 },
+    end: { line: 10, character: 5 },
+  }, { code: "LOCAL", message: "local failure" });
+  const touchedRanges = [touched(touchedPath, 10)];
+
+  const delta = workspaceDiagnosticDelta({
+    beforeSnapshot: createDiagnosticSnapshot([existing]),
+    afterSnapshot: createDiagnosticSnapshot([worsened, possible, attributed, touchedDiagnostic]),
+    touchedRanges,
+    linkedDiagnostics: [{
+      diagnostic: attributed,
+      linkReason: "cascade-related",
+      touchedRange: touchedRanges[0],
+      isNewOrWorsened: true,
+    }],
+    maxDiagnostics: 1,
+  });
+
+  assert.ok(delta);
+  assert.equal(delta.label, "possible workspace impact");
+  assert.deepEqual(delta.diagnostics.map((entry) => entry.code), ["OLD"]);
+  assert.deepEqual(delta.summary, {
+    totalNewOrWorsened: 2,
+    shownDiagnostics: 1,
+    hiddenByLimit: 1,
+  });
+
+  assert.equal(workspaceDiagnosticDelta({
+    afterSnapshot: createDiagnosticSnapshot([possible]),
+    touchedRanges,
+    maxDiagnostics: 8,
+  }), undefined, "a missing before snapshot must not manufacture a possible impact");
+
+  const boundedMessage = workspaceDiagnosticDelta({
+    beforeSnapshot: createDiagnosticSnapshot([]),
+    afterSnapshot: createDiagnosticSnapshot([diagnostic(otherPath, {
+      start: { line: 1, character: 1 },
+      end: { line: 1, character: 2 },
+    }, { code: "LONG", message: "x".repeat(10_000) })]),
+    touchedRanges,
+    maxDiagnostics: 8,
+  });
+  assert.ok(boundedMessage);
+  assert.equal(boundedMessage.diagnostics[0].message.length, 1_000);
+  assert.equal(boundedMessage.diagnostics[0].relatedInformation, undefined);
 });
 
 test("diagnostic linking honors maxInline while retaining full summary", () => {

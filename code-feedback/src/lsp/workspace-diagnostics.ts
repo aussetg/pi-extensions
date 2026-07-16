@@ -2,7 +2,9 @@ import * as fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import * as path from "node:path";
-import type { ReadUtf8SkippedReason } from "../fs.ts";
+import { errorMessage, isErrorCode } from "../errors.ts";
+import { readDescriptorUpTo, type ReadUtf8SkippedReason } from "../fs.ts";
+import { isInsideOrEqual } from "../paths.ts";
 import { throwIfAborted } from "./cancellation.ts";
 
 export const DEFAULT_WORKSPACE_DIAGNOSTIC_FILE_LIMIT = 50;
@@ -268,16 +270,11 @@ function hasIgnoredWorkspacePart(relativePath: string): boolean {
   return relativePath.split(path.sep).filter(Boolean).some((part) => IGNORED_WORKSPACE_DIRECTORIES.has(part));
 }
 
-function isInsideOrEqual(candidate: string, root: string): boolean {
-  const relative = path.relative(path.resolve(root), path.resolve(candidate));
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
 async function realpathOrThrow(filePath: string, label: string): Promise<string> {
   try {
     return await fsPromises.realpath(filePath);
   } catch (error) {
-    throw new Error(`Cannot resolve ${label}: ${filePath}: ${formatError(error)}`);
+    throw new Error(`Cannot resolve ${label}: ${filePath}: ${errorMessage(error)}`);
   }
 }
 
@@ -285,7 +282,7 @@ async function lstatOrThrow(filePath: string, label: string) {
   try {
     return await fsPromises.lstat(filePath);
   } catch (error) {
-    throw new Error(`Cannot inspect ${label}: ${filePath}: ${formatError(error)}`);
+    throw new Error(`Cannot inspect ${label}: ${filePath}: ${errorMessage(error)}`);
   }
 }
 
@@ -293,7 +290,7 @@ async function statOrThrow(filePath: string, label: string) {
   try {
     return await fsPromises.stat(filePath);
   } catch (error) {
-    throw new Error(`Cannot inspect ${label}: ${filePath}: ${formatError(error)}`);
+    throw new Error(`Cannot inspect ${label}: ${filePath}: ${errorMessage(error)}`);
   }
 }
 
@@ -325,28 +322,8 @@ function openedFileHasExpectedPath(
   }
 }
 
-function readDescriptorUpTo(descriptor: number, maxBytes: number): Buffer {
-  const buffer = Buffer.allocUnsafe(maxBytes);
-  let offset = 0;
-  while (offset < buffer.length) {
-    const bytesRead = fs.readSync(descriptor, buffer, offset, buffer.length - offset, null);
-    if (bytesRead === 0) break;
-    offset += bytesRead;
-  }
-  return buffer.subarray(0, offset);
-}
-
 function workspaceSourceOpenSkipReason(error: unknown): WorkspaceDiagnosticSourceReadResult["skippedReason"] {
-  if (!isErrorWithCode(error)) return "read-error";
-  if (error.code === "ELOOP") return "unsafe-path";
-  if (error.code === "ENOENT" || error.code === "ENOTDIR") return "missing";
+  if (isErrorCode(error, "ELOOP")) return "unsafe-path";
+  if (isErrorCode(error, "ENOENT", "ENOTDIR")) return "missing";
   return "read-error";
-}
-
-function isErrorWithCode(error: unknown): error is { code: string } {
-  return typeof error === "object" && error !== null && typeof (error as { code?: unknown }).code === "string";
-}
-
-function formatError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

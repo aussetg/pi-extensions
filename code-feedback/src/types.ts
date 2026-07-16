@@ -13,10 +13,15 @@ export const LSP_METHODS = [
   "workspace/symbol",
   "textDocument/codeAction",
   "textDocument/rename",
+  "workspace/renameFile",
   "workspaceEdit/apply",
 ] as const;
 
 export type LspMethod = (typeof LSP_METHODS)[number];
+
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 export type DiagnosticSeverity = "error" | "warning" | "information" | "hint";
 
@@ -136,6 +141,10 @@ export interface WorkspaceDiagnosticScanSummary {
   unavailableFiles: number;
   skippedFiles: number;
   diagnostics: number;
+  workspacePullRequests: number;
+  workspacePullFailures: number;
+  workspacePullFiles: number;
+  documentRefreshFiles: number;
   ignoredDirectories: number;
   symlinksSkipped: number;
   boundaryEntriesSkipped: number;
@@ -153,7 +162,7 @@ export interface WorkspaceDiagnosticScanResult {
   files: WorkspaceDiagnosticFileResult[];
 }
 
-export type LspClientState = "starting" | "ready" | "stopped" | "failed";
+export type LspClientState = "queued" | "starting" | "ready" | "stopped" | "failed";
 export type LspDiagnosticOutcome = "fresh" | "timeout" | "cancelled";
 
 export type LspServerLogLevel = "info" | "warning" | "error";
@@ -166,19 +175,41 @@ export interface LspServerLog {
 
 export interface LspClientStatus {
   id: string;
+  role: "language" | "linter";
   root: string;
   command: string;
   args: string[];
   state: LspClientState;
   pid?: number;
+  busy: boolean;
+  lastActivityAt: number;
+  startCount: number;
+  restartCount: number;
+  initializationCooldownCount: number;
   openDocuments: number;
   diagnosticFiles: number;
   lastDiagnosticsAt?: number;
   lastDiagnosticDurationMs?: number;
   lastDiagnosticOutcome?: LspDiagnosticOutcome;
   lastError?: string;
+  initializationRetryAt?: number;
   lastServerLog?: LspServerLog;
   environment?: string;
+}
+
+export interface LspClientResourceStatus {
+  idleTimeoutMs: number;
+  maxActiveClients: number;
+  initializationConcurrency: number;
+  activeClients: number;
+  initializingClients: number;
+  queuedStarts: number;
+  starts: number;
+  restarts: number;
+  evictions: number;
+  idleEvictions: number;
+  capacityEvictions: number;
+  initializationCooldowns: number;
 }
 
 export interface LspUnavailableServer {
@@ -205,6 +236,7 @@ export interface LspServiceStatus {
   clients: LspClientStatus[];
   unavailableServers: LspUnavailableServer[];
   serverConfiguration?: LspServerConfigurationStatus;
+  clientResources?: LspClientResourceStatus;
   diagnosticRefreshes?: {
     concurrency: number;
     active: number;
@@ -234,6 +266,18 @@ export interface DiagnosticFilterResult {
   summary: DiagnosticFilterSummary;
 }
 
+export interface WorkspaceDiagnosticDeltaSummary {
+  totalNewOrWorsened: number;
+  shownDiagnostics: number;
+  hiddenByLimit: number;
+}
+
+export interface WorkspaceDiagnosticDelta {
+  label: "possible workspace impact";
+  diagnostics: LspDiagnostic[];
+  summary: WorkspaceDiagnosticDeltaSummary;
+}
+
 export const CODE_FEEDBACK_DETAILS_KEY = "piCodeFeedback";
 
 export const LSP_RESULT_SERVER_ID_KEY = "__piCodeFeedbackServerId";
@@ -256,6 +300,7 @@ export interface CodeFeedbackEditDetails {
   timing?: CodeFeedbackTiming;
   formatter?: FormatterSummary;
   diagnostics?: CodeFeedbackDiagnosticDetails;
+  workspaceDelta?: WorkspaceDiagnosticDelta;
 }
 
 export interface CodeFeedbackTimingPhase {
@@ -279,6 +324,7 @@ export interface PendingEdit {
   toolName: TrackedToolName;
   filePath: string;
   beforeContent: string | undefined;
+  beforeFileExisted: boolean;
   beforeDiagnostics: DiagnosticSnapshot | undefined;
   turnIndex: number;
   writeIndex: number;
@@ -305,6 +351,7 @@ export interface CompletedEdit {
   rangeComputation?: TouchedRangeComputation;
   formatter?: FormatterSummary;
   diagnosticFilter?: DiagnosticFilterResult;
+  workspaceDelta?: WorkspaceDiagnosticDelta;
   applyPatchOperationIndex?: number;
   originalPath?: string;
 }
@@ -313,6 +360,9 @@ export interface DelayedDiagnosticFeedback {
   id: string;
   editId: string;
   filePath: string;
+  mutationGeneration: number;
+  contentHash: string;
+  validationContentHashes?: Array<{ filePath: string; contentHash: string }>;
   turnIndex: number;
   writeIndex: number;
   queuedAt: number;
@@ -373,6 +423,8 @@ export interface FeedbackConfig {
   lsp: {
     enabled: boolean;
     idleTimeoutMs: number;
+    maxActiveClients: number;
+    initializationConcurrency: number;
     diagnosticRefreshConcurrency: number;
   };
 }

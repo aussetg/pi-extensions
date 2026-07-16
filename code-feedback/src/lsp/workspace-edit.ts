@@ -1,7 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY } from "../types.ts";
+import { errorMessage, isErrorCode } from "../errors.ts";
+import { realpathIfExists } from "../fs.ts";
+import { isInsideOrEqual } from "../paths.ts";
+import { isRecord, LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY } from "../types.ts";
 import { isCancellation, throwIfAborted, waitWithSignal } from "./cancellation.ts";
 import { isLspPosition, isLspRange, uriToFilePath, type LspPosition, type LspRange } from "./positions.ts";
 
@@ -18,9 +21,17 @@ export interface WorkspaceEditApplyResult {
   files: AppliedTextEdit[];
   editCount: number;
   changedFiles: string[];
+  fileRename?: AppliedFileRename;
   rejected?: string;
   rollbackFailedFiles?: string[];
 }
+
+export interface FileRenameOperation {
+  oldFilePath: string;
+  newFilePath: string;
+}
+
+export type AppliedFileRename = FileRenameOperation;
 
 export interface WorkspaceEditFileState {
   filePath: string;
@@ -35,15 +46,21 @@ export interface WorkspaceEditApplyOptions {
   getDocumentVersion?: (filePath: string) => number | undefined;
   mutationQueue?: FileMutationQueue;
   renameFile?: (sourcePath: string, targetPath: string) => void;
+  renameResource?: (sourcePath: string, targetPath: string) => void;
   signal?: AbortSignal;
   captureAppliedChanges?: AppliedWorkspaceEditChange[];
 }
 
 export interface AppliedWorkspaceEditChange {
   filePath: string;
+  originalFilePath?: string;
   beforeContent: string;
   afterContent: string;
 }
+
+export type ResolvedFileRenameOperation =
+  | ({ ok: true } & FileRenameOperation)
+  | { ok: false; reason: string };
 
 export type WorkspaceEditTargetFilesResult =
   | { ok: true; files: string[]; resourceOperations: number }
@@ -126,7 +143,8 @@ export function readWorkspaceEditFileState(filePath: string): WorkspaceEditFileS
       bytes: content.byteLength,
       mode: stat.mode & 0o777,
     };
-  } catch {
+  } catch (error) {
+    if (!isErrorCode(error, "ENOENT", "ENOTDIR")) throw error;
     return { filePath: resolved, exists: false };
   }
 }
@@ -168,14 +186,138 @@ export async function applyWorkspaceEdit(
   }
 }
 
+export async function applyFileRenameWorkspaceEdit(
+  value: unknown,
+  projectRoot: string,
+  rename: FileRenameOperation,
+  options: WorkspaceEditApplyOptions = {},
+): Promise<WorkspaceEditApplyResult> {
+  throwIfAborted(options.signal);
+  const resolvedRename = resolveFileRenameOperation(rename.oldFilePath, rename.newFilePath, projectRoot);
+  if (!resolvedRename.ok) return rejectedApply(resolvedRename.reason);
+
+  const collected = collectTextEdits(value, projectRoot, { validateProjectRoot: true });
+  if (!collected.ok) return rejectedApply(collected.reason);
+
+  const initialSourceState = readWorkspaceEditFileState(resolvedRename.oldFilePath);
+  const initialDestinationState = readWorkspaceEditFileState(resolvedRename.newFilePath);
+  const expectedFileStates = ensureRenameExpectedStates(
+    options.expectedFileStates,
+    [
+      initialSourceState,
+      initialDestinationState,
+      ...[...collected.editsByPath.keys()].map(readWorkspaceEditFileState),
+    ],
+  );
+  const applyOptions = { ...options, expectedFileStates };
+  const lockPaths = uniqueSortedPaths([
+    resolvedRename.oldFilePath,
+    resolvedRename.newFilePath,
+    ...collected.editsByPath.keys(),
+    ...expectedFileStates.map((state) => state.filePath),
+  ]);
+
+  try {
+    const applying = withMutationQueues(lockPaths, options.mutationQueue ?? withLocalMutationQueue, () => {
+      throwIfAborted(options.signal);
+      return applyCollectedWorkspaceEdit(collected, applyOptions, resolvedRename);
+    }, options.signal);
+    return await waitWithSignal(applying, options.signal);
+  } catch (error) {
+    if (isCancellation(error, options.signal)) throw error;
+    return rejectedApply(errorMessage(error));
+  }
+}
+
+export function resolveFileRenameOperation(
+  oldFilePath: string,
+  newFilePath: string,
+  projectRoot: string,
+): ResolvedFileRenameOperation {
+  const root = realpathIfExists(projectRoot) ?? path.resolve(projectRoot);
+  const lexicalRoot = path.resolve(projectRoot);
+  const lexicalOldPath = path.resolve(projectRoot, oldFilePath);
+  const lexicalNewPath = path.resolve(projectRoot, newFilePath);
+
+  if (!isInsideOrEqual(lexicalOldPath, lexicalRoot) && !isInsideOrEqual(lexicalOldPath, root)) {
+    return { ok: false, reason: `File rename source is outside project root: ${lexicalOldPath}` };
+  }
+  if (!isInsideOrEqual(lexicalNewPath, lexicalRoot) && !isInsideOrEqual(lexicalNewPath, root)) {
+    return { ok: false, reason: `File rename destination is outside project root: ${lexicalNewPath}` };
+  }
+
+  let oldStat: fs.Stats;
+  try {
+    oldStat = fs.lstatSync(lexicalOldPath);
+  } catch (error) {
+    return isErrorCode(error, "ENOENT", "ENOTDIR")
+      ? { ok: false, reason: `File rename source does not exist: ${lexicalOldPath}` }
+      : { ok: false, reason: `Cannot inspect file rename source ${lexicalOldPath}: ${errorMessage(error)}` };
+  }
+  if (oldStat.isSymbolicLink()) {
+    return { ok: false, reason: `File rename source must not be a symbolic link: ${lexicalOldPath}` };
+  }
+  if (!oldStat.isFile()) {
+    return { ok: false, reason: `File rename source is not a regular file: ${lexicalOldPath}` };
+  }
+
+  const resolvedOldPath = realpathIfExists(lexicalOldPath);
+  if (!resolvedOldPath || !isInsideOrEqual(resolvedOldPath, root)) {
+    return { ok: false, reason: `File rename source is outside project root: ${lexicalOldPath}` };
+  }
+
+  try {
+    fs.lstatSync(lexicalNewPath);
+    return { ok: false, reason: `File rename destination already exists: ${lexicalNewPath}` };
+  } catch (error) {
+    if (!isErrorCode(error, "ENOENT", "ENOTDIR")) {
+      return { ok: false, reason: `Cannot inspect file rename destination ${lexicalNewPath}: ${errorMessage(error)}` };
+    }
+  }
+
+  const lexicalParent = path.dirname(lexicalNewPath);
+  const resolvedParent = realpathIfExists(lexicalParent);
+  if (!resolvedParent) {
+    return { ok: false, reason: `File rename destination parent does not exist: ${lexicalParent}` };
+  }
+  let parentStat: fs.Stats;
+  try {
+    parentStat = fs.statSync(resolvedParent);
+  } catch (error) {
+    return { ok: false, reason: `Cannot inspect file rename destination parent ${lexicalParent}: ${errorMessage(error)}` };
+  }
+  if (!parentStat.isDirectory()) {
+    return { ok: false, reason: `File rename destination parent is not a directory: ${lexicalParent}` };
+  }
+  if (!isInsideOrEqual(resolvedParent, root)) {
+    return { ok: false, reason: `File rename destination is outside project root: ${lexicalNewPath}` };
+  }
+
+  const resolvedNewPath = path.join(resolvedParent, path.basename(lexicalNewPath));
+  if (!isInsideOrEqual(resolvedNewPath, root)) {
+    return { ok: false, reason: `File rename destination is outside project root: ${lexicalNewPath}` };
+  }
+  if (path.resolve(resolvedOldPath) === path.resolve(resolvedNewPath)) {
+    return { ok: false, reason: `File rename source and destination are the same file: ${resolvedOldPath}` };
+  }
+
+  return {
+    ok: true,
+    oldFilePath: resolvedOldPath,
+    newFilePath: resolvedNewPath,
+  };
+}
+
 function applyCollectedWorkspaceEdit(
   collected: CollectedWorkspaceEdit,
   options: WorkspaceEditApplyOptions,
+  fileRename?: FileRenameOperation,
 ): WorkspaceEditApplyResult {
   throwIfAborted(options.signal);
   const staleReason = validateExpectedFileStates(options.expectedFileStates, collected.editsByPath.keys());
   if (staleReason) return rejectedApply(staleReason);
 
+  let currentRename: FileRenameOperation | undefined;
   const versionReason = validateDocumentVersions(collected.versionsByPath, options.getDocumentVersion);
   if (versionReason) return rejectedApply(versionReason);
 
@@ -184,6 +326,29 @@ function applyCollectedWorkspaceEdit(
     planned = planWorkspaceEdit(collected.editsByPath);
   } catch (error) {
     return rejectedApply(errorMessage(error));
+  }
+
+  if (fileRename) {
+    const resolved = resolveFileRenameAgainstResolvedPaths(fileRename);
+    if (!resolved.ok) return rejectedApply(resolved.reason);
+    currentRename = { oldFilePath: resolved.oldFilePath, newFilePath: resolved.newFilePath };
+  }
+
+  let renamedSourceChange: AppliedWorkspaceEditChange | undefined;
+  if (currentRename) {
+    const sourcePlan = planned.find((file) => path.resolve(file.filePath) === path.resolve(currentRename!.oldFilePath));
+    let beforeContent: string;
+    try {
+      beforeContent = sourcePlan?.before ?? fs.readFileSync(currentRename.oldFilePath, "utf8");
+    } catch (error) {
+      return rejectedApply(`Cannot read file rename source before commit: ${errorMessage(error)}`);
+    }
+    renamedSourceChange = {
+      filePath: currentRename.newFilePath,
+      originalFilePath: currentRename.oldFilePath,
+      beforeContent,
+      afterContent: sourcePlan?.after ?? beforeContent,
+    };
   }
 
   let staged: StagedFileEdit[] = [];
@@ -208,43 +373,85 @@ function applyCollectedWorkspaceEdit(
     cleanupStagedFiles(staged);
     return rejectedApply(`WorkspaceEdit target changed before commit: ${changedWhileStaging.filePath}`);
   }
+  const changedExpectedState = validateExpectedFileStates(options.expectedFileStates, collected.editsByPath.keys());
+  if (changedExpectedState) {
+    cleanupStagedFiles(staged);
+    return rejectedApply(changedExpectedState);
+  }
+  if (currentRename) {
+    const resolved = resolveFileRenameAgainstResolvedPaths(currentRename);
+    if (!resolved.ok) {
+      cleanupStagedFiles(staged);
+      return rejectedApply(resolved.reason);
+    }
+    currentRename = { oldFilePath: resolved.oldFilePath, newFilePath: resolved.newFilePath };
+  }
 
   const committed: StagedFileEdit[] = [];
   const renameFile = options.renameFile ?? fs.renameSync;
+  const renameResource = options.renameResource ?? renameRegularFileNoReplace;
   try {
     throwIfAborted(options.signal);
     for (const file of staged) {
       renameFile(file.tempPath, file.plan.filePath);
       committed.push(file);
     }
+    if (currentRename) renameResource(currentRename.oldFilePath, currentRename.newFilePath);
   } catch (error) {
     const rollbackFailedFiles = rollbackCommittedFiles(committed, renameFile);
     cleanupStagedFiles(staged);
     const rollback = rollbackFailedFiles.length > 0
       ? `; rollback failed for: ${rollbackFailedFiles.join(", ")}`
-      : "; committed files were rolled back";
+      : committed.length > 0
+        ? "; committed files were rolled back"
+        : "; no text edits were committed";
     return {
-      ...rejectedApply(`WorkspaceEdit commit failed: ${errorMessage(error)}${rollback}`),
+      ...rejectedApply(`${currentRename ? "File rename transaction" : "WorkspaceEdit"} commit failed: ${errorMessage(error)}${rollback}`),
       changedFiles: rollbackFailedFiles,
       rollbackFailedFiles: rollbackFailedFiles.length > 0 ? rollbackFailedFiles : undefined,
     };
   }
 
-  cleanupStagedFiles(staged);
+  if (currentRename && renamedSourceChange) {
+    options.captureAppliedChanges?.push(renamedSourceChange);
+    options.captureAppliedChanges?.push(...planned
+      .filter((file) => file.changed && path.resolve(file.filePath) !== path.resolve(currentRename!.oldFilePath))
+      .map((file) => ({
+        filePath: file.filePath,
+        beforeContent: file.before,
+        afterContent: file.after,
+      })));
+  } else {
+    options.captureAppliedChanges?.push(...planned
+      .filter((file) => file.changed)
+      .map((file) => ({
+        filePath: file.filePath,
+        beforeContent: file.before,
+        afterContent: file.after,
+      })));
+  }
 
-  options.captureAppliedChanges?.push(...planned
-    .filter((file) => file.changed)
-    .map((file) => ({
-      filePath: file.filePath,
-      beforeContent: file.before,
-      afterContent: file.after,
-    })));
+  const changedFiles = currentRename
+    ? uniqueSortedPaths([
+        currentRename.newFilePath,
+        ...planned
+          .filter((file) => file.changed && path.resolve(file.filePath) !== path.resolve(currentRename!.oldFilePath))
+          .map((file) => file.filePath),
+      ])
+    : planned.filter((file) => file.changed).map((file) => file.filePath);
 
   return {
     applied: true,
-    files: planned.map(({ filePath, editCount, changed }) => ({ filePath, editCount, changed })),
+    files: planned.map(({ filePath, editCount, changed }) => ({
+      filePath: currentRename && path.resolve(filePath) === path.resolve(currentRename.oldFilePath)
+        ? currentRename.newFilePath
+        : filePath,
+      editCount,
+      changed,
+    })),
     editCount: planned.reduce((count, file) => count + file.editCount, 0),
-    changedFiles: planned.filter((file) => file.changed).map((file) => file.filePath),
+    changedFiles,
+    ...(currentRename ? { fileRename: currentRename } : {}),
   };
 }
 
@@ -299,7 +506,7 @@ function validateExpectedFileStates(
   targetFiles: Iterable<string>,
 ): string | undefined {
   if (!expected) return undefined;
-  const expectedStates = dedupeFileStates(expected);
+  const expectedStates = dedupeWorkspaceEditFileStates(expected);
   const expectedPaths = new Set(expectedStates.map((state) => path.resolve(state.filePath)));
   for (const filePath of targetFiles) {
     if (!expectedPaths.has(path.resolve(filePath))) return `WorkspaceEdit target set changed since preview: ${filePath}`;
@@ -389,7 +596,24 @@ function removeIfExists(filePath: string): void {
   try {
     fs.unlinkSync(filePath);
   } catch (error) {
-    if (!isMissingPathError(error)) throw error;
+    if (!isErrorCode(error, "ENOENT", "ENOTDIR")) throw error;
+  }
+}
+
+function renameRegularFileNoReplace(sourcePath: string, targetPath: string): void {
+  // fs.renameSync replaces an existing target on Linux. A hard-link reservation
+  // gives regular files no-clobber semantics and leaves valid data at both names
+  // if the process is interrupted between the two filesystem operations.
+  fs.linkSync(sourcePath, targetPath);
+  try {
+    fs.unlinkSync(sourcePath);
+  } catch (error) {
+    try {
+      fs.unlinkSync(targetPath);
+    } catch (cleanupError) {
+      throw new Error(`Could not remove source after reserving destination: ${errorMessage(error)}; destination cleanup failed: ${errorMessage(cleanupError)}`);
+    }
+    throw error;
   }
 }
 
@@ -407,18 +631,61 @@ function uniqueSortedPaths(filePaths: string[]): string[] {
   return [...new Set(filePaths.map((filePath) => path.resolve(filePath)))].sort((left, right) => left.localeCompare(right));
 }
 
-function dedupeFileStates(states: readonly WorkspaceEditFileState[]): WorkspaceEditFileState[] {
+export function dedupeWorkspaceEditFileStates(states: readonly WorkspaceEditFileState[]): WorkspaceEditFileState[] {
   const byPath = new Map<string, WorkspaceEditFileState>();
   for (const state of states) byPath.set(path.resolve(state.filePath), state);
   return [...byPath.values()];
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function ensureRenameExpectedStates(
+  expected: readonly WorkspaceEditFileState[] | undefined,
+  required: readonly WorkspaceEditFileState[],
+): WorkspaceEditFileState[] {
+  const states = dedupeWorkspaceEditFileStates(expected ?? []);
+  const paths = new Set(states.map((state) => path.resolve(state.filePath)));
+  for (const state of required) {
+    const resolved = path.resolve(state.filePath);
+    if (paths.has(resolved)) continue;
+    paths.add(resolved);
+    states.push(state);
+  }
+  return states;
 }
 
-function isMissingPathError(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR");
+function resolveFileRenameAgainstResolvedPaths(rename: FileRenameOperation): ResolvedFileRenameOperation {
+  const oldFilePath = path.resolve(rename.oldFilePath);
+  const newFilePath = path.resolve(rename.newFilePath);
+  let oldStat: fs.Stats;
+  try {
+    oldStat = fs.lstatSync(oldFilePath);
+  } catch {
+    return { ok: false, reason: `File rename source changed before commit: ${oldFilePath}` };
+  }
+  if (oldStat.isSymbolicLink() || !oldStat.isFile() || realpathIfExists(oldFilePath) !== oldFilePath) {
+    return { ok: false, reason: `File rename source changed before commit: ${oldFilePath}` };
+  }
+
+  try {
+    fs.lstatSync(newFilePath);
+    return { ok: false, reason: `File rename destination changed before commit: ${newFilePath}` };
+  } catch (error) {
+    if (!isErrorCode(error, "ENOENT", "ENOTDIR")) {
+      return { ok: false, reason: `Cannot inspect file rename destination ${newFilePath}: ${errorMessage(error)}` };
+    }
+  }
+
+  const parent = path.dirname(newFilePath);
+  let parentStat: fs.Stats;
+  try {
+    parentStat = fs.statSync(parent);
+  } catch {
+    return { ok: false, reason: `File rename destination parent changed before commit: ${parent}` };
+  }
+  if (!parentStat.isDirectory() || realpathIfExists(parent) !== parent) {
+    return { ok: false, reason: `File rename destination parent changed before commit: ${parent}` };
+  }
+
+  return { ok: true, oldFilePath, newFilePath };
 }
 
 export function canResolveCodeActionOnApply(action: Record<string, unknown>): boolean {
@@ -523,7 +790,7 @@ function resolveWorkspaceUri(uri: string, projectRoot: string, validateProjectRo
   }
   if (validateProjectRoot) {
     const resolvedRoot = realpathIfExists(projectRoot) ?? path.resolve(projectRoot);
-    if (!isInsideProject(resolved, resolvedRoot)) {
+    if (!isInsideOrEqual(resolved, resolvedRoot)) {
       return { ok: false, reason: `WorkspaceEdit target is outside project root: ${resolved}` };
     }
     let stat: fs.Stats;
@@ -535,19 +802,6 @@ function resolveWorkspaceUri(uri: string, projectRoot: string, validateProjectRo
     if (!stat.isFile()) return { ok: false, reason: `WorkspaceEdit target is not a regular file: ${resolved}` };
   }
   return { ok: true, filePath: resolved };
-}
-
-function realpathIfExists(filePath: string): string | undefined {
-  try {
-    return fs.realpathSync(filePath);
-  } catch {
-    return undefined;
-  }
-}
-
-function isInsideProject(filePath: string, projectRoot: string): boolean {
-  const relative = path.relative(path.resolve(projectRoot), path.resolve(filePath));
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function applyTextEditsToContent(content: string, edits: CollectedEdit[], filePath: string): string {
@@ -565,10 +819,13 @@ function applyTextEditsToContent(content: string, edits: CollectedEdit[], filePa
     while (endIndex < resolved.length && resolved[endIndex].start === start) endIndex += 1;
 
     const group = resolved.slice(index, endIndex);
-    const replacement = group.filter((edit) => edit.start !== edit.end);
-    if (replacement.length > 1) throw new Error(`Overlapping LSP text edits for ${filePath}`);
-
-    const replace = replacement[0];
+    const replacements = group.filter((edit) => edit.start !== edit.end);
+    const replace = replacements[0];
+    if (replacements.length > 1 && !replacements.every((edit) => (
+      edit.end === replace?.end && edit.newText === replace.newText
+    ))) {
+      throw new Error(`Overlapping LSP text edits for ${filePath}`);
+    }
     const inserts = group.filter((edit) => edit.start === edit.end).sort((left, right) => left.index - right.index);
     if (replace && inserts.some((edit) => edit.index > replace.index)) {
       throw new Error(`Invalid same-position LSP text edit order for ${filePath}: inserts must precede the replace/delete edit`);
@@ -617,8 +874,3 @@ function positionToOffset(content: string, position: LspPosition): number | unde
   if (lineStart + character > end) return undefined;
   return lineStart + character;
 }
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-

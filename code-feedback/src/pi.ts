@@ -8,28 +8,28 @@ export interface PiFlagDefinition {
 
 export interface PiUi {
   notify(message: string, level?: NoticeLevel): void;
-  setStatus?: (id: string, text: string | undefined) => void;
-  theme?: {
-    fg?: (color: string, text: string) => string;
+  setStatus(id: string, text: string | undefined): void;
+  theme: {
+    fg(color: string, text: string): string;
   };
 }
 
 export interface PiCommandContext {
-  cwd?: string;
+  cwd: string;
   ui: PiUi;
-  sessionManager?: PiSessionManager;
-  reload?: () => Promise<void>;
-  isProjectTrusted?: () => boolean;
+  sessionManager: PiSessionManager;
+  reload(): Promise<void>;
+  isProjectTrusted(): boolean;
 }
 
 export interface PiToolContext {
-  cwd?: string;
-  isProjectTrusted?: () => boolean;
+  cwd: string;
+  isProjectTrusted(): boolean;
 }
 
 export interface PiCommandDefinition {
   description: string;
-  handler(args: unknown, ctx: PiCommandContext): Promise<void> | void;
+  handler(args: string, ctx: PiCommandContext): Promise<void> | void;
   getArgumentCompletions?: (prefix: string) => Array<{ value: string; label?: string }> | null;
 }
 
@@ -52,28 +52,22 @@ export interface PiToolDefinition {
   execute(
     toolCallId: string,
     params: Record<string, unknown>,
-    signal?: AbortSignal,
-    onUpdate?: (result: Partial<PiToolResult>) => void,
-    ctx?: PiToolContext,
+    signal: AbortSignal | undefined,
+    onUpdate: ((result: Partial<PiToolResult>) => void) | undefined,
+    ctx: PiToolContext,
   ): Promise<PiToolResult> | PiToolResult;
 }
 
 export interface PiApi {
-  registerFlag?: (name: string, definition: PiFlagDefinition) => void;
-  getFlag?: (name: string) => boolean | string | undefined;
-  appendEntry?: (customType: string, data?: unknown) => void;
-  registerCommand: (name: string, definition: PiCommandDefinition) => void;
-  registerTool: (definition: PiToolDefinition) => void;
-  on?: (eventName: string, handler: (event: unknown, ctx: PiCommandContext) => unknown) => void;
+  registerFlag(name: string, definition: PiFlagDefinition): void;
+  getFlag(name: string): boolean | string | undefined;
+  appendEntry(customType: string, data?: unknown): void;
+  registerCommand(name: string, definition: PiCommandDefinition): void;
+  registerTool(definition: PiToolDefinition): void;
+  on(eventName: string, handler: (event: unknown, ctx: PiCommandContext) => unknown): void;
 }
 
 export interface PiSessionManager {
-  getEntries?: () => unknown[];
-  getBranch?: () => unknown[];
-  getSessionFile?: () => string | undefined;
-}
-
-export function asPiApi(value: unknown): PiApi {
-  return value as PiApi;
+  getBranch(): unknown[];
 }
 

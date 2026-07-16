@@ -168,7 +168,7 @@ test("explicit requests can select one of multiple matching language servers", a
   });
 
   try {
-    const hover = await service.hover(filePath, 1, 1, undefined, "python-ruff");
+    const hover = await service.hover(filePath, { line: 1, column: 1 }, undefined, "python-ruff");
     assert.equal(hover?.contents?.value, "ruff hover");
 
     const refresh = await service.diagnosticsForFileDetailed(filePath, content, {
@@ -180,15 +180,13 @@ test("explicit requests can select one of multiple matching language servers", a
     assert.deepEqual(diagnostics.map((diagnostic) => diagnostic.source), ["ruff"]);
 
     await assert.rejects(
-      service.hover(filePath, 1, 1, undefined, "missing-server"),
+      service.hover(filePath, { line: 1, column: 1 }, undefined, "missing-server"),
       /Unknown language server "missing-server"/,
     );
-    await assert.rejects(
-      service.rename(filePath, 1, 1, "renamed"),
-      /Multiple language servers support .* Pass server to select one/,
-    );
+    const automaticallyRoutedRename = await service.rename(filePath, { line: 1, column: 1 }, "renamed");
+    assert.equal(automaticallyRoutedRename[LSP_RESULT_SERVER_ID_KEY], "python");
 
-    const rename = await service.rename(filePath, 1, 1, "renamed", undefined, "python");
+    const rename = await service.rename(filePath, { line: 1, column: 1 }, "renamed", undefined, "python");
     assert.equal(rename[LSP_RESULT_SERVER_ID_KEY], "python");
   } finally {
     await service.shutdownAll();
@@ -566,6 +564,51 @@ test("LSP document changes use incremental sync when the server supports it", as
   }
 });
 
+test("forced diagnostic refreshes resync push-only documents instead of accepting cached diagnostics", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-force-fresh-diagnostic-"));
+  const filePath = path.join(root, "probe.py");
+  const logPath = path.join(root, "lsp.jsonl");
+  const content = "value = 1\n";
+  await writeFile(filePath, content, "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "workspace-files-log", logPath],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    const first = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 1000,
+      settleMs: 0,
+    });
+    const forced = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 1000,
+      settleMs: 0,
+      forceFresh: true,
+    });
+
+    assert.equal(first?.fresh, true);
+    assert.equal(forced?.fresh, true);
+    const entries = await waitForJsonLog(logPath, (current) => (
+      current.filter((entry) => entry.method === "textDocument/didOpen").length === 1 &&
+      current.some((entry) => entry.method === "textDocument/didChange")
+    ));
+    assert.equal(entries.filter((entry) => entry.method === "textDocument/didOpen").length, 1);
+    assert.equal(entries.filter((entry) => entry.method === "textDocument/didChange").length, 1);
+    assert.deepEqual(entries.find((entry) => entry.method === "textDocument/didChange")?.params.contentChanges, [{ text: content }]);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("document requests sync the file without forcing a save or diagnostic refresh", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-document-request-"));
   const filePath = path.join(root, "probe.py");
@@ -585,8 +628,8 @@ test("document requests sync the file without forcing a save or diagnostic refre
   });
 
   try {
-    assert.deepEqual(await service.hover(filePath, 1, 1), { contents: { kind: "plaintext", value: "py hover" } });
-    assert.deepEqual(await service.hover(filePath, 1, 1), { contents: { kind: "plaintext", value: "py hover" } });
+    assert.deepEqual(await service.hover(filePath, { line: 1, column: 1 }), { contents: { kind: "plaintext", value: "py hover" } });
+    assert.deepEqual(await service.hover(filePath, { line: 1, column: 1 }), { contents: { kind: "plaintext", value: "py hover" } });
 
     const entries = (await readFile(logPath, "utf8"))
       .trim()
@@ -770,9 +813,11 @@ test("timed out LSP requests send a cancel notification", async () => {
 
   const client = new LspClient({
     id: "python",
+    role: "language",
     command: process.execPath,
     args: [fakeServer, "py", "T100", "1", "", "hover-delay-200", logPath],
     extensions: [".py"],
+    rootMarkers: [],
     languageId: () => "python",
   }, root);
 
@@ -800,9 +845,11 @@ test("hung initialization is killed and obsolete child exits cannot corrupt repl
   const processLog = path.join(root, "processes.jsonl");
   const client = new LspClient({
     id: "python",
+    role: "language",
     command: process.execPath,
     args: [fakeServer, "py", "T100", "1", "", "initialize-delay-once-500", processLog],
     extensions: [".py"],
+    rootMarkers: [],
     languageId: () => "python",
   }, root, { initializeTimeoutMs: 250 });
 
@@ -866,7 +913,7 @@ test("code actions for a Python file are merged from ty and Ruff clients", async
   });
 
   try {
-    const actions = await service.codeActions(filePath, 1, 1);
+    const actions = await service.codeActions(filePath, { line: 1, column: 1 });
     assert.ok(Array.isArray(actions));
     assert.equal(actions.length, 2);
     assert.deepEqual(actions.map((action) => action[LSP_RESULT_SERVER_ID_KEY]).sort(), ["python", "python-ruff"]);
@@ -904,7 +951,7 @@ test("edit-less code actions are not applyable unless the source server advertis
   });
 
   try {
-    const actions = await service.codeActions(filePath, 1, 1);
+    const actions = await service.codeActions(filePath, { line: 1, column: 1 });
     assert.equal(actions.length, 1);
     assert.equal(actions[0].edit, undefined);
     assert.equal(actions[0][LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY], undefined);
@@ -937,7 +984,7 @@ test("top-level command actions are not treated as resolvable edits", async () =
   });
 
   try {
-    const actions = await service.codeActions(filePath, 1, 1);
+    const actions = await service.codeActions(filePath, { line: 1, column: 1 });
     assert.equal(actions.length, 1);
     assert.equal(actions[0].title, "py command T100");
     assert.equal(actions[0].command, "py.command.T100");
@@ -969,7 +1016,7 @@ test("deferred code actions are stale after their source LSP session is gone", a
   });
 
   try {
-    const actions = await service.codeActions(filePath, 1, 1);
+    const actions = await service.codeActions(filePath, { line: 1, column: 1 });
     const action = actions[0];
     assert.equal(action?.title, "py fix T100");
     assert.equal(typeof action?.[LSP_RESULT_SERVER_ID_KEY], "string");

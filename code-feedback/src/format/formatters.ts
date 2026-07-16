@@ -1,8 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { resolveCommand, walkUpInsideProject } from "../command-path.ts";
-import { resolveLanguageEnvironment, type LanguageEnvironment } from "../language-environments.ts";
-import type { FormatterCommandStatus } from "../types.ts";
+import { resolvePythonEnvironment, type LanguageEnvironment } from "../language-environments.ts";
+import { isRecord, type FormatterCommandStatus } from "../types.ts";
 
 export interface SelectedFormatter {
   id: string;
@@ -85,7 +85,7 @@ const FORMATTERS: FormatterCandidate[] = [
     command: "fourmolu",
     extensions: HASKELL_FORMAT_EXTENSIONS,
     args: (filePath) => ["--mode", "inplace", filePath],
-    configured: fourmoluConfigured,
+    configured: (filePath, projectRoot, overrides) => findUp(path.dirname(filePath), projectRoot, ["fourmolu.yaml"]) ?? forced(overrides, "fourmolu"),
   },
   {
     id: "ormolu",
@@ -93,7 +93,7 @@ const FORMATTERS: FormatterCandidate[] = [
     command: "ormolu",
     extensions: HASKELL_FORMAT_EXTENSIONS,
     args: (filePath) => ["--mode", "inplace", filePath],
-    configured: ormoluConfigured,
+    configured: (filePath, projectRoot, overrides) => findUp(path.dirname(filePath), projectRoot, [".ormolu"]) ?? forced(overrides, "ormolu"),
   },
   {
     id: "stylish-haskell",
@@ -101,7 +101,7 @@ const FORMATTERS: FormatterCandidate[] = [
     command: "stylish-haskell",
     extensions: HASKELL_FORMAT_EXTENSIONS,
     args: (filePath) => ["--inplace", filePath],
-    configured: stylishHaskellConfigured,
+    configured: (filePath, projectRoot, overrides) => findUp(path.dirname(filePath), projectRoot, [".stylish-haskell.yaml"]) ?? forced(overrides, "stylish-haskell"),
   },
   {
     id: "clang-format",
@@ -109,7 +109,7 @@ const FORMATTERS: FormatterCandidate[] = [
     command: "clang-format",
     extensions: CLANG_FORMAT_EXTENSIONS,
     args: (filePath) => ["-i", filePath],
-    configured: clangFormatConfigured,
+    configured: (filePath, projectRoot, overrides) => findUp(path.dirname(filePath), projectRoot, [".clang-format", "_clang-format"]) ?? forced(overrides, "clang-format"),
   },
   {
     id: "biome",
@@ -141,7 +141,7 @@ const FORMATTERS: FormatterCandidate[] = [
     command: "black",
     extensions: [".py", ".pyi"],
     args: (filePath) => ["--quiet", filePath],
-    configured: blackConfigured,
+    configured: (filePath, projectRoot, overrides) => pyprojectHas(path.dirname(filePath), projectRoot, "[tool.black]") ?? forced(overrides, "black"),
   },
   {
     id: "shfmt",
@@ -213,7 +213,7 @@ function shouldSkipFormatting(filePath: string): boolean {
 export function listFormatterCommandStatus(projectRoot: string, overrides: Record<string, unknown> = {}, trustedEnvironmentRoots: string[] = []): FormatterCommandStatus[] {
   const seen = new Set<string>();
   const statuses: FormatterCommandStatus[] = [];
-  const workspaceRoots = uniqueResolved([projectRoot, ...trustedEnvironmentRoots]);
+  const workspaceRoots = [...new Set([projectRoot, ...trustedEnvironmentRoots].map((root) => path.resolve(root)))];
 
   for (const formatter of FORMATTERS) {
     if (seen.has(formatter.id)) continue;
@@ -246,11 +246,7 @@ function formatterArgs(candidate: FormatterCandidate, override: FormatterOverrid
 
 function languageEnvironmentForFormatter(candidate: FormatterCandidate, filePath: string, projectRoot: string, trustedEnvironmentRoots: string[] = []): LanguageEnvironment | undefined {
   if (!candidate.extensions.some((extension) => PYTHON_EXTENSIONS.includes(extension))) return undefined;
-  return resolveLanguageEnvironment("python", filePath, projectRoot, trustedEnvironmentRoots);
-}
-
-function uniqueResolved(values: string[]): string[] {
-  return [...new Set(values.map((value) => path.resolve(value)))];
+  return resolvePythonEnvironment(filePath, projectRoot, trustedEnvironmentRoots);
 }
 
 function prettierConfigured(filePath: string, projectRoot: string, overrides: Record<string, unknown>): string | undefined | true {
@@ -285,26 +281,6 @@ function ruffConfigured(filePath: string, projectRoot: string, overrides: Record
   );
 }
 
-function blackConfigured(filePath: string, projectRoot: string, overrides: Record<string, unknown>): string | undefined | true {
-  return pyprojectHas(path.dirname(filePath), projectRoot, "[tool.black]") ?? forced(overrides, "black");
-}
-
-function clangFormatConfigured(filePath: string, projectRoot: string, overrides: Record<string, unknown>): string | undefined | true {
-  return findUp(path.dirname(filePath), projectRoot, [".clang-format", "_clang-format"]) ?? forced(overrides, "clang-format");
-}
-
-function fourmoluConfigured(filePath: string, projectRoot: string, overrides: Record<string, unknown>): string | undefined | true {
-  return findUp(path.dirname(filePath), projectRoot, ["fourmolu.yaml"]) ?? forced(overrides, "fourmolu");
-}
-
-function ormoluConfigured(filePath: string, projectRoot: string, overrides: Record<string, unknown>): string | undefined | true {
-  return findUp(path.dirname(filePath), projectRoot, [".ormolu"]) ?? forced(overrides, "ormolu");
-}
-
-function stylishHaskellConfigured(filePath: string, projectRoot: string, overrides: Record<string, unknown>): string | undefined | true {
-  return findUp(path.dirname(filePath), projectRoot, [".stylish-haskell.yaml"]) ?? forced(overrides, "stylish-haskell");
-}
-
 function forced(overrides: Record<string, unknown>, id: string): true | undefined {
   const value = overrides[id];
   if (value === true) return true;
@@ -314,7 +290,7 @@ function forced(overrides: Record<string, unknown>, id: string): true | undefine
 
 function readOverride(overrides: Record<string, unknown>, id: string): FormatterOverride | undefined {
   const value = overrides[id];
-  return value && typeof value === "object" ? (value as FormatterOverride) : undefined;
+  return isRecord(value) ? value : undefined;
 }
 
 function findUp(startDir: string, projectRoot: string, names: string[]): string | undefined {
@@ -345,7 +321,7 @@ function packageJsonHasDependency(startDir: string, projectRoot: string, names: 
   return packageJsonHas(startDir, projectRoot, (json) => {
     for (const key of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
       const deps = json[key];
-      if (!deps || typeof deps !== "object") continue;
+      if (!isRecord(deps)) continue;
       for (const name of names) {
         if (Object.prototype.hasOwnProperty.call(deps, name)) return true;
       }

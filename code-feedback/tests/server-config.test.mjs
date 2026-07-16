@@ -38,6 +38,8 @@ test("trusted project language-server config replaces user entries and adds lang
         extensions: [".foo", ".bar"],
         languageId: "fallback-language",
         languageIds: { ".foo": "foo-project" },
+        rootMarkers: ["gleam.toml"],
+        role: "linter",
         env: { CUSTOM_LSP: "enabled" },
         initializationOptions: { client: "project" },
         workspaceConfiguration: { custom: { lint: true } },
@@ -83,6 +85,8 @@ test("trusted project language-server config replaces user entries and adds lang
     assert.deepEqual(foo[0].definition.args, ["project-server.mjs", "--stdio"]);
     assert.equal(foo[0].definition.languageId(fooPath), "foo-project");
     assert.equal(bar[0].definition.languageId(barPath), "fallback-language");
+    assert.deepEqual(foo[0].definition.rootMarkers, ["gleam.toml"]);
+    assert.equal(foo[0].definition.role, "linter");
     assert.deepEqual(foo[0].definition.env, { CUSTOM_LSP: "enabled" });
     assert.deepEqual(foo[0].definition.initializationOptions, { client: "project" });
     assert.deepEqual(foo[0].definition.workspaceConfiguration, { custom: { lint: true } });
@@ -103,6 +107,43 @@ test("trusted project language-server config replaces user entries and adds lang
       server: "inferred",
     });
     assert.equal(inferred[0].definition.languageId(inferredPath), "zed");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("root markers and server roles are validated atomically", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-server-config-routing-"));
+  const agentDir = path.join(root, "agent");
+  const projectRoot = path.join(root, "project");
+  const configPath = path.join(agentDir, "code-feedback.json");
+  await mkdir(agentDir, { recursive: true });
+
+  const invalidCases = [
+    [{ role: "formatter" }, /servers\.custom\.role must be "language" or "linter"/],
+    [{ rootMarkers: [] }, /servers\.custom\.rootMarkers must be a non-empty string array/],
+    [{ rootMarkers: ["nested\/marker"] }, /rootMarkers\[0\] must be a trimmed basename/],
+    [{ rootMarkers: ["project.toml", "project.toml"] }, /rootMarkers contains duplicates/],
+  ];
+
+  try {
+    for (const [extra, expected] of invalidCases) {
+      await writeJson(configPath, {
+        servers: {
+          valid: { command: [process.execPath], extensions: [".valid"] },
+          custom: { command: [process.execPath], extensions: [".custom"], ...extra },
+        },
+      });
+      const configuration = loadLanguageServerConfiguration({
+        agentDir,
+        projectRoot,
+        configDirName: ".pi",
+        projectTrusted: true,
+      });
+      assert.deepEqual(Object.keys(configuration.servers), []);
+      assert.equal(configuration.status.sources[0].state, "invalid");
+      assert.match(configuration.status.errors[0], expected);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

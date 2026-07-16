@@ -1,9 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import * as path from "node:path";
 import { createDiagnosticSnapshot } from "../diagnostics/snapshots.ts";
+import { asError, errorMessage } from "../errors.ts";
 import { mergeProcessEnv } from "../language-environments.ts";
-import type { DiagnosticRefreshResult, DiagnosticSnapshot, LspClientState, LspClientStatus, LspDiagnostic, LspDiagnosticOutcome, LspServerLog, LspServerLogLevel, RelatedLocation } from "../types.ts";
+import { isRecord, type DiagnosticRefreshResult, type DiagnosticSnapshot, type LspClientState, type LspClientStatus, type LspDiagnostic, type LspDiagnosticOutcome, type LspServerLog, type LspServerLogLevel, type RelatedLocation } from "../types.ts";
 import { abortError, isCancellation, throwIfAborted, waitWithSignal } from "./cancellation.ts";
+import type { LspFileMutation } from "./file-mutations.ts";
 import { filePathToUri, isLspRange, lspRangeToExternal, type LspRange } from "./positions.ts";
 import type { LanguageServerDefinition } from "./servers.ts";
 
@@ -34,8 +36,39 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
+  outbound?: OutboundMessage;
   signal?: AbortSignal;
   onAbort?: () => void;
+}
+
+type OutboundMessageState = "queued" | "writing" | "sent" | "discarded";
+
+interface OutboundMessage {
+  child: ChildProcessWithoutNullStreams;
+  generation: number;
+  payload: string;
+  byteLength: number;
+  label: string;
+  state: OutboundMessageState;
+  error?: Error;
+  timeout?: NodeJS.Timeout;
+  waiters?: Set<OutboundMessageWaiter>;
+}
+
+interface OutboundMessageWaiter {
+  resolve: () => void;
+  reject: (error: Error) => void;
+}
+
+interface InitializationFailure {
+  message: string;
+  retryAt: number;
+}
+
+interface InitializationAttempt {
+  controller: AbortController;
+  promise: Promise<void>;
+  waiters: number;
 }
 
 interface OpenDocument {
@@ -43,6 +76,11 @@ interface OpenDocument {
   filePath: string;
   languageId: string;
   version: number;
+  content: string;
+}
+
+export interface OpenDocumentState {
+  filePath: string;
   content: string;
 }
 
@@ -87,6 +125,10 @@ interface DocumentDiagnosticProvider {
   identifier?: string;
 }
 
+interface WorkspaceDiagnosticProvider extends DocumentDiagnosticProvider {
+  workspaceDiagnostics: true;
+}
+
 interface ParsedDocumentDiagnosticReport {
   diagnostics: RawLspDiagnostic[];
   relatedDocuments: Array<{ uri: string; diagnostics: RawLspDiagnostic[] }>;
@@ -95,6 +137,22 @@ interface ParsedDocumentDiagnosticReport {
 
 interface ParsedDiagnosticItems {
   diagnostics: RawLspDiagnostic[];
+  malformed: boolean;
+}
+
+interface ParsedWorkspaceDocumentDiagnosticReport {
+  uri: string;
+  version: number | null;
+  kind: "full" | "unchanged";
+  resultId?: string;
+  diagnostics?: RawLspDiagnostic[];
+}
+
+interface WorkspaceDiagnosticReportCollector {
+  reports: Map<string, ParsedWorkspaceDocumentDiagnosticReport>;
+  reportEntries: number;
+  diagnosticEntries: number;
+  collectedBytes: number;
   malformed: boolean;
 }
 
@@ -117,16 +175,49 @@ export interface TouchDocumentOptions {
   timeoutMs: number;
   settleMs: number;
   snapshotScope?: DiagnosticSnapshotScope;
+  forceFresh?: boolean;
+  signal?: AbortSignal;
+}
+
+export type WorkspaceDiagnosticPullOutcome = "fresh" | "timed-out" | "unavailable";
+
+export interface WorkspaceDiagnosticPullResult {
+  attempted: boolean;
+  outcome: WorkspaceDiagnosticPullOutcome;
+  coveredUris: ReadonlySet<string>;
+}
+
+export interface WorkspaceDiagnosticPullOptions {
+  uris: ReadonlySet<string>;
+  timeoutMs: number;
+  settleMs: number;
   signal?: AbortSignal;
 }
 
 export type DiagnosticSnapshotScope = "file" | "workspace";
 
 const DEFAULT_INITIALIZE_TIMEOUT_MS = 10_000;
+const DEFAULT_INITIALIZATION_FAILURE_COOLDOWN_MS = 3 * 60_000;
+const DEFAULT_WRITE_TIMEOUT_MS = 5_000;
+const DEFAULT_MAX_QUEUED_WRITE_BYTES = 16 * 1024 * 1024;
+const MAX_INBOUND_HEADER_BYTES = 8 * 1024;
+const MAX_INBOUND_MESSAGE_BYTES = 16 * 1024 * 1024;
+const MAX_WORKSPACE_DIAGNOSTIC_REPORT_ENTRIES = 10_000;
+const MAX_WORKSPACE_DIAGNOSTIC_ENTRIES = 50_000;
+const MAX_WORKSPACE_DIAGNOSTIC_COLLECTED_BYTES = 16 * 1024 * 1024;
 const PROCESS_KILL_GRACE_MS = 750;
+const FILE_CHANGE_CREATED = 1;
+const FILE_CHANGE_CHANGED = 2;
+const FILE_CHANGE_DELETED = 3;
 
 export interface LspClientOptions {
   initializeTimeoutMs?: number;
+  initializationFailureCooldownMs?: number;
+  writeTimeoutMs?: number;
+  maxQueuedWriteBytes?: number;
+  acquireStartPermit?: (signal?: AbortSignal) => Promise<() => void>;
+  onResourceChange?: () => void;
+  onLifecycleEvent?: (event: "start" | "restart" | "cooldown") => void;
 }
 
 export class LspClient {
@@ -139,10 +230,14 @@ export class LspClient {
   private nextRequestId = 1;
   private pending = new Map<number | string, PendingRequest>();
   private inputBuffer = Buffer.alloc(0);
-  private initializePromise?: Promise<void>;
+  private initializationAttempt?: InitializationAttempt;
   private documents = new Map<string, OpenDocument>();
   private diagnostics = new Map<string, DiagnosticEntry>();
+  private workspaceDiagnosticResultIds = new Map<string, string>();
   private diagnosticWaiters = new Map<string, Set<DiagnosticWaiter>>();
+  private progressHandlers = new Map<string | number, (value: unknown) => void>();
+  private nextProgressToken = 1;
+  private workspaceStateGeneration = 0;
   private capabilities: unknown;
   private lastDiagnosticsAt?: number;
   private lastDiagnosticDurationMs?: number;
@@ -152,66 +247,184 @@ export class LspClient {
   private sessionId?: string;
   private launchGeneration = 0;
   private initializeTimeoutMs: number;
+  private initializationFailureCooldownMs: number;
+  private initializationFailure?: InitializationFailure;
+  private writeTimeoutMs: number;
+  private maxQueuedWriteBytes: number;
+  private outboundQueue: OutboundMessage[] = [];
+  private activeOutbound?: OutboundMessage;
+  private outboundBytes = 0;
+  private readonly acquireStartPermit?: (signal?: AbortSignal) => Promise<() => void>;
+  private readonly onResourceChange?: () => void;
+  private readonly onLifecycleEvent?: (event: "start" | "restart" | "cooldown") => void;
+  private activeOperations = 0;
+  private lastActivityAt = Date.now();
+  private startCount = 0;
+  private restartCount = 0;
+  private initializationCooldownCount = 0;
+  private shutdownPromise?: Promise<void>;
+  private shuttingDown = false;
 
   constructor(definition: LanguageServerDefinition, root: string, options: LspClientOptions = {}) {
     this.definition = definition;
     this.id = definition.id;
     this.root = path.resolve(root);
     this.initializeTimeoutMs = Math.max(1, options.initializeTimeoutMs ?? DEFAULT_INITIALIZE_TIMEOUT_MS);
+    this.initializationFailureCooldownMs = Math.max(0, options.initializationFailureCooldownMs ?? DEFAULT_INITIALIZATION_FAILURE_COOLDOWN_MS);
+    this.writeTimeoutMs = Math.max(1, options.writeTimeoutMs ?? DEFAULT_WRITE_TIMEOUT_MS);
+    this.maxQueuedWriteBytes = Math.max(1, options.maxQueuedWriteBytes ?? DEFAULT_MAX_QUEUED_WRITE_BYTES);
+    this.acquireStartPermit = options.acquireStartPermit;
+    this.onResourceChange = options.onResourceChange;
+    this.onLifecycleEvent = options.onLifecycleEvent;
   }
 
   async touchDocumentDetailed(filePath: string, content: string, options: TouchDocumentOptions): Promise<DiagnosticRefreshResult> {
-    await this.ensureStarted(options.signal);
-    throwIfAborted(options.signal);
+    return this.withActiveOperation(async () => {
+      await this.ensureStarted(options.signal);
+      throwIfAborted(options.signal);
 
-    const touchedAt = Date.now();
-    const document = this.syncDocument(filePath, content);
-    const documentVersion = document.version;
+      const touchedAt = Date.now();
+      const uri = filePathToUri(filePath);
+      const pullProvider = documentDiagnosticProvider(this.capabilities);
+      if (options.forceFresh) this.invalidateDiagnostics(uri);
+      const document = this.syncDocument(filePath, content, options.forceFresh === true && !pullProvider);
+      const documentVersion = document.version;
 
-    this.notify("textDocument/didSave", textDocumentDidSaveParams(document.uri, content, this.capabilities));
+      this.notify("textDocument/didSave", textDocumentDidSaveParams(document.uri, content, this.capabilities));
 
-    let fresh: boolean;
-    try {
-      const pullOutcome = await this.pullDiagnostics(document, documentVersion, touchedAt, options);
-      if (pullOutcome === "authoritative") {
-        fresh = true;
-      } else {
-        fresh = await this.waitForDiagnostics(
-          document.uri,
-          documentVersion,
-          touchedAt,
-          remainingDiagnosticTimeout(options.timeoutMs, touchedAt),
-          options.settleMs,
-          options.signal,
+      let fresh: boolean;
+      try {
+        const pullOutcome = await this.pullDiagnostics(document, documentVersion, touchedAt, options);
+        if (pullOutcome === "authoritative") {
+          fresh = true;
+        } else {
+          fresh = await this.waitForDiagnostics(
+            document.uri,
+            documentVersion,
+            touchedAt,
+            remainingDiagnosticTimeout(options.timeoutMs, touchedAt),
+            options.settleMs,
+            options.signal,
+          );
+        }
+      } catch (error) {
+        if (isCancellation(error, options.signal)) {
+          this.lastDiagnosticDurationMs = Date.now() - touchedAt;
+          this.lastDiagnosticOutcome = "cancelled";
+        }
+        throw error;
+      }
+      const completedAt = Date.now();
+      this.lastDiagnosticDurationMs = completedAt - touchedAt;
+      this.lastDiagnosticOutcome = fresh ? "fresh" : "timeout";
+      return {
+        snapshot: this.snapshotForScope(document.uri, options.snapshotScope),
+        fresh,
+        timedOut: !fresh,
+        requestedAt: touchedAt,
+        completedAt,
+      };
+    });
+  }
+
+  async pullWorkspaceDiagnostics(options: WorkspaceDiagnosticPullOptions): Promise<WorkspaceDiagnosticPullResult> {
+    return this.withActiveOperation(async () => {
+      await this.ensureStarted(options.signal);
+      throwIfAborted(options.signal);
+
+      const provider = workspaceDiagnosticProvider(this.capabilities);
+      if (!provider) return workspaceDiagnosticPullResult(false, "unavailable");
+      if (options.uris.size === 0) return workspaceDiagnosticPullResult(false, "unavailable");
+
+      const requestedAt = Date.now();
+      const stateGeneration = this.workspaceStateGeneration;
+      const documentVersions = new Map<string, number | undefined>();
+      const previousResultIds = new Map<string, string>();
+      for (const uri of options.uris) {
+        documentVersions.set(uri, this.documents.get(uri)?.version);
+        const resultId = this.workspaceDiagnosticResultIds.get(uri);
+        if (resultId !== undefined && this.diagnostics.get(uri)?.authoritative === true) {
+          previousResultIds.set(uri, resultId);
+        }
+      }
+
+      const partialResultToken = `${this.sessionId ?? this.id}:workspace-diagnostic:${this.nextProgressToken++}`;
+      const collector: WorkspaceDiagnosticReportCollector = {
+        reports: new Map(),
+        reportEntries: 0,
+        diagnosticEntries: 0,
+        collectedBytes: 0,
+        malformed: false,
+      };
+      this.progressHandlers.set(partialResultToken, (value) => {
+        if (!appendWorkspaceDiagnosticReportChunk(collector, value)) collector.malformed = true;
+      });
+
+      const params: Record<string, unknown> = {
+        previousResultIds: [...previousResultIds].map(([uri, value]) => ({ uri, value })),
+        partialResultToken,
+      };
+      if (provider.identifier !== undefined) params.identifier = provider.identifier;
+
+      let response: unknown;
+      try {
+        response = await this.sendRequest("workspace/diagnostic", params, options.timeoutMs, options.signal);
+      } catch (error) {
+        if (isCancellation(error, options.signal)) throw error;
+        return workspaceDiagnosticPullResult(
+          true,
+          isRequestTimeout(error, "workspace/diagnostic") ? "timed-out" : "unavailable",
         );
+      } finally {
+        this.progressHandlers.delete(partialResultToken);
       }
-    } catch (error) {
-      if (isCancellation(error, options.signal)) {
-        this.lastDiagnosticDurationMs = Date.now() - touchedAt;
-        this.lastDiagnosticOutcome = "cancelled";
+
+      if (!appendWorkspaceDiagnosticReportChunk(collector, response) || collector.malformed) {
+        return workspaceDiagnosticPullResult(true, "unavailable");
       }
-      throw error;
-    }
-    const completedAt = Date.now();
-    this.lastDiagnosticDurationMs = completedAt - touchedAt;
-    this.lastDiagnosticOutcome = fresh ? "fresh" : "timeout";
-    return {
-      snapshot: this.snapshotForScope(document.uri, options.snapshotScope),
-      fresh,
-      timedOut: !fresh,
-      requestedAt: touchedAt,
-      completedAt,
-    };
+      if (this.workspaceStateGeneration !== stateGeneration) {
+        return workspaceDiagnosticPullResult(true, "unavailable");
+      }
+
+      const receivedAt = Date.now();
+      const coveredUris = new Set<string>();
+      for (const [uri, report] of collector.reports) {
+        if (!options.uris.has(uri)) continue;
+        const expectedVersion = documentVersions.get(uri);
+        const currentVersion = this.documents.get(uri)?.version;
+        if (currentVersion !== expectedVersion) continue;
+        if (expectedVersion === undefined ? report.version !== null : report.version !== expectedVersion) continue;
+
+        if (report.kind === "unchanged") {
+          if (!previousResultIds.has(uri) || this.diagnostics.get(uri)?.authoritative !== true || report.resultId === undefined) continue;
+          this.workspaceDiagnosticResultIds.set(uri, report.resultId);
+          coveredUris.add(uri);
+          continue;
+        }
+
+        this.storeDiagnostics(uri, report.diagnostics ?? [], report.version ?? undefined, receivedAt, true);
+        if (report.resultId === undefined) this.workspaceDiagnosticResultIds.delete(uri);
+        else this.workspaceDiagnosticResultIds.set(uri, report.resultId);
+        coveredUris.add(uri);
+      }
+
+      await settleDiagnostics(options.settleMs, options.signal);
+      this.lastDiagnosticDurationMs = Date.now() - requestedAt;
+      this.lastDiagnosticOutcome = "fresh";
+      return workspaceDiagnosticPullResult(true, "fresh", coveredUris);
+    });
   }
 
   async ensureDocument(filePath: string, content: string, signal?: AbortSignal): Promise<void> {
-    await this.ensureStarted(signal);
-    throwIfAborted(signal);
-    this.syncDocument(filePath, content);
+    await this.withActiveOperation(async () => {
+      await this.ensureStarted(signal);
+      throwIfAborted(signal);
+      this.syncDocument(filePath, content);
+    });
   }
 
   async start(signal?: AbortSignal): Promise<void> {
-    await this.ensureStarted(signal);
+    await this.withActiveOperation(() => this.ensureStarted(signal));
   }
 
   snapshot(): DiagnosticSnapshot {
@@ -234,25 +447,109 @@ export class LspClient {
 
   forgetDocument(filePath: string): void {
     const uri = filePathToUri(filePath);
-    if (this.documents.has(uri) && this.state === "ready") {
-      try {
-        this.notify("textDocument/didClose", { textDocument: { uri } });
-      } catch (error) {
-        this.lastError = error instanceof Error ? error.message : String(error);
+    if (this.documents.has(uri) || this.diagnostics.has(uri)) this.noteActivity();
+    this.closeDocument(uri);
+    this.invalidateDiagnostics(uri);
+  }
+
+  invalidateDiagnosticsForFile(filePath: string): void {
+    this.invalidateDiagnostics(filePathToUri(filePath));
+  }
+
+  openDocumentsForReconciliation(): OpenDocumentState[] {
+    if (this.state !== "ready") return [];
+    return [...this.documents.values()].map((document) => ({
+      filePath: document.filePath,
+      content: document.content,
+    }));
+  }
+
+  reconcileOpenDocument(filePath: string, content: string): boolean {
+    if (this.state !== "ready") return false;
+    const uri = filePathToUri(filePath);
+    const current = this.documents.get(uri);
+    if (!current || current.content === content) return false;
+
+    this.noteActivity();
+    const document = this.syncDocument(filePath, content);
+    this.notify("textDocument/didSave", textDocumentDidSaveParams(document.uri, content, this.capabilities));
+    return true;
+  }
+
+  notifyFileMutations(mutations: readonly LspFileMutation[]): boolean {
+    if (this.state !== "ready" || mutations.length === 0) return false;
+    this.noteActivity();
+
+    const watchedChanges: Array<{ uri: string; type: number }> = [];
+    const renamedFiles: Array<{ oldUri: string; newUri: string }> = [];
+    const watchedKeys = new Set<string>();
+    const closedUris = new Set<string>();
+
+    const addWatchedChange = (filePath: string, type: number) => {
+      const uri = filePathToUri(filePath);
+      const key = `${uri}\0${type}`;
+      if (!watchedKeys.has(key)) {
+        watchedKeys.add(key);
+        watchedChanges.push({ uri, type });
+      }
+      this.invalidateDiagnostics(uri);
+    };
+
+    for (const mutation of mutations) {
+      switch (mutation.type) {
+        case "created":
+          addWatchedChange(mutation.filePath, FILE_CHANGE_CREATED);
+          break;
+        case "changed":
+          addWatchedChange(mutation.filePath, FILE_CHANGE_CHANGED);
+          break;
+        case "deleted": {
+          const uri = filePathToUri(mutation.filePath);
+          addWatchedChange(mutation.filePath, FILE_CHANGE_DELETED);
+          closedUris.add(uri);
+          break;
+        }
+        case "renamed": {
+          const oldUri = filePathToUri(mutation.oldFilePath);
+          const newUri = filePathToUri(mutation.newFilePath);
+          addWatchedChange(mutation.oldFilePath, FILE_CHANGE_DELETED);
+          addWatchedChange(mutation.newFilePath, FILE_CHANGE_CREATED);
+          closedUris.add(oldUri);
+          renamedFiles.push({ oldUri, newUri });
+          break;
+        }
       }
     }
-    this.documents.delete(uri);
-    this.diagnostics.delete(uri);
+
+    try {
+      for (const uri of closedUris) this.closeDocument(uri);
+      if (renamedFiles.length > 0) {
+        this.notify("workspace/didRenameFiles", { files: renamedFiles });
+      }
+      if (watchedChanges.length > 0) {
+        this.notify("workspace/didChangeWatchedFiles", { changes: watchedChanges });
+      }
+      return true;
+    } catch (error) {
+      this.lastError = errorMessage(error);
+      return false;
+    }
   }
 
   async request(method: string, params?: unknown, timeoutMs = 10_000, signal?: AbortSignal): Promise<unknown> {
-    await this.ensureStarted(signal);
-    return this.sendRequest(method, params, timeoutMs, signal);
+    return this.withActiveOperation(async () => {
+      await this.ensureStarted(signal);
+      return this.sendRequest(method, params, timeoutMs, signal);
+    });
   }
 
   async requestForDocument(filePath: string, content: string, method: string, params: Record<string, unknown>, timeoutMs = 10_000, signal?: AbortSignal): Promise<unknown> {
-    await this.ensureDocument(filePath, content, signal);
-    return this.sendRequest(method, params, timeoutMs, signal);
+    return this.withActiveOperation(async () => {
+      await this.ensureStarted(signal);
+      throwIfAborted(signal);
+      this.syncDocument(filePath, content);
+      return this.sendRequest(method, params, timeoutMs, signal);
+    });
   }
 
   getCapabilities(): unknown {
@@ -271,69 +568,158 @@ export class LspClient {
     return codeActionResolveProvider(this.capabilities);
   }
 
+  canRenameFiles(oldFilePath: string, newFilePath: string): boolean {
+    return fileRenameProvider(this.capabilities, oldFilePath, newFilePath);
+  }
+
+  hasActiveWork(): boolean {
+    return this.shuttingDown ||
+      this.activeOperations > 0 ||
+      this.state === "queued" ||
+      this.state === "starting" ||
+      this.initializationAttempt !== undefined ||
+      this.pending.size > 0 ||
+      this.outboundBytes > 0 ||
+      this.diagnosticWaiters.size > 0;
+  }
+
+  getLastActivityAt(): number {
+    return this.lastActivityAt;
+  }
+
   getStatus(): LspClientStatus {
     return {
       id: this.id,
+      role: this.definition.role,
       root: this.root,
       command: this.definition.command,
       args: this.definition.args,
       state: this.state,
       pid: this.process?.pid,
+      busy: this.hasActiveWork(),
+      lastActivityAt: this.lastActivityAt,
+      startCount: this.startCount,
+      restartCount: this.restartCount,
+      initializationCooldownCount: this.initializationCooldownCount,
       openDocuments: this.documents.size,
       diagnosticFiles: this.diagnostics.size,
       lastDiagnosticsAt: this.lastDiagnosticsAt,
       lastDiagnosticDurationMs: this.lastDiagnosticDurationMs,
       lastDiagnosticOutcome: this.lastDiagnosticOutcome,
       lastError: this.lastError,
+      initializationRetryAt: this.activeInitializationFailure()?.retryAt,
       lastServerLog: this.lastServerLog,
       environment: this.definition.environment?.description,
     };
   }
 
   async shutdown(signal?: AbortSignal): Promise<void> {
+    if (this.shutdownPromise) return waitWithSignal(this.shutdownPromise, signal);
+    const shutdown = this.performShutdown(signal);
+    this.shutdownPromise = shutdown;
+    try {
+      await shutdown;
+    } finally {
+      if (this.shutdownPromise === shutdown) this.shutdownPromise = undefined;
+    }
+  }
+
+  private async performShutdown(signal?: AbortSignal): Promise<void> {
+    this.shuttingDown = true;
+    this.initializationAttempt?.controller.abort("LSP client stopped");
+    this.signalResourceChange();
     this.finishDiagnosticWaiters(false);
     const child = this.process;
     const generation = this.launchGeneration;
-    if (!child) {
-      this.resetStoppedState();
-      return;
-    }
-
-    if (this.state === "ready") {
-      try {
-        await this.sendRequest("shutdown", undefined, 1500, signal);
-        if (this.isActiveLaunch(child, generation)) this.notify("exit");
-      } catch {
-        // Fall through to killing the process.
+    try {
+      if (!child) {
+        this.resetStoppedState();
+        return;
       }
-    }
 
-    if (this.isActiveLaunch(child, generation)) this.detachActiveProcess(child);
-    this.rejectPending(new Error("LSP client stopped"));
-    this.resetStoppedState();
-    terminateProcess(child);
+      if (this.state === "ready") {
+        try {
+          await this.sendRequest("shutdown", undefined, 1500, signal);
+          if (this.isActiveLaunch(child, generation)) await this.notifyAndWait("exit");
+        } catch {
+          // Fall through to killing the process.
+        }
+      }
+
+      if (this.isActiveLaunch(child, generation)) this.detachActiveProcess(child);
+      this.rejectPending(new Error("LSP client stopped"));
+      this.resetStoppedState();
+      await terminateProcessAndWait(child);
+    } finally {
+      this.shuttingDown = false;
+      this.signalResourceChange();
+    }
   }
 
   private async ensureStarted(signal?: AbortSignal): Promise<void> {
     throwIfAborted(signal);
     if (this.state === "ready") return;
-    if (this.initializePromise) return waitWithSignal(this.initializePromise, signal);
+    if (this.initializationAttempt) return this.waitForInitialization(this.initializationAttempt, signal);
 
-    this.state = "starting";
-    const attempt = this.startAndInitialize(signal);
-    this.initializePromise = attempt;
-    attempt.then(
+    const cachedFailure = this.activeInitializationFailure();
+    if (cachedFailure) {
+      throw new Error(
+        `LSP initialization is cooling down for ${this.id} until ${new Date(cachedFailure.retryAt).toISOString()}: ${cachedFailure.message}`,
+      );
+    }
+
+    const controller = new AbortController();
+    this.state = "queued";
+    this.signalResourceChange();
+    const promise = this.startAndInitialize(controller.signal);
+    const attempt: InitializationAttempt = { controller, promise, waiters: 0 };
+    this.initializationAttempt = attempt;
+    promise.then(
       () => {
-        if (this.initializePromise === attempt) this.initializePromise = undefined;
+        if (this.initializationAttempt === attempt) {
+          this.initializationAttempt = undefined;
+          this.signalResourceChange();
+        }
       },
       () => {
-        if (this.initializePromise === attempt) this.initializePromise = undefined;
+        if (this.initializationAttempt === attempt) {
+          this.initializationAttempt = undefined;
+          if (this.state === "queued") this.state = "stopped";
+          this.signalResourceChange();
+        }
       },
     );
-    return attempt;
+    return this.waitForInitialization(attempt, signal);
+  }
+
+  private async waitForInitialization(attempt: InitializationAttempt, signal?: AbortSignal): Promise<void> {
+    attempt.waiters += 1;
+    try {
+      await waitWithSignal(attempt.promise, signal);
+    } finally {
+      attempt.waiters = Math.max(0, attempt.waiters - 1);
+      if (this.initializationAttempt === attempt && attempt.waiters === 0) {
+        attempt.controller.abort("LSP initialization has no active waiters");
+      }
+    }
   }
 
   private async startAndInitialize(signal?: AbortSignal): Promise<void> {
+    let releaseStartPermit: (() => void) | undefined;
+    try {
+      releaseStartPermit = this.acquireStartPermit
+        ? await this.acquireStartPermit(signal)
+        : () => undefined;
+      throwIfAborted(signal);
+      this.state = "starting";
+      this.signalResourceChange();
+      await this.launchAndInitialize(signal);
+    } finally {
+      releaseStartPermit?.();
+    }
+  }
+
+  private async launchAndInitialize(signal?: AbortSignal): Promise<void> {
     const generation = ++this.launchGeneration;
     let child: ChildProcessWithoutNullStreams;
     try {
@@ -343,15 +729,24 @@ export class LspClient {
         stdio: "pipe",
       });
     } catch (error) {
-      const failure = error instanceof Error ? error : new Error(String(error));
+      const failure = asError(error);
       this.state = "failed";
       this.sessionId = undefined;
       this.lastError = failure.message;
       this.clearServerState();
       this.finishDiagnosticWaiters(false);
+      this.cacheInitializationFailure(failure, signal);
       throw failure;
     }
     this.process = child;
+    const restarting = this.startCount > 0;
+    this.startCount += 1;
+    this.onLifecycleEvent?.("start");
+    if (restarting) {
+      this.restartCount += 1;
+      this.onLifecycleEvent?.("restart");
+    }
+    this.signalResourceChange();
     this.inputBuffer = Buffer.alloc(0);
 
     child.stdout.on("data", (chunk: Buffer) => {
@@ -361,6 +756,10 @@ export class LspClient {
       if (!this.isActiveLaunch(child, generation)) return;
       const text = chunk.toString("utf8").trim();
       if (text.length > 0) this.lastServerLog = classifyServerLog(text.slice(-1000));
+    });
+    child.stdin.on("error", (error) => {
+      if (!this.isActiveLaunch(child, generation)) return;
+      this.failActiveLaunch(child, error);
     });
     child.on("error", (error) => {
       if (!this.isActiveLaunch(child, generation)) return;
@@ -378,20 +777,25 @@ export class LspClient {
       this.clearServerState();
       this.rejectPending(new Error(message));
       this.finishDiagnosticWaiters(false);
+      this.signalResourceChange();
     });
 
     try {
       const initializeResult = await this.sendRequest("initialize", this.initializeParams(), this.initializeTimeoutMs, signal);
       if (!this.isActiveLaunch(child, generation)) throw new Error(`LSP initialization was superseded: ${this.id}`);
-      this.capabilities = readServerCapabilities(initializeResult);
-      this.notify("initialized", {});
+      this.capabilities = isRecord(initializeResult) ? initializeResult.capabilities : undefined;
+      await this.notifyAndWait("initialized", {});
+      if (!this.isActiveLaunch(child, generation)) throw new Error(`LSP initialization was superseded: ${this.id}`);
       this.state = "ready";
       this.sessionId = createLspClientSessionId(this.id);
       this.lastError = undefined;
+      this.initializationFailure = undefined;
+      this.signalResourceChange();
     } catch (error) {
       if (this.isActiveLaunch(child, generation)) {
         this.failActiveLaunch(child, error);
       }
+      this.cacheInitializationFailure(error, signal);
       throw error;
     }
   }
@@ -401,7 +805,7 @@ export class LspClient {
   }
 
   private failActiveLaunch(child: ChildProcessWithoutNullStreams, error: unknown): void {
-    const failure = error instanceof Error ? error : new Error(String(error));
+    const failure = asError(error);
     this.lastError = failure.message;
     this.state = "failed";
     this.sessionId = undefined;
@@ -410,10 +814,12 @@ export class LspClient {
     this.rejectPending(failure);
     this.finishDiagnosticWaiters(false);
     terminateProcess(child);
+    this.signalResourceChange();
   }
 
   private detachActiveProcess(child: ChildProcessWithoutNullStreams): void {
     if (this.process !== child) return;
+    this.discardOutboundForProcess(child, new Error(`LSP process stopped: ${this.id}`));
     this.process = undefined;
     this.inputBuffer = Buffer.alloc(0);
   }
@@ -421,14 +827,41 @@ export class LspClient {
   private resetStoppedState(): void {
     this.state = "stopped";
     this.sessionId = undefined;
-    this.initializePromise = undefined;
+    this.initializationAttempt = undefined;
+    this.initializationFailure = undefined;
     this.clearServerState();
+    this.signalResourceChange();
+  }
+
+  private activeInitializationFailure(): InitializationFailure | undefined {
+    const failure = this.initializationFailure;
+    if (!failure) return undefined;
+    if (failure.retryAt > Date.now()) return failure;
+    this.initializationFailure = undefined;
+    return undefined;
+  }
+
+  private cacheInitializationFailure(error: unknown, signal?: AbortSignal): void {
+    if (this.initializationFailureCooldownMs <= 0 || isTransientInitializationFailure(error, signal)) return;
+    const message = errorMessage(error);
+    this.state = "failed";
+    this.lastError = message;
+    this.initializationFailure = {
+      message,
+      retryAt: Date.now() + this.initializationFailureCooldownMs,
+    };
+    this.initializationCooldownCount += 1;
+    this.onLifecycleEvent?.("cooldown");
+    this.signalResourceChange();
   }
 
   private clearServerState(): void {
     this.capabilities = undefined;
     this.documents.clear();
     this.diagnostics.clear();
+    this.workspaceDiagnosticResultIds.clear();
+    this.progressHandlers.clear();
+    this.workspaceStateGeneration += 1;
   }
 
   private initializeParams(): Record<string, unknown> {
@@ -459,6 +892,16 @@ export class LspClient {
           symbol: { resolveSupport: { properties: ["location.range"] } },
           configuration: true,
           workspaceFolders: true,
+          diagnostics: { refreshSupport: true },
+          fileOperations: {
+            dynamicRegistration: false,
+            willCreate: false,
+            didCreate: false,
+            willRename: true,
+            didRename: true,
+            willDelete: false,
+            didDelete: false,
+          },
         },
         window: { workDoneProgress: false },
       },
@@ -466,7 +909,7 @@ export class LspClient {
     };
   }
 
-  private syncDocument(filePath: string, content: string): OpenDocument {
+  private syncDocument(filePath: string, content: string, forceChange = false): OpenDocument {
     const uri = filePathToUri(filePath);
     const languageId = this.definition.languageId(filePath);
     const document = this.documents.get(uri);
@@ -474,6 +917,8 @@ export class LspClient {
     if (!document) {
       const opened: OpenDocument = { uri, filePath, languageId, version: 1, content };
       this.documents.set(uri, opened);
+      this.workspaceDiagnosticResultIds.delete(uri);
+      this.workspaceStateGeneration += 1;
       this.notify("textDocument/didOpen", {
         textDocument: {
           uri,
@@ -487,17 +932,19 @@ export class LspClient {
 
     document.filePath = filePath;
     document.languageId = languageId;
-    if (document.content === content) return document;
+    if (document.content === content && !forceChange) return document;
 
     const oldContent = document.content;
     document.version += 1;
     document.content = content;
+    this.workspaceDiagnosticResultIds.delete(uri);
+    this.workspaceStateGeneration += 1;
 
     const syncKind = textDocumentChangeSyncKind(this.capabilities);
     if (syncKind !== TEXT_DOCUMENT_SYNC_NONE) {
-      const contentChanges = syncKind === TEXT_DOCUMENT_SYNC_INCREMENTAL
-        ? [incrementalContentChange(oldContent, content)]
-        : [{ text: content }];
+      const contentChanges = forceChange || syncKind !== TEXT_DOCUMENT_SYNC_INCREMENTAL
+        ? [{ text: content }]
+        : [incrementalContentChange(oldContent, content)];
       this.notify("textDocument/didChange", {
         textDocument: { uri, version: document.version },
         contentChanges,
@@ -505,6 +952,31 @@ export class LspClient {
     }
 
     return document;
+  }
+
+  private closeDocument(uri: string): void {
+    const wasOpen = this.documents.has(uri);
+    if (wasOpen && this.state === "ready") {
+      try {
+        this.notify("textDocument/didClose", { textDocument: { uri } });
+      } catch (error) {
+        this.lastError = errorMessage(error);
+      }
+    }
+    this.documents.delete(uri);
+    if (wasOpen) {
+      this.workspaceDiagnosticResultIds.delete(uri);
+      this.workspaceStateGeneration += 1;
+    }
+  }
+
+  private invalidateDiagnostics(uri: string): void {
+    this.diagnostics.delete(uri);
+    this.workspaceDiagnosticResultIds.delete(uri);
+    this.workspaceStateGeneration += 1;
+    const waiters = this.diagnosticWaiters.get(uri);
+    if (!waiters) return;
+    for (const waiter of [...waiters]) waiter.finish(false);
   }
 
   private sendRequest(method: string, params: unknown, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
@@ -516,45 +988,162 @@ export class LspClient {
       let pending: PendingRequest;
       const timeout = setTimeout(() => {
         if (!this.removePending(id, pending)) return;
-        this.cancelRequest(id);
+        if (!this.discardQueuedOutbound(pending.outbound, new Error(`LSP request expired before it was written: ${method}`))) {
+          this.cancelRequest(id);
+        }
         reject(new Error(`LSP request timed out: ${method}`));
       }, timeoutMs);
-      timeout.unref?.();
+      timeout.unref();
       const onAbort = signal ? () => {
         if (!this.removePending(id, pending)) return;
-        this.cancelRequest(id);
+        if (!this.discardQueuedOutbound(pending.outbound, abortError(signal))) this.cancelRequest(id);
         reject(abortError(signal));
       } : undefined;
       pending = { method, resolve, reject, timeout, signal, onAbort };
       this.pending.set(id, pending);
       if (onAbort) signal!.addEventListener("abort", onAbort, { once: true });
       try {
-        this.send(message);
+        pending.outbound = this.send(message, method);
       } catch (error) {
         this.removePending(id, pending);
-        reject(error instanceof Error ? error : new Error(String(error)));
+        reject(asError(error));
       }
     });
   }
 
   private notify(method: string, params?: unknown): void {
     const message: JsonRpcNotification = params === undefined ? { jsonrpc: "2.0", method } : { jsonrpc: "2.0", method, params };
-    this.send(message);
+    this.send(message, method);
+  }
+
+  private async notifyAndWait(method: string, params?: unknown): Promise<void> {
+    const message: JsonRpcNotification = params === undefined ? { jsonrpc: "2.0", method } : { jsonrpc: "2.0", method, params };
+    await this.waitForOutbound(this.send(message, method));
   }
 
   private cancelRequest(id: number | string): void {
     try {
       this.notify("$/cancelRequest", { id });
     } catch (error) {
-      this.lastError = error instanceof Error ? error.message : String(error);
+      this.lastError = errorMessage(error);
     }
   }
 
-  private send(message: JsonRpcMessage): void {
-    if (!this.process?.stdin.writable) throw new Error(`LSP process is not writable: ${this.id}`);
+  private send(message: JsonRpcMessage, label = "JSON-RPC message"): OutboundMessage {
+    const child = this.process;
+    if (!child?.stdin.writable) throw new Error(`LSP process is not writable: ${this.id}`);
     const body = JSON.stringify(message);
-    const header = `Content-Length: ${Buffer.byteLength(body, "utf8")}\r\n\r\n`;
-    this.process.stdin.write(header + body, "utf8");
+    const payload = `Content-Length: ${Buffer.byteLength(body, "utf8")}\r\n\r\n${body}`;
+    const byteLength = Buffer.byteLength(payload, "utf8");
+    if (byteLength > this.maxQueuedWriteBytes || this.outboundBytes + byteLength > this.maxQueuedWriteBytes) {
+      throw new Error(
+        `LSP outbound queue limit exceeded for ${this.id}: ${this.outboundBytes + byteLength} bytes > ${this.maxQueuedWriteBytes}`,
+      );
+    }
+
+    const outbound: OutboundMessage = {
+      child,
+      generation: this.launchGeneration,
+      payload,
+      byteLength,
+      label,
+      state: "queued",
+    };
+    this.outboundQueue.push(outbound);
+    this.outboundBytes += byteLength;
+    this.signalOutboundResourceChange();
+    this.pumpOutbound();
+    return outbound;
+  }
+
+  private pumpOutbound(): void {
+    if (this.activeOutbound) return;
+
+    const outbound = this.outboundQueue.shift();
+    if (!outbound) return;
+    if (!this.isActiveLaunch(outbound.child, outbound.generation) || !outbound.child.stdin.writable) {
+      const error = new Error(`LSP process is not writable: ${this.id}`);
+      this.finishOutbound(outbound, error);
+      this.pumpOutbound();
+      return;
+    }
+
+    this.activeOutbound = outbound;
+    outbound.state = "writing";
+    outbound.timeout = setTimeout(() => {
+      if (this.activeOutbound !== outbound || outbound.state !== "writing") return;
+      const error = new Error(`LSP write timed out after ${this.writeTimeoutMs}ms: ${outbound.label}`);
+      this.finishOutbound(outbound, error);
+      if (this.isActiveLaunch(outbound.child, outbound.generation)) this.failActiveLaunch(outbound.child, error);
+    }, this.writeTimeoutMs);
+    outbound.timeout.unref();
+
+    try {
+      outbound.child.stdin.write(outbound.payload, "utf8", (error) => {
+        if (outbound.state !== "writing") return;
+        if (error) {
+          const failure = asError(error);
+          this.finishOutbound(outbound, failure);
+          if (this.isActiveLaunch(outbound.child, outbound.generation)) this.failActiveLaunch(outbound.child, failure);
+          return;
+        }
+        this.finishOutbound(outbound);
+        this.pumpOutbound();
+      });
+    } catch (error) {
+      const failure = asError(error);
+      this.finishOutbound(outbound, failure);
+      if (this.isActiveLaunch(outbound.child, outbound.generation)) this.failActiveLaunch(outbound.child, failure);
+    }
+  }
+
+  private waitForOutbound(outbound: OutboundMessage): Promise<void> {
+    if (outbound.state === "sent") return Promise.resolve();
+    if (outbound.state === "discarded") return Promise.reject(outbound.error ?? new Error(`LSP message was not written: ${outbound.label}`));
+
+    return new Promise((resolve, reject) => {
+      const waiters = outbound.waiters ?? new Set<OutboundMessageWaiter>();
+      waiters.add({ resolve, reject });
+      outbound.waiters = waiters;
+    });
+  }
+
+  private discardQueuedOutbound(outbound: OutboundMessage | undefined, error: Error): boolean {
+    if (!outbound || outbound.state !== "queued") return false;
+    const index = this.outboundQueue.indexOf(outbound);
+    if (index < 0) return false;
+    this.outboundQueue.splice(index, 1);
+    this.finishOutbound(outbound, error);
+    return true;
+  }
+
+  private finishOutbound(outbound: OutboundMessage, error?: Error): void {
+    if (outbound.state === "sent" || outbound.state === "discarded") return;
+    if (outbound.timeout) clearTimeout(outbound.timeout);
+    outbound.timeout = undefined;
+    if (this.activeOutbound === outbound) this.activeOutbound = undefined;
+    this.outboundBytes = Math.max(0, this.outboundBytes - outbound.byteLength);
+    outbound.state = error ? "discarded" : "sent";
+    outbound.error = error;
+    this.signalOutboundResourceChange();
+    const waiters = outbound.waiters;
+    outbound.waiters = undefined;
+    if (!waiters) return;
+    for (const waiter of waiters) {
+      if (error) waiter.reject(error);
+      else waiter.resolve();
+    }
+  }
+
+  private discardOutboundForProcess(child: ChildProcessWithoutNullStreams, error: Error): void {
+    const active = this.activeOutbound;
+    if (active?.child === child) this.finishOutbound(active, error);
+    for (const outbound of [...this.outboundQueue]) {
+      if (outbound.child !== child) continue;
+      const index = this.outboundQueue.indexOf(outbound);
+      if (index >= 0) this.outboundQueue.splice(index, 1);
+      this.finishOutbound(outbound, error);
+    }
   }
 
   private handleData(chunk: Buffer): void {
@@ -562,16 +1151,29 @@ export class LspClient {
 
     while (true) {
       const headerEnd = this.inputBuffer.indexOf("\r\n\r\n");
-      if (headerEnd < 0) return;
+      if (headerEnd < 0) {
+        if (this.inputBuffer.length > MAX_INBOUND_HEADER_BYTES) {
+          this.failProtocol(new Error(`LSP header exceeds ${MAX_INBOUND_HEADER_BYTES} bytes: ${this.id}`));
+        }
+        return;
+      }
+      if (headerEnd > MAX_INBOUND_HEADER_BYTES) {
+        this.failProtocol(new Error(`LSP header exceeds ${MAX_INBOUND_HEADER_BYTES} bytes: ${this.id}`));
+        return;
+      }
 
       const header = this.inputBuffer.subarray(0, headerEnd).toString("ascii");
-      const lengthMatch = header.match(/Content-Length:\s*(\d+)/i);
+      const lengthMatch = header.match(/(?:^|\r\n)Content-Length:\s*(\d+)\s*(?:\r\n|$)/i);
       if (!lengthMatch) {
         this.inputBuffer = this.inputBuffer.subarray(headerEnd + 4);
         continue;
       }
 
       const contentLength = Number.parseInt(lengthMatch[1], 10);
+      if (!Number.isSafeInteger(contentLength) || contentLength > MAX_INBOUND_MESSAGE_BYTES) {
+        this.failProtocol(new Error(`LSP message exceeds ${MAX_INBOUND_MESSAGE_BYTES} bytes: ${this.id}`));
+        return;
+      }
       const bodyStart = headerEnd + 4;
       const bodyEnd = bodyStart + contentLength;
       if (this.inputBuffer.length < bodyEnd) return;
@@ -579,12 +1181,24 @@ export class LspClient {
       const body = this.inputBuffer.subarray(bodyStart, bodyEnd).toString("utf8");
       this.inputBuffer = this.inputBuffer.subarray(bodyEnd);
 
+      let message: unknown;
       try {
-        this.handleMessage(JSON.parse(body) as JsonRpcMessage);
+        message = JSON.parse(body);
+        if (!isRecord(message)) {
+          throw new Error(`LSP message must be a JSON object: ${this.id}`);
+        }
+        this.handleMessage(message as unknown as JsonRpcMessage);
       } catch (error) {
-        this.lastError = error instanceof Error ? error.message : String(error);
+        this.failProtocol(asError(error));
+        return;
       }
     }
+  }
+
+  private failProtocol(error: Error): void {
+    const child = this.process;
+    if (child) this.failActiveLaunch(child, error);
+    else this.lastError = error.message;
   }
 
   private handleMessage(message: JsonRpcMessage): void {
@@ -609,34 +1223,65 @@ export class LspClient {
     if ("method" in message) {
       if (message.method === "textDocument/publishDiagnostics") {
         this.handlePublishDiagnostics(message.params);
+      } else if (message.method === "$/progress") {
+        this.handleProgress(message.params);
       }
     }
   }
 
-  private handleServerRequest(message: JsonRpcRequest): void {
-    let result: unknown = null;
-    switch (message.method) {
-      case "workspace/configuration":
-        result = this.workspaceConfiguration(message.params);
-        break;
-      case "workspace/workspaceFolders":
-        result = [{ uri: filePathToUri(this.root), name: path.basename(this.root) || this.root }];
-        break;
-      case "workspace/applyEdit":
-        result = { applied: false, failureReason: "code-feedback does not let language servers apply edits directly" };
-        break;
-      case "client/registerCapability":
-      case "client/unregisterCapability":
-      case "window/showMessageRequest":
-      case "window/workDoneProgress/create":
-        result = null;
-        break;
-    }
+  private handleProgress(params: unknown): void {
+    if (!isRecord(params)) return;
+    const token = params.token;
+    if (typeof token !== "string" && typeof token !== "number") return;
+    this.progressHandlers.get(token)?.(params.value);
+  }
 
+  private handleServerRequest(message: JsonRpcRequest): void {
     try {
-      this.send({ jsonrpc: "2.0", id: message.id, result });
+      let result: unknown;
+      switch (message.method) {
+        case "workspace/configuration":
+          result = this.workspaceConfiguration(message.params);
+          break;
+        case "workspace/workspaceFolders":
+          result = [{ uri: filePathToUri(this.root), name: path.basename(this.root) || this.root }];
+          break;
+        case "workspace/applyEdit":
+          result = { applied: false, failureReason: "code-feedback does not let language servers apply edits directly" };
+          break;
+        case "window/showDocument":
+          result = { success: false };
+          break;
+        case "client/registerCapability":
+        case "client/unregisterCapability":
+        case "window/showMessageRequest":
+        case "window/workDoneProgress/create":
+          result = null;
+          break;
+        case "workspace/diagnostic/refresh":
+          this.diagnostics.clear();
+          this.workspaceDiagnosticResultIds.clear();
+          this.workspaceStateGeneration += 1;
+          result = null;
+          break;
+        case "workspace/codeLens/refresh":
+        case "workspace/inlayHint/refresh":
+        case "workspace/inlineValue/refresh":
+        case "workspace/semanticTokens/refresh":
+          result = null;
+          break;
+        default:
+          this.send({
+            jsonrpc: "2.0",
+            id: message.id,
+            error: { code: -32601, message: `Method not found: ${message.method}` },
+          }, `response:${message.method}`);
+          return;
+      }
+
+      this.send({ jsonrpc: "2.0", id: message.id, result }, `response:${message.method}`);
     } catch (error) {
-      this.lastError = error instanceof Error ? error.message : String(error);
+      this.lastError = errorMessage(error);
     }
   }
 
@@ -675,9 +1320,11 @@ export class LspClient {
 
     const receivedAt = Date.now();
     const authoritative = !report.malformed;
+    this.workspaceDiagnosticResultIds.delete(document.uri);
     this.storeDiagnostics(document.uri, report.diagnostics, documentVersion, receivedAt, authoritative);
     for (const related of report.relatedDocuments) {
       if (related.uri === document.uri) continue;
+      this.workspaceDiagnosticResultIds.delete(related.uri);
       this.storeDiagnostics(related.uri, related.diagnostics, undefined, receivedAt, authoritative);
     }
     if (!authoritative) return "unavailable";
@@ -686,13 +1333,14 @@ export class LspClient {
   }
 
   private handlePublishDiagnostics(params: unknown): void {
-    if (!isNonArrayRecord(params)) return;
+    if (!isRecord(params)) return;
     const diagnostics = params as PublishDiagnosticsParams;
     if (typeof diagnostics.uri !== "string" || diagnostics.uri.length === 0) return;
     if (diagnostics.version !== undefined && !isLspInteger(diagnostics.version)) return;
     const parsed = parseDiagnosticItems(diagnostics.diagnostics);
     if (!parsed) return;
 
+    this.workspaceDiagnosticResultIds.delete(diagnostics.uri);
     this.storeDiagnostics(
       diagnostics.uri,
       parsed.diagnostics,
@@ -760,7 +1408,7 @@ export class LspClient {
       };
 
       timeout = setTimeout(() => waiter.finish(false), Math.max(0, timeoutMs));
-      timeout.unref?.();
+      timeout.unref();
       this.addDiagnosticWaiter(uri, waiter);
       signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -832,7 +1480,32 @@ export class LspClient {
     this.pending.delete(id);
     clearTimeout(pending.timeout);
     if (pending.signal && pending.onAbort) pending.signal.removeEventListener("abort", pending.onAbort);
+    this.signalOutboundResourceChange();
     return true;
+  }
+
+  private async withActiveOperation<T>(operation: () => Promise<T>): Promise<T> {
+    this.activeOperations += 1;
+    this.noteActivity();
+    try {
+      return await operation();
+    } finally {
+      this.activeOperations = Math.max(0, this.activeOperations - 1);
+      this.noteActivity();
+    }
+  }
+
+  private noteActivity(): void {
+    this.lastActivityAt = Date.now();
+    this.signalResourceChange();
+  }
+
+  private signalResourceChange(): void {
+    this.onResourceChange?.();
+  }
+
+  private signalOutboundResourceChange(): void {
+    if (this.activeOperations === 0 && !this.shuttingDown) this.signalResourceChange();
   }
 }
 
@@ -895,25 +1568,116 @@ function inferServerLogLevel(message: string): LspServerLogLevel {
   return "info";
 }
 
-function readServerCapabilities(initializeResult: unknown): unknown {
-  if (!initializeResult || typeof initializeResult !== "object") return undefined;
-  return (initializeResult as { capabilities?: unknown }).capabilities;
-}
-
 function codeActionResolveProvider(capabilities: unknown): boolean {
   const provider = isRecord(capabilities) ? capabilities.codeActionProvider : undefined;
   return isRecord(provider) && provider.resolveProvider === true;
 }
 
+function fileRenameProvider(capabilities: unknown, oldFilePath: string, newFilePath: string): boolean {
+  const workspace = isRecord(capabilities) ? capabilities.workspace : undefined;
+  const fileOperations = isRecord(workspace) ? workspace.fileOperations : undefined;
+  const provider = isRecord(fileOperations) ? fileOperations.willRename : undefined;
+  if (!isRecord(provider) || !Array.isArray(provider.filters)) return false;
+  return provider.filters.some((filter) => (
+    fileOperationFilterMatches(filter, oldFilePath) || fileOperationFilterMatches(filter, newFilePath)
+  ));
+}
+
+function fileOperationFilterMatches(value: unknown, filePath: string): boolean {
+  if (!isRecord(value)) return false;
+  if (value.scheme !== undefined && value.scheme !== "file") return false;
+  const pattern = value.pattern;
+  if (!isRecord(pattern) || typeof pattern.glob !== "string") return false;
+  if (pattern.matches !== undefined && pattern.matches !== "file") return false;
+
+  const ignoreCase = isRecord(pattern.options) && pattern.options.ignoreCase === true;
+  const candidate = filePath.replaceAll(path.sep, "/");
+  const glob = pattern.glob.replaceAll("\\", "/");
+  const comparableCandidate = ignoreCase ? candidate.toLowerCase() : candidate;
+  const comparableGlob = ignoreCase ? glob.toLowerCase() : glob;
+  try {
+    return path.matchesGlob(comparableCandidate, comparableGlob) ||
+      path.matchesGlob(path.basename(comparableCandidate), comparableGlob);
+  } catch {
+    return false;
+  }
+}
+
 function documentDiagnosticProvider(capabilities: unknown): DocumentDiagnosticProvider | undefined {
   const provider = isRecord(capabilities) ? capabilities.diagnosticProvider : undefined;
   if (provider === true) return {};
-  if (!isRecord(provider) || Array.isArray(provider)) return undefined;
+  if (!isRecord(provider)) return undefined;
   return typeof provider.identifier === "string" ? { identifier: provider.identifier } : {};
 }
 
+function workspaceDiagnosticProvider(capabilities: unknown): WorkspaceDiagnosticProvider | undefined {
+  const provider = isRecord(capabilities) ? capabilities.diagnosticProvider : undefined;
+  if (!isRecord(provider) || provider.workspaceDiagnostics !== true) return undefined;
+  return {
+    workspaceDiagnostics: true,
+    ...(typeof provider.identifier === "string" ? { identifier: provider.identifier } : {}),
+  };
+}
+
+function workspaceDiagnosticPullResult(
+  attempted: boolean,
+  outcome: WorkspaceDiagnosticPullOutcome,
+  coveredUris: ReadonlySet<string> = new Set(),
+): WorkspaceDiagnosticPullResult {
+  return { attempted, outcome, coveredUris };
+}
+
+function appendWorkspaceDiagnosticReportChunk(
+  collector: WorkspaceDiagnosticReportCollector,
+  value: unknown,
+): boolean {
+  if (!isRecord(value) || !Array.isArray(value.items)) return false;
+  if (collector.reportEntries + value.items.length > MAX_WORKSPACE_DIAGNOSTIC_REPORT_ENTRIES) return false;
+  collector.reportEntries += value.items.length;
+
+  for (const item of value.items) {
+    const report = parseWorkspaceDocumentDiagnosticReport(item);
+    if (!report || collector.reports.has(report.uri)) return false;
+    const diagnosticEntries = report.diagnostics?.length ?? 0;
+    const collectedBytes = workspaceDiagnosticReportBytes(report);
+    if (collector.diagnosticEntries + diagnosticEntries > MAX_WORKSPACE_DIAGNOSTIC_ENTRIES) return false;
+    if (collector.collectedBytes + collectedBytes > MAX_WORKSPACE_DIAGNOSTIC_COLLECTED_BYTES) return false;
+    collector.diagnosticEntries += diagnosticEntries;
+    collector.collectedBytes += collectedBytes;
+    collector.reports.set(report.uri, report);
+  }
+  return true;
+}
+
+function parseWorkspaceDocumentDiagnosticReport(value: unknown): ParsedWorkspaceDocumentDiagnosticReport | undefined {
+  if (!isRecord(value) || typeof value.uri !== "string" || value.uri.length === 0) return undefined;
+  if (value.version !== null && !isLspInteger(value.version)) return undefined;
+
+  if (value.kind === "unchanged") {
+    if (typeof value.resultId !== "string") return undefined;
+    return {
+      uri: value.uri,
+      version: value.version,
+      kind: "unchanged",
+      resultId: value.resultId,
+    };
+  }
+
+  if (value.kind !== "full") return undefined;
+  if (value.resultId !== undefined && typeof value.resultId !== "string") return undefined;
+  const parsed = parseDiagnosticItems(value.items);
+  if (!parsed || parsed.malformed) return undefined;
+  return {
+    uri: value.uri,
+    version: value.version,
+    kind: "full",
+    resultId: value.resultId,
+    diagnostics: parsed.diagnostics,
+  };
+}
+
 function parseDocumentDiagnosticReport(value: unknown): ParsedDocumentDiagnosticReport | undefined {
-  if (!isNonArrayRecord(value) || value.kind !== "full") return undefined;
+  if (!isRecord(value) || value.kind !== "full") return undefined;
   if (value.resultId !== undefined && typeof value.resultId !== "string") return undefined;
   const parsed = parseDiagnosticItems(value.items);
   if (!parsed) return undefined;
@@ -921,9 +1685,9 @@ function parseDocumentDiagnosticReport(value: unknown): ParsedDocumentDiagnostic
   const relatedDocuments: ParsedDocumentDiagnosticReport["relatedDocuments"] = [];
   let malformed = parsed.malformed;
   if (value.relatedDocuments !== undefined) {
-    if (!isNonArrayRecord(value.relatedDocuments)) return undefined;
+    if (!isRecord(value.relatedDocuments)) return undefined;
     for (const [uri, related] of Object.entries(value.relatedDocuments)) {
-      if (uri.length === 0 || !isNonArrayRecord(related)) return undefined;
+      if (uri.length === 0 || !isRecord(related)) return undefined;
       if (related.kind === "unchanged") {
         if (typeof related.resultId !== "string") return undefined;
         continue;
@@ -949,14 +1713,51 @@ function parseDiagnosticItems(value: unknown): ParsedDiagnosticItems | undefined
   const diagnostics: RawLspDiagnostic[] = [];
   let malformed = false;
   for (const diagnostic of value) {
-    if (isRawLspDiagnostic(diagnostic)) diagnostics.push(diagnostic);
+    if (isRawLspDiagnostic(diagnostic)) diagnostics.push(copyRawLspDiagnostic(diagnostic));
     else malformed = true;
   }
   return { diagnostics, malformed };
 }
 
+function copyRawLspDiagnostic(diagnostic: RawLspDiagnostic): RawLspDiagnostic {
+  return {
+    range: {
+      start: { line: diagnostic.range.start.line, character: diagnostic.range.start.character },
+      end: { line: diagnostic.range.end.line, character: diagnostic.range.end.character },
+    },
+    severity: diagnostic.severity,
+    code: diagnostic.code,
+    source: diagnostic.source,
+    message: diagnostic.message,
+    relatedInformation: diagnostic.relatedInformation?.map((related) => ({
+      location: {
+        uri: related.location.uri,
+        range: {
+          start: { line: related.location.range.start.line, character: related.location.range.start.character },
+          end: { line: related.location.range.end.line, character: related.location.range.end.character },
+        },
+      },
+      message: related.message,
+    })),
+  };
+}
+
+function workspaceDiagnosticReportBytes(report: ParsedWorkspaceDocumentDiagnosticReport): number {
+  let bytes = Buffer.byteLength(report.uri, "utf8") + Buffer.byteLength(report.resultId ?? "", "utf8") + 32;
+  for (const diagnostic of report.diagnostics ?? []) {
+    bytes += Buffer.byteLength(diagnostic.message, "utf8") +
+      Buffer.byteLength(diagnostic.source ?? "", "utf8") +
+      Buffer.byteLength(String(diagnostic.code ?? ""), "utf8") +
+      64;
+    for (const related of diagnostic.relatedInformation ?? []) {
+      bytes += Buffer.byteLength(related.location.uri, "utf8") + Buffer.byteLength(related.message, "utf8") + 48;
+    }
+  }
+  return bytes;
+}
+
 function isRawLspDiagnostic(value: unknown): value is RawLspDiagnostic {
-  if (!isNonArrayRecord(value) || !isLspRange(value.range) || typeof value.message !== "string") return false;
+  if (!isRecord(value) || !isLspRange(value.range) || typeof value.message !== "string") return false;
   if (value.severity !== undefined && !isDiagnosticSeverity(value.severity)) return false;
   if (value.code !== undefined && typeof value.code !== "string" && !isLspInteger(value.code)) return false;
   if (value.source !== undefined && typeof value.source !== "string") return false;
@@ -969,15 +1770,15 @@ function isRawLspDiagnostic(value: unknown): value is RawLspDiagnostic {
     !value.tags.every((tag) => tag === 1 || tag === 2)
   )) return false;
   if (value.codeDescription !== undefined && (
-    !isNonArrayRecord(value.codeDescription) ||
+    !isRecord(value.codeDescription) ||
     typeof value.codeDescription.href !== "string"
   )) return false;
   return true;
 }
 
 function isRawRelatedInformation(value: unknown): value is RawRelatedInformation {
-  return isNonArrayRecord(value) &&
-    isNonArrayRecord(value.location) &&
+  return isRecord(value) &&
+    isRecord(value.location) &&
     typeof value.location.uri === "string" &&
     value.location.uri.length > 0 &&
     isLspRange(value.location.range) &&
@@ -990,6 +1791,10 @@ function isDiagnosticSeverity(value: unknown): value is number {
 
 function isLspInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= -2_147_483_648 && value <= 2_147_483_647;
+}
+
+function isRequestTimeout(error: unknown, method: string): boolean {
+  return error instanceof Error && error.message === `LSP request timed out: ${method}`;
 }
 
 function remainingDiagnosticTimeout(timeoutMs: number, startedAt: number): number {
@@ -1114,17 +1919,34 @@ function terminateProcess(child: ChildProcessWithoutNullStreams): void {
   const forceKill = setTimeout(() => {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   }, PROCESS_KILL_GRACE_MS);
-  forceKill.unref?.();
+  forceKill.unref();
   child.once("exit", () => clearTimeout(forceKill));
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+async function terminateProcessAndWait(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  terminateProcess(child);
+  await new Promise<void>((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve();
+      return;
+    }
+    const timeout = setTimeout(resolve, PROCESS_KILL_GRACE_MS + 250);
+    timeout.unref();
+    child.once("exit", () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+  });
 }
 
-function isNonArrayRecord(value: unknown): value is Record<string, unknown> {
-  return isRecord(value) && !Array.isArray(value);
+function isTransientInitializationFailure(error: unknown, signal?: AbortSignal): boolean {
+  if (isCancellation(error, signal)) return true;
+  if (!(error instanceof Error)) return false;
+  return error.message === "LSP request timed out: initialize" ||
+    error.message.startsWith("LSP initialization was superseded:");
 }
+
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));

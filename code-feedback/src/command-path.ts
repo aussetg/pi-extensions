@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isInsideOrEqual } from "./paths.ts";
 
 const commandAvailabilityCache = new Map<string, boolean>();
 
@@ -60,11 +61,6 @@ function commandExists(command: string): boolean {
   const available = result.status === 0;
   commandAvailabilityCache.set(command, available);
   return available;
-}
-
-function isInsideOrEqual(child: string, parent: string): boolean {
-  const relative = path.relative(parent, child);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function shellQuote(value: string): string {

@@ -9,6 +9,7 @@ import { createDiagnosticSnapshot } from "../src/diagnostics/snapshots.ts";
 import { handleToolResult } from "../src/events/tool-result.ts";
 import { DEFAULT_TRACKED_FILE_MAX_BYTES } from "../src/fs.ts";
 import { createRuntime, setProjectRoot } from "../src/runtime.ts";
+import { inactiveFormatService } from "./helpers/inactive-services.mjs";
 import { CODE_FEEDBACK_DETAILS_KEY } from "../src/types.ts";
 
 test("inline diagnostics are mirrored into structured tool-result details", async () => {
@@ -34,6 +35,7 @@ test("inline diagnostics are mirrored into structured tool-result details", asyn
   };
 
   const lspService = {
+    notifyFileMutations() {},
     async diagnosticsForFileDetailed() {
       const now = Date.now();
       return {
@@ -59,6 +61,7 @@ test("inline diagnostics are mirrored into structured tool-result details", asyn
       { cwd: root },
       runtime,
       lspService,
+      inactiveFormatService,
     );
 
     assert.ok(result);
@@ -98,6 +101,7 @@ test("large write results emit skipped exact-feedback notice", async () => {
 
   let forgottenPath;
   const lspService = {
+    notifyFileMutations() {},
     forgetFile(file) {
       forgottenPath = file;
     },
@@ -116,6 +120,7 @@ test("large write results emit skipped exact-feedback notice", async () => {
       { cwd: root },
       runtime,
       lspService,
+      inactiveFormatService,
     );
 
     assert.ok(result);

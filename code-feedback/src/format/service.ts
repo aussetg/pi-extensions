@@ -134,9 +134,9 @@ function runFormatterProcess(formatter: SelectedFormatter, cwd: string, timeoutM
     const timeout = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 750).unref?.();
+      setTimeout(() => child.kill("SIGKILL"), 750).unref();
     }, Math.max(1, timeoutMs));
-    timeout.unref?.();
+    timeout.unref();
 
     child.stdout.on("data", (chunk: Buffer) => {
       stdout = appendLimited(stdout, chunk.toString("utf8"));

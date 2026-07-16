@@ -9,6 +9,7 @@ import { createDiagnosticSnapshot } from "../src/diagnostics/snapshots.ts";
 import { handleToolCall } from "../src/events/tool-call.ts";
 import { handleToolResult } from "../src/events/tool-result.ts";
 import { createRuntime, setProjectRoot } from "../src/runtime.ts";
+import { inactiveFormatService } from "./helpers/inactive-services.mjs";
 import { CODE_FEEDBACK_DETAILS_KEY } from "../src/types.ts";
 
 test("tool_call captures cached before diagnostics without refreshing the document", async () => {
@@ -74,6 +75,7 @@ test("cached before diagnostics preserve new-on-touched-file provenance", async 
   };
 
   const lspService = {
+    notifyFileMutations() {},
     cachedDiagnosticsIfKnown() {
       return createDiagnosticSnapshot([]);
     },
@@ -113,6 +115,7 @@ test("cached before diagnostics preserve new-on-touched-file provenance", async 
       { cwd: root },
       runtime,
       lspService,
+      inactiveFormatService,
     );
 
     const feedback = result.details[CODE_FEEDBACK_DETAILS_KEY];
@@ -148,6 +151,7 @@ test("unknown before diagnostics do not mark nearby diagnostics as new", async (
   };
 
   const lspService = {
+    notifyFileMutations() {},
     cachedDiagnosticsIfKnown() {
       return undefined;
     },
@@ -187,6 +191,7 @@ test("unknown before diagnostics do not mark nearby diagnostics as new", async (
       { cwd: root },
       runtime,
       lspService,
+      inactiveFormatService,
     );
 
     assert.equal(result, undefined);

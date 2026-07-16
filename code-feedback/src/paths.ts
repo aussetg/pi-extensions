@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { isRecord } from "./types.ts";
 
 const VENDOR_PARTS = new Set([
   ".git",
@@ -12,14 +13,22 @@ const VENDOR_PARTS = new Set([
   ".cache",
 ]);
 
-export function resolveInputPath(input: unknown, cwd: string | undefined, projectRoot: string): string | undefined {
-  const raw = readPath(input);
+export function resolveInputPath(input: unknown, cwd: string): string | undefined {
+  const raw = readToolPath(input);
   if (!raw) return undefined;
-  return path.resolve(path.isAbsolute(raw) ? raw : path.join(cwd || projectRoot, raw));
+  return path.resolve(cwd, raw);
 }
 
 export function normalizeToolPath(raw: string): string {
   return raw.startsWith("@") ? raw.slice(1) : raw;
+}
+
+export function readToolPath(input: unknown): string | undefined {
+  if (!isRecord(input)) return undefined;
+  const raw = input.path;
+  if (typeof raw !== "string" || raw.length === 0) return undefined;
+  const normalized = normalizeToolPath(raw);
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 export function displayPathFromRoot(filePath: string, projectRoot: string): string {
@@ -28,6 +37,17 @@ export function displayPathFromRoot(filePath: string, projectRoot: string): stri
   const relative = path.relative(root, resolved);
   if (relative === "") return ".";
   return relative.startsWith("..") || path.isAbsolute(relative) ? resolved : relative;
+}
+
+export function isInsideOrEqual(filePath: string, root: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(filePath));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+export function projectRelativeText(text: string, projectRoot: string): string {
+  const root = path.resolve(projectRoot);
+  const prefix = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  return text.split(prefix).join("");
 }
 
 export function shouldTrackFile(filePath: string, projectRoot: string): boolean {
@@ -40,18 +60,3 @@ export function shouldTrackFile(filePath: string, projectRoot: string): boolean 
   const parts = relative.split(path.sep).filter(Boolean);
   return !parts.some((part) => VENDOR_PARTS.has(part));
 }
-
-function readPath(input: unknown): string | undefined {
-  if (!input || typeof input !== "object") return undefined;
-  const candidate = input as { path?: unknown; filePath?: unknown };
-  if (typeof candidate.path === "string" && candidate.path.length > 0) {
-    const normalized = normalizeToolPath(candidate.path);
-    return normalized.length > 0 ? normalized : undefined;
-  }
-  if (typeof candidate.filePath === "string" && candidate.filePath.length > 0) {
-    const normalized = normalizeToolPath(candidate.filePath);
-    return normalized.length > 0 ? normalized : undefined;
-  }
-  return undefined;
-}
-

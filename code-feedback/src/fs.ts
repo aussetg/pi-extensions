@@ -12,6 +12,33 @@ export interface ReadUtf8Result {
   limitBytes?: number;
 }
 
+export function statIfExists(filePath: string): fs.Stats | undefined {
+  try {
+    return fs.statSync(filePath);
+  } catch {
+    return undefined;
+  }
+}
+
+export function realpathIfExists(filePath: string): string | undefined {
+  try {
+    return fs.realpathSync(filePath);
+  } catch {
+    return undefined;
+  }
+}
+
+export function readDescriptorUpTo(descriptor: number, maxBytes: number): Buffer {
+  const buffer = Buffer.allocUnsafe(maxBytes);
+  let offset = 0;
+  while (offset < buffer.length) {
+    const bytesRead = fs.readSync(descriptor, buffer, offset, buffer.length - offset, null);
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  return buffer.subarray(0, offset);
+}
+
 export function readUtf8IfExists(filePath: string): string | undefined {
   return readUtf8File(filePath).content;
 }

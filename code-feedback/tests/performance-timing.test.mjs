@@ -10,6 +10,7 @@ import { handleToolCall } from "../src/events/tool-call.ts";
 import { handleToolResult } from "../src/events/tool-result.ts";
 import { renderDiagnosticsStatus } from "../src/render.ts";
 import { createRuntime, setProjectRoot } from "../src/runtime.ts";
+import { inactiveFormatService } from "./helpers/inactive-services.mjs";
 import { CODE_FEEDBACK_DETAILS_KEY } from "../src/types.ts";
 
 test("edit phase timings are recorded and mirrored into feedback details", async () => {
@@ -37,6 +38,9 @@ test("edit phase timings are recorded and mirrored into feedback details", async
   };
 
   const lspService = {
+    notifyFileMutations() {},
+    cachedDiagnosticsIfKnown() { return undefined; },
+    prewarm() {},
     async diagnosticsForFileDetailed() {
       const now = Date.now();
       return {
@@ -54,6 +58,7 @@ test("edit phase timings are recorded and mirrored into feedback details", async
       { toolName: "edit", toolCallId: "edit-1", input: { path: "probe.ts" } },
       { cwd: root },
       runtime,
+      lspService,
     );
     await writeFile(filePath, after, "utf8");
 
@@ -69,6 +74,7 @@ test("edit phase timings are recorded and mirrored into feedback details", async
       { cwd: root },
       runtime,
       lspService,
+      inactiveFormatService,
     );
 
     const edit = runtime.completedEdits.at(-1);

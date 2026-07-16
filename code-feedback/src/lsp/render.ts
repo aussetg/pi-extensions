@@ -1,7 +1,7 @@
 import { displayPathFromRoot } from "../paths.ts";
 import { isLspRange, lspRangeToExternal, uriToFilePath, type LspRange } from "./positions.ts";
 import { canResolveCodeActionOnApply, workspaceEditSummary } from "./workspace-edit.ts";
-import { LSP_RESULT_SERVER_ID_KEY, type LspMethod } from "../types.ts";
+import { isRecord, LSP_RESULT_SERVER_ID_KEY, type LspMethod } from "../types.ts";
 
 export function renderLspMethodResult(method: LspMethod, result: unknown, projectRoot: string): string {
   switch (method) {
@@ -19,6 +19,8 @@ export function renderLspMethodResult(method: LspMethod, result: unknown, projec
       return renderCodeActions(result);
     case "textDocument/rename":
       return renderWorkspaceEditPreview(result, projectRoot, "rename");
+    case "workspace/renameFile":
+      return renderWorkspaceEditPreview(result, projectRoot, "file rename");
     default:
       return renderJson(result);
   }
@@ -143,10 +145,6 @@ function renderJson(result: unknown): string {
 
 function truncate(text: string, maxChars: number): string {
   return text.length <= maxChars ? text : `${text.slice(0, maxChars)}\n... truncated`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }
 
 function symbolKindName(kind: number): string {
