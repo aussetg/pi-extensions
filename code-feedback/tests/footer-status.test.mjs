@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createDefaultConfig } from "../src/config.ts";
-import { renderFooterStatus } from "../src/render.ts";
+import { renderFooterStatus, renderStatus } from "../src/render.ts";
 import { createRuntime } from "../src/runtime.ts";
 
 function runtime(overrides = {}) {
@@ -22,6 +22,21 @@ function client(overrides) {
     ...overrides,
   };
 }
+
+test("default config exposes only implemented formatting and service settings", () => {
+  const rt = runtime();
+
+  assert.equal(Object.hasOwn(rt.config, "formatMode"), false);
+  assert.equal(Object.hasOwn(rt.config, "formatters"), false);
+  assert.equal(Object.hasOwn(rt.config.lsp, "servers"), false);
+  assert.match(renderStatus(rt), /^  auto format: immediate$/m);
+  assert.match(renderStatus(rt), /^  delayed context injection: enabled$/m);
+
+  rt.config.autoFormat = false;
+  rt.config.contextInjection = false;
+  assert.match(renderStatus(rt), /^  auto format: disabled$/m);
+  assert.match(renderStatus(rt), /^  delayed context injection: disabled$/m);
+});
 
 test("footer shows disabled LSP with a readable prefix", () => {
   const rt = runtime();
@@ -82,4 +97,26 @@ test("footer caps trusted external roots", () => {
   rt.trustedEnvironmentRoots = ["/tmp/a", "/tmp/b", "/tmp/c", "/tmp/d", "/tmp/e"];
 
   assert.equal(renderFooterStatus(rt), "lsp: idle trusted: /tmp/a, /tmp/b, /tmp/c, +2 more");
+});
+
+test("status reports trusted language-server config sources and parse failures", () => {
+  const rt = runtime();
+  const status = {
+    activeClients: 0,
+    clients: [],
+    unavailableServers: [],
+    serverConfiguration: {
+      sources: [
+        { scope: "user", path: "/tmp/agent/code-feedback.json", state: "loaded" },
+        { scope: "project", path: "/tmp/project/.pi/code-feedback.json", state: "invalid" },
+      ],
+      configuredServerIds: ["gleam"],
+      errors: ["/tmp/project/.pi/code-feedback.json: invalid JSON"],
+    },
+  };
+
+  const rendered = renderStatus(rt, status);
+  assert.match(rendered, /^  server config: user=loaded, project=invalid$/m);
+  assert.match(rendered, /^  configured server entries: gleam$/m);
+  assert.match(rendered, /server config errors:\n    \/tmp\/project\/\.pi\/code-feedback\.json: invalid JSON/);
 });

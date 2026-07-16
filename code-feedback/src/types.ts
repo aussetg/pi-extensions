@@ -116,6 +116,43 @@ export interface DiagnosticRefreshResult {
   completedAt: number;
 }
 
+export type WorkspaceDiagnosticFileOutcome = "fresh" | "timed-out" | "unavailable" | "skipped";
+
+export interface WorkspaceDiagnosticFileResult {
+  filePath: string;
+  outcome: WorkspaceDiagnosticFileOutcome;
+  diagnostics: number;
+  reason?: string;
+}
+
+export interface WorkspaceDiagnosticScanSummary {
+  targetPath: string;
+  fileLimit: number;
+  entryLimit: number;
+  entriesVisited: number;
+  selectedFiles: number;
+  freshFiles: number;
+  timedOutFiles: number;
+  unavailableFiles: number;
+  skippedFiles: number;
+  diagnostics: number;
+  ignoredDirectories: number;
+  symlinksSkipped: number;
+  boundaryEntriesSkipped: number;
+  walkErrors: number;
+  fileLimitReached: boolean;
+  entryLimitReached: boolean;
+  traversalComplete: boolean;
+  complete: boolean;
+  durationMs: number;
+}
+
+export interface WorkspaceDiagnosticScanResult {
+  snapshot: DiagnosticSnapshot;
+  summary: WorkspaceDiagnosticScanSummary;
+  files: WorkspaceDiagnosticFileResult[];
+}
+
 export type LspClientState = "starting" | "ready" | "stopped" | "failed";
 export type LspDiagnosticOutcome = "fresh" | "timeout" | "cancelled";
 
@@ -151,10 +188,23 @@ export interface LspUnavailableServer {
   reason: string;
 }
 
+export interface LspServerConfigurationSourceStatus {
+  scope: "user" | "project";
+  path: string;
+  state: "loaded" | "missing" | "ignored-untrusted" | "invalid";
+}
+
+export interface LspServerConfigurationStatus {
+  sources: LspServerConfigurationSourceStatus[];
+  configuredServerIds: string[];
+  errors: string[];
+}
+
 export interface LspServiceStatus {
   activeClients: number;
   clients: LspClientStatus[];
   unavailableServers: LspUnavailableServer[];
+  serverConfiguration?: LspServerConfigurationStatus;
   diagnosticRefreshes?: {
     concurrency: number;
     active: number;
@@ -310,7 +360,7 @@ export interface FeedbackConfig {
   enabled: boolean;
   strict: boolean;
   autoFormat: boolean;
-  formatMode: "immediate" | "deferred";
+  contextInjection: boolean;
   diagnostics: {
     inline: "touched" | "all" | "off";
     maxInline: number;
@@ -324,8 +374,6 @@ export interface FeedbackConfig {
     enabled: boolean;
     idleTimeoutMs: number;
     diagnosticRefreshConcurrency: number;
-    servers: Record<string, unknown>;
   };
-  formatters: Record<string, unknown>;
 }
 

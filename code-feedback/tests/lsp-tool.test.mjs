@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { createDefaultConfig } from "../src/config.ts";
+import { createDiagnosticSnapshot } from "../src/diagnostics/snapshots.ts";
 import { DEFAULT_LSP_SOURCE_FILE_MAX_BYTES } from "../src/fs.ts";
 import { createLspService } from "../src/lsp/service.ts";
 import { renderLspToolResult } from "../src/lsp/tool-renderer.ts";
@@ -46,6 +47,11 @@ test("lsp agent schema excludes legacy aliases and unrestricted methods", async 
     assert.equal(properties.method.enum.includes("raw/request"), false);
     assert.equal(properties.method.enum.includes("codeAction/apply"), false);
     assert.equal(properties.method.enum.includes("workspaceEdit/apply"), true);
+    assert.equal(properties.server.type, "string");
+    assert.equal(properties.server.minLength, 1);
+    assert.equal(properties.limit.type, "number");
+    assert.equal(properties.limit.minimum, 1);
+    assert.equal(properties.limit.maximum, 200);
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });
@@ -116,6 +122,58 @@ test("lsp tool blocks project-local LSP work when Pi project trust is declined",
     assert.equal(result.isError, true);
     assert.equal(result.details.ok, false);
     assert.match(result.content[0].text, /Project is not trusted/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit diagnostic timeouts are rendered as non-authoritative", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-diagnostic-timeout-"));
+  const runtime = createRuntime(createDefaultConfig());
+  setProjectRoot(runtime, root);
+  const snapshot = createDiagnosticSnapshot([]);
+  const lspService = {
+    configure() {},
+    getStatus() { return { activeClients: 0, clients: [], unavailableServers: [] }; },
+    async diagnosticsForFileDetailed() {
+      return {
+        snapshot,
+        fresh: false,
+        timedOut: true,
+        requestedAt: 100,
+        completedAt: 1300,
+      };
+    },
+  };
+  let tool;
+  registerLspTool({
+    registerTool(definition) { tool = definition; },
+    registerCommand() {},
+  }, runtime, lspService);
+
+  try {
+    const result = await tool.execute("lsp-timeout", {
+      method: "textDocument/diagnostic",
+      path: "probe.py",
+    }, undefined, undefined, { cwd: root });
+
+    assert.equal(result.isError, undefined);
+    assert.equal(result.details.ok, true);
+    assert.equal(result.details.authoritative, false);
+    assert.equal(result.details.diagnosticRefresh.outcome, "timed-out");
+    assert.equal(result.details.diagnosticRefresh.durationMs, 1200);
+    assert.match(result.content[0].text, /^  refresh: timed out \(1200ms\) — cached diagnostics shown; not authoritative$/m);
+    assert.match(result.details.hint, /diagnostic refresh timed out/);
+
+    const theme = {
+      fg: (color, text) => `<${color}>${text}</${color}>`,
+      bold: (text) => text,
+    };
+    const rendered = renderLspToolResult(result, { expanded: false }, theme, {
+      args: { method: "textDocument/diagnostic", path: "probe.py" },
+    }).render(500).join("\n");
+    assert.match(rendered, /^<warning>Diagnostics<\/warning>/);
+    assert.match(rendered, /timed out/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -707,6 +765,137 @@ test("lsp hover execution returns raw unfenced hover text", async () => {
   }
 });
 
+test("lsp tool server selects one matching language server", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-server-"));
+  await writeFile(path.join(root, "probe.py"), "value = 1\n", "utf8");
+  const runtime = createRuntime(createDefaultConfig());
+  setProjectRoot(runtime, root);
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "ty", "T100", "1"],
+      },
+      "python-ruff": {
+        command: process.execPath,
+        args: [fakeServer, "ruff", "R100", "2"],
+      },
+    },
+  });
+  let tool;
+  registerLspTool({
+    registerTool(definition) { tool = definition; },
+    registerCommand() {},
+  }, runtime, service);
+
+  try {
+    const result = await tool.execute("lsp-1", {
+      method: "textDocument/hover",
+      path: "probe.py",
+      line: 1,
+      column: 1,
+      server: "python-ruff",
+    }, undefined, undefined, { cwd: root });
+
+    assert.equal(result.content[0].text, "ruff hover");
+    assert.equal(result.details.server, "python-ruff");
+    assert.deepEqual(service.getStatus().clients.map((client) => client.id), ["python-ruff"]);
+
+    const missing = await tool.execute("lsp-2", {
+      method: "textDocument/hover",
+      path: "probe.py",
+      line: 1,
+      column: 1,
+      server: "missing-server",
+    }, undefined, undefined, { cwd: root });
+    assert.equal(missing.isError, true);
+    assert.match(missing.content[0].text, /Unknown language server "missing-server"/);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("lsp workspace diagnostics actively scan a bounded path and retain a cached mode", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-workspace-"));
+  await writeFile(path.join(root, "a.py"), "a = 1\n", "utf8");
+  await writeFile(path.join(root, "b.py"), "b = 2\n", "utf8");
+  const runtime = createRuntime(createDefaultConfig());
+  setProjectRoot(runtime, root);
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "ty", "T100", "1", "", "pull-diagnostics"],
+      },
+      "python-ruff": {
+        command: process.execPath,
+        args: [fakeServer, "ruff", "R100", "2", "", "pull-diagnostics"],
+      },
+    },
+  });
+  let tool;
+  registerLspTool({
+    registerTool(definition) { tool = definition; },
+    registerCommand() {},
+  }, runtime, service);
+
+  try {
+    const active = await tool.execute("lsp-workspace-active", {
+      method: "workspace/diagnostic",
+      path: ".",
+      limit: 1,
+      server: "python-ruff",
+    }, undefined, undefined, { cwd: root });
+
+    assert.equal(active.isError, undefined);
+    assert.match(active.content[0].text, /target: \./);
+    assert.match(active.content[0].text, /known LSP diagnostics: 1/);
+    assert.match(active.content[0].text, /scan: bounded\/incomplete/);
+    assert.match(active.content[0].text, /files: 1 selected · 1 fresh · 0 timed out · 0 unavailable · 0 skipped/);
+    assert.equal(active.details.ok, true);
+    assert.equal(active.details.method, "workspace/diagnostic");
+    assert.equal(active.details.mode, "workspace");
+    assert.equal(active.details.server, "python-ruff");
+    assert.equal(active.details.workspaceScan.selectedFiles, 1);
+    assert.equal(active.details.workspaceScan.fileLimitReached, true);
+    assert.equal(active.details.workspaceScan.files[0].outcome, "fresh");
+    assert.deepEqual(service.getStatus().clients.map((client) => client.id), ["python-ruff"]);
+
+    const invalidLimit = await tool.execute("lsp-workspace-limit", {
+      method: "workspace/diagnostic",
+      path: ".",
+      limit: 201,
+    }, undefined, undefined, { cwd: root });
+    assert.equal(invalidLimit.isError, true);
+    assert.match(invalidLimit.content[0].text, /file limit must be at most 200/);
+    assert.match(invalidLimit.content[0].text, /hint: Pass limit as an integer from 1 to 200/);
+
+    const cached = await tool.execute("lsp-workspace-cached", {
+      method: "workspace/diagnostic",
+      server: "python-ruff",
+    }, undefined, undefined, { cwd: root, isProjectTrusted: () => false });
+    assert.equal(cached.isError, undefined);
+    assert.equal(cached.details.mode, "cached");
+    assert.equal(cached.details.workspaceScan, undefined);
+    assert.match(cached.content[0].text, /target: all \(cached\)/);
+
+    const untrustedActive = await tool.execute("lsp-workspace-untrusted", {
+      method: "workspace/diagnostic",
+      path: ".",
+    }, undefined, undefined, { cwd: root, isProjectTrusted: () => false });
+    assert.equal(untrustedActive.isError, true);
+    assert.match(untrustedActive.content[0].text, /Project is not trusted/);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 async function waitForJsonLog(filePath, predicate) {
   let entries = [];
   for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -733,7 +922,7 @@ function createRegisteredTool(root, mode = "actions-require-diagnostics", logPat
   const runtime = createRuntime(createDefaultConfig());
   setProjectRoot(runtime, root);
   runtime.config.autoFormat = formatService !== undefined;
-  runtime.config.lsp.servers = {
+  const serverOverrides = {
     python: {
       command: process.execPath,
       args: [fakeServer, "py", "T100", "1", "", mode, logPath].filter((value) => value !== undefined),
@@ -744,7 +933,7 @@ function createRegisteredTool(root, mode = "actions-require-diagnostics", logPat
   const service = createLspService({
     projectRoot: root,
     idleTimeoutMs: 0,
-    serverOverrides: runtime.config.lsp.servers,
+    serverOverrides,
   });
 
   let tool;

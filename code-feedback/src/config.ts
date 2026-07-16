@@ -7,7 +7,7 @@ export function createDefaultConfig(): FeedbackConfig {
     enabled: true,
     strict: false,
     autoFormat: true,
-    formatMode: "immediate",
+    contextInjection: true,
     diagnostics: {
       inline: "touched",
       maxInline: 8,
@@ -21,9 +21,7 @@ export function createDefaultConfig(): FeedbackConfig {
       enabled: true,
       idleTimeoutMs: 240_000,
       diagnosticRefreshConcurrency: DEFAULT_DIAGNOSTIC_REFRESH_CONCURRENCY,
-      servers: {},
     },
-    formatters: {},
   };
 }
 
@@ -42,6 +40,12 @@ export function registerFlags(pi: PiApi): void {
 
   pi.registerFlag?.("code-feedback-no-format", {
     description: "Disable code-feedback automatic formatter pass.",
+    type: "boolean",
+    default: false,
+  });
+
+  pi.registerFlag?.("code-feedback-no-context", {
+    description: "Disable delayed LSP diagnostics injection into model context while keeping LSP feedback and formatting active.",
     type: "boolean",
     default: false,
   });
@@ -76,6 +80,9 @@ export function resolveConfig(pi: PiApi): FeedbackConfig {
   }
   if (pi.getFlag?.("code-feedback-no-format")) {
     config.autoFormat = false;
+  }
+  if (pi.getFlag?.("code-feedback-no-context")) {
+    config.contextInjection = false;
   }
   if (pi.getFlag?.("code-feedback-strict")) {
     config.strict = true;

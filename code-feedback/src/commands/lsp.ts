@@ -4,15 +4,17 @@ import type { LspService } from "../lsp/service.ts";
 import { normalizeToolPath } from "../paths.ts";
 import { restartLsp, setLspEnabled, setProjectRoot, setProjectTrust, type CodeFeedbackRuntime } from "../runtime.ts";
 import type { PiApi, PiCommandContext } from "../pi.ts";
+import { contextInjectionArgumentCompletions, handleContextInjectionCommand } from "./context-injection.ts";
 import { handleTrustCommand, trustArgumentCompletions } from "./trust.ts";
 
-const SUBCOMMANDS = ["status", "enable", "disable", "restart", "diagnostics", "capabilities", "trust", "help"] as const;
+const SUBCOMMANDS = ["status", "enable", "disable", "restart", "diagnostics", "capabilities", "context", "trust", "help"] as const;
 
 export function registerLspCommand(pi: PiApi, runtime: CodeFeedbackRuntime, lspService: LspService, formatService?: FormatService): void {
   pi.registerCommand("lsp", {
-    description: "Manage code-feedback LSP feedback. Usage: /lsp status | enable | disable | restart | diagnostics | capabilities | trust",
+    description: "Manage code-feedback LSP feedback. Usage: /lsp status | enable | disable | restart | diagnostics | capabilities | context | trust",
     getArgumentCompletions: (prefix) => {
       const trimmed = prefix.trimStart();
+      if (trimmed.toLowerCase().startsWith("context ")) return contextInjectionArgumentCompletions(trimmed.slice("context ".length));
       if (trimmed.toLowerCase().startsWith("trust ")) return trustArgumentCompletions(trimmed.slice("trust ".length));
       const needle = trimmed.toLowerCase();
       return SUBCOMMANDS
@@ -24,14 +26,12 @@ export function registerLspCommand(pi: PiApi, runtime: CodeFeedbackRuntime, lspS
       setProjectTrust(runtime, ctx);
       lspService.configure({
         projectRoot: runtime.projectRoot,
-        serverOverrides: runtime.config.lsp.servers,
         trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
         idleTimeoutMs: runtime.config.lsp.idleTimeoutMs,
         diagnosticRefreshConcurrency: runtime.config.lsp.diagnosticRefreshConcurrency,
       });
       formatService?.configure({
         projectRoot: runtime.projectRoot,
-        formatterOverrides: runtime.config.formatters,
         trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
       });
       const [subcommand = "status", ...rest] = normalizeArgs(args);
@@ -94,6 +94,10 @@ export function registerLspCommand(pi: PiApi, runtime: CodeFeedbackRuntime, lspS
           notify(ctx, renderDiagnosticsStatus(runtime, normalizeOptionalPath(rest[0]), lspService.cachedDiagnostics(normalizeOptionalPath(rest[0]))), "info");
           return;
 
+        case "context":
+          handleContextInjectionCommand(runtime, rest, ctx);
+          return;
+
         case "trust":
           if (!formatService) {
             notify(ctx, "Formatter service is unavailable; cannot update trusted environment roots.", "warning");
@@ -147,6 +151,7 @@ function renderHelp(command: string): string {
     "  /lsp restart",
     "  /lsp diagnostics [path|all]",
     "  /lsp capabilities [path]",
+    "  /lsp context [status|on|off|toggle]",
     "  /lsp trust [status|add <path>|remove <path>|clear]",
   ].join("\n");
 }

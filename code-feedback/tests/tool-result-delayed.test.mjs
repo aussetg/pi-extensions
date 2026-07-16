@@ -97,6 +97,11 @@ test("slow after diagnostics use the inline budget and arrive through delayed co
     assert.equal(refreshOptions[1].timeoutMs, 900);
     assert.equal(refreshOptions[1].settleMs, 0);
 
+    runtime.config.contextInjection = false;
+    assert.equal(handleContext({ messages: [{ role: "user", content: "next" }] }, runtime), undefined);
+    assert.equal(runtime.delayedFeedback.length, 1);
+
+    runtime.config.contextInjection = true;
     const context = handleContext({ messages: [{ role: "user", content: "next" }] }, runtime);
     assert.ok(context);
     assert.match(context.messages[0].content, /Delayed code-feedback LSP feedback/);

@@ -5,11 +5,14 @@ import { mergeProcessEnv, resolveWorkspaceRootForPath } from "../language-enviro
 import type { FormatterResult, FormatterRunRecord, FormatServiceStatus } from "../types.ts";
 import { listFormatterCommandStatus, selectFormatter, type SelectedFormatter } from "./formatters.ts";
 
-export interface FormatServiceOptions {
+export interface FormatServiceConfiguration {
   projectRoot: string;
-  formatterOverrides?: Record<string, unknown>;
   trustedEnvironmentRoots?: string[];
   timeoutMs?: number;
+}
+
+export interface FormatServiceOptions extends FormatServiceConfiguration {
+  formatterOverrides?: Record<string, unknown>;
 }
 
 interface SpawnResult {
@@ -25,7 +28,7 @@ const MAX_OUTPUT_CHARS = 8_000;
 
 export class FormatService {
   private projectRoot: string;
-  private formatterOverrides: Record<string, unknown>;
+  private readonly formatterOverrides: Record<string, unknown>;
   private trustedEnvironmentRoots: string[];
   private timeoutMs: number;
   private recentRuns: FormatterRunRecord[] = [];
@@ -37,9 +40,8 @@ export class FormatService {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_FORMAT_TIMEOUT_MS;
   }
 
-  configure(options: FormatServiceOptions): void {
+  configure(options: FormatServiceConfiguration): void {
     this.projectRoot = path.resolve(options.projectRoot);
-    this.formatterOverrides = options.formatterOverrides ?? {};
     this.trustedEnvironmentRoots = options.trustedEnvironmentRoots?.map((root) => path.resolve(root)) ?? [];
     this.timeoutMs = options.timeoutMs ?? this.timeoutMs;
   }

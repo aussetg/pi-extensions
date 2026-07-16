@@ -1,10 +1,10 @@
 import * as path from "node:path";
-import { renderCapabilities, renderDiagnosticsStatus, renderStatus } from "../render.ts";
+import { renderCapabilities, renderDiagnosticsStatus, renderStatus, type ExplicitDiagnosticRefreshStatus } from "../render.ts";
 import type { FormatService } from "../format/service.ts";
 import type { LspService } from "./service.ts";
 import { displayPathFromRoot, normalizeToolPath } from "../paths.ts";
 import { restartLsp, setProjectRoot, setProjectTrust, type CodeFeedbackRuntime } from "../runtime.ts";
-import { LSP_METHODS, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY, type DiagnosticSnapshot, type LspMethod } from "../types.ts";
+import { LSP_METHODS, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY, type DiagnosticRefreshResult, type DiagnosticSnapshot, type LspMethod, type WorkspaceDiagnosticScanResult } from "../types.ts";
 import type { PiApi, PiToolResult } from "../pi.ts";
 import { renderLspMethodResult } from "./render.ts";
 import {
@@ -17,6 +17,7 @@ import {
 } from "./tool-output.ts";
 import { renderLspToolCall, renderLspToolResult } from "./tool-renderer.ts";
 import { isCancellation, throwIfAborted } from "./cancellation.ts";
+import { DEFAULT_WORKSPACE_DIAGNOSTIC_FILE_LIMIT, MAX_WORKSPACE_DIAGNOSTIC_FILE_LIMIT, normalizeWorkspaceDiagnosticFileLimit } from "./workspace-diagnostics.ts";
 import { processAppliedLspFileMutations, type AppliedLspFileMutation } from "../events/tool-result.ts";
 import {
   applyWorkspaceEdit,
@@ -100,6 +101,14 @@ interface RenderedLspText {
   truncation?: LspToolJsonTruncation;
 }
 
+interface DiagnosticsToolSnapshot {
+  mode: "cached" | "file" | "workspace";
+  target: string;
+  snapshot: DiagnosticSnapshot;
+  refresh?: ExplicitDiagnosticRefreshStatus;
+  workspaceScan?: WorkspaceDiagnosticScanResult;
+}
+
 export function registerLspTool(
   pi: PiApi,
   runtime: CodeFeedbackRuntime,
@@ -126,7 +135,8 @@ export function registerLspTool(
     promptGuidelines: [
       "Use lsp with method=\"server/status\" when language-server feedback seems missing or stale.",
       "Use lsp with real LSP method names such as method=\"textDocument/hover\", method=\"textDocument/definition\", and method=\"workspace/symbol\"; line and column are 1-based.",
-      "Use lsp method=\"textDocument/diagnostic\" with path to refresh one file, or method=\"workspace/diagnostic\" for cached known diagnostics; explicit diagnostics are not touched-line filtered.",
+      "Use the optional lsp server parameter to select one configured language server when multiple servers match a file.",
+      "Use lsp method=\"textDocument/diagnostic\" with path to refresh one file. Use method=\"workspace/diagnostic\" without path for cached diagnostics, or pass a project file/directory path for a bounded active scan; explicit diagnostics are not touched-line filtered.",
       "Use lsp method=\"textDocument/codeAction\" or method=\"textDocument/rename\" to preview a WorkspaceEdit, then method=\"workspaceEdit/apply\" with its id to apply it safely.",
       "Do not use lsp for formatting; formatting is handled by code-feedback's edit pipeline or normal shell/editor tools.",
     ],
@@ -143,14 +153,12 @@ export function registerLspTool(
       setProjectTrust(runtime, ctx);
       lspService.configure({
         projectRoot: runtime.projectRoot,
-        serverOverrides: runtime.config.lsp.servers,
         trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
         idleTimeoutMs: runtime.config.lsp.idleTimeoutMs,
         diagnosticRefreshConcurrency: runtime.config.lsp.diagnosticRefreshConcurrency,
       });
       formatService?.configure({
         projectRoot: runtime.projectRoot,
-        formatterOverrides: runtime.config.formatters,
         trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
       });
       const parsed = parseToolMethod(params);
@@ -170,35 +178,26 @@ export function registerLspTool(
         return textResult("code-feedback LSP clients are disabled for this session. Use /lsp enable to turn them back on.", true, statusDetails(runtime, lspService, formatService));
       }
 
-      if (!runtime.projectTrusted && methodRequiresProjectTrust(method)) {
+      if (!runtime.projectTrusted && methodRequiresProjectTrust(method, params)) {
         return errorResult(method, "Project is not trusted; code-feedback LSP/formatting is paused until project trust is approved.", statusDetails(runtime, lspService, formatService));
       }
 
       try {
+        const server = readServer(params);
         switch (method) {
         case "server/status":
-          return textResult(renderStatus(runtime, lspService.getStatus(), runtime.projectTrusted ? formatService?.getStatus() : undefined), false, statusDetails(runtime, lspService, formatService));
+          return textResult(renderStatus(runtime, lspService.getStatus(server), runtime.projectTrusted ? formatService?.getStatus() : undefined), false, statusDetails(runtime, lspService, formatService, server));
 
         case "server/capabilities":
-          return textResult(renderCapabilities(runtime, lspService.getStatus(), await lspService.capabilities(readPath(params), signal)), false, {
-            clients: lspService.getStatus().clients,
+          return textResult(renderCapabilities(runtime, lspService.getStatus(server), await lspService.capabilities(readPath(params), signal, server)), false, {
+            server,
+            clients: lspService.getStatus(server).clients,
             implementedMethods: LSP_METHODS,
           });
 
         case "textDocument/diagnostic":
         case "workspace/diagnostic":
-          return textResult(renderDiagnosticsStatus(runtime, diagnosticsTarget(method, params), await diagnosticsSnapshot(method, params, runtime, lspService, signal)), false, {
-            implemented: true,
-            diagnosticSnapshots: true,
-            hint: "workspace/diagnostic returns cached diagnostics for files the LSP already knows. Use textDocument/diagnostic with path to refresh one file.",
-            recentTouchedRanges: runtime.completedEdits.slice(-5).map((edit) => ({
-              filePath: edit.filePath,
-              toolName: edit.toolName,
-              touchedRanges: edit.touchedRanges,
-              rangeComputation: edit.rangeComputation,
-              diagnosticFilter: edit.diagnosticFilter?.summary,
-            })),
-          });
+          return await handleDiagnostics(method, params, runtime, lspService, signal);
 
         case "server/reload":
           restartLsp(runtime, "lsp tool");
@@ -206,25 +205,25 @@ export function registerLspTool(
           return textResult("code-feedback LSP clients restarted and will be relaunched on demand.", false, statusDetails(runtime, lspService, formatService));
 
         case "textDocument/hover":
-          return rawOrPretty(method, params, await lspService.hover(requirePath(params), params.line, readColumn(params), signal), runtime.projectRoot);
+          return rawOrPretty(method, params, await lspService.hover(requirePath(params), params.line, readColumn(params), signal, server), runtime.projectRoot);
 
         case "textDocument/definition":
-          return rawOrPretty(method, params, await lspService.definition(requirePath(params), params.line, readColumn(params), signal), runtime.projectRoot);
+          return rawOrPretty(method, params, await lspService.definition(requirePath(params), params.line, readColumn(params), signal, server), runtime.projectRoot);
 
         case "textDocument/references":
-          return rawOrPretty(method, params, await lspService.references(requirePath(params), params.line, readColumn(params), signal), runtime.projectRoot);
+          return rawOrPretty(method, params, await lspService.references(requirePath(params), params.line, readColumn(params), signal, server), runtime.projectRoot);
 
         case "textDocument/implementation":
-          return rawOrPretty(method, params, await lspService.implementation(requirePath(params), params.line, readColumn(params), signal), runtime.projectRoot);
+          return rawOrPretty(method, params, await lspService.implementation(requirePath(params), params.line, readColumn(params), signal, server), runtime.projectRoot);
 
         case "textDocument/typeDefinition":
-          return rawOrPretty(method, params, await lspService.typeDefinition(requirePath(params), params.line, readColumn(params), signal), runtime.projectRoot);
+          return rawOrPretty(method, params, await lspService.typeDefinition(requirePath(params), params.line, readColumn(params), signal, server), runtime.projectRoot);
 
         case "textDocument/documentSymbol":
-          return rawOrPretty(method, params, await lspService.documentSymbols(requirePath(params), signal), runtime.projectRoot);
+          return rawOrPretty(method, params, await lspService.documentSymbols(requirePath(params), signal, server), runtime.projectRoot);
 
         case "workspace/symbol":
-          return rawOrPretty(method, params, await lspService.workspaceSymbols(params.query, readPath(params), signal), runtime.projectRoot);
+          return rawOrPretty(method, params, await lspService.workspaceSymbols(params.query, readPath(params), signal, server), runtime.projectRoot);
 
         case "textDocument/codeAction":
           return await handleCodeActions(method, params, runtime, lspService, toolState, signal);
@@ -256,7 +255,9 @@ const LspToolParameters = {
       enum: LSP_METHODS,
       description: "LSP-lite method to run. Uses real LSP method names where possible; positions are still 1-based.",
     },
-    path: { type: "string", description: "File path for file-scoped LSP actions." },
+    path: { type: "string", description: "File path for file-scoped LSP actions, or a project file/directory target for an active workspace/diagnostic scan." },
+    server: { type: "string", minLength: 1, description: "Configured language-server id. Omit to use all matching servers where the method supports fan-out." },
+    limit: { type: "number", minimum: 1, maximum: MAX_WORKSPACE_DIAGNOSTIC_FILE_LIMIT, multipleOf: 1, description: `Maximum files for an active workspace/diagnostic scan (default ${DEFAULT_WORKSPACE_DIAGNOSTIC_FILE_LIMIT}, hard maximum ${MAX_WORKSPACE_DIAGNOSTIC_FILE_LIMIT}).` },
     line: { type: "number", minimum: 1, multipleOf: 1, description: "1-based line for position-scoped LSP actions." },
     column: { type: "number", minimum: 1, multipleOf: 1, description: "1-based column for position-scoped LSP actions." },
     query: { type: "string", description: "Search query for workspace/symbol." },
@@ -352,40 +353,153 @@ function attachDetailsTruncation(details: unknown, truncation: LspToolDetailsTru
   return { value: details, detailsTruncation: truncation };
 }
 
+async function handleDiagnostics(
+  method: LspMethod,
+  params: Record<string, unknown>,
+  runtime: CodeFeedbackRuntime,
+  lspService: LspService,
+  signal?: AbortSignal,
+): Promise<PiToolResult> {
+  const diagnostics = await diagnosticsSnapshot(method, params, runtime, lspService, signal);
+  const server = readServer(params);
+  const workspaceScan = diagnostics.workspaceScan;
+  const workspaceScanDetails = workspaceScan ? {
+    ...workspaceScan.summary,
+    targetPath: displayPathFromRoot(workspaceScan.summary.targetPath, runtime.projectRoot),
+    files: workspaceScan.files.map((file) => ({
+      ...file,
+      filePath: displayPathFromRoot(file.filePath, runtime.projectRoot),
+    })),
+  } : undefined;
+  const hint = workspaceDiagnosticHint(diagnostics);
+
+  return textResult(renderDiagnosticsStatus(runtime, diagnostics.target, diagnostics.snapshot, workspaceScan, diagnostics.refresh), false, {
+    ok: true,
+    method,
+    implemented: true,
+    mode: diagnostics.mode,
+    server,
+    authoritative: diagnosticsAreAuthoritative(diagnostics),
+    diagnosticRefresh: diagnostics.refresh,
+    diagnosticSnapshots: true,
+    workspaceScan: workspaceScanDetails,
+    hint,
+    recentTouchedRanges: runtime.completedEdits.slice(-5).map((edit) => ({
+      filePath: edit.filePath,
+      toolName: edit.toolName,
+      touchedRanges: edit.touchedRanges,
+      rangeComputation: edit.rangeComputation,
+      diagnosticFilter: edit.diagnosticFilter?.summary,
+    })),
+  });
+}
+
+function workspaceDiagnosticHint(diagnostics: DiagnosticsToolSnapshot): string {
+  if (diagnostics.mode === "cached") {
+    return "Pass path=\".\" (and optional limit/server) to actively refresh a bounded project scan; omit path to keep this cached-only query cheap.";
+  }
+  if (diagnostics.mode === "file" && diagnostics.refresh?.outcome === "timed-out") {
+    return "The diagnostic refresh timed out. The displayed cache is not authoritative; inspect server/status and retry.";
+  }
+  if (diagnostics.mode === "file" && diagnostics.refresh?.outcome === "unavailable") {
+    return "No language server produced an authoritative diagnostic refresh. The displayed cache may be stale; inspect server/status.";
+  }
+  const summary = diagnostics.workspaceScan?.summary;
+  if (!summary) return "Use workspace/diagnostic without path for a cheap cached snapshot.";
+  if (summary.fileLimitReached || summary.entryLimitReached) {
+    return `The active scan was bounded or incomplete. Narrow path or raise limit up to ${MAX_WORKSPACE_DIAGNOSTIC_FILE_LIMIT}; ignored directories and symlinks remain excluded.`;
+  }
+  if (!summary.traversalComplete) {
+    return "Workspace traversal encountered unreadable directories. Narrow the target or check project permissions before retrying.";
+  }
+  if (!summary.complete) {
+    return "Some selected files did not produce fresh diagnostics. Inspect timeout/unavailable/skipped counts and server/status, then retry or narrow the target.";
+  }
+  return "Use workspace/diagnostic without path for a cheap cached snapshot.";
+}
+
 async function diagnosticsSnapshot(
   method: LspMethod,
   params: Record<string, unknown>,
   runtime: CodeFeedbackRuntime,
   lspService: LspService,
   signal?: AbortSignal,
-) {
-  if (method === "workspace/diagnostic") return lspService.cachedDiagnostics("all");
+): Promise<DiagnosticsToolSnapshot> {
+  const server = readServer(params);
+  if (method === "workspace/diagnostic") {
+    const target = readPath(params);
+    if (!target) {
+      if (params.limit !== undefined) throw new Error("workspace/diagnostic limit requires path for an active scan");
+      return { mode: "cached", target: "all (cached)", snapshot: lspService.cachedDiagnostics("all", server) };
+    }
+    const workspaceScan = await lspService.diagnosticsForWorkspace(target, {
+      limit: readWorkspaceDiagnosticLimit(params),
+      timeoutMs: 1200,
+      settleMs: 100,
+      server,
+      signal,
+    });
+    return {
+      mode: "workspace",
+      target: displayPathFromRoot(workspaceScan.summary.targetPath, runtime.projectRoot),
+      snapshot: workspaceScan.snapshot,
+      workspaceScan,
+    };
+  }
   const filePath = requirePath(params);
-  if (!runtime.config.enabled || !runtime.config.lsp.enabled) return lspService.cachedDiagnostics(filePath);
-  return (await lspService.diagnosticsForFile(filePath, undefined, {
+  if (!runtime.config.enabled || !runtime.config.lsp.enabled) {
+    return { mode: "cached", target: filePath, snapshot: lspService.cachedDiagnostics(filePath, server) };
+  }
+  const refresh = await lspService.diagnosticsForFileDetailed(filePath, undefined, {
     timeoutMs: 1200,
     settleMs: 100,
     snapshotScope: "file",
+    server,
     signal,
-  })) ?? lspService.cachedDiagnostics(filePath);
+  });
+  if (refresh) {
+    return {
+      mode: "file",
+      target: filePath,
+      snapshot: refresh.snapshot,
+      refresh: explicitDiagnosticRefreshStatus(refresh),
+    };
+  }
+  return {
+    mode: "file",
+    target: filePath,
+    snapshot: lspService.cachedDiagnostics(filePath, server),
+    refresh: { outcome: "unavailable" },
+  };
 }
 
-function diagnosticsTarget(method: LspMethod, params: Record<string, unknown>): string {
-  if (method === "workspace/diagnostic") return "all";
-  return requirePath(params);
+function explicitDiagnosticRefreshStatus(refresh: DiagnosticRefreshResult): ExplicitDiagnosticRefreshStatus {
+  return {
+    outcome: refresh.fresh ? "fresh" : refresh.timedOut ? "timed-out" : "unavailable",
+    durationMs: Math.max(0, refresh.completedAt - refresh.requestedAt),
+  };
 }
 
-function statusDetails(runtime: CodeFeedbackRuntime, lspService: LspService, formatService?: FormatService): Record<string, unknown> {
-  const serviceStatus = lspService.getStatus();
+function diagnosticsAreAuthoritative(diagnostics: DiagnosticsToolSnapshot): boolean {
+  if (diagnostics.mode === "file") return diagnostics.refresh?.outcome === "fresh";
+  if (diagnostics.mode === "workspace") return diagnostics.workspaceScan?.summary.complete === true;
+  return false;
+}
+
+function statusDetails(runtime: CodeFeedbackRuntime, lspService: LspService, formatService?: FormatService, server?: string): Record<string, unknown> {
+  const serviceStatus = lspService.getStatus(server);
   return {
     enabled: runtime.config.enabled,
     lspEnabled: runtime.config.lsp.enabled,
     diagnosticRefreshConcurrency: runtime.config.lsp.diagnosticRefreshConcurrency,
     diagnosticRefreshes: serviceStatus.diagnosticRefreshes,
     autoFormat: runtime.config.autoFormat,
+    contextInjection: runtime.config.contextInjection,
     strict: runtime.config.strict,
     projectTrusted: runtime.projectTrusted,
     projectRoot: runtime.projectRoot,
+    server,
+    serverConfiguration: serviceStatus.serverConfiguration,
     clientSummary: serviceStatus.clients.length === 0 ? "none yet — starts lazily when you query a source file" : `${serviceStatus.clients.length} client(s)`,
     clients: serviceStatus.clients,
     unavailableServers: serviceStatus.unavailableServers,
@@ -408,13 +522,29 @@ function readColumn(params: Record<string, unknown>): unknown {
   return params.column;
 }
 
+function readServer(params: Record<string, unknown>): string | undefined {
+  if (params.server === undefined) return undefined;
+  if (typeof params.server !== "string" || params.server.trim().length === 0) {
+    throw new Error("lsp server must be a non-empty configured server id");
+  }
+  if (params.server !== params.server.trim()) throw new Error("lsp server must not contain surrounding whitespace");
+  return params.server;
+}
+
+function readWorkspaceDiagnosticLimit(params: Record<string, unknown>): number {
+  return params.limit === undefined
+    ? DEFAULT_WORKSPACE_DIAGNOSTIC_FILE_LIMIT
+    : normalizeWorkspaceDiagnosticFileLimit(params.limit);
+}
+
 function methodRequiresEnabledLsp(method: LspMethod, params: Record<string, unknown>): boolean {
   switch (method) {
     case "server/status":
     case "server/reload":
-    case "workspace/diagnostic":
     case "textDocument/diagnostic":
       return false;
+    case "workspace/diagnostic":
+      return readPath(params) !== undefined;
     case "server/capabilities":
       return readPath(params) !== undefined;
     default:
@@ -422,8 +552,8 @@ function methodRequiresEnabledLsp(method: LspMethod, params: Record<string, unkn
   }
 }
 
-function methodRequiresProjectTrust(method: LspMethod): boolean {
-  return method !== "server/status" && method !== "workspace/diagnostic";
+function methodRequiresProjectTrust(method: LspMethod, params: Record<string, unknown>): boolean {
+  return method !== "server/status" && !(method === "workspace/diagnostic" && readPath(params) === undefined);
 }
 
 function requirePath(params: Record<string, unknown>): string {
@@ -442,6 +572,7 @@ function rawOrPretty(method: LspMethod, params: Record<string, unknown>, result:
       ok: true,
       method,
       raw,
+      server: readServer(params),
       ...(rendered.truncation ? { visibleJsonTruncation: rendered.truncation } : {}),
       result,
     }, limited.truncation),
@@ -464,7 +595,8 @@ async function handleCodeActions(
   const filePath = requirePath(params);
   const requestFileStateBefore = readCachedFileState(path.resolve(runtime.projectRoot, filePath));
   const column = readColumn(params);
-  const result = await lspService.codeActions(filePath, params.line, column, signal);
+  const server = readServer(params);
+  const result = await lspService.codeActions(filePath, params.line, column, signal, server);
   throwIfAborted(signal);
   const requestFileStateAfter = readCachedFileState(path.resolve(runtime.projectRoot, filePath));
   if (!sameCachedFileState(requestFileStateBefore, requestFileStateAfter)) {
@@ -481,6 +613,7 @@ async function handleCodeActions(
     ok: true,
     method,
     path: filePath,
+    server,
     line: typeof params.line === "number" ? params.line : undefined,
     column: typeof column === "number" ? column : undefined,
     actions: summaries,
@@ -490,6 +623,7 @@ async function handleCodeActions(
   }, {
     ok: true,
     method,
+    server,
     actions: summaries,
     result,
   });
@@ -615,7 +749,8 @@ async function handleRename(
   throwIfAborted(signal);
   const requestPath = requirePath(params);
   const requestFileBefore = readCachedFileState(path.resolve(runtime.projectRoot, requestPath));
-  const result = await lspService.rename(requestPath, params.line, readColumn(params), params.newName, signal);
+  const server = readServer(params);
+  const result = await lspService.rename(requestPath, params.line, readColumn(params), params.newName, signal, server);
   throwIfAborted(signal);
   const requestFileAfter = readCachedFileState(path.resolve(runtime.projectRoot, requestPath));
   if (!sameCachedFileState(requestFileBefore, requestFileAfter)) {
@@ -631,12 +766,14 @@ async function handleRename(
     ok: true,
     method: "textDocument/rename",
     path: requestPath,
+    server,
     newName: String(params.newName),
     workspaceEdit: preview,
     hint: preview.applyable ? "Apply with method=\"workspaceEdit/apply\" and id." : undefined,
   }, {
     ok: true,
     method: "textDocument/rename",
+    server,
     workspaceEdit: preview,
     result,
   });
@@ -953,6 +1090,14 @@ function rejectApplyDuringPendingEdits(runtime: CodeFeedbackRuntime, label: stri
 function hintForError(message: string): string | undefined {
   if (/requires 1-based line and character|requires 1-based line and column/i.test(message)) return "Pass line and column as 1-based numbers.";
   if (/requires path/i.test(message)) return "Pass path for textDocument methods.";
+  if (/Multiple language servers support/i.test(message)) return "Pass server with one of the matching configured language-server ids.";
+  if (/Unknown language server/i.test(message)) return "Use method=\"server/status\" without server to inspect loaded configuration and active clients.";
+  if (/Language server .* (?:is unavailable|is disabled|does not support)/i.test(message)) return "Check method=\"server/status\", the route extensions, and the configured command.";
+  if (/Workspace diagnostic target .*outside the project root/i.test(message)) return "Choose a file or directory inside the trusted project root.";
+  if (/Workspace diagnostic target .*symbolic link/i.test(message)) return "Scan the real project directory instead; active workspace scans do not follow symlinks.";
+  if (/Cannot (?:inspect|resolve) workspace diagnostic target/i.test(message)) return "Check that the active-scan path exists inside the project root.";
+  if (/Workspace diagnostic target is inside an ignored directory/i.test(message)) return "Choose a source directory outside dependency, cache, virtual-environment, and build output trees.";
+  if (/workspace diagnostic file limit/i.test(message)) return `Pass limit as an integer from 1 to ${MAX_WORKSPACE_DIAGNOSTIC_FILE_LIMIT}.`;
   if (/LSP source file is too large/i.test(message)) return "Use a smaller source file or exclude generated output from explicit LSP requests.";
   if (/Cannot read file for LSP request/i.test(message)) return "Check that the path exists and rerun the request against a current file.";
   if (/No language server configured/i.test(message)) return "No configured language server matched this file. Check file extension, config, and installed server commands.";

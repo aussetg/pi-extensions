@@ -152,6 +152,10 @@ export function setLspEnabled(runtime: CodeFeedbackRuntime, enabled: boolean): v
   if (!enabled) runtime.delayedFeedback = [];
 }
 
+export function setContextInjectionEnabled(runtime: CodeFeedbackRuntime, enabled: boolean): void {
+  runtime.config.contextInjection = enabled;
+}
+
 export function restartLsp(runtime: CodeFeedbackRuntime, reason: string): void {
   runtime.lspRestartCount += 1;
   runtime.lastLspRestartAt = Date.now();

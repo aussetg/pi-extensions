@@ -4,7 +4,7 @@ import { createDiagnosticSnapshot } from "../diagnostics/snapshots.ts";
 import { mergeProcessEnv } from "../language-environments.ts";
 import type { DiagnosticRefreshResult, DiagnosticSnapshot, LspClientState, LspClientStatus, LspDiagnostic, LspDiagnosticOutcome, LspServerLog, LspServerLogLevel, RelatedLocation } from "../types.ts";
 import { abortError, isCancellation, throwIfAborted, waitWithSignal } from "./cancellation.ts";
-import { filePathToUri, lspRangeToExternal, type LspRange } from "./positions.ts";
+import { filePathToUri, isLspRange, lspRangeToExternal, type LspRange } from "./positions.ts";
 import type { LanguageServerDefinition } from "./servers.ts";
 
 interface JsonRpcRequest {
@@ -51,6 +51,7 @@ interface DiagnosticEntry {
   version?: number;
   diagnostics: RawLspDiagnostic[];
   receivedAt: number;
+  authoritative: boolean;
 }
 
 interface DiagnosticWaiter {
@@ -64,16 +65,16 @@ interface RawLspDiagnostic {
   severity?: number;
   code?: string | number;
   source?: string;
-  message?: string;
+  message: string;
   relatedInformation?: RawRelatedInformation[];
 }
 
 interface RawRelatedInformation {
-  location?: {
-    uri?: string;
-    range?: LspRange;
+  location: {
+    uri: string;
+    range: LspRange;
   };
-  message?: string;
+  message: string;
 }
 
 interface PublishDiagnosticsParams {
@@ -81,6 +82,23 @@ interface PublishDiagnosticsParams {
   diagnostics?: RawLspDiagnostic[];
   version?: number;
 }
+
+interface DocumentDiagnosticProvider {
+  identifier?: string;
+}
+
+interface ParsedDocumentDiagnosticReport {
+  diagnostics: RawLspDiagnostic[];
+  relatedDocuments: Array<{ uri: string; diagnostics: RawLspDiagnostic[] }>;
+  malformed: boolean;
+}
+
+interface ParsedDiagnosticItems {
+  diagnostics: RawLspDiagnostic[];
+  malformed: boolean;
+}
+
+type PullDiagnosticOutcome = "authoritative" | "unavailable";
 
 interface TextDocumentContentChange {
   text: string;
@@ -148,12 +166,25 @@ export class LspClient {
 
     const touchedAt = Date.now();
     const document = this.syncDocument(filePath, content);
+    const documentVersion = document.version;
 
     this.notify("textDocument/didSave", textDocumentDidSaveParams(document.uri, content, this.capabilities));
 
     let fresh: boolean;
     try {
-      fresh = await this.waitForDiagnostics(document.uri, document.version, touchedAt, options.timeoutMs, options.settleMs, options.signal);
+      const pullOutcome = await this.pullDiagnostics(document, documentVersion, touchedAt, options);
+      if (pullOutcome === "authoritative") {
+        fresh = true;
+      } else {
+        fresh = await this.waitForDiagnostics(
+          document.uri,
+          documentVersion,
+          touchedAt,
+          remainingDiagnosticTimeout(options.timeoutMs, touchedAt),
+          options.settleMs,
+          options.signal,
+        );
+      }
     } catch (error) {
       if (isCancellation(error, options.signal)) {
         this.lastDiagnosticDurationMs = Date.now() - touchedAt;
@@ -198,7 +229,7 @@ export class LspClient {
   }
 
   hasDiagnosticsForUri(uri: string): boolean {
-    return this.diagnostics.has(uri);
+    return this.diagnostics.get(uri)?.authoritative === true;
   }
 
   forgetDocument(filePath: string): void {
@@ -411,6 +442,7 @@ export class LspClient {
       capabilities: {
         textDocument: {
           synchronization: { didSave: true, dynamicRegistration: false },
+          diagnostic: { dynamicRegistration: false, relatedDocumentSupport: true },
           publishDiagnostics: { relatedInformation: true, versionSupport: true, codeDescriptionSupport: true, dataSupport: true },
           hover: { contentFormat: ["markdown", "plaintext"] },
           definition: { linkSupport: true },
@@ -614,18 +646,71 @@ export class LspClient {
     return items.map((item) => configurationForItem(config, item));
   }
 
-  private handlePublishDiagnostics(params: unknown): void {
-    if (!params || typeof params !== "object") return;
-    const diagnostics = params as PublishDiagnosticsParams;
-    if (typeof diagnostics.uri !== "string" || !Array.isArray(diagnostics.diagnostics)) return;
+  private async pullDiagnostics(
+    document: OpenDocument,
+    documentVersion: number,
+    touchedAt: number,
+    options: TouchDocumentOptions,
+  ): Promise<PullDiagnosticOutcome> {
+    const provider = documentDiagnosticProvider(this.capabilities);
+    if (!provider) return "unavailable";
 
-    const entry: DiagnosticEntry = {
-      uri: diagnostics.uri,
-      version: typeof diagnostics.version === "number" ? diagnostics.version : undefined,
-      diagnostics: diagnostics.diagnostics,
-      receivedAt: Date.now(),
-    };
-    this.diagnostics.set(diagnostics.uri, entry);
+    const timeoutMs = remainingDiagnosticTimeout(options.timeoutMs, touchedAt);
+    if (timeoutMs <= 0) return "unavailable";
+
+    const params: Record<string, unknown> = { textDocument: { uri: document.uri } };
+    if (provider.identifier !== undefined) params.identifier = provider.identifier;
+
+    let response: unknown;
+    try {
+      response = await this.sendRequest("textDocument/diagnostic", params, timeoutMs, options.signal);
+    } catch (error) {
+      if (isCancellation(error, options.signal)) throw error;
+      return "unavailable";
+    }
+
+    const report = parseDocumentDiagnosticReport(response);
+    if (!report) return "unavailable";
+    if (this.documents.get(document.uri)?.version !== documentVersion) return "unavailable";
+
+    const receivedAt = Date.now();
+    const authoritative = !report.malformed;
+    this.storeDiagnostics(document.uri, report.diagnostics, documentVersion, receivedAt, authoritative);
+    for (const related of report.relatedDocuments) {
+      if (related.uri === document.uri) continue;
+      this.storeDiagnostics(related.uri, related.diagnostics, undefined, receivedAt, authoritative);
+    }
+    if (!authoritative) return "unavailable";
+    await settleDiagnostics(options.settleMs, options.signal);
+    return "authoritative";
+  }
+
+  private handlePublishDiagnostics(params: unknown): void {
+    if (!isNonArrayRecord(params)) return;
+    const diagnostics = params as PublishDiagnosticsParams;
+    if (typeof diagnostics.uri !== "string" || diagnostics.uri.length === 0) return;
+    if (diagnostics.version !== undefined && !isLspInteger(diagnostics.version)) return;
+    const parsed = parseDiagnosticItems(diagnostics.diagnostics);
+    if (!parsed) return;
+
+    this.storeDiagnostics(
+      diagnostics.uri,
+      parsed.diagnostics,
+      diagnostics.version,
+      Date.now(),
+      !parsed.malformed,
+    );
+  }
+
+  private storeDiagnostics(
+    uri: string,
+    diagnostics: RawLspDiagnostic[],
+    version: number | undefined,
+    receivedAt: number,
+    authoritative: boolean,
+  ): void {
+    const entry: DiagnosticEntry = { uri, version, diagnostics, receivedAt, authoritative };
+    this.diagnostics.set(uri, entry);
     this.lastDiagnosticsAt = entry.receivedAt;
     this.notifyDiagnosticWaiters(entry);
   }
@@ -752,6 +837,7 @@ export class LspClient {
 }
 
 function diagnosticsAreFresh(entry: DiagnosticEntry, minVersion: number, touchedAt: number): boolean {
+  if (!entry.authoritative) return false;
   if (typeof entry.version === "number") return entry.version >= minVersion;
   return entry.receivedAt >= touchedAt;
 }
@@ -817,6 +903,97 @@ function readServerCapabilities(initializeResult: unknown): unknown {
 function codeActionResolveProvider(capabilities: unknown): boolean {
   const provider = isRecord(capabilities) ? capabilities.codeActionProvider : undefined;
   return isRecord(provider) && provider.resolveProvider === true;
+}
+
+function documentDiagnosticProvider(capabilities: unknown): DocumentDiagnosticProvider | undefined {
+  const provider = isRecord(capabilities) ? capabilities.diagnosticProvider : undefined;
+  if (provider === true) return {};
+  if (!isRecord(provider) || Array.isArray(provider)) return undefined;
+  return typeof provider.identifier === "string" ? { identifier: provider.identifier } : {};
+}
+
+function parseDocumentDiagnosticReport(value: unknown): ParsedDocumentDiagnosticReport | undefined {
+  if (!isNonArrayRecord(value) || value.kind !== "full") return undefined;
+  if (value.resultId !== undefined && typeof value.resultId !== "string") return undefined;
+  const parsed = parseDiagnosticItems(value.items);
+  if (!parsed) return undefined;
+
+  const relatedDocuments: ParsedDocumentDiagnosticReport["relatedDocuments"] = [];
+  let malformed = parsed.malformed;
+  if (value.relatedDocuments !== undefined) {
+    if (!isNonArrayRecord(value.relatedDocuments)) return undefined;
+    for (const [uri, related] of Object.entries(value.relatedDocuments)) {
+      if (uri.length === 0 || !isNonArrayRecord(related)) return undefined;
+      if (related.kind === "unchanged") {
+        if (typeof related.resultId !== "string") return undefined;
+        continue;
+      }
+      if (related.kind !== "full") return undefined;
+      if (related.resultId !== undefined && typeof related.resultId !== "string") return undefined;
+      const relatedItems = parseDiagnosticItems(related.items);
+      if (!relatedItems) return undefined;
+      malformed ||= relatedItems.malformed;
+      relatedDocuments.push({ uri, diagnostics: relatedItems.diagnostics });
+    }
+  }
+
+  return {
+    diagnostics: parsed.diagnostics,
+    relatedDocuments,
+    malformed,
+  };
+}
+
+function parseDiagnosticItems(value: unknown): ParsedDiagnosticItems | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const diagnostics: RawLspDiagnostic[] = [];
+  let malformed = false;
+  for (const diagnostic of value) {
+    if (isRawLspDiagnostic(diagnostic)) diagnostics.push(diagnostic);
+    else malformed = true;
+  }
+  return { diagnostics, malformed };
+}
+
+function isRawLspDiagnostic(value: unknown): value is RawLspDiagnostic {
+  if (!isNonArrayRecord(value) || !isLspRange(value.range) || typeof value.message !== "string") return false;
+  if (value.severity !== undefined && !isDiagnosticSeverity(value.severity)) return false;
+  if (value.code !== undefined && typeof value.code !== "string" && !isLspInteger(value.code)) return false;
+  if (value.source !== undefined && typeof value.source !== "string") return false;
+  if (value.relatedInformation !== undefined && (
+    !Array.isArray(value.relatedInformation) ||
+    !value.relatedInformation.every(isRawRelatedInformation)
+  )) return false;
+  if (value.tags !== undefined && (
+    !Array.isArray(value.tags) ||
+    !value.tags.every((tag) => tag === 1 || tag === 2)
+  )) return false;
+  if (value.codeDescription !== undefined && (
+    !isNonArrayRecord(value.codeDescription) ||
+    typeof value.codeDescription.href !== "string"
+  )) return false;
+  return true;
+}
+
+function isRawRelatedInformation(value: unknown): value is RawRelatedInformation {
+  return isNonArrayRecord(value) &&
+    isNonArrayRecord(value.location) &&
+    typeof value.location.uri === "string" &&
+    value.location.uri.length > 0 &&
+    isLspRange(value.location.range) &&
+    typeof value.message === "string";
+}
+
+function isDiagnosticSeverity(value: unknown): value is number {
+  return value === 1 || value === 2 || value === 3 || value === 4;
+}
+
+function isLspInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= -2_147_483_648 && value <= 2_147_483_647;
+}
+
+function remainingDiagnosticTimeout(timeoutMs: number, startedAt: number): number {
+  return Math.max(0, timeoutMs - (Date.now() - startedAt));
 }
 
 function textDocumentChangeSyncKind(capabilities: unknown): TextDocumentSyncKind {
@@ -943,6 +1120,10 @@ function terminateProcess(child: ChildProcessWithoutNullStreams): void {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function isNonArrayRecord(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && !Array.isArray(value);
 }
 
 function sleep(ms: number): Promise<void> {

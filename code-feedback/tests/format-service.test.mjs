@@ -5,7 +5,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { createFormatService } from "../src/format/service.ts";
 
-test("formatter selection notices a newly added higher-priority config", async () => {
+test("formatter selection keeps constructor overrides across reconfiguration and notices new project config", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-format-selection-"));
   const filePath = path.join(root, "probe.ts");
   const prettierPath = path.join(root, "prettier");
@@ -24,6 +24,7 @@ test("formatter selection notices a newly added higher-priority config", async (
   });
 
   try {
+    service.configure({ projectRoot: root });
     const first = await service.formatFile(filePath, "source\n");
     assert.equal(first.formatterName, "Prettier");
     assert.equal(first.finalContent, "prettier\n");

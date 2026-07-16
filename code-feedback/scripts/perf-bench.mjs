@@ -46,8 +46,10 @@ const scenarioSpecs = [
   ["formatter/fake-map-large", () => runEditScenario({ name: "formatter/fake-map-large", iterations: Math.max(2, Math.ceil(baseIterations / 15)), enabled: true, lsp: false, format: "fake-change", lineCount: 1800 })],
   ["lsp/fake-cold", () => runFakeLspScenario({ name: "lsp/fake-cold", iterations: 1, warmup: 0 })],
   ["lsp/fake-warm", () => runFakeLspScenario({ name: "lsp/fake-warm", iterations: baseIterations, warmup: 2 })],
+  ["lsp/fake-pull-clean", () => runFakeLspScenario({ name: "lsp/fake-pull-clean", iterations: baseIterations, warmup: 2, mode: "pull-clean", expectInline: false })],
+  ["lsp/workspace-pull-clean-20", () => runFakeWorkspaceLspScenario(Math.max(3, Math.ceil(baseIterations / 10)))],
   ["lsp/fake-delay-200", () => runFakeLspScenario({ name: "lsp/fake-delay-200", iterations: Math.max(3, Math.ceil(baseIterations / 10)), warmup: 1, mode: "diagnostics-delay-200", inlineTimeoutMs: 80, expectInline: false })],
-  ["lsp/fake-timeout-120", () => runFakeLspScenario({ name: "lsp/fake-timeout-120", iterations: Math.max(3, Math.ceil(baseIterations / 10)), warmup: 0, mode: "no-diagnostics", timeoutMs: 120, inlineTimeoutMs: 80, inline: "off" })],
+  ["lsp/fake-timeout-80", () => runFakeLspScenario({ name: "lsp/fake-timeout-80", iterations: Math.max(3, Math.ceil(baseIterations / 10)), warmup: 0, mode: "no-diagnostics", timeoutMs: 80, inlineTimeoutMs: 80, inline: "off" })],
 ];
 
 if (args.live) {
@@ -148,7 +150,7 @@ async function runEditScenario(options) {
   await writeFile(filePath, makeTsContent(0, lineCount), "utf8");
 
   const runtime = makeRuntime(root, { enabled: options.enabled, lsp: options.lsp, format: options.format !== false });
-  const formatService = makeFormatService(root, runtime, options.format);
+  const formatService = makeFormatService(root, options.format);
   const operation = makeEditOperation({
     root,
     runtime,
@@ -265,9 +267,54 @@ async function runFakeLspScenario(options) {
 }
 
 function fakeLspNotes(options) {
+  if (options.mode === "pull-clean") return "fake LSP advertises document pull diagnostics and returns an authoritative empty full report";
   if (options.mode === "diagnostics-delay-200") return `fake LSP delays diagnostics by 200ms; inline budget is ${options.inlineTimeoutMs ?? 200}ms and delayed diagnostics continue in the background`;
   if (options.mode === "no-diagnostics") return `fake LSP never publishes diagnostics; inline wall time should track the ${options.inlineTimeoutMs ?? options.timeoutMs ?? 200}ms budget`;
-  return "deterministic stdio LSP with one diagnostic; includes before and after diagnostic refresh";
+  return "deterministic stdio LSP with one post-edit diagnostic refresh; tool-call prewarm is asynchronous";
+}
+
+async function runFakeWorkspaceLspScenario(iterations) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-perf-workspace-pull-"));
+  const fileCount = 20;
+  await Promise.all(Array.from({ length: fileCount }, (_, index) => (
+    writeFile(path.join(root, `probe-${String(index).padStart(2, "0")}.ts`), makeTsContent(index, 30), "utf8")
+  )));
+  const lspService = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    diagnosticRefreshConcurrency: 4,
+    serverOverrides: {
+      typescript: {
+        command: process.execPath,
+        args: [fakeLspServer, "fake-ts", "TS100", "1", "", "pull-clean"],
+      },
+    },
+  });
+
+  try {
+    return await runScenario({
+      name: "lsp/workspace-pull-clean-20",
+      iterations,
+      warmup: 1,
+      notes: `${fileCount}-file active workspace scan through four workers; fake pull server returns authoritative clean reports`,
+      resources: () => lspRootPids(lspService),
+      operation: async () => {
+        const scan = await timed("workspace_diagnostics", () => lspService.diagnosticsForWorkspace(".", {
+          limit: fileCount,
+          timeoutMs: 1000,
+          settleMs: 0,
+          server: "typescript",
+        }));
+        if (scan.value.summary.selectedFiles !== fileCount || scan.value.summary.freshFiles !== fileCount) {
+          throw new Error("benchmark sanity check failed: expected every workspace file to refresh cleanly");
+        }
+        return withTotal([scan]);
+      },
+    });
+  } finally {
+    await lspService.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 async function runTypeScriptLiveScenario(iterations) {
@@ -579,18 +626,18 @@ function makeRuntime(root, options) {
   return runtime;
 }
 
-function makeFormatService(root, runtime, mode) {
+function makeFormatService(root, mode) {
   if (mode === false) return undefined;
-  if (mode === "fake-noop" || mode === "fake-change") {
-    runtime.config.formatters = {
-      prettier: {
-        enabled: true,
-        command: process.execPath,
-        args: [fakeFormatter, mode === "fake-noop" ? "--mode=noop" : "--mode=top-comment", "{file}"],
-      },
-    };
-  }
-  return createFormatService({ projectRoot: root, formatterOverrides: runtime.config.formatters });
+  const formatterOverrides = mode === "fake-noop" || mode === "fake-change"
+    ? {
+        prettier: {
+          enabled: true,
+          command: process.execPath,
+          args: [fakeFormatter, mode === "fake-noop" ? "--mode=noop" : "--mode=top-comment", "{file}"],
+        },
+      }
+    : undefined;
+  return createFormatService({ projectRoot: root, formatterOverrides });
 }
 
 function makeEditOperation({ root, runtime, filePath, lspService, formatService, content, unchanged = false, expectCompletedEdit = false, expectTouchedRanges = true, expectFeedback = false, expectFormatted = false }) {

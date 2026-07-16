@@ -185,14 +185,12 @@ async function reconfigureAfterTrustChange(
   }
   lspService.configure({
     projectRoot: runtime.projectRoot,
-    serverOverrides: runtime.config.lsp.servers,
     trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
     idleTimeoutMs: runtime.config.lsp.idleTimeoutMs,
     diagnosticRefreshConcurrency: runtime.config.lsp.diagnosticRefreshConcurrency,
   });
   formatService.configure({
     projectRoot: runtime.projectRoot,
-    formatterOverrides: runtime.config.formatters,
     trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
   });
 }

@@ -14,15 +14,16 @@ test("clangd is selected for C sources and headers", () => {
   const header = path.join(root, "probe.h");
   const cppFile = path.join(root, "probe.cpp");
 
-  const servers = resolveLanguageServers(cFile, overrides, root);
+  const options = { serverOverrides: overrides, projectRoot: root };
+  const servers = resolveLanguageServers(cFile, options);
   assert.equal(servers.length, 1);
   assert.equal(servers[0].available, true);
   assert.equal(servers[0].definition.id, "clangd");
   assert.equal(servers[0].definition.command, process.execPath);
   assert.equal(servers[0].definition.languageId(cFile), "c");
 
-  assert.equal(resolveLanguageServers(header, overrides, root)[0].definition.languageId(header), "c");
-  assert.equal(resolveLanguageServers(cppFile, overrides, root)[0].definition.languageId(cppFile), "cpp");
+  assert.equal(resolveLanguageServers(header, options)[0].definition.languageId(header), "c");
+  assert.equal(resolveLanguageServers(cppFile, options)[0].definition.languageId(cppFile), "cpp");
 });
 
 test("clang-format is selected for C files with clang-format config", async () => {

@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { resolveCommand } from "../command-path.ts";
 import { resolveLanguageEnvironment, type LanguageEnvironment } from "../language-environments.ts";
+import type { ConfiguredLanguageServer, ConfiguredLanguageServers, EnabledLanguageServerConfig } from "./server-config.ts";
 
 export interface LanguageServerDefinition {
   id: string;
@@ -13,12 +14,26 @@ export interface LanguageServerDefinition {
   environment?: LanguageEnvironment;
   initializationOptions?: unknown;
   workspaceConfiguration?: Record<string, unknown>;
+  configurationKey?: string;
 }
 
 export interface ResolvedLanguageServer {
   definition: LanguageServerDefinition;
   available: boolean;
   unavailableReason?: string;
+}
+
+export interface LanguageServerResolutionOptions {
+  serverOverrides?: Record<string, unknown>;
+  serverConfiguration?: ConfiguredLanguageServers;
+  projectRoot?: string;
+  trustedEnvironmentRoots?: string[];
+  server?: string;
+}
+
+interface RegisteredLanguageServer {
+  definition: LanguageServerDefinition;
+  disabled: boolean;
 }
 
 const TYPESCRIPT_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"];
@@ -122,23 +137,111 @@ const DEFAULT_SERVERS: LanguageServerDefinition[] = [
     languageId: () => "lua",
   },
 ];
-export function resolveLanguageServer(filePath: string, overrides: Record<string, unknown> | undefined, projectRoot = path.dirname(filePath), trustedEnvironmentRoots: string[] = []): ResolvedLanguageServer | undefined {
-  return resolveLanguageServers(filePath, overrides, projectRoot, trustedEnvironmentRoots)[0];
+
+export function resolveLanguageServer(filePath: string, options: LanguageServerResolutionOptions = {}): ResolvedLanguageServer | undefined {
+  return resolveLanguageServers(filePath, options)[0];
 }
 
-export function resolveLanguageServers(filePath: string, overrides: Record<string, unknown> | undefined, projectRoot = path.dirname(filePath), trustedEnvironmentRoots: string[] = []): ResolvedLanguageServer[] {
+export function resolveLanguageServers(filePath: string, options: LanguageServerResolutionOptions = {}): ResolvedLanguageServer[] {
   const extension = path.extname(filePath).toLowerCase();
-  const bases = DEFAULT_SERVERS.filter((server) => server.extensions.includes(extension));
-  return bases.map((base) => resolveOneLanguageServer(base, filePath, overrides, projectRoot, trustedEnvironmentRoots));
+  const projectRoot = options.projectRoot ?? path.dirname(filePath);
+  const trustedEnvironmentRoots = options.trustedEnvironmentRoots ?? [];
+  const routes = registeredLanguageServers(options.serverConfiguration)
+    .filter((route) => route.definition.extensions.includes(extension))
+    .filter((route) => options.server === undefined || route.definition.id === options.server);
+  return routes.map((route) => resolveOneLanguageServer(
+    route.definition,
+    route.disabled,
+    filePath,
+    options.serverOverrides,
+    projectRoot,
+    trustedEnvironmentRoots,
+  ));
+}
+
+export function configuredLanguageServerIds(configuration: ConfiguredLanguageServers | undefined): string[] {
+  return [...new Set([...DEFAULT_SERVERS.map((server) => server.id), ...Object.keys(configuration ?? {})])]
+    .sort((left, right) => left.localeCompare(right));
+}
+
+export function languageServerExtensions(configuration: ConfiguredLanguageServers | undefined, server?: string): Set<string> {
+  return new Set(registeredLanguageServers(configuration)
+    .filter((route) => !route.disabled)
+    .filter((route) => server === undefined || route.definition.id === server)
+    .flatMap((route) => route.definition.extensions));
+}
+
+function registeredLanguageServers(configuration: ConfiguredLanguageServers | undefined): RegisteredLanguageServer[] {
+  const registered: RegisteredLanguageServer[] = [];
+  const builtInIds = new Set(DEFAULT_SERVERS.map((server) => server.id));
+
+  for (const builtIn of DEFAULT_SERVERS) {
+    const configured = configuration?.[builtIn.id];
+    if (!configured) {
+      registered.push({ definition: builtIn, disabled: false });
+    } else if (configured.disabled) {
+      registered.push({
+        definition: {
+          ...builtIn,
+          configurationKey: configurationKey(configured),
+        },
+        disabled: true,
+      });
+    } else {
+      registered.push({ definition: definitionFromConfig(builtIn.id, configured), disabled: false });
+    }
+  }
+
+  for (const [id, configured] of Object.entries(configuration ?? {})) {
+    if (builtInIds.has(id) || configured.disabled) continue;
+    registered.push({ definition: definitionFromConfig(id, configured), disabled: false });
+  }
+
+  return registered;
+}
+
+function definitionFromConfig(id: string, configured: EnabledLanguageServerConfig): LanguageServerDefinition {
+  const [command, ...args] = configured.command;
+  return {
+    id,
+    command,
+    args,
+    extensions: [...configured.extensions],
+    languageId: configuredLanguageId(configured),
+    env: configured.env ? { ...configured.env } : undefined,
+    initializationOptions: configured.initializationOptions,
+    workspaceConfiguration: configured.workspaceConfiguration ? { ...configured.workspaceConfiguration } : undefined,
+    configurationKey: configurationKey(configured),
+  };
+}
+
+function configuredLanguageId(configured: EnabledLanguageServerConfig): (filePath: string) => string {
+  return (filePath) => {
+    const extension = path.extname(filePath).toLowerCase();
+    return configured.languageIds?.[extension] ?? configured.languageId ?? (extension.slice(1) || "plaintext");
+  };
+}
+
+function configurationKey(configured: ConfiguredLanguageServer): string {
+  return JSON.stringify(configured);
 }
 
 function resolveOneLanguageServer(
   base: LanguageServerDefinition,
+  disabled: boolean,
   filePath: string,
   overrides: Record<string, unknown> | undefined,
   projectRoot: string,
   trustedEnvironmentRoots: string[],
 ): ResolvedLanguageServer {
+  if (disabled) {
+    return {
+      definition: base,
+      available: false,
+      unavailableReason: "disabled by config",
+    };
+  }
+
   const definition = applyOverride(base, overrides?.[base.id]);
   if (!definition) {
     return {
@@ -149,7 +252,8 @@ function resolveOneLanguageServer(
   }
 
   const environment = languageEnvironmentForServer(definition, filePath, projectRoot, trustedEnvironmentRoots);
-  const resolvedCommand = resolveCommand(definition.command, path.dirname(filePath), projectRoot, { extraBinDirs: environment?.binDirs });
+  const command = relativeCommandFromProject(definition.command, projectRoot);
+  const resolvedCommand = resolveCommand(command, path.dirname(filePath), projectRoot, { extraBinDirs: environment?.binDirs });
   const available = resolvedCommand !== undefined;
   const resolvedDefinition = resolvedCommand
     ? withLanguageEnvironment({ ...definition, command: resolvedCommand }, environment)
@@ -161,6 +265,12 @@ function resolveOneLanguageServer(
   };
 }
 
+function relativeCommandFromProject(command: string, projectRoot: string): string {
+  return !path.isAbsolute(command) && (command.includes(path.sep) || command.includes("/"))
+    ? path.resolve(projectRoot, command)
+    : command;
+}
+
 function languageEnvironmentForServer(definition: LanguageServerDefinition, filePath: string, projectRoot: string, trustedEnvironmentRoots: string[]): LanguageEnvironment | undefined {
   if (!definition.extensions.some((extension) => extension === ".py" || extension === ".pyi")) return undefined;
   return resolveLanguageEnvironment("python", filePath, projectRoot, trustedEnvironmentRoots);
@@ -170,7 +280,7 @@ function withLanguageEnvironment(definition: LanguageServerDefinition, environme
   if (!environment) return definition;
   return {
     ...definition,
-    env: environment.env,
+    env: { ...definition.env, ...environment.env },
     environment,
     initializationOptions: initializationOptionsForServer(definition, environment),
     workspaceConfiguration: workspaceConfigurationForServer(definition, environment),
@@ -262,6 +372,7 @@ function applyOverride(base: LanguageServerDefinition, value: unknown): Language
     command,
     args,
     languageId: languageIdOverride ? () => languageIdOverride : base.languageId,
+    configurationKey: `${base.configurationKey ?? "built-in"}\0override:${JSON.stringify(override)}`,
   };
 }
 

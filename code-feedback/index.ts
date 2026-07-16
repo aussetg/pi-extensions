@@ -1,4 +1,4 @@
-import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { createDefaultConfig, registerFlags, resolveConfig } from "./src/config.ts";
 import { registerLspCommand } from "./src/commands/lsp.ts";
 import { reconfigureTrustedEnvironmentServices, restoreTrustedEnvironmentRoots } from "./src/commands/trust.ts";
@@ -7,6 +7,7 @@ import { handleToolCall } from "./src/events/tool-call.ts";
 import { handleToolResult } from "./src/events/tool-result.ts";
 import { createFormatService } from "./src/format/service.ts";
 import { createLspService } from "./src/lsp/service.ts";
+import { loadLanguageServerConfiguration } from "./src/lsp/server-config.ts";
 import { registerLspTool } from "./src/lsp/tool.ts";
 import { asPiApi } from "./src/pi.ts";
 import { renderFooterStatus } from "./src/render.ts";
@@ -19,14 +20,12 @@ export default function (piValue: unknown) {
   const runtime = createRuntime(createDefaultConfig());
   const lspService = createLspService({
     projectRoot: runtime.projectRoot,
-    serverOverrides: runtime.config.lsp.servers,
     trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
     idleTimeoutMs: runtime.config.lsp.idleTimeoutMs,
     diagnosticRefreshConcurrency: runtime.config.lsp.diagnosticRefreshConcurrency,
   });
   const formatService = createFormatService({
     projectRoot: runtime.projectRoot,
-    formatterOverrides: runtime.config.formatters,
     trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
   });
 
@@ -38,19 +37,27 @@ export default function (piValue: unknown) {
     setProjectRoot(runtime, ctx.cwd);
     setProjectTrust(runtime, ctx);
     restoreTrustedEnvironmentRoots(runtime, ctx);
+    const serverConfiguration = loadLanguageServerConfiguration({
+      agentDir: getAgentDir(),
+      projectRoot: runtime.projectRoot,
+      configDirName: CONFIG_DIR_NAME,
+      projectTrusted: runtime.projectTrusted,
+    });
     lspService.configure({
       projectRoot: runtime.projectRoot,
-      serverOverrides: runtime.config.lsp.servers,
       trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
       idleTimeoutMs: runtime.config.lsp.idleTimeoutMs,
       diagnosticRefreshConcurrency: runtime.config.lsp.diagnosticRefreshConcurrency,
+      serverConfiguration,
     });
     formatService.configure({
       projectRoot: runtime.projectRoot,
-      formatterOverrides: runtime.config.formatters,
       trustedEnvironmentRoots: runtime.trustedEnvironmentRoots,
     });
     if (!runtime.projectTrusted) await lspService.shutdownAll();
+    if (serverConfiguration.status.errors.length > 0) {
+      ctx.ui?.notify?.(`code-feedback ignored invalid language-server config:\n${serverConfiguration.status.errors.join("\n")}`, "warning");
+    }
     ctx.ui?.setStatus?.("code-feedback-lsp", renderFooterStatus(runtime, ctx.ui?.theme, lspService.getStatus()));
   });
 

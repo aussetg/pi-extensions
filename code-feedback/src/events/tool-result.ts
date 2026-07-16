@@ -504,7 +504,7 @@ async function maybeFormatFile(
   changedByTool: boolean,
 ): Promise<FormatterResult | undefined> {
   if (!formatService) return undefined;
-  if (!runtime.config.autoFormat || runtime.config.formatMode !== "immediate") return undefined;
+  if (!runtime.config.autoFormat) return undefined;
   if (!changedByTool) {
     return {
       changed: false,

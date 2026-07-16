@@ -125,7 +125,14 @@ function renderCapabilities(text: string, theme: ThemeLike, expanded: boolean, t
 function renderDiagnostics(text: string, theme: ThemeLike, expanded: boolean, truncation?: LspToolTruncation): ComponentLike {
   const target = findLineValue(text, "target") ?? "current session";
   const count = findLineValue(text, "known LSP diagnostics") ?? "0";
-  const lines = [statusLine(theme, "Diagnostics", `${count} · ${target}`, count === "0" ? "success" : "warning")];
+  const refresh = findLineValue(text, "refresh");
+  const scanFiles = findLineValue(text, "files");
+  const scan = findLineValue(text, "scan");
+  const summary = [count, target, refresh, scanFiles].filter(Boolean).join(" · ");
+  const authoritativeRefresh = refresh === undefined || refresh.startsWith("fresh");
+  const cleanScan = scanFiles === undefined || /· 0 timed out · 0 unavailable · 0 skipped$/.test(scanFiles);
+  const completeScan = scan === undefined || scan.startsWith("complete ") || scan === "complete";
+  const lines = [statusLine(theme, "Diagnostics", summary, count === "0" && authoritativeRefresh && cleanScan && completeScan ? "success" : "warning")];
   const diagnosticLines = text.split("\n").filter((line) => /^\s*(ERROR|WARNING|INFORMATION|HINT)\b/.test(line));
   if (expanded) {
     lines.push(...styleContentLines(text, theme, truncation, EXPANDED_MAX_LINES));
@@ -282,7 +289,9 @@ function displayMethod(args: Record<string, unknown>): string {
 
 function displayTarget(args: Record<string, unknown>): string | undefined {
   const parts: string[] = [];
+  if (typeof args.server === "string") parts.push(`[${args.server}]`);
   if (typeof args.path === "string") parts.push(args.path);
+  if (typeof args.limit === "number") parts.push(`limit=${args.limit}`);
   if (typeof args.line === "number") parts.push(`${args.line}:${typeof args.column === "number" ? args.column : "?"}`);
   if (typeof args.query === "string") parts.push(`“${args.query}”`);
   if (typeof args.id === "string") parts.push(args.id);

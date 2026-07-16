@@ -19,7 +19,7 @@ test("HLS is selected for Haskell source, literate source, boot, and Cabal files
 
   for (const [basename, languageId] of cases) {
     const filePath = path.join(root, basename);
-    const servers = resolveLanguageServers(filePath, overrides, root);
+    const servers = resolveLanguageServers(filePath, { serverOverrides: overrides, projectRoot: root });
 
     assert.equal(servers.length, 1);
     assert.equal(servers[0].available, true);

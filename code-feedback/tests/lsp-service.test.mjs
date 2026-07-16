@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { LspClient } from "../src/lsp/client.ts";
+import { loadLanguageServerConfiguration } from "../src/lsp/server-config.ts";
 import { createLspService } from "../src/lsp/service.ts";
 import { LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY } from "../src/types.ts";
 
@@ -80,6 +81,319 @@ test("diagnostics for a Python file are merged from ty and Ruff clients", async 
   }
 });
 
+test("a configured custom extension routes through a language-agnostic server definition", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-custom-server-"));
+  const agentDir = path.join(root, "agent");
+  const projectRoot = path.join(root, "project");
+  const configDir = path.join(projectRoot, ".pi-test");
+  const filePath = path.join(projectRoot, "main.gleam");
+  const logPath = path.join(root, "custom-server.jsonl");
+  await mkdir(agentDir, { recursive: true });
+  await mkdir(configDir, { recursive: true });
+  await writeFile(filePath, "pub fn main() { Nil }\n", "utf8");
+  await writeFile(path.join(configDir, "code-feedback.json"), JSON.stringify({
+    servers: {
+      gleam: {
+        command: [process.execPath, fakeServer, "gleam-lsp", "G100", "1", "", "sync-log", logPath],
+        extensions: [".gleam"],
+        languageId: "gleam",
+      },
+    },
+  }), "utf8");
+
+  const serverConfiguration = loadLanguageServerConfiguration({
+    agentDir,
+    projectRoot,
+    configDirName: ".pi-test",
+    projectTrusted: true,
+  });
+  const service = createLspService({
+    projectRoot,
+    idleTimeoutMs: 0,
+    serverConfiguration,
+  });
+
+  try {
+    service.configure({ projectRoot, idleTimeoutMs: 0 });
+    const refresh = await service.diagnosticsForFileDetailed(filePath, await readFile(filePath, "utf8"), {
+      timeoutMs: 1000,
+      settleMs: 0,
+    });
+
+    assert.equal(refresh?.fresh, true);
+    const diagnostics = [...refresh.snapshot.byUri.values()].flat();
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].source, "gleam-lsp");
+    assert.equal(service.getStatus().clients[0]?.id, "gleam");
+    assert.deepEqual(service.getStatus().serverConfiguration?.configuredServerIds, ["gleam"]);
+
+    const workspace = await service.diagnosticsForWorkspace(projectRoot, {
+      limit: 10,
+      timeoutMs: 1000,
+      settleMs: 0,
+      server: "gleam",
+    });
+    assert.equal(workspace.summary.selectedFiles, 1);
+    assert.equal(workspace.summary.freshFiles, 1);
+    assert.deepEqual(workspace.files.map((file) => path.basename(file.filePath)), ["main.gleam"]);
+
+    const entries = await waitForJsonLog(logPath, (items) => items.some((entry) => entry.method === "textDocument/didOpen"));
+    const didOpen = entries.find((entry) => entry.method === "textDocument/didOpen");
+    assert.equal(didOpen?.params?.textDocument?.languageId, "gleam");
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit requests can select one of multiple matching language servers", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-server-selection-"));
+  const filePath = path.join(root, "probe.py");
+  const content = "value = 1\n";
+  await writeFile(filePath, content, "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "ty", "T100", "1"],
+      },
+      "python-ruff": {
+        command: process.execPath,
+        args: [fakeServer, "ruff", "R100", "2"],
+      },
+    },
+  });
+
+  try {
+    const hover = await service.hover(filePath, 1, 1, undefined, "python-ruff");
+    assert.equal(hover?.contents?.value, "ruff hover");
+
+    const refresh = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 1000,
+      settleMs: 0,
+      server: "python-ruff",
+    });
+    const diagnostics = [...refresh.snapshot.byUri.values()].flat();
+    assert.deepEqual(diagnostics.map((diagnostic) => diagnostic.source), ["ruff"]);
+
+    await assert.rejects(
+      service.hover(filePath, 1, 1, undefined, "missing-server"),
+      /Unknown language server "missing-server"/,
+    );
+    await assert.rejects(
+      service.rename(filePath, 1, 1, "renamed"),
+      /Multiple language servers support .* Pass server to select one/,
+    );
+
+    const rename = await service.rename(filePath, 1, 1, "renamed", undefined, "python");
+    assert.equal(rename[LSP_RESULT_SERVER_ID_KEY], "python");
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("advertised document diagnostics use an authoritative pull response", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-pull-diagnostics-"));
+  const filePath = path.join(root, "probe.py");
+  const logPath = path.join(root, "lsp.jsonl");
+  const content = "value = 1\n";
+  await writeFile(filePath, content, "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "pull-related", logPath],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    const refresh = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 1000,
+      settleMs: 0,
+      snapshotScope: "workspace",
+    });
+
+    assert.equal(refresh?.fresh, true);
+    assert.equal(refresh?.timedOut, false);
+    const diagnostics = [...refresh.snapshot.byUri.values()].flat();
+    assert.equal(diagnostics.length, 2);
+    const primary = refresh.snapshot.byUri.get(pathToFileURL(filePath).href);
+    assert.equal(primary?.[0].code, "T100");
+    assert.equal(primary?.[0].version, 1);
+    const related = refresh.snapshot.byUri.get(pathToFileURL(path.join(root, "related.py")).href);
+    assert.equal(related?.[0].code, "T100");
+    assert.equal(related?.[0].version, undefined);
+
+    const entries = await waitForJsonLog(logPath, (items) => items.some((entry) => entry.method === "textDocument/diagnostic"));
+    const initialize = entries.find((entry) => entry.method === "initialize");
+    assert.deepEqual(initialize?.params?.capabilities?.textDocument?.diagnostic, {
+      dynamicRegistration: false,
+      relatedDocumentSupport: true,
+    });
+    const pull = entries.find((entry) => entry.method === "textDocument/diagnostic");
+    assert.deepEqual(pull?.params, {
+      textDocument: { uri: pathToFileURL(filePath).href },
+      identifier: "fake-pull",
+    });
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an empty pull diagnostic report is fresh and authoritatively clean", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-pull-clean-"));
+  const filePath = path.join(root, "probe.py");
+  const content = "value = 1\n";
+  await writeFile(filePath, content, "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "pull-clean"],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    const refresh = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 1000,
+      settleMs: 0,
+    });
+
+    assert.equal(refresh?.fresh, true);
+    assert.equal(refresh?.timedOut, false);
+    assert.equal(refresh?.snapshot.byUri.size, 0);
+    assert.ok(service.cachedDiagnosticsIfKnown(filePath));
+    assert.equal(service.getStatus().clients[0]?.lastDiagnosticOutcome, "fresh");
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a falsely advertised pull method falls back to pushed diagnostics", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-pull-fallback-"));
+  const filePath = path.join(root, "probe.py");
+  const logPath = path.join(root, "lsp.jsonl");
+  const content = "value = 1\n";
+  await writeFile(filePath, content, "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "pull-unsupported", logPath],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    const refresh = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 1000,
+      settleMs: 0,
+    });
+
+    assert.equal(refresh?.fresh, true);
+    assert.equal(refresh?.timedOut, false);
+    assert.equal([...refresh.snapshot.byUri.values()].flat().length, 1);
+    const entries = await waitForJsonLog(logPath, (items) => items.some((entry) => entry.method === "textDocument/diagnostic"));
+    assert.equal(entries.filter((entry) => entry.method === "textDocument/diagnostic").length, 1);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a malformed pull response is never interpreted as clean", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-pull-invalid-"));
+  const filePath = path.join(root, "probe.py");
+  const content = "value = 1\n";
+  await writeFile(filePath, content, "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "pull-invalid"],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    const refresh = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 30,
+      settleMs: 0,
+    });
+
+    assert.equal(refresh?.fresh, false);
+    assert.equal(refresh?.timedOut, true);
+    assert.equal(refresh?.snapshot.byUri.size, 0);
+    for (let attempt = 0; attempt < 20 && service.getStatus().diagnosticRefreshes?.active !== 0; attempt += 1) {
+      await sleep(10);
+    }
+    assert.equal(service.getStatus().clients[0]?.lastDiagnosticOutcome, "timeout");
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("malformed diagnostic item arrays are never interpreted as clean", async () => {
+  for (const mode of ["pull-malformed-items", "push-malformed-items"]) {
+    const root = await mkdtemp(path.join(os.tmpdir(), `pi-code-feedback-${mode}-`));
+    const filePath = path.join(root, "probe.py");
+    const content = "value = 1\n";
+    await writeFile(filePath, content, "utf8");
+
+    const service = createLspService({
+      projectRoot: root,
+      idleTimeoutMs: 0,
+      serverOverrides: {
+        python: {
+          command: process.execPath,
+          args: [fakeServer, "py", "T100", "1", "", mode],
+        },
+        "python-ruff": { disabled: true },
+      },
+    });
+
+    try {
+      const refresh = await service.diagnosticsForFileDetailed(filePath, content, {
+        timeoutMs: 30,
+        settleMs: 0,
+      });
+
+      assert.equal(refresh?.fresh, false, mode);
+      assert.equal(refresh?.timedOut, true, mode);
+      assert.equal(refresh?.snapshot.byUri.size, 0, mode);
+      assert.equal(service.cachedDiagnosticsIfKnown(filePath), undefined, mode);
+    } finally {
+      await service.shutdownAll();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("service shutdown starts all client shutdowns in parallel", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-shutdown-parallel-"));
   const filePath = path.join(root, "probe.py");
@@ -116,7 +430,7 @@ test("service shutdown starts all client shutdowns in parallel", async () => {
   }
 });
 
-test("malformed diagnostic positions are dropped instead of clamped", async () => {
+test("malformed diagnostic positions do not make valid diagnostics authoritative", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-malformed-diagnostic-"));
   const filePath = path.join(root, "probe.py");
   await writeFile(filePath, "value = 1\n", "utf8");
@@ -135,10 +449,12 @@ test("malformed diagnostic positions are dropped instead of clamped", async () =
 
   try {
     const result = await service.diagnosticsForFileDetailed(filePath, await readFile(filePath, "utf8"), {
-      timeoutMs: 1000,
+      timeoutMs: 30,
       settleMs: 0,
     });
     const diagnostics = [...result.snapshot.byUri.values()].flat();
+    assert.equal(result.fresh, false);
+    assert.equal(result.timedOut, true);
     assert.equal(diagnostics.length, 1);
     assert.equal(diagnostics[0].code, "T100");
     assert.deepEqual(diagnostics[0].range.start, { line: 1, character: 1 });

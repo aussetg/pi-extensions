@@ -59,13 +59,15 @@ function handleMessage(message) {
   }
 
   if (message.id !== undefined && message.method === "initialize") {
+    const diagnosticProvider = diagnosticProviderCapability(mode);
+    if (diagnosticProvider) log({ method: message.method, params: message.params });
     const response = {
       jsonrpc: "2.0",
       id: message.id,
       result: {
         capabilities: {
           textDocumentSync: mode === "incremental-log" || mode === "sync-log" ? 2 : 1,
-          diagnosticProvider: { interFileDependencies: false, workspaceDiagnostics: false },
+          ...(diagnosticProvider ? { diagnosticProvider } : {}),
           codeActionProvider: codeActionProviderCapability(mode),
           hoverProvider: true,
           renameProvider: true,
@@ -95,6 +97,31 @@ function handleMessage(message) {
       return;
     }
     send({ jsonrpc: "2.0", id: message.id, result: null });
+    return;
+  }
+
+  if (message.id !== undefined && message.method === "textDocument/diagnostic") {
+    log({ method: message.method, params: message.params });
+    if (mode === "pull-unsupported") {
+      send({
+        jsonrpc: "2.0",
+        id: message.id,
+        error: { code: -32601, message: "Method not found: textDocument/diagnostic" },
+      });
+      return;
+    }
+
+    const result = mode === "pull-invalid"
+      ? { items: [] }
+      : mode === "pull-malformed-items"
+        ? { kind: "full", resultId: "fake-pull-malformed", items: [{}] }
+        : {
+          kind: "full",
+          resultId: "fake-pull-1",
+          items: mode === "pull-clean" ? [] : diagnosticItems(),
+          ...(mode === "pull-related" ? { relatedDocuments: relatedDiagnosticReports(message.params?.textDocument?.uri) } : {}),
+        };
+    send({ jsonrpc: "2.0", id: message.id, result });
     return;
   }
 
@@ -224,6 +251,15 @@ function codeActionProviderCapability(value) {
   return value.startsWith("actions-resolve") ? { resolveProvider: true } : true;
 }
 
+function diagnosticProviderCapability(value) {
+  if (!value.startsWith("pull-")) return undefined;
+  return {
+    identifier: "fake-pull",
+    interFileDependencies: false,
+    workspaceDiagnostics: false,
+  };
+}
+
 function codeActionsRequireDiagnostics(value) {
   return value === "actions-require-diagnostics" || value.startsWith("actions-resolve") || value === "actions-defer-no-resolve";
 }
@@ -288,7 +324,28 @@ function renameEdit(uri, newName, serverMode) {
 
 function publishDiagnostics(uri, version) {
   if (typeof uri !== "string") return;
-  if (mode === "no-diagnostics") return;
+  if (!shouldPublishDiagnostics(mode)) return;
+
+  const message = {
+    jsonrpc: "2.0",
+    method: "textDocument/publishDiagnostics",
+    params: {
+      uri,
+      version: typeof version === "number" ? version : undefined,
+      diagnostics: diagnosticItems(),
+    },
+  };
+
+  const delayMs = diagnosticDelayMs(mode);
+  if (delayMs > 0) {
+    setTimeout(() => send(message), delayMs);
+  } else {
+    send(message);
+  }
+}
+
+function diagnosticItems() {
+  if (mode === "push-malformed-items") return [{}];
 
   const malformedDiagnostics = mode === "malformed-diagnostic-position" ? [{
     range: {
@@ -301,34 +358,38 @@ function publishDiagnostics(uri, version) {
     message: `${source} malformed diagnostic`,
   }] : [];
 
-  const message = {
-    jsonrpc: "2.0",
-    method: "textDocument/publishDiagnostics",
-    params: {
-      uri,
-      version: typeof version === "number" ? version : undefined,
-      diagnostics: [
-        ...malformedDiagnostics,
-        {
-          range: {
-            start: { line: 0, character: 0 },
-            end: { line: 0, character: 1 },
-          },
-          severity,
-          source,
-          code,
-          message: `${source} diagnostic`,
-        },
-      ],
+  return [
+    ...malformedDiagnostics,
+    {
+      range: {
+        start: { line: 0, character: 0 },
+        end: { line: 0, character: 1 },
+      },
+      severity,
+      source,
+      code,
+      message: `${source} diagnostic`,
+    },
+  ];
+}
+
+function shouldPublishDiagnostics(value) {
+  return value !== "no-diagnostics" &&
+    value !== "pull-diagnostics" &&
+    value !== "pull-related" &&
+    value !== "pull-clean" &&
+    value !== "pull-invalid" &&
+    value !== "pull-malformed-items";
+}
+
+function relatedDiagnosticReports(uri) {
+  if (typeof uri !== "string") return {};
+  return {
+    [new URL("related.py", uri).href]: {
+      kind: "full",
+      items: diagnosticItems(),
     },
   };
-
-  const delayMs = diagnosticDelayMs(mode);
-  if (delayMs > 0) {
-    setTimeout(() => send(message), delayMs);
-  } else {
-    send(message);
-  }
 }
 
 function diagnosticDelayMs(value) {

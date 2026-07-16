@@ -3,7 +3,12 @@ import { formatTouchedRange } from "./diagnostics/ranges.ts";
 import { countDiagnosticSnapshotDiagnostics, flattenDiagnosticSnapshot } from "./diagnostics/snapshots.ts";
 import { displayPathFromRoot } from "./paths.ts";
 import type { CodeFeedbackRuntime } from "./runtime.ts";
-import { LSP_METHODS, type CompletedEdit, type DelayedDiagnosticFeedback, type DiagnosticFilterResult, type DiagnosticSeverity, type DiagnosticSnapshot, type FormatServiceStatus, type FormatterSummary, type LinkedDiagnostic, type LspDiagnostic, type LspServiceStatus, type TouchedRangeComputation } from "./types.ts";
+import { LSP_METHODS, type CompletedEdit, type DelayedDiagnosticFeedback, type DiagnosticFilterResult, type DiagnosticSeverity, type DiagnosticSnapshot, type FormatServiceStatus, type FormatterSummary, type LinkedDiagnostic, type LspDiagnostic, type LspServiceStatus, type TouchedRangeComputation, type WorkspaceDiagnosticScanResult } from "./types.ts";
+
+export interface ExplicitDiagnosticRefreshStatus {
+  outcome: "fresh" | "timed-out" | "unavailable";
+  durationMs?: number;
+}
 
 export interface FooterTheme {
   fg?: (color: string, text: string) => string;
@@ -17,11 +22,13 @@ export function renderStatus(runtime: CodeFeedbackRuntime, lspStatus?: LspServic
     `  lsp feedback: ${config.lsp.enabled ? "enabled" : "disabled"}`,
     `  diagnostic refresh concurrency: ${config.lsp.diagnosticRefreshConcurrency}${formatDiagnosticRefreshSummary(lspStatus)}`,
     `  inline diagnostics: ${config.diagnostics.inline}`,
-    `  auto format: ${config.autoFormat ? config.formatMode : "disabled"}`,
+    `  auto format: ${config.autoFormat ? "immediate" : "disabled"}`,
+    `  delayed context injection: ${config.contextInjection ? "enabled" : "disabled"}`,
     `  strict: ${config.strict ? "enabled" : "disabled"}`,
     `  project trust: ${runtime.projectTrusted ? "trusted" : "not trusted — LSP/formatting paused"}`,
     `  project root: ${runtime.projectRoot}`,
     `  trusted external roots: ${formatTrustedEnvironmentRoots(runtime)}`,
+    ...formatServerConfigurationSummary(lspStatus),
     `  clients: ${formatClientSummary(lspStatus)}`,
     `  lsp restarts: ${runtime.lspRestartCount}`,
     `  captured edits: ${runtime.completedEdits.length}`,
@@ -57,6 +64,11 @@ export function renderStatus(runtime: CodeFeedbackRuntime, lspStatus?: LspServic
     }
   }
 
+  if (lspStatus?.serverConfiguration && lspStatus.serverConfiguration.errors.length > 0) {
+    lines.push("", "  server config errors:");
+    for (const error of lspStatus.serverConfiguration.errors) lines.push(`    ${error}`);
+  }
+
   if (formatStatus) {
     lines.push("", "  formatters:");
     const available = formatStatus.commands.filter((command) => command.available).map((command) => command.id).join(", ") || "none found";
@@ -87,6 +99,19 @@ function formatTrustedEnvironmentRoots(runtime: CodeFeedbackRuntime): string {
     .join(", ");
 }
 
+function formatServerConfigurationSummary(lspStatus?: LspServiceStatus): string[] {
+  const configuration = lspStatus?.serverConfiguration;
+  if (!configuration) return [];
+  const sources = configuration.sources
+    .map((source) => `${source.scope}=${source.state}`)
+    .join(", ");
+  const configured = configuration.configuredServerIds.join(", ") || "built-ins only";
+  return [
+    `  server config: ${sources || "not loaded"}`,
+    `  configured server entries: ${configured}`,
+  ];
+}
+
 export function renderCapabilities(runtime: CodeFeedbackRuntime, lspStatus?: LspServiceStatus, capabilities?: unknown): string {
   const lines = [
     "code-feedback / LSP capabilities",
@@ -110,13 +135,59 @@ export function renderCapabilities(runtime: CodeFeedbackRuntime, lspStatus?: Lsp
   return lines.join("\n");
 }
 
-export function renderDiagnosticsStatus(runtime: CodeFeedbackRuntime, target?: string, snapshot?: DiagnosticSnapshot): string {
-  const targetPath = target && target !== "all" ? path.resolve(runtime.projectRoot, target) : undefined;
+export function renderDiagnosticsStatus(
+  runtime: CodeFeedbackRuntime,
+  target?: string,
+  snapshot?: DiagnosticSnapshot,
+  workspaceScan?: WorkspaceDiagnosticScanResult,
+  refresh?: ExplicitDiagnosticRefreshStatus,
+): string {
+  const targetPath = target && target !== "all" && target !== "all (cached)" ? path.resolve(runtime.projectRoot, target) : undefined;
   const lines = [
     "code-feedback / diagnostics",
     `  target: ${target ?? "current session"}`,
     `  known LSP diagnostics: ${snapshot ? countDiagnosticSnapshotDiagnostics(snapshot) : 0}`,
   ];
+
+  if (refresh) lines.push(`  refresh: ${formatExplicitDiagnosticRefresh(refresh)}`);
+
+  if (workspaceScan) {
+    const summary = workspaceScan.summary;
+    const completeness = summary.complete
+      ? "complete"
+      : summary.traversalComplete
+        ? "completed with non-fresh files"
+        : "bounded/incomplete";
+    const bounds = [
+      `${summary.entriesVisited}/${summary.entryLimit} entries visited`,
+      `file limit ${summary.fileLimit}`,
+      summary.fileLimitReached ? "file limit reached" : undefined,
+      summary.entryLimitReached ? "entry limit reached" : undefined,
+    ].filter(Boolean).join(" · ");
+    const excluded = [
+      summary.ignoredDirectories > 0 ? `${summary.ignoredDirectories} ignored director${summary.ignoredDirectories === 1 ? "y" : "ies"}` : undefined,
+      summary.symlinksSkipped > 0 ? `${summary.symlinksSkipped} symlink${summary.symlinksSkipped === 1 ? "" : "s"}` : undefined,
+      summary.boundaryEntriesSkipped > 0 ? `${summary.boundaryEntriesSkipped} boundary mismatch${summary.boundaryEntriesSkipped === 1 ? "" : "es"}` : undefined,
+      summary.walkErrors > 0 ? `${summary.walkErrors} unreadable director${summary.walkErrors === 1 ? "y" : "ies"}` : undefined,
+    ].filter(Boolean).join(" · ");
+    lines.push(
+      `  scan: ${completeness} (${summary.durationMs}ms)`,
+      `  files: ${summary.selectedFiles} selected · ${summary.freshFiles} fresh · ${summary.timedOutFiles} timed out · ${summary.unavailableFiles} unavailable · ${summary.skippedFiles} skipped`,
+      `  bounds: ${bounds}`,
+    );
+    if (excluded) lines.push(`  excluded: ${excluded}`);
+
+    const nonFreshFiles = workspaceScan.files.filter((file) => file.outcome !== "fresh");
+    if (nonFreshFiles.length > 0) {
+      lines.push("", "  non-fresh files:");
+      for (const file of nonFreshFiles.slice(0, 20)) {
+        const displayPath = displayPathFromRoot(file.filePath, runtime.projectRoot);
+        const reason = file.reason ? ` — ${projectRelativeText(file.reason, runtime.projectRoot)}` : "";
+        lines.push(`    ${file.outcome.toUpperCase()} ${displayPath}${reason}`);
+      }
+      if (nonFreshFiles.length > 20) lines.push(`    ... ${nonFreshFiles.length - 20} more`);
+    }
+  }
 
   if (snapshot && countDiagnosticSnapshotDiagnostics(snapshot) > 0) {
     lines.push("", "  diagnostics:");
@@ -128,7 +199,7 @@ export function renderDiagnosticsStatus(runtime: CodeFeedbackRuntime, target?: s
   }
 
   const recent = runtime.completedEdits
-    .filter((edit) => !targetPath || path.resolve(edit.filePath) === targetPath)
+    .filter((edit) => !targetPath || diagnosticTargetContainsFile(targetPath, edit.filePath, workspaceScan !== undefined))
     .slice(-5)
     .reverse();
   if (recent.length === 0) {
@@ -157,6 +228,33 @@ export function renderDiagnosticsStatus(runtime: CodeFeedbackRuntime, target?: s
   }
 
   return lines.join("\n");
+}
+
+function formatExplicitDiagnosticRefresh(refresh: ExplicitDiagnosticRefreshStatus): string {
+  const duration = refresh.durationMs === undefined ? "" : ` (${Math.max(0, Math.round(refresh.durationMs))}ms)`;
+  switch (refresh.outcome) {
+    case "fresh":
+      return `fresh${duration}`;
+    case "timed-out":
+      return `timed out${duration} — cached diagnostics shown; not authoritative`;
+    case "unavailable":
+      return "unavailable — cached diagnostics shown; not authoritative";
+  }
+}
+
+function projectRelativeText(text: string, projectRoot: string): string {
+  const root = path.resolve(projectRoot);
+  const prefix = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  return text.split(prefix).join("");
+}
+
+function diagnosticTargetContainsFile(targetPath: string, filePath: string, includeDescendants: boolean): boolean {
+  const target = path.resolve(targetPath);
+  const file = path.resolve(filePath);
+  if (file === target) return true;
+  if (!includeDescendants) return false;
+  const relative = path.relative(target, file);
+  return relative.length > 0 && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
 function formatRangeComputation(computation: TouchedRangeComputation | undefined): string {
