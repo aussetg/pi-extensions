@@ -108,6 +108,9 @@ function validateIdentifier(
   parent: WorkflowAstNode | undefined,
   key: string | undefined,
 ): void {
+  if (node.name.startsWith("__flow") && !isNonComputedPropertyKey(node, parent, key)) {
+    throw new WorkflowScriptError(`Reserved workflow binding: ${node.name}`, location(node));
+  }
   if (isDeclarationIdentifier(node, parent, key)) {
     if (
       node.name === "defineWorkflow" ||

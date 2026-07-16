@@ -2,6 +2,7 @@ import { fork, type ChildProcess } from "node:child_process";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { parseStructuredWorkflow } from "../src/definition/workflow-definition.js";
 import { createMetricHandle } from "../src/measurements/metrics.js";
 import {
   ControlExecutionLimitError,
@@ -65,6 +66,89 @@ describe("workflow control process", () => {
       subflow: "undefined",
       genericEffect: "undefined",
     });
+  });
+
+  it("never exposes a host-realm constructor through control values or bridges", async () => {
+    const hostError = new Error("host failure");
+    const result = await execute(controlSource("realm-control", `
+      const key = "constructor";
+      const escape = value => {
+        try {
+          const OuterConstructor = value[key];
+          const OuterFunction = OuterConstructor[key];
+          OuterFunction("return process")();
+          return "escaped";
+        } catch (error) {
+          return error.name;
+        }
+      };
+      const response = await flow.stage("response", async () => null);
+      const callback = await flow.stage("callback", async value => escape(value));
+      let failure;
+      try { await flow.stage("failure", async () => null); }
+      catch (error) { failure = escape(error); }
+      const metric = flow.metric("throughput", { direction: "maximize", primary: true });
+      return {
+        args: escape(args.items),
+        response: escape(response.items),
+        callback,
+        failure,
+        metricMethod: escape(metric.summary),
+        flowMethod: escape(__flowHostApi.stage),
+      };
+    `), {
+      stage: async (id: string, body: (value?: unknown) => Promise<unknown>) => {
+        if (id === "response") return { items: ["host"] };
+        if (id === "callback") return await body(["callback"]);
+        throw hostError;
+      },
+      metric: (id: unknown, definition: unknown) => createMetricHandle(id, definition),
+    }, { items: ["argument"] });
+
+    expect(result).toEqual({
+      args: "EvalError",
+      response: "EvalError",
+      callback: "EvalError",
+      failure: "EvalError",
+      metricMethod: "EvalError",
+      flowMethod: "EvalError",
+    });
+  });
+
+  it("contains computed constructor access accepted by the workflow language", async () => {
+    const parsed = parseStructuredWorkflow(`
+      export default defineWorkflow({
+        name: "computed-constructor",
+        description: "Control-realm isolation regression.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["items"],
+          properties: { items: { type: "array", maxItems: 4, items: { type: "integer" } } },
+        },
+        outputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["blocked"],
+          properties: { blocked: { type: "string", enum: ["EvalError"] } },
+        },
+        capabilities: [],
+        modelVisible: false,
+        async run(flow, args) {
+          const key = "constructor";
+          try {
+            const OuterArray = args.items[key];
+            const OuterFunction = OuterArray[key];
+            OuterFunction("return process")();
+            return { blocked: "escaped" };
+          } catch (error) {
+            return { blocked: error.name };
+          }
+        },
+      });
+    `);
+
+    await expect(execute(parsed.executableSource, {}, { items: [1] })).resolves.toEqual({ blocked: "EvalError" });
   });
 
   it("propagates callback scope through stage and parallel branches", async () => {

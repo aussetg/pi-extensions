@@ -9,6 +9,7 @@ import {
   normalizeMetricState,
   reachesTarget,
 } from "./control-worker-metrics.js";
+import { createControlRealm } from "./control-realm.js";
 
 const CONTROL_PROTOCOL_VERSION = 1;
 const CONTROL_WIRE_BYTES = 4 * 1024 * 1024;
@@ -32,6 +33,7 @@ const invocation = new AsyncLocalStorage();
 let nextCallback = 1;
 let nextRequest = 1;
 let configuration;
+let controlRealm;
 let syncBuffer = "";
 let phase = "awaiting-initialize";
 let finished = false;
@@ -151,40 +153,27 @@ function hardenContext(context) {
 }
 
 function startControl() {
-  const args = deepFreeze(decodeWire(configuration.args));
-  if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("Workflow control arguments must be an object");
-  const snapshot = configuration.snapshot === undefined ? undefined : deepFreeze(decodeWire(configuration.snapshot));
-  const flow = Object.create(null);
-  for (const method of ASYNC_FLOW_METHODS) {
-    Object.defineProperty(flow, method, {
-      enumerable: true,
-      value: (...args) => callHost(method, args),
-    });
-  }
-  Object.defineProperty(flow, "metric", {
-    enumerable: true,
-    value: (...args) => callMetric(args),
-  });
-  Object.defineProperty(flow, "snapshot", {
-    enumerable: true,
-    get: () => {
-      if (snapshot === undefined) throw new Error("flow.snapshot is unavailable in this semantic runtime");
-      return snapshot;
-    },
-  });
-  Object.freeze(flow);
-
   const sandbox = Object.create(null);
-  Object.defineProperties(sandbox, {
-    __flowHostApi: { value: flow, writable: false, enumerable: false },
-    __flowHostArgs: { value: args, writable: false, enumerable: false },
-    __flowHostSnapshot: { value: snapshot, writable: false, enumerable: false },
-  });
   const context = vm.createContext(sandbox, {
     name: "pi-structured-workflow-control",
     codeGeneration: { strings: false, wasm: false },
   });
   hardenContext(context);
+  controlRealm = createControlRealm(context, {
+    asyncMethods: ASYNC_FLOW_METHODS,
+    hostCall: bridgeHostCall,
+    hostMetric: bridgeHostMetric,
+    metricCall: bridgeMetricCall,
+  });
+  const args = deepFreeze(decodeWire(configuration.args));
+  if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("Workflow control arguments must be an object");
+  const snapshot = configuration.snapshot === undefined ? undefined : deepFreeze(decodeWire(configuration.snapshot));
+  const flow = controlRealm.createFlow(snapshot !== undefined, snapshot);
+  Object.defineProperties(sandbox, {
+    __flowHostApi: { value: flow, writable: false, enumerable: false },
+    __flowHostArgs: { value: args, writable: false, enumerable: false },
+    __flowHostSnapshot: { value: snapshot, writable: false, enumerable: false },
+  });
   const wrapper = `
 (async () => {
   "use strict";
@@ -272,6 +261,15 @@ function callHost(method, args) {
   return result;
 }
 
+async function bridgeHostCall(method, args) {
+  try {
+    if (!ASYNC_FLOW_METHODS.includes(method) || !Array.isArray(args)) throw new Error("Invalid workflow host call");
+    return await callHost(method, args);
+  } catch (error) {
+    throw controlRealm.createError(serializeError(error));
+  }
+}
+
 function callMetric(args) {
   const invocationId = currentInvocation();
   const requestId = `request-${nextRequest++}`;
@@ -280,6 +278,58 @@ function callMetric(args) {
   if (received.requestId !== requestId) throw new Error("Synchronous metric response request is invalid");
   if (received.error !== undefined) throw deserializeError(received.error);
   return decodeWire(received.value);
+}
+
+function bridgeHostMetric(args) {
+  try {
+    if (!Array.isArray(args)) throw new Error("Invalid workflow metric call");
+    return callMetric(args);
+  } catch (error) {
+    throw controlRealm.createError(serializeError(error));
+  }
+}
+
+function bridgeMetricCall(id, method, args) {
+  try {
+    const state = metricStates.get(id);
+    if (!state) throw new Error("Metric state is unavailable");
+    if (!Array.isArray(args)) throw new Error("Invalid metric method arguments");
+    let value;
+    switch (method) {
+      case "baseline":
+      case "current":
+      case "best":
+      case "relativeGain":
+        if (args.length !== 0) throw new Error(`Metric ${method} does not accept arguments`);
+        value = state[method];
+        break;
+      case "reachesTarget":
+        if (args.length !== 0) throw new Error("Metric reachesTarget does not accept arguments");
+        value = reachesTarget(state);
+        break;
+      case "needsImprovement":
+        if (args.length !== 0) throw new Error("Metric needsImprovement does not accept arguments");
+        value = needsImprovement(state);
+        break;
+      case "isImprovement":
+        if (args.length !== 1) throw new Error("Metric isImprovement requires one observation");
+        value = isImprovement(state, args[0]);
+        break;
+      case "isWithinGuardrail":
+        if (args.length !== 1) throw new Error("Metric isWithinGuardrail requires one observation");
+        value = isWithinGuardrail(state, args[0]);
+        break;
+      case "summary":
+        if (args.length !== 0) throw new Error("Metric summary does not accept arguments");
+        value = metricSummary(state);
+        break;
+      default:
+        throw new Error(`Unknown metric method ${String(method)}`);
+    }
+    return decodeWire(encodeWire(value));
+  } catch (error) {
+    throw controlRealm.createError(serializeError(error));
+  }
 }
 
 async function invokeCallback(message) {
@@ -385,21 +435,21 @@ function decodeWire(wire) {
     if (current.type === "array") {
       assertExactKeys(current, ["type", "values"], "array wire value");
       if (!Array.isArray(current.values)) throw new Error("Malformed workflow control array");
-      return current.values.map((entry) => visit(entry, depth + 1));
+      return controlRealm.copyArray(current.values.map((entry) => visit(entry, depth + 1)));
     }
     if (current.type === "object") {
       assertExactKeys(current, ["type", "entries"], "object wire value");
       if (!Array.isArray(current.entries)) throw new Error("Malformed workflow control object");
-      const result = Object.create(null);
+      const entries = [];
       const seen = new Set();
       for (const entry of current.entries) {
         if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") throw new Error("Malformed workflow control object");
         if (seen.has(entry[0])) throw new Error(`Duplicate workflow control property ${entry[0]}`);
         seen.add(entry[0]);
         consumeWire(counter, depth + 1, entry[0]);
-        result[entry[0]] = visit(entry[1], depth + 1);
+        entries.push([entry[0], visit(entry[1], depth + 1)]);
       }
-      return result;
+      return controlRealm.copyObject(entries);
     }
     throw new Error(`Unsupported workflow control wire type ${current.type}`);
   };
@@ -410,7 +460,7 @@ function remoteReference(id) {
   if (typeof id !== "string") throw new Error("Invalid host reference");
   let value = remoteReferences.get(id);
   if (!value) {
-    value = Object.freeze(Object.create(null));
+    value = controlRealm.createReference();
     remoteReferences.set(id, value);
     remoteReferenceIds.set(value, id);
   }
@@ -421,24 +471,7 @@ function remoteMetric(id, state) {
   if (state !== undefined) metricStates.set(id, normalizeMetricState(state));
   let handle = metricHandles.get(id);
   if (handle) return handle;
-  const getState = () => {
-    const current = metricStates.get(id);
-    if (!current) throw new Error("Metric state is unavailable");
-    return current;
-  };
-  handle = Object.create(null);
-  Object.defineProperties(handle, {
-    baseline: { enumerable: true, get: () => getState().baseline },
-    current: { enumerable: true, get: () => getState().current },
-    best: { enumerable: true, get: () => getState().best },
-    relativeGain: { enumerable: true, get: () => getState().relativeGain },
-    reachesTarget: { value: () => reachesTarget(getState()) },
-    needsImprovement: { value: () => needsImprovement(getState()) },
-    isImprovement: { value: (observation) => isImprovement(getState(), observation) },
-    isWithinGuardrail: { value: (observation) => isWithinGuardrail(getState(), observation) },
-    summary: { value: () => metricSummary(getState()) },
-  });
-  Object.freeze(handle);
+  handle = controlRealm.createMetric(id);
   metricHandles.set(id, handle);
   metricHandleIds.set(handle, id);
   return handle;
@@ -573,12 +606,14 @@ function boundedProtocolString(value, label, maximum, empty = false) {
 }
 
 function deserializeError(serialized) {
-  const error = new Error(typeof serialized?.message === "string" ? serialized.message : "Workflow host operation failed");
-  error.name = typeof serialized?.name === "string" ? serialized.name : "Error";
-  if (typeof serialized?.stack === "string") error.stack = serialized.stack;
-  if (serialized?.properties && typeof serialized.properties === "object") Object.assign(error, serialized.properties);
-  if (typeof serialized?.hostErrorId === "string") Object.defineProperty(error, "__flowHostErrorId", { value: serialized.hostErrorId });
-  return error;
+  if (!controlRealm) throw new Error("Workflow control realm is unavailable");
+  return controlRealm.createError({
+    name: typeof serialized?.name === "string" ? serialized.name : "Error",
+    message: typeof serialized?.message === "string" ? serialized.message : "Workflow host operation failed",
+    ...(typeof serialized?.stack === "string" ? { stack: serialized.stack } : {}),
+    ...(serialized?.properties && typeof serialized.properties === "object" ? { properties: serialized.properties } : {}),
+    ...(typeof serialized?.hostErrorId === "string" ? { hostErrorId: serialized.hostErrorId } : {}),
+  });
 }
 
 function consumeWire(counter, depth, text) {

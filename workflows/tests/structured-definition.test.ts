@@ -357,6 +357,7 @@ ${simpleSource("recursive", "return a();")}`;
     ["dynamic agent authority", `await flow.agent("work", { profile: args.value, prompt: "x" });`],
     ["dynamic command authority", `await flow.command("command", { profile: args.value });`],
     ["dynamic measurement authority", `const m = flow.metric("m", { direction: "maximize" }); await flow.measure("measure", { metric: m, measurement: args.value });`],
+    ["runtime internals", `return __flowHostArgs;`],
   ])("rejects obsolete or unreviewable %s", (_label, body) => {
     expect(() => parseStructuredWorkflow(simpleSource("rejected", body, {
       capabilities: ["read-project", "candidate-write", "host-command", "human-input"],
