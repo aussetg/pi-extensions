@@ -252,8 +252,10 @@ class ApplyPatchTextResultComponent implements Component {
 
   render(width: number): string[] {
     const lines = renderResultParts(this.parts, width, this.background);
-    for (let i = 0; i < this.footerLines; i += 1) {
-      lines.push(backgroundBlankLine(width, this.background));
+    if (!resultPartAttachesToPrevious(this.parts.at(-1))) {
+      for (let i = 0; i < this.footerLines; i += 1) {
+        lines.push(backgroundBlankLine(width, this.background));
+      }
     }
     return lines;
   }
@@ -520,16 +522,21 @@ function renderResultParts(
   const safeWidth = Math.max(1, Math.trunc(width));
   const lines: string[] = [];
   let emitted = false;
+  let lastPartAttached = false;
 
   for (const part of parts) {
     const rendered = renderResultPart(part, safeWidth, background);
     if (rendered.length === 0) continue;
-    if (emitted) lines.push(backgroundBlankLine(safeWidth, background));
+    const attached = resultPartAttachesToPrevious(part);
+    if (emitted && !attached) {
+      lines.push(backgroundBlankLine(safeWidth, background));
+    }
     lines.push(...rendered);
     emitted = true;
+    lastPartAttached = attached;
   }
 
-  if (emitted && options.trailingBlank) {
+  if (emitted && options.trailingBlank && !lastPartAttached) {
     lines.push(backgroundBlankLine(safeWidth, background));
   }
 
@@ -542,11 +549,11 @@ function renderResultPart(
   background: ((text: string) => string) | undefined,
 ): string[] {
   if (typeof part === "string") return new Text(part, 1, 0, background).render(width);
+  return part.render(width, background);
+}
 
-  const contentWidth = Math.max(1, width - 2);
-  const content = part.renderContent(contentWidth);
-  if (content.length === 0) return [];
-  return new Text(content.join("\n"), 1, 0, background).render(width);
+function resultPartAttachesToPrevious(part: ResultPart | undefined): boolean {
+  return typeof part !== "string" && part?.attachesToPrevious === true;
 }
 
 function backgroundBlankLine(

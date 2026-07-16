@@ -7,6 +7,7 @@ import { relativePathFromCwd, shortenPathForDisplay } from "./util.ts";
 
 type ThemeLike = {
   fg: (color: string, text: string) => string;
+  bg?: (color: string, text: string) => string;
   bold: (text: string) => string;
 };
 
@@ -36,7 +37,11 @@ interface CodeFeedbackDiagnosticEntry {
 }
 
 export interface CodeFeedbackBlock {
-  renderContent(width: number): string[];
+  readonly attachesToPrevious: true;
+  render(
+    width: number,
+    fallbackBackground?: (text: string) => string,
+  ): string[];
 }
 
 export type CodeFeedbackRender = string | CodeFeedbackBlock;
@@ -52,37 +57,72 @@ export function renderCodeFeedbackFromDetails(
   const lines = renderStructuredCodeFeedback(feedback, theme, options);
   if (lines.length > 0) return new CodeFeedbackPanel(lines, theme);
 
-  return feedback.inlineText ? theme.fg("toolOutput", feedback.inlineText) : undefined;
+  if (!feedback.inlineText) return undefined;
+  const fallbackLines = feedback.inlineText.trim().split("\n");
+  if (/^code-feedback\s*:/i.test(fallbackLines[0] ?? "")) {
+    fallbackLines.shift();
+  }
+  return new CodeFeedbackPanel([
+    theme.fg("warning", theme.bold("code feedback")),
+    ...fallbackLines,
+  ], theme);
 }
 
 class CodeFeedbackPanel implements CodeFeedbackBlock {
+  readonly attachesToPrevious = true as const;
+
   private readonly content: string[];
   private readonly theme: ThemeLike;
+  private renderedWidth: number | undefined;
+  private renderedBackgroundSample: string | undefined;
+  private renderedLines: string[] | undefined;
 
   constructor(lines: string[], theme: ThemeLike) {
     this.theme = theme;
     this.content = [lines[0]!, ...lines.slice(1).map((line) => line.replace(/^  /, ""))];
   }
 
-  renderContent(width: number): string[] {
+  render(
+    width: number,
+    fallbackBackground?: (text: string) => string,
+  ): string[] {
     const safeWidth = Math.max(1, Math.trunc(width));
-    if (safeWidth < 6) return wrapContentLines(this.content, safeWidth);
-
-    const naturalWidth = Math.max(1, ...this.content.map((line) => visibleWidth(line)));
-    const innerWidth = Math.max(1, Math.min(naturalWidth, safeWidth - 4));
-    const border = (text: string) => this.theme.fg("muted", text);
-    const horizontal = "─".repeat(innerWidth + 2);
-    const out = [border(`╭${horizontal}╮`)];
-
-    for (const line of this.content) {
-      for (const segment of wrapAnsiLine(line, innerWidth)) {
-        const padding = " ".repeat(Math.max(0, innerWidth - visibleWidth(segment)));
-        out.push(`${border("│")} ${segment}${padding} ${border("│")}`);
-      }
+    const background = fallbackBackground ?? (this.theme.bg
+      ? (text: string) => this.theme.bg!("toolSuccessBg", text)
+      : undefined);
+    const backgroundSample = background?.("__code_feedback_background__");
+    if (
+      this.renderedWidth === safeWidth &&
+      this.renderedBackgroundSample === backgroundSample &&
+      this.renderedLines
+    ) {
+      return this.renderedLines;
     }
 
-    out.push(border(`╰${horizontal}╯`));
-    return out;
+    // Keep feedback on the settled tool surface. Spacing and typography are
+    // enough hierarchy; another full-width color creates an unnecessary band.
+    const paddingX = safeWidth >= 3 ? 1 : 0;
+    const innerWidth = Math.max(1, safeWidth - paddingX * 2);
+    const paint = (line: string) => background ? background(line) : line;
+    const blank = paint(" ".repeat(safeWidth));
+    const rendered: string[] = [];
+    for (const line of this.content) {
+      for (const segment of wrapAnsiLine(line, innerWidth)) {
+        const fitted = fitAnsiLine(segment, innerWidth);
+        const rightPadding = Math.max(
+          0,
+          safeWidth - paddingX - visibleWidth(fitted),
+        );
+        rendered.push(
+          paint(`${" ".repeat(paddingX)}${fitted}${" ".repeat(rightPadding)}`),
+        );
+      }
+    }
+    rendered.push(blank);
+    this.renderedLines = rendered;
+    this.renderedWidth = safeWidth;
+    this.renderedBackgroundSample = backgroundSample;
+    return this.renderedLines;
   }
 }
 
@@ -398,10 +438,6 @@ function plural(count: number, noun: string): string {
 
 function isPresent<T>(value: T | undefined): value is T {
   return value !== undefined;
-}
-
-function wrapContentLines(lines: string[], width: number): string[] {
-  return lines.flatMap((line) => wrapAnsiLine(line, width));
 }
 
 function wrapAnsiLine(line: string, width: number): string[] {

@@ -224,8 +224,10 @@ class RichTextResultComponent implements Component {
   render(width: number): string[] {
     const lines = renderFooterParts(this.parts, width, this.background);
     if (lines.length === 0) return lines;
-    for (let i = 0; i < this.footerLines; i += 1) {
-      lines.push(backgroundBlankLine(width, this.background));
+    if (!footerPartAttachesToPrevious(this.parts.at(-1))) {
+      for (let i = 0; i < this.footerLines; i += 1) {
+        lines.push(backgroundBlankLine(width, this.background));
+      }
     }
     return lines;
   }
@@ -502,16 +504,21 @@ function renderFooterParts(
   const safeWidth = Math.max(1, Math.trunc(width));
   const lines: string[] = [];
   let emitted = false;
+  let lastPartAttached = false;
 
   for (const part of parts) {
     const rendered = renderFooterPart(part, safeWidth, background);
     if (rendered.length === 0) continue;
-    if (emitted) lines.push(backgroundBlankLine(safeWidth, background));
+    const attached = footerPartAttachesToPrevious(part);
+    if (emitted && !attached) {
+      lines.push(backgroundBlankLine(safeWidth, background));
+    }
     lines.push(...rendered);
     emitted = true;
+    lastPartAttached = attached;
   }
 
-  if (emitted && options.trailingBlank) {
+  if (emitted && options.trailingBlank && !lastPartAttached) {
     lines.push(backgroundBlankLine(safeWidth, background));
   }
 
@@ -524,11 +531,11 @@ function renderFooterPart(
   background: ((text: string) => string) | undefined,
 ): string[] {
   if (typeof part === "string") return new Text(part, 1, 0, background).render(width);
+  return part.render(width, background);
+}
 
-  const contentWidth = Math.max(1, width - 2);
-  const content = part.renderContent(contentWidth);
-  if (content.length === 0) return [];
-  return new Text(content.join("\n"), 1, 0, background).render(width);
+function footerPartAttachesToPrevious(part: FooterPart | undefined): boolean {
+  return typeof part !== "string" && part?.attachesToPrevious === true;
 }
 
 function footerParts(parts: Array<FooterPart | undefined>): FooterPart[] {

@@ -201,6 +201,82 @@ test("partial apply_patch results render completed diffs and failed operations",
   assert.match(text, /✗\s+update:\s+missing\.txt\s+— File not found/);
 });
 
+test("code feedback stays left-aligned on the full-width settled tool surface", () => {
+  const feedbackTheme = {
+    name: "dark",
+    fg: (_color, text) => text,
+    bg: (color, text) => {
+      const rgb = color === "toolPendingBg" ? "50;48;47" : "45;59;45";
+      return `\x1b[48;2;${rgb}m${text}\x1b[49m`;
+    },
+    bold: (text) => text,
+  };
+  const result = {
+    content: [{ type: "text", text: "✓ update src/example.ts" }],
+    details: {
+      stage: "done",
+      fuzz: 0,
+      results: [
+        {
+          type: "update_file",
+          path: "src/example.ts",
+          status: "completed",
+          change: {
+            type: "update",
+            unifiedDiff:
+              "--- src/example.ts\n" +
+              "+++ src/example.ts\n" +
+              "@@ -1 +1 @@\n" +
+              "-export const value = 1;\n" +
+              "+export const value = 2;\n",
+          },
+        },
+      ],
+      warnings: [],
+      piCodeFeedback: {
+        edits: [
+          {
+            displayPath: "src/example.ts",
+            diagnostics: {
+              linked: [
+                {
+                  diagnostic: {
+                    severity: "error",
+                    message: "Example diagnostic",
+                    range: { start: { line: 1, character: 1 } },
+                  },
+                },
+              ],
+              summary: {},
+            },
+          },
+        ],
+      },
+    },
+  };
+
+  const lines = renderApplyPatchResult(
+    result,
+    { expanded: false, isPartial: false },
+    feedbackTheme,
+    { invalidate() {} },
+  ).render(80);
+  const trayStart = lines.findIndex((line) => stripAnsi(line).includes("code feedback"));
+
+  assert.ok(trayStart > 0, "expected feedback after the diff");
+  assert.equal(stripAnsi(lines[trayStart - 1]).trim(), "", "the edit should keep its trailing breathing room");
+  assert.match(stripAnsi(lines.slice(trayStart).join("\n")), /code feedback.*1 error/);
+  assert.doesNotMatch(stripAnsi(lines.slice(trayStart).join("\n")), /[╭╮╰╯│]/);
+  for (const line of lines.slice(trayStart)) {
+    assert.ok(
+      line.startsWith("\x1b[48;2;45;59;45m"),
+      "feedback should retain the settled tool background",
+    );
+    assert.equal(stripAnsi(line).length, 80);
+  }
+  assert.ok(stripAnsi(lines[trayStart]).startsWith(" code feedback"));
+});
+
 function stripAnsi(text) {
   return text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
 }

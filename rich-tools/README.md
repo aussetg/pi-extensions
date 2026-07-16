@@ -10,7 +10,7 @@ One Pi extension for rich model-facing tools and richer built-in tool rendering:
 - `read`: Pierre line-numbered code view with tree-sitter/TextMate highlighting.
 - `write`: Pierre create/update diff preview.
 - `edit`: Pierre diff preview from the built-in numbered diff.
-- `write` / `edit` / `apply_patch`: renders `code-feedback` details in the same panel style.
+- `write` / `edit` / `apply_patch`: renders `code-feedback` directly on the settled edit surface beneath the preview.
 - `bash`: classifies read/list/search shell commands and renders them as `Exploring` / `Explored` instead of generic runs.
 - `bash`: visually coalesces adjacent exploratory bash calls into one UI block, including resumed session history, without changing stored tool history or model context.
 - `bash`: captures TTY colors for the live UI through a PTY, then strips ANSI/PTY artifacts from tool results and full-output logs before they can reach model context.
