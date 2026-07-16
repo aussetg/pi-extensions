@@ -1,3 +1,5 @@
+export const DIAGNOSTIC_TIMEOUT_ABORT_REASON = "Diagnostic refresh no longer has a waiter after timing out";
+
 export function abortError(signal?: AbortSignal): Error {
   if (signal?.reason instanceof Error) return signal.reason;
   const error = new Error(typeof signal?.reason === "string" ? signal.reason : "Operation cancelled");

@@ -10,6 +10,7 @@ import { createLspService } from "../src/lsp/service.ts";
 import {
   discoverWorkspaceDiagnosticFiles,
   MAX_WORKSPACE_DIAGNOSTIC_FILE_LIMIT,
+  MAX_WORKSPACE_DIAGNOSTIC_TOTAL_SOURCE_BYTES,
   normalizeWorkspaceDiagnosticFileLimit,
   readWorkspaceDiagnosticSource,
 } from "../src/lsp/workspace-diagnostics.ts";
@@ -90,7 +91,8 @@ test("active workspace diagnostics prefer one capability-gated workspace pull", 
     assert.equal(result.summary.workspacePullRequests, 1);
     assert.equal(result.summary.workspacePullFailures, 0);
     assert.equal(result.summary.workspacePullFiles, 2);
-    assert.equal(result.summary.documentRefreshFiles, 0);
+    assert.equal(result.summary.documentPullFiles, 0);
+    assert.equal(result.summary.pushBatchFiles, 0);
 
     const entries = await readJsonLog(logPath);
     const initialize = entries.find((entry) => entry.method === "initialize");
@@ -134,7 +136,8 @@ test("workspace pull diagnostics refresh a source that changes while the pull is
     assert.equal(result.summary.complete, true);
     assert.equal(result.summary.freshFiles, 1);
     assert.equal(result.summary.workspacePullFiles, 0);
-    assert.equal(result.summary.documentRefreshFiles, 1);
+    assert.equal(result.summary.documentPullFiles, 1);
+    assert.equal(result.summary.pushBatchFiles, 0);
     assert.equal(result.files[0]?.outcome, "fresh");
 
     const entries = await readJsonLog(logPath);
@@ -163,7 +166,8 @@ test("workspace pull diagnostics combine bounded partial results", async () => {
     assert.equal(result.summary.complete, true);
     assert.equal(result.summary.workspacePullRequests, 1);
     assert.equal(result.summary.workspacePullFiles, 3);
-    assert.equal(result.summary.documentRefreshFiles, 0);
+    assert.equal(result.summary.documentPullFiles, 0);
+    assert.equal(result.summary.pushBatchFiles, 0);
     assert.equal(result.summary.diagnostics, 3);
   } finally {
     await service.shutdownAll();
@@ -207,7 +211,6 @@ test("workspace pull diagnostics issue one request per nested routed client with
     assert.equal(result.summary.complete, true);
     assert.equal(result.summary.workspacePullRequests, 2);
     assert.equal(result.summary.workspacePullFiles, 2);
-    assert.equal(result.summary.documentRefreshFiles, 0);
     assert.equal((await readJsonLog(logPath)).filter((entry) => entry.method === "workspace/diagnostic").length, 2);
     assert.equal(service.getStatus().clientResources.capacityEvictions, 1);
     assert.deepEqual(service.getStatus().clients.map((client) => client.root), [secondRoot]);
@@ -249,7 +252,6 @@ test("workspace pull diagnostics reuse result ids for unchanged reports", async 
     assert.equal(second.summary.diagnostics, 2);
     assert.equal(third.summary.diagnostics, 2);
     assert.equal(second.summary.workspacePullFiles, 2);
-    assert.equal(second.summary.documentRefreshFiles, 0);
     const pulls = (await readJsonLog(logPath)).filter((entry) => entry.method === "workspace/diagnostic");
     assert.equal(pulls.length, 3);
     assert.equal(pulls[1].params.previousResultIds.length, 2);
@@ -262,8 +264,8 @@ test("workspace pull diagnostics reuse result ids for unchanged reports", async 
   }
 });
 
-test("missing, malformed, oversized, timed-out, and unsupported workspace reports fall back without false clean results", async () => {
-  for (const mode of ["workspace-pull-missing", "workspace-pull-malformed", "workspace-pull-partial-overflow", "workspace-pull-delay-80", "workspace-pull-unsupported"]) {
+test("missing, malformed, oversized, and unsupported workspace reports fall back within the shared deadline", async () => {
+  for (const mode of ["workspace-pull-missing", "workspace-pull-malformed", "workspace-pull-partial-overflow", "workspace-pull-unsupported"]) {
     const root = await mkdtemp(path.join(os.tmpdir(), `pi-code-feedback-workspace-protocol-${mode}-`));
     const logPath = path.join(root, "lsp.jsonl");
     await writeFile(path.join(root, "a.py"), "a = 1\n", "utf8");
@@ -273,7 +275,7 @@ test("missing, malformed, oversized, timed-out, and unsupported workspace report
     try {
       const result = await service.diagnosticsForWorkspace(".", {
         limit: 10,
-        timeoutMs: mode === "workspace-pull-delay-80" ? 30 : 1000,
+        timeoutMs: 1000,
         settleMs: 0,
         server: "python",
       });
@@ -283,13 +285,72 @@ test("missing, malformed, oversized, timed-out, and unsupported workspace report
       assert.equal(result.summary.workspacePullRequests, 1, mode);
       assert.equal(result.summary.workspacePullFailures, mode === "workspace-pull-missing" ? 0 : 1, mode);
       assert.equal(result.summary.workspacePullFiles, mode === "workspace-pull-missing" ? 1 : 0, mode);
-      assert.equal(result.summary.documentRefreshFiles, mode === "workspace-pull-missing" ? 1 : 2, mode);
+      const expectedDocumentPulls = mode === "workspace-pull-missing" ? 1 : 2;
+      assert.equal(result.summary.documentPullFiles, expectedDocumentPulls, mode);
+      assert.equal(result.summary.pushBatchFiles, 0, mode);
       const entries = await readJsonLog(logPath);
-      assert.equal(entries.filter((entry) => entry.method === "textDocument/diagnostic").length, result.summary.documentRefreshFiles, mode);
+      assert.equal(entries.filter((entry) => entry.method === "textDocument/diagnostic").length, expectedDocumentPulls, mode);
     } finally {
       await service.shutdownAll();
       await rm(root, { recursive: true, force: true });
     }
+  }
+});
+
+test("a timed-out native workspace pull does not start fallback work after the scan deadline", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-workspace-protocol-deadline-"));
+  const logPath = path.join(root, "lsp.jsonl");
+  await writeFile(path.join(root, "a.py"), "a = 1\n", "utf8");
+  await writeFile(path.join(root, "b.py"), "b = 2\n", "utf8");
+
+  const service = fakePythonService(root, "workspace-pull-delay-80", 4, logPath);
+  try {
+    const result = await service.diagnosticsForWorkspace(".", {
+      limit: 10,
+      timeoutMs: 30,
+      settleMs: 0,
+      server: "python",
+    });
+    assert.equal(result.summary.complete, false);
+    assert.equal(result.summary.deadlineReached, true);
+    assert.equal(result.summary.freshFiles, 0);
+    assert.equal(result.summary.timedOutFiles, 2);
+    assert.equal(result.summary.workspacePullRequests, 1);
+    assert.equal(result.summary.workspacePullFailures, 1);
+    assert.equal(result.summary.documentPullFiles, 0);
+    assert.equal(result.summary.pushBatchFiles, 0);
+    const entries = await readJsonLog(logPath);
+    assert.equal(entries.filter((entry) => entry.method === "workspace/diagnostic").length, 1);
+    assert.equal(entries.some((entry) => entry.method === "textDocument/diagnostic"), false);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a falsely advertised document pull falls back to one push batch within the shared deadline", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-workspace-document-pull-fallback-"));
+  const logPath = path.join(root, "lsp.jsonl");
+  await writeFile(path.join(root, "a.py"), "a = 1\n", "utf8");
+  await writeFile(path.join(root, "b.py"), "b = 2\n", "utf8");
+
+  const service = fakePythonService(root, "pull-unsupported", 2, logPath);
+  try {
+    const result = await service.diagnosticsForWorkspace(".", {
+      limit: 10,
+      timeoutMs: 1000,
+      settleMs: 0,
+      server: "python",
+    });
+    assert.equal(result.summary.complete, true);
+    assert.equal(result.summary.freshFiles, 2);
+    assert.equal(result.summary.documentPullFiles, 0);
+    assert.equal(result.summary.pushBatchFiles, 2);
+    assert.equal((await readJsonLog(logPath)).filter((entry) => entry.method === "textDocument/diagnostic").length, 2);
+    assert.equal(service.getStatus().clients[0]?.openDocuments, 0);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -339,6 +400,16 @@ test("active workspace diagnostics enforce file and traversal bounds", async () 
   assert.equal(discovery.entriesVisited, 2);
   assert.equal(discovery.entryLimitReached, true);
 
+  const expiredDiscovery = await discoverWorkspaceDiagnosticFiles({
+    projectRoot: root,
+    targetPath: ".",
+    extensions: new Set([".py"]),
+    limit: 10,
+    deadlineAt: 0,
+  });
+  assert.equal(expiredDiscovery.deadlineReached, true);
+  assert.equal(expiredDiscovery.files.length, 0);
+
   const service = fakePythonService(root, "pull-clean");
   try {
     const result = await service.diagnosticsForWorkspace(".", {
@@ -384,6 +455,35 @@ test("active workspace diagnostics report oversized and binary sources as skippe
     assert.match(result.files.find((file) => file.filePath.endsWith("binary.py"))?.reason ?? "", /binary/);
     assert.match(result.files.find((file) => file.filePath.endsWith("generated.py"))?.reason ?? "", /2\.0 MiB limit/);
     assert.equal(service.getStatus().clients.length, 0);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("active workspace diagnostics enforce a total source-byte bound", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-workspace-total-source-bound-"));
+  const chunk = Buffer.alloc(1024 * 1024, 0x61);
+  for (let index = 0; index < 9; index += 1) {
+    await writeFile(path.join(root, `${String(index).padStart(2, "0")}.py`), chunk);
+  }
+
+  const service = fakePythonService(root, "workspace-pull-clean");
+  try {
+    const result = await service.diagnosticsForWorkspace(".", {
+      limit: 20,
+      timeoutMs: 1000,
+      settleMs: 0,
+      server: "python",
+    });
+    assert.equal(result.summary.selectedFiles, 9);
+    assert.equal(result.summary.freshFiles, 8);
+    assert.equal(result.summary.skippedFiles, 1);
+    assert.equal(result.summary.sourceByteLimit, MAX_WORKSPACE_DIAGNOSTIC_TOTAL_SOURCE_BYTES);
+    assert.equal(result.summary.sourceBytes, MAX_WORKSPACE_DIAGNOSTIC_TOTAL_SOURCE_BYTES);
+    assert.equal(result.summary.sourceByteLimitReached, true);
+    assert.match(result.files.find((file) => file.outcome === "skipped")?.reason ?? "", /total source limit/);
+    assert.equal(result.summary.complete, false);
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });
@@ -455,13 +555,13 @@ test("workspace source reads reject symlink swaps after discovery", async () => 
   }
 });
 
-test("workspace workers give each queued file its own diagnostic timeout budget", async () => {
+test("document pulls share one absolute workspace diagnostic deadline", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-workspace-timeouts-"));
   for (const name of ["a.py", "b.py", "c.py"]) {
     await writeFile(path.join(root, name), `${name} = 1\n`, "utf8");
   }
 
-  const service = fakePythonService(root, "diagnostics-delay-80", 1);
+  const service = fakePythonService(root, "pull-delay-80", 1);
   try {
     const result = await service.diagnosticsForWorkspace(".", {
       limit: 10,
@@ -470,9 +570,78 @@ test("workspace workers give each queued file its own diagnostic timeout budget"
       server: "python",
     });
     assert.equal(result.summary.selectedFiles, 3);
-    assert.equal(result.summary.freshFiles, 3);
+    assert.equal(result.summary.freshFiles, 1);
+    assert.equal(result.summary.timedOutFiles, 2);
+    assert.equal(result.summary.documentPullFiles, 3);
+    assert.equal(result.summary.pushBatchFiles, 0);
+    assert.ok(result.summary.durationMs >= 120);
+    assert.ok(result.summary.durationMs < 250);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("push-only workspace diagnostics synchronize once, publish as a batch, and close transient documents", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-workspace-push-batch-"));
+  const logPath = path.join(root, "lsp.jsonl");
+  for (const name of ["a.py", "b.py", "c.py", "d.py", "e.py"]) {
+    await writeFile(path.join(root, name), `${name} = 1\n`, "utf8");
+  }
+
+  const service = fakePythonService(root, "diagnostics-delay-80", 1, logPath);
+  try {
+    const result = await service.diagnosticsForWorkspace(".", {
+      limit: 10,
+      timeoutMs: 180,
+      settleMs: 0,
+      server: "python",
+    });
+    assert.equal(result.summary.complete, true);
+    assert.equal(result.summary.freshFiles, 5);
     assert.equal(result.summary.timedOutFiles, 0);
-    assert.ok(result.summary.durationMs >= 200);
+    assert.equal(result.summary.documentPullFiles, 0);
+    assert.equal(result.summary.pushBatchFiles, 5);
+    assert.ok(result.summary.durationMs < 180);
+    assert.equal(service.getStatus().clients[0]?.openDocuments, 0);
+
+    await sleep(20);
+    const entries = await readJsonLog(logPath);
+    assert.equal(entries.filter((entry) => entry.method === "textDocument/didOpen").length, 5);
+    assert.equal(entries.filter((entry) => entry.method === "textDocument/didClose").length, 5);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("push diagnostic batches preserve documents that were already open", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-workspace-push-existing-"));
+  const logPath = path.join(root, "lsp.jsonl");
+  const firstPath = path.join(root, "a.py");
+  const secondPath = path.join(root, "b.py");
+  await writeFile(firstPath, "a = 1\n", "utf8");
+  await writeFile(secondPath, "b = 2\n", "utf8");
+
+  const service = fakePythonService(root, "diagnostics-delay-20", 2, logPath);
+  try {
+    const initial = await service.diagnosticsForFileDetailed(firstPath, undefined, {
+      timeoutMs: 500,
+      settleMs: 0,
+      server: "python",
+    });
+    assert.equal(initial?.fresh, true);
+
+    const result = await service.diagnosticsForWorkspace(".", {
+      limit: 10,
+      timeoutMs: 500,
+      settleMs: 0,
+      server: "python",
+    });
+    assert.equal(result.summary.complete, true);
+    assert.equal(service.getStatus().clients[0]?.openDocuments, 1);
+    const closes = (await readJsonLog(logPath)).filter((entry) => entry.method === "textDocument/didClose");
+    assert.deepEqual(closes.map((entry) => entry.params.textDocument.uri), [pathToFileURL(secondPath).href]);
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });
@@ -495,7 +664,11 @@ test("workspace diagnostics report per-file timeouts explicitly", async () => {
     assert.equal(result.summary.freshFiles, 0);
     assert.equal(result.summary.timedOutFiles, 2);
     assert.equal(result.summary.unavailableFiles, 0);
+    assert.equal(result.summary.deadlineReached, true);
+    assert.equal(result.summary.pushBatchFiles, 2);
     assert.ok(result.files.every((file) => file.outcome === "timed-out"));
+    assert.equal(service.getStatus().clients[0]?.state, "stopped");
+    assert.equal(service.getStatus().clients[0]?.openDocuments, 0);
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });
@@ -537,11 +710,12 @@ test("workspace diagnostic timeouts exclude previously cached diagnostics", asyn
 
 test("cancelling an active workspace scan drains its diagnostic work", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-workspace-cancel-"));
+  const logPath = path.join(root, "lsp.jsonl");
   for (const name of ["a.py", "b.py", "c.py", "d.py"]) {
     await writeFile(path.join(root, name), `${name} = 1\n`, "utf8");
   }
 
-  const service = fakePythonService(root, "diagnostics-delay-500", 2);
+  const service = fakePythonService(root, "diagnostics-delay-500", 2, logPath);
   const controller = new AbortController();
   try {
     const scan = service.diagnosticsForWorkspace(".", {
@@ -551,7 +725,11 @@ test("cancelling an active workspace scan drains its diagnostic work", async () 
       server: "python",
       signal: controller.signal,
     });
-    setTimeout(() => controller.abort(), 20);
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if ((await readJsonLog(logPath)).some((entry) => entry.method === "textDocument/didOpen")) break;
+      await sleep(5);
+    }
+    controller.abort();
     await assert.rejects(scan, (error) => error?.name === "AbortError");
 
     for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -561,6 +739,8 @@ test("cancelling an active workspace scan drains its diagnostic work", async () 
     }
     assert.equal(service.getStatus().diagnosticRefreshes?.active, 0);
     assert.equal(service.getStatus().diagnosticRefreshes?.queued, 0);
+    assert.equal(service.getStatus().clients[0]?.state, "stopped");
+    assert.equal(service.getStatus().clients[0]?.openDocuments, 0);
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });

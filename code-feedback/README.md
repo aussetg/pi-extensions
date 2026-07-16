@@ -134,16 +134,25 @@ Explicit diagnostic methods have a separate 10-second budget and never substitut
 
 - `textDocument/diagnostic` returns diagnostics only after an authoritative refresh of the current
   file content. Timeout or unavailability is an error with no diagnostics.
-- `workspace/diagnostic` includes only files refreshed during that scan. A partial scan may return
-  diagnostics from fresh files while reporting timed-out, unavailable, or skipped files separately.
+- `workspace/diagnostic` uses one absolute deadline for the whole scan and includes only files
+  refreshed during it. A partial scan may return diagnostics from fresh files while reporting
+  timed-out, unavailable, or skipped files separately.
 
-For clients advertising workspace diagnostics, an active scan first attempts one real
-`workspace/diagnostic` pull per routed workspace. Unsupported, missing, malformed, oversized, or
-timed-out reports fall back to forced-fresh document refreshes; none are treated as clean evidence.
+The scan chooses the strongest protocol each server advertises. It first attempts one real
+`workspace/diagnostic` pull per routed workspace. Missing, malformed, oversized, or immediately
+unsupported workspace reports use bounded `textDocument/diagnostic` pulls when available. A
+push-only server receives one bulk document synchronization and the client waits for a
+post-synchronization publication from every selected file; scan-only documents are closed again.
+No fallback starts after the shared deadline, and a timed-out push batch stops its client so
+non-cancellable background work cannot continue consuming resources.
+
+Push diagnostics do not have a protocol completion response. A push-batched file is fresh only
+after a valid post-synchronization publication and a short diagnostic quiet period; a missing or
+malformed publication is never interpreted as a clean file.
 
 Workspace traversal stays inside the trusted project root, never follows symlinks, stops after
-50,000 entries, and ignores common VCS, dependency, virtual-environment, cache, coverage, and build
-directories.
+50,000 entries and 8 MiB of selected source, and ignores common VCS, dependency,
+virtual-environment, cache, coverage, and build directories.
 
 Examples:
 
@@ -212,7 +221,7 @@ are rejected.
 | `--code-feedback-no-context` | Disable delayed diagnostic injection while keeping LSP and formatting active. |
 | `--code-feedback-strict` | Wait longer and fail mutation results on linked error diagnostics. |
 | `--code-feedback-all-diagnostics` | Inline all diagnostics in the post-edit snapshot instead of touched/provenance-linked diagnostics. |
-| `--code-feedback-lsp-concurrency=<1-16>` | Concurrent diagnostic refreshes across files; default 4. Same-file refreshes remain ordered/coalesced. |
+| `--code-feedback-lsp-concurrency=<1-16>` | Concurrent document-pull and ordinary diagnostic refreshes; default 4. Push-only workspace scans synchronize as one batch. Same-file refreshes remain ordered/coalesced. |
 | `--code-feedback-lsp-max-clients=<1-32>` | Simultaneously active client processes; default 8. |
 | `--code-feedback-lsp-start-concurrency=<1-8>` | Simultaneous client initializations; default 2. |
 

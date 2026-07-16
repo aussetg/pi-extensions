@@ -134,6 +134,8 @@ export interface WorkspaceDiagnosticScanSummary {
   targetPath: string;
   fileLimit: number;
   entryLimit: number;
+  sourceByteLimit: number;
+  sourceBytes: number;
   entriesVisited: number;
   selectedFiles: number;
   freshFiles: number;
@@ -144,13 +146,16 @@ export interface WorkspaceDiagnosticScanSummary {
   workspacePullRequests: number;
   workspacePullFailures: number;
   workspacePullFiles: number;
-  documentRefreshFiles: number;
+  documentPullFiles: number;
+  pushBatchFiles: number;
   ignoredDirectories: number;
   symlinksSkipped: number;
   boundaryEntriesSkipped: number;
   walkErrors: number;
   fileLimitReached: boolean;
   entryLimitReached: boolean;
+  sourceByteLimitReached: boolean;
+  deadlineReached: boolean;
   traversalComplete: boolean;
   complete: boolean;
   durationMs: number;

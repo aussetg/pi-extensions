@@ -8,8 +8,13 @@ import { resolveWorkspaceRootForPath } from "../language-environments.ts";
 import { isInsideOrEqual } from "../paths.ts";
 import { contentHash } from "../runtime.ts";
 import { isRecord, LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY, type DiagnosticRefreshResult, type DiagnosticSnapshot, type LspDiagnostic, type LspServiceStatus, type LspUnavailableServer, type WorkspaceDiagnosticFileResult, type WorkspaceDiagnosticScanResult } from "../types.ts";
-import { abortError, isCancellation, throwIfAborted } from "./cancellation.ts";
-import { LspClient, type DiagnosticSnapshotScope, type OpenDocumentState } from "./client.ts";
+import { abortError, DIAGNOSTIC_TIMEOUT_ABORT_REASON, isCancellation, throwIfAborted } from "./cancellation.ts";
+import {
+  LspClient,
+  type DiagnosticSnapshotScope,
+  type OpenDocumentState,
+  type WorkspaceDocumentDiagnosticProtocol,
+} from "./client.ts";
 import { normalizeDiagnosticRefreshConcurrency, normalizeLspInitializationConcurrency, normalizeMaxActiveLspClients } from "./client-resources.ts";
 import {
   lspFileMutationPaths,
@@ -26,6 +31,7 @@ import { configuredLanguageServerIds, languageServerExtensions, languageServerRo
 import {
   discoverWorkspaceDiagnosticFiles,
   MAX_WORKSPACE_DIAGNOSTIC_ENTRIES,
+  MAX_WORKSPACE_DIAGNOSTIC_TOTAL_SOURCE_BYTES,
   normalizeWorkspaceDiagnosticFileLimit,
   readWorkspaceDiagnosticSource,
   type WorkspaceDiagnosticDiscovery,
@@ -122,7 +128,7 @@ interface WorkspaceDiagnosticClientFileResult {
   snapshot?: DiagnosticSnapshot;
   reason?: string;
   contentHash?: string;
-  protocol?: "workspace-pull" | "document-refresh";
+  protocol?: "workspace-pull" | WorkspaceDocumentDiagnosticProtocol;
 }
 
 interface WorkspaceDiagnosticFallbackPlan {
@@ -135,74 +141,8 @@ interface WorkspaceDiagnosticExecutionStats {
   workspacePullRequests: number;
   workspacePullFailures: number;
   workspacePullFiles: Set<string>;
-  documentRefreshFiles: Set<string>;
-}
-
-interface AsyncPermitWaiter {
-  resolve: (release: () => void) => void;
-  reject: (error: Error) => void;
-  signal?: AbortSignal;
-  onAbort?: () => void;
-  settled: boolean;
-}
-
-class AsyncPermitPool {
-  private active = 0;
-  private readonly waiters: AsyncPermitWaiter[] = [];
-  private readonly limit: number;
-
-  constructor(limit: number) {
-    this.limit = limit;
-  }
-
-  async run<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    const release = await this.acquire(signal);
-    try {
-      return await operation();
-    } finally {
-      release();
-    }
-  }
-
-  private acquire(signal?: AbortSignal): Promise<() => void> {
-    throwIfAborted(signal);
-    if (this.active < this.limit) {
-      this.active += 1;
-      return Promise.resolve(this.releasePermit());
-    }
-
-    return new Promise((resolve, reject) => {
-      const waiter: AsyncPermitWaiter = { resolve, reject, signal, settled: false };
-      if (signal) {
-        waiter.onAbort = () => {
-          if (waiter.settled) return;
-          waiter.settled = true;
-          signal.removeEventListener("abort", waiter.onAbort!);
-          reject(abortError(signal));
-        };
-        signal.addEventListener("abort", waiter.onAbort, { once: true });
-      }
-      this.waiters.push(waiter);
-      if (signal?.aborted) waiter.onAbort?.();
-    });
-  }
-
-  private releasePermit(): () => void {
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      while (this.waiters.length > 0) {
-        const waiter = this.waiters.shift()!;
-        if (waiter.settled) continue;
-        waiter.settled = true;
-        if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
-        waiter.resolve(this.releasePermit());
-        return;
-      }
-      this.active = Math.max(0, this.active - 1);
-    };
-  }
+  documentPullFiles: Set<string>;
+  pushBatchFiles: Set<string>;
 }
 
 type ClientEvictionReason = "idle" | "capacity";
@@ -312,6 +252,7 @@ export class LspService {
   async diagnosticsForWorkspace(targetPath: string, options: WorkspaceDiagnosticsOptions): Promise<WorkspaceDiagnosticScanResult> {
     throwIfAborted(options.signal);
     const startedAt = Date.now();
+    const deadlineAt = startedAt + Math.max(0, options.timeoutMs);
     const projectRoot = this.projectRoot;
     const limit = normalizeWorkspaceDiagnosticFileLimit(options.limit);
     if (options.server !== undefined) {
@@ -327,16 +268,39 @@ export class LspService {
       extensions: languageServerExtensions(this.serverConfiguration?.servers, options.server),
       limit,
       maxEntries: MAX_WORKSPACE_DIAGNOSTIC_ENTRIES,
+      deadlineAt,
       signal: options.signal,
     });
     const files = new Array<WorkspaceDiagnosticFileResult>(discovery.files.length);
     const snapshots = new Array<DiagnosticSnapshot | undefined>(discovery.files.length);
     const plans: WorkspaceDiagnosticFilePlan[] = [];
     const plansByClient = new Map<LspClient, WorkspaceDiagnosticFilePlan[]>();
+    let sourceBytes = 0;
+    let sourceByteLimitReached = false;
+    let deadlineReached = discovery.deadlineReached;
 
     for (let index = 0; index < discovery.files.length; index += 1) {
       throwIfAborted(options.signal);
       const filePath = discovery.files[index];
+      if (remainingWorkspaceDiagnosticBudget(deadlineAt) <= 0) {
+        deadlineReached = true;
+        files[index] = {
+          filePath,
+          outcome: "timed-out",
+          diagnostics: 0,
+          reason: "workspace diagnostic deadline expired before source preparation",
+        };
+        continue;
+      }
+      if (sourceByteLimitReached) {
+        files[index] = {
+          filePath,
+          outcome: "skipped",
+          diagnostics: 0,
+          reason: `workspace diagnostic total source limit of ${formatBytes(MAX_WORKSPACE_DIAGNOSTIC_TOTAL_SOURCE_BYTES)} was reached`,
+        };
+        continue;
+      }
       const source = readWorkspaceDiagnosticSource(discovery, filePath, DEFAULT_LSP_SOURCE_FILE_MAX_BYTES);
       if (source.content === undefined) {
         files[index] = {
@@ -347,6 +311,18 @@ export class LspService {
         };
         continue;
       }
+      const fileBytes = source.size ?? Buffer.byteLength(source.content, "utf8");
+      if (sourceBytes + fileBytes > MAX_WORKSPACE_DIAGNOSTIC_TOTAL_SOURCE_BYTES) {
+        sourceByteLimitReached = true;
+        files[index] = {
+          filePath,
+          outcome: "skipped",
+          diagnostics: 0,
+          reason: `workspace diagnostic total source limit of ${formatBytes(MAX_WORKSPACE_DIAGNOSTIC_TOTAL_SOURCE_BYTES)} was reached`,
+        };
+        continue;
+      }
+      sourceBytes += fileBytes;
 
       try {
         const clients = this.getOrCreateClients(filePath, options.server, options.server !== undefined);
@@ -390,9 +366,10 @@ export class LspService {
       workspacePullRequests: 0,
       workspacePullFailures: 0,
       workspacePullFiles: new Set(),
-      documentRefreshFiles: new Set(),
+      documentPullFiles: new Set(),
+      pushBatchFiles: new Set(),
     };
-    await this.executeWorkspaceDiagnosticPlans(discovery, plansByClient, clientResults, executionStats, options);
+    await this.executeWorkspaceDiagnosticPlans(discovery, plansByClient, clientResults, executionStats, options, deadlineAt);
     throwIfAborted(options.signal);
     this.revalidateWorkspaceDiagnosticResults(discovery, plans, clientResults, executionStats, options.signal);
 
@@ -430,7 +407,8 @@ export class LspService {
     const timedOutFiles = files.filter((file) => file.outcome === "timed-out").length;
     const unavailableFiles = files.filter((file) => file.outcome === "unavailable").length;
     const skippedFiles = files.filter((file) => file.outcome === "skipped").length;
-    const traversalComplete = !discovery.fileLimitReached && !discovery.entryLimitReached && discovery.walkErrors === 0;
+    if (timedOutFiles > 0 && Date.now() >= deadlineAt) deadlineReached = true;
+    const traversalComplete = !discovery.fileLimitReached && !discovery.entryLimitReached && !discovery.deadlineReached && discovery.walkErrors === 0;
     const complete = traversalComplete && timedOutFiles === 0 && unavailableFiles === 0 && skippedFiles === 0;
 
     return {
@@ -440,6 +418,8 @@ export class LspService {
         targetPath: discovery.targetPath,
         fileLimit: limit,
         entryLimit: MAX_WORKSPACE_DIAGNOSTIC_ENTRIES,
+        sourceByteLimit: MAX_WORKSPACE_DIAGNOSTIC_TOTAL_SOURCE_BYTES,
+        sourceBytes,
         entriesVisited: discovery.entriesVisited,
         selectedFiles: files.length,
         freshFiles,
@@ -450,13 +430,16 @@ export class LspService {
         workspacePullRequests: executionStats.workspacePullRequests,
         workspacePullFailures: executionStats.workspacePullFailures,
         workspacePullFiles: executionStats.workspacePullFiles.size,
-        documentRefreshFiles: executionStats.documentRefreshFiles.size,
+        documentPullFiles: executionStats.documentPullFiles.size,
+        pushBatchFiles: executionStats.pushBatchFiles.size,
         ignoredDirectories: discovery.ignoredDirectories,
         symlinksSkipped: discovery.symlinksSkipped,
         boundaryEntriesSkipped: discovery.boundaryEntriesSkipped,
         walkErrors: discovery.walkErrors,
         fileLimitReached: discovery.fileLimitReached,
         entryLimitReached: discovery.entryLimitReached,
+        sourceByteLimitReached,
+        deadlineReached,
         traversalComplete,
         complete,
         durationMs: Date.now() - startedAt,
@@ -470,9 +453,9 @@ export class LspService {
     clientResults: Map<LspClient, Map<string, WorkspaceDiagnosticClientFileResult>>,
     stats: WorkspaceDiagnosticExecutionStats,
     options: WorkspaceDiagnosticsOptions,
+    deadlineAt: number,
   ): Promise<void> {
     const entries = [...plansByClient.entries()];
-    const documentRefreshPermits = new AsyncPermitPool(this.diagnosticRefreshConcurrency);
     let nextIndex = 0;
     const worker = async () => {
       while (true) {
@@ -484,15 +467,35 @@ export class LspService {
         try {
           const resultByFile = new Map<string, WorkspaceDiagnosticClientFileResult>();
           clientResults.set(client, resultByFile);
+          if (remainingWorkspaceDiagnosticBudget(deadlineAt) <= 0) {
+            for (const plan of plans) {
+              resultByFile.set(plan.filePath, {
+                outcome: "timed-out",
+                reason: "workspace diagnostic deadline expired before this language server could run",
+              });
+            }
+            continue;
+          }
+
           const pull = await client.pullWorkspaceDiagnostics({
             uris: new Set(plans.map((plan) => plan.uri)),
-            timeoutMs: options.timeoutMs,
+            timeoutMs: Math.max(1, remainingWorkspaceDiagnosticBudget(deadlineAt)),
+            deadlineAt,
             settleMs: options.settleMs,
             signal: options.signal,
           });
           if (pull.attempted) {
             stats.workspacePullRequests += 1;
             if (pull.outcome !== "fresh") stats.workspacePullFailures += 1;
+          }
+          if (pull.outcome === "timed-out") {
+            for (const plan of plans) {
+              resultByFile.set(plan.filePath, {
+                outcome: "timed-out",
+                reason: "workspace diagnostic deadline expired during the native workspace pull",
+              });
+            }
+            continue;
           }
 
           const coveredUris = pull.outcome === "fresh" ? pull.coveredUris : new Set<string>();
@@ -520,66 +523,57 @@ export class LspService {
             } else {
               if (coveredUris.has(plan.uri)) client.invalidateDiagnosticsForFile(plan.filePath);
               fallbackPlans.push({ plan, content: source.content, contentHash: currentContentHash });
-              stats.documentRefreshFiles.add(plan.filePath);
             }
           }
 
-          await Promise.all(fallbackPlans.map(async (fallback) => {
-            const { plan } = fallback;
-            try {
-              const refresh = await documentRefreshPermits.run(
-                () => this.enqueueDiagnosticRefresh(plan.filePath, fallback.content, [client], {
-                  timeoutMs: options.timeoutMs,
-                  settleMs: options.settleMs,
-                  snapshotScope: "file",
-                  forceFresh: true,
-                  server: options.server,
-                  signal: options.signal,
-                }),
-                options.signal,
-              );
+          if (fallbackPlans.length > 0) {
+            const refresh = await client.refreshWorkspaceDocuments(
+              fallbackPlans.map((fallback) => ({
+                filePath: fallback.plan.filePath,
+                content: fallback.content,
+              })),
+              {
+                deadlineAt,
+                settleMs: options.settleMs,
+                concurrency: this.diagnosticRefreshConcurrency,
+                signal: options.signal,
+              },
+            );
 
-              if (refresh?.fresh) {
-                const source = readWorkspaceDiagnosticSource(discovery, plan.filePath, DEFAULT_LSP_SOURCE_FILE_MAX_BYTES);
-                if (source.content === undefined || contentHash(source.content) !== fallback.contentHash) {
-                  client.invalidateDiagnosticsForFile(plan.filePath);
-                  resultByFile.set(plan.filePath, {
-                    outcome: "unavailable",
-                    reason: source.content === undefined
-                      ? `source could not be revalidated after diagnostic refresh: ${workspaceSourceSkipReason(source)}`
-                      : "source file changed during diagnostic refresh",
-                  });
-                  return;
-                }
+            for (const fallback of fallbackPlans) {
+              const { plan } = fallback;
+              const documentResult = refresh.files.get(plan.uri);
+              if (!documentResult) {
+                resultByFile.set(plan.filePath, {
+                  outcome: remainingWorkspaceDiagnosticBudget(deadlineAt) <= 0 ? "timed-out" : "unavailable",
+                  reason: remainingWorkspaceDiagnosticBudget(deadlineAt) <= 0
+                    ? "workspace diagnostic deadline expired before document refresh"
+                    : "language server did not produce a document diagnostic result",
+                });
+                continue;
               }
-
-              resultByFile.set(plan.filePath, refresh
-                ? {
-                    outcome: refresh.fresh ? "fresh" : refresh.timedOut ? "timed-out" : "unavailable",
-                    ...(refresh.fresh ? { snapshot: refresh.snapshot } : {}),
-                    ...(refresh.fresh ? { contentHash: fallback.contentHash, protocol: "document-refresh" as const } : {}),
-                    ...(!refresh.fresh && !refresh.timedOut ? { reason: "diagnostic refresh was not authoritative" } : {}),
-                  }
-                : {
-                    outcome: "unavailable",
-                    reason: "language server did not produce a diagnostic refresh",
-                  });
-            } catch (error) {
-              if (isCancellation(error, options.signal)) throw error;
+              if (documentResult.protocol === "document-pull") stats.documentPullFiles.add(plan.filePath);
+              else stats.pushBatchFiles.add(plan.filePath);
               resultByFile.set(plan.filePath, {
-                outcome: "unavailable",
-                reason: errorMessage(error),
+                outcome: documentResult.outcome,
+                ...(documentResult.snapshot ? { snapshot: documentResult.snapshot } : {}),
+                ...(documentResult.outcome === "fresh" ? { contentHash: fallback.contentHash } : {}),
+                protocol: documentResult.protocol,
+                ...(documentResult.reason ? { reason: documentResult.reason } : {}),
               });
             }
-          }));
+          }
         } catch (error) {
-          if (isCancellation(error, options.signal)) throw error;
-          this.markClientInstanceError(plans[0]?.filePath ?? this.projectRoot, client, error);
-          const reason = errorMessage(error);
+          if (options.signal?.aborted) throw abortError(options.signal);
+          const timedOut = remainingWorkspaceDiagnosticBudget(deadlineAt) <= 0;
+          if (!timedOut) this.markClientInstanceError(plans[0]?.filePath ?? this.projectRoot, client, error);
+          const reason = timedOut ? "workspace diagnostic deadline expired" : errorMessage(error);
           const resultByFile = clientResults.get(client) ?? new Map<string, WorkspaceDiagnosticClientFileResult>();
           clientResults.set(client, resultByFile);
           for (const plan of plans) {
-            if (!resultByFile.has(plan.filePath)) resultByFile.set(plan.filePath, { outcome: "unavailable", reason });
+            if (!resultByFile.has(plan.filePath)) {
+              resultByFile.set(plan.filePath, { outcome: timedOut ? "timed-out" : "unavailable", reason });
+            }
           }
         } finally {
           this.workspaceDiagnosticClients.delete(client);
@@ -1290,6 +1284,7 @@ export class LspService {
   private armDiagnosticWaiterTimeout(job: DiagnosticRefreshJob, waiter: DiagnosticRefreshWaiter): void {
     waiter.timeout = setTimeout(() => {
       this.resolveDiagnosticWaiter(job, waiter, timedOutDiagnosticRefresh(job, waiter));
+      this.abortDiagnosticJobWithoutWaiters(job, DIAGNOSTIC_TIMEOUT_ABORT_REASON);
     }, Math.max(0, waiter.options.timeoutMs));
     waiter.timeout.unref();
   }
@@ -1321,10 +1316,13 @@ export class LspService {
     if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
     job.waiters.delete(waiter);
     waiter.reject(error);
-    if (job.waiters.size === 0) {
-      job.controller.abort();
-      this.scheduleDiagnosticPump();
-    }
+    this.abortDiagnosticJobWithoutWaiters(job);
+  }
+
+  private abortDiagnosticJobWithoutWaiters(job: DiagnosticRefreshJob, reason?: string): void {
+    if (job.waiters.size > 0) return;
+    job.controller.abort(reason);
+    this.scheduleDiagnosticPump();
   }
 
   private finishDiagnosticRefreshWaiters(result: DiagnosticRefreshResult | undefined): void {
@@ -2126,6 +2124,10 @@ function readLspSourceFileIfExists(filePath: string): string | undefined {
     throw new Error(`LSP source file is too large (${size} > ${formatBytes(DEFAULT_LSP_SOURCE_FILE_MAX_BYTES)} limit): ${filePath}`);
   }
   return result.content;
+}
+
+function remainingWorkspaceDiagnosticBudget(deadlineAt: number): number {
+  return Math.max(0, deadlineAt - Date.now());
 }
 
 function workspaceSourceSkipReason(result: WorkspaceDiagnosticSourceReadResult): string {

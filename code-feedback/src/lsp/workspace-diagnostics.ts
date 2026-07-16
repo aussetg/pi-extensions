@@ -10,6 +10,9 @@ import { throwIfAborted } from "./cancellation.ts";
 export const DEFAULT_WORKSPACE_DIAGNOSTIC_FILE_LIMIT = 50;
 export const MAX_WORKSPACE_DIAGNOSTIC_FILE_LIMIT = 200;
 export const MAX_WORKSPACE_DIAGNOSTIC_ENTRIES = 50_000;
+// Leave headroom below the 16 MiB outbound queue for JSON framing and escaping
+// when a push-only server receives the selected sources in one burst.
+export const MAX_WORKSPACE_DIAGNOSTIC_TOTAL_SOURCE_BYTES = 8 * 1024 * 1024;
 
 const IGNORED_WORKSPACE_DIRECTORIES = new Set([
   ".git",
@@ -45,6 +48,7 @@ export interface WorkspaceDiagnosticDiscoveryOptions {
   extensions: ReadonlySet<string>;
   limit: number;
   maxEntries?: number;
+  deadlineAt?: number;
   signal?: AbortSignal;
 }
 
@@ -60,6 +64,7 @@ export interface WorkspaceDiagnosticDiscovery {
   walkErrors: number;
   fileLimitReached: boolean;
   entryLimitReached: boolean;
+  deadlineReached: boolean;
 }
 
 export interface WorkspaceDiagnosticSourceReadResult {
@@ -115,6 +120,7 @@ export async function discoverWorkspaceDiagnosticFiles(
     walkErrors: 0,
     fileLimitReached: false,
     entryLimitReached: false,
+    deadlineReached: false,
   };
 
   const targetRelative = path.relative(projectRoot, targetPath);
@@ -124,6 +130,10 @@ export async function discoverWorkspaceDiagnosticFiles(
   if (options.extensions.size === 0) return discovery;
 
   if (targetTypeStat.isFile()) {
+    if (workspaceDiagnosticDeadlineReached(options.deadlineAt)) {
+      discovery.deadlineReached = true;
+      return discovery;
+    }
     discovery.entriesVisited = 1;
     if (matchesExtension(targetPath, options.extensions)) discovery.files.push(targetPath);
     return discovery;
@@ -132,6 +142,10 @@ export async function discoverWorkspaceDiagnosticFiles(
   const pendingDirectories = [targetPath];
   scan: while (pendingDirectories.length > 0) {
     throwIfAborted(options.signal);
+    if (workspaceDiagnosticDeadlineReached(options.deadlineAt)) {
+      discovery.deadlineReached = true;
+      break;
+    }
     const directory = pendingDirectories.pop()!;
     let entries: Dirent<string>[];
     try {
@@ -145,6 +159,10 @@ export async function discoverWorkspaceDiagnosticFiles(
     const childDirectories: string[] = [];
     for (const entry of entries) {
       throwIfAborted(options.signal);
+      if (workspaceDiagnosticDeadlineReached(options.deadlineAt)) {
+        discovery.deadlineReached = true;
+        break scan;
+      }
       if (discovery.entriesVisited >= maxEntries) {
         discovery.entryLimitReached = true;
         break scan;
@@ -183,6 +201,10 @@ export async function discoverWorkspaceDiagnosticFiles(
   }
 
   return discovery;
+}
+
+function workspaceDiagnosticDeadlineReached(deadlineAt: number | undefined): boolean {
+  return deadlineAt !== undefined && Date.now() >= deadlineAt;
 }
 
 export function readWorkspaceDiagnosticSource(

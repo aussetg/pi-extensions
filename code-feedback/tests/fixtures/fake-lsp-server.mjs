@@ -167,7 +167,10 @@ function handleMessage(message) {
           items: mode === "pull-clean" ? [] : diagnosticItems(),
           ...(mode === "pull-related" ? { relatedDocuments: relatedDiagnosticReports(message.params?.textDocument?.uri) } : {}),
         };
-    send({ jsonrpc: "2.0", id: message.id, result });
+    const respond = () => send({ jsonrpc: "2.0", id: message.id, result });
+    const delayMs = pullDiagnosticDelayMs(mode);
+    if (delayMs > 0) setTimeout(respond, delayMs);
+    else respond();
     return;
   }
 
@@ -294,7 +297,7 @@ function handleMessage(message) {
   }
 
   if (
-    (mode === "workspace-files-log" || mode === "file-rename-log") &&
+    (mode === "workspace-files-log" || mode === "file-rename-log" || logsDocumentSync(mode)) &&
     (message.method === "workspace/didChangeWatchedFiles" ||
       message.method === "workspace/didRenameFiles" ||
       message.method === "textDocument/didClose")
@@ -314,7 +317,8 @@ function isPositionScopedMethod(method) {
 }
 
 function logsDocumentSync(value) {
-  return value === "sync-log" || value === "workspace-files-log" || value === "file-rename-log" || /^workspace-pull-delay-\d+$/.test(value);
+  return value === "sync-log" || value === "workspace-files-log" || value === "file-rename-log" ||
+    /^workspace-pull-delay-\d+$/.test(value) || /^pull-delay-\d+$/.test(value) || /^diagnostics-delay-\d+$/.test(value);
 }
 
 function hoverContents() {
@@ -690,11 +694,8 @@ function diagnosticItems() {
 
 function shouldPublishDiagnostics(value) {
   return value !== "no-diagnostics" &&
-    value !== "pull-diagnostics" &&
-    value !== "pull-related" &&
-    value !== "pull-clean" &&
-    value !== "pull-invalid" &&
-    value !== "pull-malformed-items";
+    (!value.startsWith("pull-") || value === "pull-unsupported") &&
+    !value.startsWith("workspace-pull-");
 }
 
 function relatedDiagnosticReports(uri) {
@@ -709,6 +710,11 @@ function relatedDiagnosticReports(uri) {
 
 function diagnosticDelayMs(value) {
   const match = /^diagnostics-delay-(\d+)$/.exec(value);
+  return match ? Number.parseInt(match[1], 10) : 0;
+}
+
+function pullDiagnosticDelayMs(value) {
+  const match = /^pull-delay-(\d+)$/.exec(value);
   return match ? Number.parseInt(match[1], 10) : 0;
 }
 

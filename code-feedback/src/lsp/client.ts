@@ -4,7 +4,7 @@ import { createDiagnosticSnapshot } from "../diagnostics/snapshots.ts";
 import { asError, errorMessage } from "../errors.ts";
 import { mergeProcessEnv } from "../language-environments.ts";
 import { isRecord, type DiagnosticRefreshResult, type DiagnosticSnapshot, type LspClientState, type LspClientStatus, type LspDiagnostic, type LspDiagnosticOutcome, type LspServerLog, type LspServerLogLevel, type RelatedLocation } from "../types.ts";
-import { abortError, isCancellation, throwIfAborted, waitWithSignal } from "./cancellation.ts";
+import { abortError, DIAGNOSTIC_TIMEOUT_ABORT_REASON, isCancellation, throwIfAborted, waitWithSignal } from "./cancellation.ts";
 import type { LspFileMutation } from "./file-mutations.ts";
 import { filePathToUri, isLspRange, lspRangeToExternal, type LspRange } from "./positions.ts";
 import type { LanguageServerDefinition } from "./servers.ts";
@@ -156,7 +156,7 @@ interface WorkspaceDiagnosticReportCollector {
   malformed: boolean;
 }
 
-type PullDiagnosticOutcome = "authoritative" | "unavailable";
+type PullDiagnosticOutcome = "authoritative" | "timed-out" | "unavailable";
 
 interface TextDocumentContentChange {
   text: string;
@@ -190,8 +190,40 @@ export interface WorkspaceDiagnosticPullResult {
 export interface WorkspaceDiagnosticPullOptions {
   uris: ReadonlySet<string>;
   timeoutMs: number;
+  deadlineAt?: number;
   settleMs: number;
   signal?: AbortSignal;
+}
+
+export interface WorkspaceDiagnosticDocument {
+  filePath: string;
+  content: string;
+}
+
+export type WorkspaceDocumentDiagnosticProtocol = "document-pull" | "push-batch";
+
+export interface WorkspaceDocumentDiagnosticResult {
+  outcome: "fresh" | "timed-out" | "unavailable";
+  protocol: WorkspaceDocumentDiagnosticProtocol;
+  snapshot?: DiagnosticSnapshot;
+  reason?: string;
+}
+
+export interface WorkspaceDocumentDiagnosticsResult {
+  files: Map<string, WorkspaceDocumentDiagnosticResult>;
+}
+
+export interface WorkspaceDocumentDiagnosticsOptions {
+  deadlineAt: number;
+  settleMs: number;
+  concurrency: number;
+  signal?: AbortSignal;
+}
+
+interface DeadlineSignal {
+  signal: AbortSignal;
+  readonly timedOut: boolean;
+  dispose(): void;
 }
 
 export type DiagnosticSnapshotScope = "file" | "workspace";
@@ -205,6 +237,7 @@ const MAX_INBOUND_MESSAGE_BYTES = 16 * 1024 * 1024;
 const MAX_WORKSPACE_DIAGNOSTIC_REPORT_ENTRIES = 10_000;
 const MAX_WORKSPACE_DIAGNOSTIC_ENTRIES = 50_000;
 const MAX_WORKSPACE_DIAGNOSTIC_COLLECTED_BYTES = 16 * 1024 * 1024;
+const CLOSED_DOCUMENT_DIAGNOSTIC_SUPPRESSION_MS = 1_000;
 const PROCESS_KILL_GRACE_MS = 750;
 const FILE_CHANGE_CREATED = 1;
 const FILE_CHANGE_CHANGED = 2;
@@ -233,6 +266,7 @@ export class LspClient {
   private initializationAttempt?: InitializationAttempt;
   private documents = new Map<string, OpenDocument>();
   private diagnostics = new Map<string, DiagnosticEntry>();
+  private suppressedClosedDocumentDiagnostics = new Map<string, number>();
   private workspaceDiagnosticResultIds = new Map<string, string>();
   private diagnosticWaiters = new Map<string, Set<DiagnosticWaiter>>();
   private progressHandlers = new Map<string | number, (value: unknown) => void>();
@@ -310,7 +344,7 @@ export class LspClient {
       } catch (error) {
         if (isCancellation(error, options.signal)) {
           this.lastDiagnosticDurationMs = Date.now() - touchedAt;
-          this.lastDiagnosticOutcome = "cancelled";
+          this.lastDiagnosticOutcome = options.signal?.reason === DIAGNOSTIC_TIMEOUT_ABORT_REASON ? "timeout" : "cancelled";
         }
         throw error;
       }
@@ -329,90 +363,357 @@ export class LspClient {
 
   async pullWorkspaceDiagnostics(options: WorkspaceDiagnosticPullOptions): Promise<WorkspaceDiagnosticPullResult> {
     return this.withActiveOperation(async () => {
-      await this.ensureStarted(options.signal);
-      throwIfAborted(options.signal);
-
-      const provider = workspaceDiagnosticProvider(this.capabilities);
-      if (!provider) return workspaceDiagnosticPullResult(false, "unavailable");
-      if (options.uris.size === 0) return workspaceDiagnosticPullResult(false, "unavailable");
-
-      const requestedAt = Date.now();
-      const stateGeneration = this.workspaceStateGeneration;
-      const documentVersions = new Map<string, number | undefined>();
-      const previousResultIds = new Map<string, string>();
-      for (const uri of options.uris) {
-        documentVersions.set(uri, this.documents.get(uri)?.version);
-        const resultId = this.workspaceDiagnosticResultIds.get(uri);
-        if (resultId !== undefined && this.diagnostics.get(uri)?.authoritative === true) {
-          previousResultIds.set(uri, resultId);
-        }
-      }
-
-      const partialResultToken = `${this.sessionId ?? this.id}:workspace-diagnostic:${this.nextProgressToken++}`;
-      const collector: WorkspaceDiagnosticReportCollector = {
-        reports: new Map(),
-        reportEntries: 0,
-        diagnosticEntries: 0,
-        collectedBytes: 0,
-        malformed: false,
-      };
-      this.progressHandlers.set(partialResultToken, (value) => {
-        if (!appendWorkspaceDiagnosticReportChunk(collector, value)) collector.malformed = true;
-      });
-
-      const params: Record<string, unknown> = {
-        previousResultIds: [...previousResultIds].map(([uri, value]) => ({ uri, value })),
-        partialResultToken,
-      };
-      if (provider.identifier !== undefined) params.identifier = provider.identifier;
-
-      let response: unknown;
+      const deadlineAt = options.deadlineAt ?? Date.now() + Math.max(0, options.timeoutMs);
+      const deadline = createDeadlineSignal(deadlineAt, options.signal);
       try {
-        response = await this.sendRequest("workspace/diagnostic", params, options.timeoutMs, options.signal);
-      } catch (error) {
-        if (isCancellation(error, options.signal)) throw error;
-        return workspaceDiagnosticPullResult(
-          true,
-          isRequestTimeout(error, "workspace/diagnostic") ? "timed-out" : "unavailable",
-        );
-      } finally {
-        this.progressHandlers.delete(partialResultToken);
-      }
+        try {
+          await this.ensureStarted(deadline.signal);
+        } catch (error) {
+          if (options.signal?.aborted) throw abortError(options.signal);
+          if (deadline.timedOut) return workspaceDiagnosticPullResult(false, "timed-out");
+          throw error;
+        }
+        throwIfAborted(deadline.signal);
 
-      if (!appendWorkspaceDiagnosticReportChunk(collector, response) || collector.malformed) {
-        return workspaceDiagnosticPullResult(true, "unavailable");
-      }
-      if (this.workspaceStateGeneration !== stateGeneration) {
-        return workspaceDiagnosticPullResult(true, "unavailable");
-      }
+        const provider = workspaceDiagnosticProvider(this.capabilities);
+        if (!provider) return workspaceDiagnosticPullResult(false, "unavailable");
+        if (options.uris.size === 0) return workspaceDiagnosticPullResult(false, "unavailable");
+        if (remainingUntil(deadlineAt) <= 0) return workspaceDiagnosticPullResult(false, "timed-out");
 
-      const receivedAt = Date.now();
-      const coveredUris = new Set<string>();
-      for (const [uri, report] of collector.reports) {
-        if (!options.uris.has(uri)) continue;
-        const expectedVersion = documentVersions.get(uri);
-        const currentVersion = this.documents.get(uri)?.version;
-        if (currentVersion !== expectedVersion) continue;
-        if (expectedVersion === undefined ? report.version !== null : report.version !== expectedVersion) continue;
+        const requestedAt = Date.now();
+        const stateGeneration = this.workspaceStateGeneration;
+        const documentVersions = new Map<string, number | undefined>();
+        const previousResultIds = new Map<string, string>();
+        for (const uri of options.uris) {
+          documentVersions.set(uri, this.documents.get(uri)?.version);
+          const resultId = this.workspaceDiagnosticResultIds.get(uri);
+          if (resultId !== undefined && this.diagnostics.get(uri)?.authoritative === true) {
+            previousResultIds.set(uri, resultId);
+          }
+        }
 
-        if (report.kind === "unchanged") {
-          if (!previousResultIds.has(uri) || this.diagnostics.get(uri)?.authoritative !== true || report.resultId === undefined) continue;
-          this.workspaceDiagnosticResultIds.set(uri, report.resultId);
+        const partialResultToken = `${this.sessionId ?? this.id}:workspace-diagnostic:${this.nextProgressToken++}`;
+        const collector: WorkspaceDiagnosticReportCollector = {
+          reports: new Map(),
+          reportEntries: 0,
+          diagnosticEntries: 0,
+          collectedBytes: 0,
+          malformed: false,
+        };
+        this.progressHandlers.set(partialResultToken, (value) => {
+          if (!appendWorkspaceDiagnosticReportChunk(collector, value)) collector.malformed = true;
+        });
+
+        const params: Record<string, unknown> = {
+          previousResultIds: [...previousResultIds].map(([uri, value]) => ({ uri, value })),
+          partialResultToken,
+        };
+        if (provider.identifier !== undefined) params.identifier = provider.identifier;
+
+        let response: unknown;
+        try {
+          response = await this.sendRequest(
+            "workspace/diagnostic",
+            params,
+            Math.max(1, remainingUntil(deadlineAt)),
+            deadline.signal,
+          );
+        } catch (error) {
+          if (options.signal?.aborted) throw abortError(options.signal);
+          return workspaceDiagnosticPullResult(
+            true,
+            deadline.timedOut || isRequestTimeout(error, "workspace/diagnostic") ? "timed-out" : "unavailable",
+          );
+        } finally {
+          this.progressHandlers.delete(partialResultToken);
+        }
+
+        if (!appendWorkspaceDiagnosticReportChunk(collector, response) || collector.malformed) {
+          return workspaceDiagnosticPullResult(true, "unavailable");
+        }
+        if (this.workspaceStateGeneration !== stateGeneration) {
+          return workspaceDiagnosticPullResult(true, "unavailable");
+        }
+
+        const receivedAt = Date.now();
+        const coveredUris = new Set<string>();
+        for (const [uri, report] of collector.reports) {
+          if (!options.uris.has(uri)) continue;
+          const expectedVersion = documentVersions.get(uri);
+          const currentVersion = this.documents.get(uri)?.version;
+          if (currentVersion !== expectedVersion) continue;
+          if (expectedVersion === undefined ? report.version !== null : report.version !== expectedVersion) continue;
+
+          if (report.kind === "unchanged") {
+            if (!previousResultIds.has(uri) || this.diagnostics.get(uri)?.authoritative !== true || report.resultId === undefined) continue;
+            this.workspaceDiagnosticResultIds.set(uri, report.resultId);
+            coveredUris.add(uri);
+            continue;
+          }
+
+          this.storeDiagnostics(uri, report.diagnostics ?? [], report.version ?? undefined, receivedAt, true);
+          if (report.resultId === undefined) this.workspaceDiagnosticResultIds.delete(uri);
+          else this.workspaceDiagnosticResultIds.set(uri, report.resultId);
           coveredUris.add(uri);
+        }
+
+        try {
+          await settleDiagnostics(options.settleMs, deadline.signal);
+        } catch (error) {
+          if (options.signal?.aborted) throw abortError(options.signal);
+          if (deadline.timedOut) return workspaceDiagnosticPullResult(true, "timed-out");
+          throw error;
+        }
+        this.lastDiagnosticDurationMs = Date.now() - requestedAt;
+        this.lastDiagnosticOutcome = "fresh";
+        return workspaceDiagnosticPullResult(true, "fresh", coveredUris);
+      } finally {
+        deadline.dispose();
+      }
+    });
+  }
+
+  async refreshWorkspaceDocuments(
+    documents: readonly WorkspaceDiagnosticDocument[],
+    options: WorkspaceDocumentDiagnosticsOptions,
+  ): Promise<WorkspaceDocumentDiagnosticsResult> {
+    return this.withActiveOperation(async () => {
+      const files = new Map<string, WorkspaceDocumentDiagnosticResult>();
+      if (documents.length === 0) return { files };
+
+      const deadline = createDeadlineSignal(options.deadlineAt, options.signal);
+      const initiallyOpen = new Set(this.documents.keys());
+      let usedPushBatch = false;
+      try {
+        try {
+          await this.ensureStarted(deadline.signal);
+        } catch (error) {
+          if (options.signal?.aborted) throw abortError(options.signal);
+          if (!deadline.timedOut) throw error;
+          const protocol = documentDiagnosticProvider(this.capabilities) ? "document-pull" : "push-batch";
+          return {
+            files: workspaceDocumentOutcomeMap(documents, protocol, "timed-out", "workspace diagnostic deadline expired during server initialization"),
+          };
+        }
+
+        if (remainingUntil(options.deadlineAt) <= 0) {
+          const protocol = documentDiagnosticProvider(this.capabilities) ? "document-pull" : "push-batch";
+          return {
+            files: workspaceDocumentOutcomeMap(documents, protocol, "timed-out", "workspace diagnostic deadline expired before document refresh"),
+          };
+        }
+
+        if (documentDiagnosticProvider(this.capabilities)) {
+          const pulled = await this.pullWorkspaceDocumentDiagnostics(documents, options, deadline);
+          const pushFallbackDocuments = documents.filter((document) => (
+            pulled.get(filePathToUri(document.filePath))?.outcome === "unavailable"
+          ));
+          if (pushFallbackDocuments.length === 0 || remainingUntil(options.deadlineAt) <= 0) {
+            return { files: pulled };
+          }
+
+          usedPushBatch = true;
+          const pushed = await this.pushWorkspaceDocumentDiagnostics(pushFallbackDocuments, options, deadline);
+          for (const [uri, result] of pushed) pulled.set(uri, result);
+          return {
+            files: pulled,
+          };
+        }
+
+        usedPushBatch = true;
+        return {
+          files: await this.pushWorkspaceDocumentDiagnostics(documents, options, deadline),
+        };
+      } catch (error) {
+        if (options.signal?.aborted) throw abortError(options.signal);
+        if (!deadline.timedOut) throw error;
+        return {
+          files: workspaceDocumentOutcomeMap(
+            documents,
+            usedPushBatch ? "push-batch" : "document-pull",
+            "timed-out",
+            "workspace diagnostic deadline expired during document refresh",
+          ),
+        };
+      } finally {
+        for (const document of documents) {
+          const uri = filePathToUri(document.filePath);
+          if (initiallyOpen.has(uri)) continue;
+          this.closeDocument(uri);
+          this.invalidateDiagnostics(uri);
+        }
+
+        if (usedPushBatch && (deadline.timedOut || options.signal?.aborted)) {
+          this.terminateAfterWorkspaceDiagnosticBatch(
+            options.signal?.aborted
+              ? "push diagnostic batch was cancelled"
+              : "push diagnostic batch exceeded the workspace deadline",
+          );
+        }
+        deadline.dispose();
+      }
+    });
+  }
+
+  private async pullWorkspaceDocumentDiagnostics(
+    documents: readonly WorkspaceDiagnosticDocument[],
+    options: WorkspaceDocumentDiagnosticsOptions,
+    deadline: DeadlineSignal,
+  ): Promise<Map<string, WorkspaceDocumentDiagnosticResult>> {
+    const files = new Map<string, WorkspaceDocumentDiagnosticResult>();
+    let nextIndex = 0;
+    const worker = async () => {
+      while (true) {
+        const documentInput = documents[nextIndex++];
+        if (!documentInput) return;
+        const uri = filePathToUri(documentInput.filePath);
+        if (deadline.timedOut || remainingUntil(options.deadlineAt) <= 0) {
+          files.set(uri, {
+            outcome: "timed-out",
+            protocol: "document-pull",
+            reason: "workspace diagnostic deadline expired before document pull",
+          });
           continue;
         }
 
-        this.storeDiagnostics(uri, report.diagnostics ?? [], report.version ?? undefined, receivedAt, true);
-        if (report.resultId === undefined) this.workspaceDiagnosticResultIds.delete(uri);
-        else this.workspaceDiagnosticResultIds.set(uri, report.resultId);
-        coveredUris.add(uri);
+        const touchedAt = Date.now();
+        try {
+          this.invalidateDiagnostics(uri);
+          const document = this.syncDocument(documentInput.filePath, documentInput.content);
+          this.notify("textDocument/didSave", textDocumentDidSaveParams(document.uri, documentInput.content, this.capabilities));
+          const outcome = await this.pullDiagnostics(document, document.version, touchedAt, {
+            timeoutMs: Math.max(1, remainingUntil(options.deadlineAt)),
+            settleMs: options.settleMs,
+            forceFresh: true,
+            signal: deadline.signal,
+          });
+
+          if (outcome === "authoritative") {
+            files.set(uri, {
+              outcome: "fresh",
+              protocol: "document-pull",
+              snapshot: this.snapshotForUri(uri),
+            });
+          } else {
+            files.set(uri, {
+              outcome: outcome === "timed-out" || deadline.timedOut ? "timed-out" : "unavailable",
+              protocol: "document-pull",
+              reason: outcome === "timed-out" || deadline.timedOut
+                ? "workspace diagnostic deadline expired during document pull"
+                : "document diagnostic pull was unavailable or malformed",
+            });
+          }
+        } catch (error) {
+          if (options.signal?.aborted) throw abortError(options.signal);
+          if (!deadline.timedOut) throw error;
+          files.set(uri, {
+            outcome: "timed-out",
+            protocol: "document-pull",
+            reason: "workspace diagnostic deadline expired during document pull",
+          });
+        }
+      }
+    };
+
+    const concurrency = Math.min(documents.length, Math.max(1, Math.floor(options.concurrency)));
+    await Promise.all(Array.from({ length: concurrency }, worker));
+    return files;
+  }
+
+  private async pushWorkspaceDocumentDiagnostics(
+    documents: readonly WorkspaceDiagnosticDocument[],
+    options: WorkspaceDocumentDiagnosticsOptions,
+    deadline: DeadlineSignal,
+  ): Promise<Map<string, WorkspaceDocumentDiagnosticResult>> {
+    const files = new Map<string, WorkspaceDocumentDiagnosticResult>();
+    const synchronized: Array<{ uri: string; version: number; touchedAt: number }> = [];
+
+    // Synchronize the whole target set in one event-loop turn. Push-only
+    // servers commonly debounce these notifications into one diagnostic pass.
+    for (const documentInput of documents) {
+      throwIfAborted(deadline.signal);
+      const uri = filePathToUri(documentInput.filePath);
+      const touchedAt = Date.now();
+      this.invalidateDiagnostics(uri);
+      const document = this.syncDocument(documentInput.filePath, documentInput.content, true);
+      synchronized.push({ uri, version: document.version, touchedAt });
+    }
+    for (let index = 0; index < documents.length; index += 1) {
+      const documentInput = documents[index];
+      const document = synchronized[index];
+      this.notify("textDocument/didSave", textDocumentDidSaveParams(document.uri, documentInput.content, this.capabilities));
+    }
+
+    await Promise.all(synchronized.map(async (document) => {
+      if (deadline.timedOut || remainingUntil(options.deadlineAt) <= 0) {
+        files.set(document.uri, {
+          outcome: "timed-out",
+          protocol: "push-batch",
+          reason: "workspace diagnostic deadline expired before a diagnostic publication",
+        });
+        return;
       }
 
-      await settleDiagnostics(options.settleMs, options.signal);
-      this.lastDiagnosticDurationMs = Date.now() - requestedAt;
-      this.lastDiagnosticOutcome = "fresh";
-      return workspaceDiagnosticPullResult(true, "fresh", coveredUris);
-    });
+      try {
+        const fresh = await this.waitForDiagnostics(
+          document.uri,
+          document.version,
+          document.touchedAt,
+          Math.max(0, remainingUntil(options.deadlineAt)),
+          0,
+          deadline.signal,
+        );
+        files.set(document.uri, fresh
+          ? {
+              outcome: "fresh",
+              protocol: "push-batch",
+              snapshot: this.snapshotForUri(document.uri),
+            }
+          : {
+              outcome: "timed-out",
+              protocol: "push-batch",
+              reason: "push-only server did not publish diagnostics before the workspace deadline",
+            });
+      } catch (error) {
+        if (options.signal?.aborted) throw abortError(options.signal);
+        if (!deadline.timedOut) throw error;
+        files.set(document.uri, {
+          outcome: "timed-out",
+          protocol: "push-batch",
+          reason: "push-only server did not publish diagnostics before the workspace deadline",
+        });
+      }
+    }));
+
+    if ([...files.values()].every((result) => result.outcome === "fresh") && options.settleMs > 0) {
+      try {
+        await this.settleDiagnosticQuiescence(options.settleMs, options.deadlineAt, deadline.signal);
+        for (const document of synchronized) {
+          const result = files.get(document.uri);
+          if (result?.outcome === "fresh") result.snapshot = this.snapshotForUri(document.uri);
+        }
+      } catch (error) {
+        if (options.signal?.aborted) throw abortError(options.signal);
+        if (!deadline.timedOut) throw error;
+      }
+    }
+
+    const completedAt = Date.now();
+    const requestedAt = Math.min(...synchronized.map((document) => document.touchedAt));
+    this.lastDiagnosticDurationMs = Math.max(0, completedAt - requestedAt);
+    this.lastDiagnosticOutcome = [...files.values()].every((result) => result.outcome === "fresh") ? "fresh" : "timeout";
+    return files;
+  }
+
+  private async settleDiagnosticQuiescence(settleMs: number, deadlineAt: number, signal?: AbortSignal): Promise<void> {
+    while (true) {
+      throwIfAborted(signal);
+      const quietFor = Date.now() - (this.lastDiagnosticsAt ?? Date.now());
+      if (quietFor >= settleMs) return;
+      const remaining = remainingUntil(deadlineAt);
+      if (remaining <= 0) throw abortError(signal);
+      await waitWithSignal(sleep(Math.min(settleMs - quietFor, remaining)), signal);
+    }
   }
 
   async ensureDocument(filePath: string, content: string, signal?: AbortSignal): Promise<void> {
@@ -622,6 +923,21 @@ export class LspClient {
     } finally {
       if (this.shutdownPromise === shutdown) this.shutdownPromise = undefined;
     }
+  }
+
+  private terminateAfterWorkspaceDiagnosticBatch(reason: string): void {
+    const child = this.process;
+    if (!child) return;
+    const error = new Error(`${this.id} ${reason}; stopped to drain non-cancellable server work`);
+    this.lastError = error.message;
+    this.state = "stopped";
+    this.sessionId = undefined;
+    this.detachActiveProcess(child);
+    this.clearServerState();
+    this.rejectPending(error);
+    this.finishDiagnosticWaiters(false);
+    terminateProcess(child);
+    this.signalResourceChange();
   }
 
   private async performShutdown(signal?: AbortSignal): Promise<void> {
@@ -859,6 +1175,7 @@ export class LspClient {
     this.capabilities = undefined;
     this.documents.clear();
     this.diagnostics.clear();
+    this.suppressedClosedDocumentDiagnostics.clear();
     this.workspaceDiagnosticResultIds.clear();
     this.progressHandlers.clear();
     this.workspaceStateGeneration += 1;
@@ -911,6 +1228,7 @@ export class LspClient {
 
   private syncDocument(filePath: string, content: string, forceChange = false): OpenDocument {
     const uri = filePathToUri(filePath);
+    this.suppressedClosedDocumentDiagnostics.delete(uri);
     const languageId = this.definition.languageId(filePath);
     const document = this.documents.get(uri);
 
@@ -965,6 +1283,7 @@ export class LspClient {
     }
     this.documents.delete(uri);
     if (wasOpen) {
+      this.suppressedClosedDocumentDiagnostics.set(uri, Date.now() + CLOSED_DOCUMENT_DIAGNOSTIC_SUPPRESSION_MS);
       this.workspaceDiagnosticResultIds.delete(uri);
       this.workspaceStateGeneration += 1;
     }
@@ -1301,7 +1620,7 @@ export class LspClient {
     if (!provider) return "unavailable";
 
     const timeoutMs = remainingDiagnosticTimeout(options.timeoutMs, touchedAt);
-    if (timeoutMs <= 0) return "unavailable";
+    if (timeoutMs <= 0) return "timed-out";
 
     const params: Record<string, unknown> = { textDocument: { uri: document.uri } };
     if (provider.identifier !== undefined) params.identifier = provider.identifier;
@@ -1311,7 +1630,7 @@ export class LspClient {
       response = await this.sendRequest("textDocument/diagnostic", params, timeoutMs, options.signal);
     } catch (error) {
       if (isCancellation(error, options.signal)) throw error;
-      return "unavailable";
+      return isRequestTimeout(error, "textDocument/diagnostic") ? "timed-out" : "unavailable";
     }
 
     const report = parseDocumentDiagnosticReport(response);
@@ -1336,6 +1655,11 @@ export class LspClient {
     if (!isRecord(params)) return;
     const diagnostics = params as PublishDiagnosticsParams;
     if (typeof diagnostics.uri !== "string" || diagnostics.uri.length === 0) return;
+    const suppressedUntil = this.suppressedClosedDocumentDiagnostics.get(diagnostics.uri);
+    if (suppressedUntil !== undefined && !this.documents.has(diagnostics.uri)) {
+      if (Date.now() < suppressedUntil) return;
+      this.suppressedClosedDocumentDiagnostics.delete(diagnostics.uri);
+    }
     if (diagnostics.version !== undefined && !isLspInteger(diagnostics.version)) return;
     const parsed = parseDiagnosticItems(diagnostics.diagnostics);
     if (!parsed) return;
@@ -1799,6 +2123,62 @@ function isRequestTimeout(error: unknown, method: string): boolean {
 
 function remainingDiagnosticTimeout(timeoutMs: number, startedAt: number): number {
   return Math.max(0, timeoutMs - (Date.now() - startedAt));
+}
+
+function remainingUntil(deadlineAt: number): number {
+  return Math.max(0, deadlineAt - Date.now());
+}
+
+function createDeadlineSignal(deadlineAt: number, parent?: AbortSignal): DeadlineSignal {
+  const controller = new AbortController();
+  let timedOut = false;
+  let timer: NodeJS.Timeout | undefined;
+  const expire = () => {
+    if (controller.signal.aborted) return;
+    timedOut = true;
+    const error = new Error("Workspace diagnostic deadline exceeded");
+    error.name = "AbortError";
+    controller.abort(error);
+  };
+  const onParentAbort = () => {
+    if (!controller.signal.aborted) controller.abort(parent?.reason);
+  };
+
+  if (parent) {
+    parent.addEventListener("abort", onParentAbort, { once: true });
+    if (parent.aborted) onParentAbort();
+  }
+  if (!controller.signal.aborted) {
+    const remaining = remainingUntil(deadlineAt);
+    if (remaining <= 0) expire();
+    else {
+      timer = setTimeout(expire, remaining);
+      timer.unref();
+    }
+  }
+
+  return {
+    signal: controller.signal,
+    get timedOut() {
+      return timedOut;
+    },
+    dispose() {
+      if (timer) clearTimeout(timer);
+      parent?.removeEventListener("abort", onParentAbort);
+    },
+  };
+}
+
+function workspaceDocumentOutcomeMap(
+  documents: readonly WorkspaceDiagnosticDocument[],
+  protocol: WorkspaceDocumentDiagnosticProtocol,
+  outcome: "timed-out" | "unavailable",
+  reason: string,
+): Map<string, WorkspaceDocumentDiagnosticResult> {
+  return new Map(documents.map((document) => [
+    filePathToUri(document.filePath),
+    { outcome, protocol, reason },
+  ]));
 }
 
 function textDocumentChangeSyncKind(capabilities: unknown): TextDocumentSyncKind {

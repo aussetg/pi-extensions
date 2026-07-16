@@ -146,7 +146,7 @@ export function registerLspTool(
       "Use lsp with real LSP method names such as method=\"textDocument/hover\", method=\"textDocument/definition\", and method=\"workspace/symbol\"; positions use 1-based line plus either column or exact symbol and optional occurrence.",
       "Semantic requests automatically use language-role routes; diagnostics and code actions also use linter-role routes.",
       "Use the optional lsp server parameter to select one configured language server when multiple servers match a file.",
-      "Use lsp method=\"textDocument/diagnostic\" with path to refresh one file, or method=\"workspace/diagnostic\" with a project file/directory path for a bounded active scan. Explicit diagnostic calls use a 10-second refresh budget and return only fresh results; timeout, unavailable, or stale cache states are never returned as diagnostics.",
+      "Use lsp method=\"textDocument/diagnostic\" with path to refresh one file, or method=\"workspace/diagnostic\" with a project file/directory path for a bounded active scan. Explicit diagnostics use a 10-second budget; workspace scans share one absolute deadline across all selected files. Timeout, unavailable, or stale cache states are never returned as diagnostics.",
       "Use lsp method=\"textDocument/codeAction\" or method=\"textDocument/rename\" to preview a WorkspaceEdit, then method=\"workspaceEdit/apply\" with its id to apply it safely.",
       "Use lsp method=\"workspace/renameFile\" with path and newPath to preview an LSP-aware file rename, then apply its id with workspaceEdit/apply; file moves are never applied during preview.",
       "Do not use lsp for formatting; formatting is handled by code-feedback's edit pipeline or normal shell/editor tools.",
@@ -415,8 +415,11 @@ function workspaceDiagnosticHint(diagnostics: DiagnosticsToolSnapshot): string {
   if (diagnostics.mode === "file") return "The displayed diagnostics are fresh for the current file content.";
   const summary = diagnostics.workspaceScan?.summary;
   if (!summary) return "Pass path for an active workspace diagnostic scan.";
-  if (summary.fileLimitReached || summary.entryLimitReached) {
-    return `The active scan was bounded or incomplete. Narrow path or raise limit up to ${MAX_WORKSPACE_DIAGNOSTIC_FILE_LIMIT}; ignored directories and symlinks remain excluded.`;
+  if (summary.deadlineReached) {
+    return "The shared workspace diagnostic deadline was reached. Narrow the target before retrying; no fallback work continues after the deadline.";
+  }
+  if (summary.fileLimitReached || summary.entryLimitReached || summary.sourceByteLimitReached) {
+    return `The active scan was bounded or incomplete. Narrow path or raise limit up to ${MAX_WORKSPACE_DIAGNOSTIC_FILE_LIMIT}; source-byte, directory, and symlink bounds remain enforced.`;
   }
   if (!summary.traversalComplete) {
     return "Workspace traversal encountered unreadable directories. Narrow the target or check project permissions before retrying.";

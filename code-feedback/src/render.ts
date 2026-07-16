@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { formatTouchedRange } from "./diagnostics/ranges.ts";
 import { countDiagnosticSnapshotDiagnostics, flattenDiagnosticSnapshot } from "./diagnostics/snapshots.ts";
+import { formatBytes } from "./fs.ts";
 import { uriToFilePath } from "./lsp/positions.ts";
 import { displayPathFromRoot, projectRelativeText } from "./paths.ts";
 import type { PiCommandContext } from "./pi.ts";
@@ -178,8 +179,11 @@ export function renderDiagnosticsStatus(
     const bounds = [
       `${summary.entriesVisited}/${summary.entryLimit} entries visited`,
       `file limit ${summary.fileLimit}`,
+      `${formatBytes(summary.sourceBytes)}/${formatBytes(summary.sourceByteLimit)} source`,
       summary.fileLimitReached ? "file limit reached" : undefined,
       summary.entryLimitReached ? "entry limit reached" : undefined,
+      summary.sourceByteLimitReached ? "source byte limit reached" : undefined,
+      summary.deadlineReached ? "scan deadline reached" : undefined,
     ].filter(Boolean).join(" · ");
     const excluded = [
       summary.ignoredDirectories > 0 ? `${summary.ignoredDirectories} ignored director${summary.ignoredDirectories === 1 ? "y" : "ies"}` : undefined,
@@ -190,7 +194,7 @@ export function renderDiagnosticsStatus(
     lines.push(
       `  scan: ${completeness} (${summary.durationMs}ms)`,
       `  files: ${summary.selectedFiles} selected · ${summary.freshFiles} fresh · ${summary.timedOutFiles} timed out · ${summary.unavailableFiles} unavailable · ${summary.skippedFiles} skipped`,
-      `  protocol: ${summary.workspacePullRequests} workspace pull${summary.workspacePullRequests === 1 ? "" : "s"} · ${summary.workspacePullFiles} pull-covered · ${summary.documentRefreshFiles} document fallback · ${summary.workspacePullFailures} pull failure${summary.workspacePullFailures === 1 ? "" : "s"}`,
+      `  protocol: ${summary.workspacePullRequests} workspace pull${summary.workspacePullRequests === 1 ? "" : "s"} · ${summary.workspacePullFiles} workspace-covered · ${summary.documentPullFiles} document-pulled · ${summary.pushBatchFiles} push-batched · ${summary.workspacePullFailures} pull failure${summary.workspacePullFailures === 1 ? "" : "s"}`,
       `  bounds: ${bounds}`,
     );
     if (excluded) lines.push(`  excluded: ${excluded}`);

@@ -1208,7 +1208,7 @@ test("lsp workspace diagnostics require an active path and return fresh-only sca
     assert.match(active.content[0].text, /known LSP diagnostics: 1/);
     assert.match(active.content[0].text, /scan: bounded\/incomplete/);
     assert.match(active.content[0].text, /files: 1 selected · 1 fresh · 0 timed out · 0 unavailable · 0 skipped/);
-    assert.match(active.content[0].text, /protocol: 1 workspace pull · 1 pull-covered · 0 document fallback · 0 pull failures/);
+    assert.match(active.content[0].text, /protocol: 1 workspace pull · 1 workspace-covered · 0 document-pulled · 0 push-batched · 0 pull failures/);
     assert.equal(active.details.ok, true);
     assert.equal(active.details.method, "workspace/diagnostic");
     assert.equal(active.details.mode, "workspace");
@@ -1218,7 +1218,8 @@ test("lsp workspace diagnostics require an active path and return fresh-only sca
     assert.equal(active.details.workspaceScan.fileLimitReached, true);
     assert.equal(active.details.workspaceScan.workspacePullRequests, 1);
     assert.equal(active.details.workspaceScan.workspacePullFiles, 1);
-    assert.equal(active.details.workspaceScan.documentRefreshFiles, 0);
+    assert.equal(active.details.workspaceScan.documentPullFiles, 0);
+    assert.equal(active.details.workspaceScan.pushBatchFiles, 0);
     assert.equal(active.details.workspaceScan.files[0].outcome, "fresh");
     assert.deepEqual(service.getStatus().clients.map((client) => client.id), ["python-ruff"]);
 

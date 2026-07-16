@@ -52,6 +52,7 @@ const scenarioSpecs = [
   ["lsp/reconcile-no-client", () => runExternalReconciliationScenario({ name: "lsp/reconcile-no-client", iterations: baseIterations * 100, active: false })],
   ["lsp/reconcile-open-change", () => runExternalReconciliationScenario({ name: "lsp/reconcile-open-change", iterations: baseIterations, active: true })],
   ["lsp/workspace-pull-clean-20", () => runFakeWorkspaceLspScenario(Math.max(3, Math.ceil(baseIterations / 10)))],
+  ["lsp/workspace-push-batch-50", () => runFakePushWorkspaceLspScenario(Math.max(3, Math.ceil(baseIterations / 10)))],
   ["lsp/fake-delay-200", () => runFakeLspScenario({ name: "lsp/fake-delay-200", iterations: Math.max(3, Math.ceil(baseIterations / 10)), warmup: 1, mode: "diagnostics-delay-200", inlineTimeoutMs: 80, expectInline: false })],
   ["lsp/fake-timeout-80", () => runFakeLspScenario({ name: "lsp/fake-timeout-80", iterations: Math.max(3, Math.ceil(baseIterations / 10)), warmup: 0, mode: "no-diagnostics", timeoutMs: 80, inlineTimeoutMs: 80, inline: "off" })],
 ];
@@ -313,9 +314,59 @@ async function runFakeWorkspaceLspScenario(iterations) {
           scan.value.summary.selectedFiles !== fileCount ||
           scan.value.summary.freshFiles !== fileCount ||
           scan.value.summary.workspacePullRequests !== 1 ||
-          scan.value.summary.documentRefreshFiles !== 0
+          scan.value.summary.documentPullFiles !== 0 ||
+          scan.value.summary.pushBatchFiles !== 0
         ) {
           throw new Error("benchmark sanity check failed: expected one authoritative workspace pull without document fallback");
+        }
+        return withTotal([scan]);
+      },
+    });
+  } finally {
+    await lspService.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function runFakePushWorkspaceLspScenario(iterations) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-perf-workspace-push-"));
+  const fileCount = 50;
+  await Promise.all(Array.from({ length: fileCount }, (_, index) => (
+    writeFile(path.join(root, `probe-${String(index).padStart(2, "0")}.ts`), makeTsContent(index, 30), "utf8")
+  )));
+  const lspService = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    diagnosticRefreshConcurrency: 1,
+    serverOverrides: {
+      typescript: {
+        command: process.execPath,
+        args: [fakeLspServer, "fake-ts", "TS100", "1", "", "diagnostics-delay-20"],
+      },
+    },
+  });
+
+  try {
+    return await runScenario({
+      name: "lsp/workspace-push-batch-50",
+      iterations,
+      warmup: 1,
+      notes: `${fileCount}-file push-only workspace scan; all documents synchronize in one batch and close after fresh publications`,
+      resources: () => lspRootPids(lspService),
+      operation: async () => {
+        const scan = await timed("workspace_diagnostics", () => lspService.diagnosticsForWorkspace(".", {
+          limit: fileCount,
+          timeoutMs: 1000,
+          settleMs: 0,
+          server: "typescript",
+        }));
+        if (
+          scan.value.summary.selectedFiles !== fileCount ||
+          scan.value.summary.freshFiles !== fileCount ||
+          scan.value.summary.pushBatchFiles !== fileCount ||
+          lspService.getStatus().clients[0]?.openDocuments !== 0
+        ) {
+          throw new Error("benchmark sanity check failed: expected one transient push batch covering every selected file");
         }
         return withTotal([scan]);
       },

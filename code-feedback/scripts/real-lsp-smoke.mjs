@@ -92,7 +92,25 @@ async function runSmokeCase(entry) {
     if (!isRecord(capabilities)) throw new Error("initialize returned no capability object");
 
     let probe = "initialize";
-    if (capabilities.documentSymbolProvider) {
+    if (entry.id === "typescript") {
+      const scan = await service.diagnosticsForWorkspace(".", {
+        limit: 100,
+        timeoutMs: 10_000,
+        settleMs: 100,
+        server: entry.id,
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!scan.summary.complete || scan.summary.freshFiles !== scan.summary.selectedFiles) {
+        throw new Error(`workspace diagnostics were incomplete (${scan.summary.freshFiles}/${scan.summary.selectedFiles} fresh)`);
+      }
+      if (scan.summary.pushBatchFiles + scan.summary.documentPullFiles + scan.summary.workspacePullFiles < scan.summary.selectedFiles) {
+        throw new Error("workspace diagnostics did not report a protocol for every selected TypeScript file");
+      }
+      if (service.getStatus().clients.some((client) => client.openDocuments !== 0)) {
+        throw new Error("workspace diagnostics retained transient TypeScript documents");
+      }
+      probe = `workspace diagnostics (${scan.summary.freshFiles} files, ${scan.summary.durationMs} ms)`;
+    } else if (capabilities.documentSymbolProvider) {
       const symbols = await service.documentSymbols(filePath, AbortSignal.timeout(20_000), entry.id);
       if (!Array.isArray(symbols)) throw new Error("document symbols returned a non-array response");
       probe = `document symbols (${symbols.length})`;
@@ -124,6 +142,11 @@ async function runSmokeCase(entry) {
 
 async function writeFixture(root, entry) {
   const allFiles = { ...entry.files, [entry.file]: entry.content };
+  if (entry.id === "typescript") {
+    for (let index = 0; index < 20; index += 1) {
+      allFiles[`src/probe-${String(index).padStart(2, "0")}.ts`] = `export const value${index}: number = ${index};\n`;
+    }
+  }
   for (const [relativePath, content] of Object.entries(allFiles)) {
     const filePath = path.join(root, relativePath);
     await mkdir(path.dirname(filePath), { recursive: true });

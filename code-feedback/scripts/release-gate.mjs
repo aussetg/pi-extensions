@@ -41,8 +41,12 @@ export const CONFORMANCE_REQUIREMENTS = [
   ]),
   requirement("capability-gated workspace diagnostics", [
     evidence("tests/workspace-diagnostics.test.mjs", "active workspace diagnostics prefer one capability-gated workspace pull"),
-    evidence("tests/workspace-diagnostics.test.mjs", "missing, malformed, oversized, timed-out, and unsupported workspace reports fall back without false clean results"),
+    evidence("tests/workspace-diagnostics.test.mjs", "missing, malformed, oversized, and unsupported workspace reports fall back within the shared deadline"),
+    evidence("tests/workspace-diagnostics.test.mjs", "a timed-out native workspace pull does not start fallback work after the scan deadline"),
+    evidence("tests/workspace-diagnostics.test.mjs", "a falsely advertised document pull falls back to one push batch within the shared deadline"),
+    evidence("tests/workspace-diagnostics.test.mjs", "push-only workspace diagnostics synchronize once, publish as a batch, and close transient documents"),
     evidence("tests/workspace-diagnostics.test.mjs", "active workspace diagnostics enforce file and traversal bounds"),
+    evidence("tests/workspace-diagnostics.test.mjs", "active workspace diagnostics enforce a total source-byte bound"),
   ]),
   requirement("preview-first transactional file rename", [
     evidence("tests/lsp-tool.test.mjs", "lsp file rename previews server edits and applies one safe transaction"),
@@ -84,6 +88,7 @@ export const PERFORMANCE_GATES = [
   wallGate("shell reconciliation without a client", "lsp/reconcile-no-client", 1, { requireNoChildProcess: true }),
   wallGate("one changed open-document reconciliation", "lsp/reconcile-open-change", 2),
   wallGate("20-file workspace pull", "lsp/workspace-pull-clean-20", 10),
+  wallGate("50-file workspace push batch", "lsp/workspace-push-batch-50", 100),
   wallGate("delayed diagnostic inline budget", "lsp/fake-delay-200", 90),
   wallGate("diagnostic timeout budget", "lsp/fake-timeout-80", 90),
 ];
