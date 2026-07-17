@@ -187,3 +187,9 @@ No control-flow compiler is required.
   source sites. Tests load all six definitions and contain memory, wire, callback, cancellation,
   worker-crash, and asynchronous-runaway failures. The path remains isolated before effect adapters
   and runtime cutover.
+- The production v17 artifact layer now stores canonical schema-4 bodies/metadata, reconstructs exact
+  artifact and attachable-product authority, generates canonical agent/command/verification/
+  measurement evidence, and normalizes nested records/arrays into sorted named manifests. Immutable
+  agent-input trees validate every digest and reject plain leaves, lookalikes, nonattachable products,
+  unsafe segments, cycles, foreign identity, and filesystem tampering. A protocol-17 test exercises a
+  whole agent product from host to worker and back through manifest materialization.

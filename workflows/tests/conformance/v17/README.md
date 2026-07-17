@@ -72,4 +72,12 @@ explicit product/reference wire variants backed by host WeakMap authority. Produ
 six corpus definitions and cover descriptor/product/reference round trips, nested public artifacts,
 lookalikes, foreign/revoked authority, callback contexts, synchronous references, source tampering,
 protocol/wire limits, cancellation, worker death, runnable-segment runaway, and heap exhaustion. It
-remains unwired from the v16 coordinator pending canonical effect products and adapters.
+remains unwired from the v16 coordinator pending effect adapters.
+
+The production artifact implementation now exists under `src/artifacts/*-v17.ts`. Its schema-4 store
+uses the same immutable body and metadata format as replay; the product factory binds public frozen
+agent, command, verification, and measurement values to canonical artifact evidence through the host
+authority registry. The recursive manifest and read-only materializer reproduce the independent
+artifact oracle for nested/repeated/empty inputs, exact path failures, anti-forgery, and unsafe names.
+Production tests additionally cover crash recovery before SQLite admission, binary/file safety,
+filesystem tampering, and a complete branded control-wire → manifest → agent-input round trip.

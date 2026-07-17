@@ -295,7 +295,23 @@ exposing identity fields to workflow source; plain lookalikes remain plain data,
 revoked authority fails closed. The host watchdog covers synchronous code and asynchronous runnable
 continuations, while IPC byte/depth/node limits and callback invocation contexts remain bounded.
 All six v17 definitions load in this realm. It remains disconnected from coordinator execution until
-the effect-product/adapters and atomic cutover phases.
+the effect-adapter and atomic cutover phases.
+
+The staged v17 artifact layer now writes schema-4 content-addressed JSON, text, binary, and copied-file
+evidence using the same immutable body/metadata layout consumed by causal replay. Host product
+factories mint agent, command, verification, and measurement results only from exact stored artifact
+authority; every such result owns a canonical host-generated artifact, while published evidence,
+candidate checkpoints, and measurement diagnostics remain separately branded artifacts. Record-
+experiment remains ordinary JSON under the frozen public contract, but its operation receives a
+canonical experiment artifact.
+
+Named artifact inputs use one recursive algebra of exact artifacts, attachable branded products,
+records, and arrays. It emits a sorted path manifest, preserves repeated authority at each path, and
+rejects plain leaves, lookalikes, nonattachable products, cycles, and unsafe segments with their exact
+path. The v17 materializer validates that manifest and every immutable body before constructing a
+read-only nested agent-input tree; it never accepts the old ad-hoc flat input shape. Product authority
+survives the protocol-17 host/worker round trip and resolves back to the same host value before
+manifest admission.
 
 The following describes the currently executable v16 layout.
 
