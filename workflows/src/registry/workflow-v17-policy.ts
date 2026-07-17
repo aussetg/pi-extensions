@@ -8,6 +8,7 @@ import { stableHash } from "../utils/hashes.js";
 import { readBoundedTextFile } from "../persistence/safe-paths.js";
 
 export const WORKFLOW_V17_REGISTRY_POLICY_FILE = "registry.json";
+export const WORKFLOW_V17_REGISTRY_PROMOTION_FILE = ".registry-promotion-v17.json";
 
 export type WorkflowV17Exposure = "human" | "model";
 
@@ -20,6 +21,13 @@ export interface WorkflowV17RegistryPolicySnapshot {
   hash: string;
 }
 
+export class WorkflowV17RegistryPromotionPendingError extends Error {
+  constructor(readonly transactionPath: string) {
+    super(`Workflow v17 registry has an incomplete promotion transaction ${transactionPath}`);
+    this.name = "WorkflowV17RegistryPromotionPendingError";
+  }
+}
+
 const POLICY_BYTES = 64 * 1024;
 const POLICY_FIELDS = new Set(["formatVersion", "model"]);
 
@@ -30,9 +38,22 @@ const POLICY_FIELDS = new Set(["formatVersion", "model"]);
 export async function readWorkflowV17RegistryPolicy(
   directoryInput: string,
   namespace: WorkflowNamespace,
+  options: { ignorePendingPromotion?: boolean } = {},
 ): Promise<WorkflowV17RegistryPolicySnapshot> {
   const directory = path.resolve(directoryInput);
   const policyPath = path.join(directory, WORKFLOW_V17_REGISTRY_POLICY_FILE);
+  const transactionPath = path.join(directory, WORKFLOW_V17_REGISTRY_PROMOTION_FILE);
+  if (!options.ignorePendingPromotion) {
+    try {
+      const transaction = await fs.promises.lstat(transactionPath);
+      if (!transaction.isFile() || transaction.isSymbolicLink()) {
+        throw new Error("Workflow v17 registry promotion marker is unsafe");
+      }
+      throw new WorkflowV17RegistryPromotionPendingError(transactionPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
   let source: string;
   try {
     const stat = await fs.promises.lstat(policyPath);
@@ -85,6 +106,19 @@ export function workflowV17Exposure(
   name: string,
 ): WorkflowV17Exposure {
   return policy.model.includes(name) ? "model" : "human";
+}
+
+export function workflowV17RegistryPolicyDocument(
+  policy: WorkflowV17RegistryPolicySnapshot,
+  name: string,
+  exposure: WorkflowV17Exposure,
+): { formatVersion: 1; model: string[] } {
+  if (!FLOW_NAME_PATTERN.test(name)) throw new TypeError("Workflow v17 policy update name is invalid");
+  if (exposure !== "human" && exposure !== "model") throw new TypeError("Workflow v17 policy exposure is invalid");
+  const model = new Set(policy.model);
+  if (exposure === "model") model.add(name);
+  else model.delete(name);
+  return { formatVersion: 1, model: [...model].sort() };
 }
 
 function policySnapshot(

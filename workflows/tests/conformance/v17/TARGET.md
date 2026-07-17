@@ -215,3 +215,11 @@ No control-flow compiler is required.
   and metric methods use an encounter-local state view. These close two future-evidence leaks found
   only by complete native-control workflows. Safe artifact names now admit ordinary ASCII camelCase
   keys while still rejecting path traversal and unsafe segments.
+- The schema-4 projection path now derives review and inspector views from causal scope/operation
+  evidence. Keyed lanes, descriptor bindings, dynamic titles, candidates, verification,
+  measurements, experiments, dispositions, checkpoints, replay, and apply are bounded plain data;
+  four complete builtin renderer snapshots demonstrate that stage/loop syntax is unnecessary.
+- The staged v17 draft/tool path now strictly reviews inert `.flow.ts`, binds promotion to source,
+  review, policy preimage, and target exposure, and uses a recoverable fail-closed marker to commit
+  source plus `registry.json`. Trust-filtered workflow schemas expose only model-visible definitions
+  and enumerate exact available measurement profiles. Launch remains deferred to atomic cutover.

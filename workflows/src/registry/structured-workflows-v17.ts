@@ -20,6 +20,8 @@ import { stableHash } from "../utils/hashes.js";
 import {
   defaultWorkflowV17RegistryPolicy,
   readWorkflowV17RegistryPolicy,
+  WorkflowV17RegistryPromotionPendingError,
+  WORKFLOW_V17_REGISTRY_PROMOTION_FILE,
   workflowV17Exposure,
   type WorkflowV17Exposure,
   type WorkflowV17RegistryPolicySnapshot,
@@ -180,10 +182,24 @@ async function discoverWorkflowV17Root(
   }
 
   let policy: WorkflowV17RegistryPolicySnapshot;
+  let fallbackPolicy = false;
   const invalid: InvalidWorkflowV17DefinitionRef[] = [];
   try {
     policy = await readWorkflowV17RegistryPolicy(directory, root.namespace);
   } catch (error) {
+    if (error instanceof WorkflowV17RegistryPromotionPendingError) {
+      return {
+        refs: [],
+        invalid: [{
+          kind: "policy",
+          namespace: root.namespace,
+          path: error.transactionPath,
+          name: "registry",
+          error: error.message,
+        }],
+      };
+    }
+    fallbackPolicy = true;
     policy = defaultWorkflowV17RegistryPolicy(directory, root.namespace);
     invalid.push({
       kind: "policy",
@@ -245,6 +261,45 @@ async function discoverWorkflowV17Root(
     } catch (error) {
       invalid.push(invalidDefinition(root.namespace, filePath, installedName, error));
     }
+  }
+  try {
+    if (fallbackPolicy) {
+      try {
+        await fs.promises.lstat(path.join(directory, WORKFLOW_V17_REGISTRY_PROMOTION_FILE));
+        throw new WorkflowV17RegistryPromotionPendingError(
+          path.join(directory, WORKFLOW_V17_REGISTRY_PROMOTION_FILE),
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      return { refs, invalid };
+    }
+    const finalPolicy = await readWorkflowV17RegistryPolicy(directory, root.namespace);
+    if (finalPolicy.hash !== policy.hash) {
+      return {
+        refs: [],
+        invalid: [{
+          kind: "policy",
+          namespace: root.namespace,
+          path: finalPolicy.path,
+          name: "registry",
+          error: "Workflow registry policy changed during definition discovery; refresh again",
+        }],
+      };
+    }
+  } catch (error) {
+    return {
+      refs: [],
+      invalid: [{
+        kind: "policy",
+        namespace: root.namespace,
+        path: error instanceof WorkflowV17RegistryPromotionPendingError
+          ? error.transactionPath
+          : path.join(directory, "registry.json"),
+        name: "registry",
+        error: errorMessage(error),
+      }],
+    };
   }
   return { refs, invalid };
 }

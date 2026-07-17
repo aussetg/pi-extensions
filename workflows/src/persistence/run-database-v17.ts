@@ -66,6 +66,7 @@ import type {
   WorkflowOperationV17Kind,
   WorkflowOperationArtifactV17Record,
   WorkflowOperationV17Record,
+  WorkflowOperationV17Status,
   WorkflowRunV17Event,
   WorkflowRunV17Record,
   WorkflowRunV17Status,
@@ -378,6 +379,14 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
     ).all(after, limit) as SqlRow[]).map(eventFromRow);
   }
 
+  latestEventSequence(): number {
+    this.assertOpen();
+    return requiredNumber(
+      this.database.prepare("SELECT coalesce(max(sequence), 0) AS value FROM events").get() as SqlRow,
+      "value",
+    );
+  }
+
   readScope(scopeId: string): WorkflowScopeV17Record | undefined {
     this.assertOpen();
     assertIdentifier(scopeId, "workflow v17 scope id");
@@ -432,6 +441,22 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
     ).all(after, limit) as SqlRow[]).map(operationFromRow);
   }
 
+  countOperations(): number {
+    this.assertOpen();
+    return requiredNumber(this.database.prepare("SELECT count(*) AS value FROM operations").get() as SqlRow, "value");
+  }
+
+  readOperationCounts(): Partial<Record<WorkflowOperationV17Status, number>> {
+    this.assertOpen();
+    const result: Partial<Record<WorkflowOperationV17Status, number>> = {};
+    for (const row of this.database.prepare(
+      "SELECT status, count(*) AS value FROM operations GROUP BY status ORDER BY status",
+    ).all() as SqlRow[]) {
+      result[requiredString(row, "status") as WorkflowOperationV17Status] = requiredNumber(row, "value");
+    }
+    return result;
+  }
+
   readScopeCall(operationId: string): WorkflowScopeCallV17Record | undefined {
     this.assertOpen();
     assertIdentifier(operationId, "workflow v17 operation id");
@@ -474,6 +499,27 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
     return row ? artifactFromRow(row) : undefined;
   }
 
+  listArtifacts(options: {
+    after?: { createdAt: string; digest: string };
+    limit?: number;
+  } = {}): WorkflowArtifactV17Record[] {
+    this.assertOpen();
+    const limit = pageLimit(options.limit);
+    if (!options.after) {
+      return (this.database.prepare(
+        "SELECT * FROM artifacts ORDER BY created_at, digest LIMIT ?",
+      ).all(limit) as SqlRow[]).map(artifactFromRow);
+    }
+    assertIsoDate(options.after.createdAt, "workflow v17 artifact cursor time");
+    assertHash(options.after.digest, "workflow v17 artifact cursor digest");
+    return (this.database.prepare(`
+      SELECT * FROM artifacts
+      WHERE created_at > ? OR (created_at = ? AND digest > ?)
+      ORDER BY created_at, digest LIMIT ?
+    `).all(options.after.createdAt, options.after.createdAt, options.after.digest, limit) as SqlRow[])
+      .map(artifactFromRow);
+  }
+
   listOperationArtifacts(operationId: string): WorkflowOperationArtifactV17Record[] {
     this.assertOpen();
     assertIdentifier(operationId, "workflow v17 operation id");
@@ -506,6 +552,48 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
     assertIdentifier(attemptId, "workflow v17 attempt id");
     const row = this.database.prepare("SELECT * FROM attempts WHERE attempt_id = ?").get(attemptId) as SqlRow | undefined;
     return row ? attemptFromRow(row) : undefined;
+  }
+
+  listAttempts(options: {
+    after?: { createdAt: string; attemptId: string };
+    limit?: number;
+  } = {}): WorkflowAttemptV17Record[] {
+    this.assertOpen();
+    const limit = pageLimit(options.limit);
+    if (!options.after) {
+      return (this.database.prepare(
+        "SELECT * FROM attempts ORDER BY created_at, attempt_id LIMIT ?",
+      ).all(limit) as SqlRow[]).map(attemptFromRow);
+    }
+    assertIsoDate(options.after.createdAt, "workflow v17 attempt cursor time");
+    assertIdentifier(options.after.attemptId, "workflow v17 attempt cursor id");
+    return (this.database.prepare(`
+      SELECT * FROM attempts
+      WHERE created_at > ? OR (created_at = ? AND attempt_id > ?)
+      ORDER BY created_at, attempt_id LIMIT ?
+    `).all(options.after.createdAt, options.after.createdAt, options.after.attemptId, limit) as SqlRow[])
+      .map(attemptFromRow);
+  }
+
+  listWorkspaceCheckpoints(options: {
+    after?: { createdAt: string; checkpointId: string };
+    limit?: number;
+  } = {}): WorkflowWorkspaceCheckpointV17Record[] {
+    this.assertOpen();
+    const limit = pageLimit(options.limit);
+    if (!options.after) {
+      return (this.database.prepare(
+        "SELECT * FROM workspace_checkpoints ORDER BY created_at, checkpoint_id LIMIT ?",
+      ).all(limit) as SqlRow[]).map(workspaceCheckpointFromRow);
+    }
+    assertIsoDate(options.after.createdAt, "workflow v17 checkpoint cursor time");
+    assertIdentifier(options.after.checkpointId, "workflow v17 checkpoint cursor id");
+    return (this.database.prepare(`
+      SELECT * FROM workspace_checkpoints
+      WHERE created_at > ? OR (created_at = ? AND checkpoint_id > ?)
+      ORDER BY created_at, checkpoint_id LIMIT ?
+    `).all(options.after.createdAt, options.after.createdAt, options.after.checkpointId, limit) as SqlRow[])
+      .map(workspaceCheckpointFromRow);
   }
 
   readCandidateWorkspace(workspaceId: string): WorkflowCandidateWorkspaceV17Record | undefined {
@@ -560,6 +648,19 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
     return row ? candidateVerificationFromRow(row) : undefined;
   }
 
+  listCandidateVerifications(candidateId?: string): WorkflowCandidateVerificationV17Record[] {
+    this.assertOpen();
+    if (candidateId !== undefined) {
+      assertIdentifier(candidateId, "workflow v17 verification candidate id");
+      return (this.database.prepare(
+        "SELECT * FROM candidate_verifications WHERE candidate_id = ? ORDER BY created_at, verification_id",
+      ).all(candidateId) as SqlRow[]).map(candidateVerificationFromRow);
+    }
+    return (this.database.prepare(
+      "SELECT * FROM candidate_verifications ORDER BY created_at, verification_id",
+    ).all() as SqlRow[]).map(candidateVerificationFromRow);
+  }
+
   readCandidateApply(candidateId: string): WorkflowCandidateApplyV17Record | undefined {
     this.assertOpen();
     assertIdentifier(candidateId, "workflow v17 candidate id");
@@ -573,6 +674,27 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
     this.assertOpen();
     return (this.database.prepare("SELECT * FROM candidates ORDER BY frozen_at, candidate_id").all() as SqlRow[])
       .map((row) => this.candidateFromRow(row));
+  }
+
+  listCandidatesPage(options: {
+    after?: { frozenAt: string; candidateId: string };
+    limit?: number;
+  } = {}): WorkflowCandidateV17Record[] {
+    this.assertOpen();
+    const limit = pageLimit(options.limit);
+    if (!options.after) {
+      return (this.database.prepare(
+        "SELECT * FROM candidates ORDER BY frozen_at, candidate_id LIMIT ?",
+      ).all(limit) as SqlRow[]).map(row => this.candidateFromRow(row));
+    }
+    assertIsoDate(options.after.frozenAt, "workflow v17 candidate cursor time");
+    assertIdentifier(options.after.candidateId, "workflow v17 candidate cursor id");
+    return (this.database.prepare(`
+      SELECT * FROM candidates
+      WHERE frozen_at > ? OR (frozen_at = ? AND candidate_id > ?)
+      ORDER BY frozen_at, candidate_id LIMIT ?
+    `).all(options.after.frozenAt, options.after.frozenAt, options.after.candidateId, limit) as SqlRow[])
+      .map(row => this.candidateFromRow(row));
   }
 
   validateIntegrity(): void {
@@ -1042,6 +1164,27 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
     ).all() as SqlRow[]).map(measurementFromRow);
   }
 
+  listMeasurementsPage(options: {
+    after?: { createdAt: string; measurementId: string };
+    limit?: number;
+  } = {}): WorkflowMeasurementV17Record[] {
+    this.assertOpen();
+    const limit = pageLimit(options.limit);
+    if (!options.after) {
+      return (this.database.prepare(
+        "SELECT * FROM workflow_measurements ORDER BY created_at, measurement_id LIMIT ?",
+      ).all(limit) as SqlRow[]).map(measurementFromRow);
+    }
+    assertIsoDate(options.after.createdAt, "workflow v17 measurement cursor time");
+    assertIdentifier(options.after.measurementId, "workflow v17 measurement cursor id");
+    return (this.database.prepare(`
+      SELECT * FROM workflow_measurements
+      WHERE created_at > ? OR (created_at = ? AND measurement_id > ?)
+      ORDER BY created_at, measurement_id LIMIT ?
+    `).all(options.after.createdAt, options.after.createdAt, options.after.measurementId, limit) as SqlRow[])
+      .map(measurementFromRow);
+  }
+
   readExperiment(experimentId: string): WorkflowExperimentV17Record | undefined {
     this.assertOpen();
     assertIdentifier(experimentId, "workflow v17 experiment id");
@@ -1067,6 +1210,27 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
        JOIN operations operation ON operation.operation_id = experiment.operation_id
        ORDER BY operation.ordinal, experiment.experiment_id`,
     ).all() as SqlRow[]).map(experimentFromRow);
+  }
+
+  listExperimentsPage(options: {
+    after?: { createdAt: string; experimentId: string };
+    limit?: number;
+  } = {}): WorkflowExperimentV17Record[] {
+    this.assertOpen();
+    const limit = pageLimit(options.limit);
+    if (!options.after) {
+      return (this.database.prepare(
+        "SELECT * FROM workflow_experiments ORDER BY created_at, experiment_id LIMIT ?",
+      ).all(limit) as SqlRow[]).map(experimentFromRow);
+    }
+    assertIsoDate(options.after.createdAt, "workflow v17 experiment cursor time");
+    assertIdentifier(options.after.experimentId, "workflow v17 experiment cursor id");
+    return (this.database.prepare(`
+      SELECT * FROM workflow_experiments
+      WHERE created_at > ? OR (created_at = ? AND experiment_id > ?)
+      ORDER BY created_at, experiment_id LIMIT ?
+    `).all(options.after.createdAt, options.after.createdAt, options.after.experimentId, limit) as SqlRow[])
+      .map(experimentFromRow);
   }
 }
 

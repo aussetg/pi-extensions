@@ -113,3 +113,16 @@ results may contain attachable branded products, so production persistence uses 
 tree and reconstructs those products without re-entering completed callbacks. Metric control methods
 likewise observe only the measurement/disposition prefix encountered in the current reconstruction,
 not future durable rows.
+
+The staged production review/projection path now reads coherent schema-4 evidence into bounded plain
+data. It groups operations by root/parallel/map/candidate scopes, preserves dynamic titles and
+descriptor identity for display, and projects candidates, verification, measurements, experiments,
+dispositions, checkpoints, replay, and apply without introducing authored stage/loop structures.
+Research, optimize, goal, and execute-plan have exact renderer snapshots, and every inspector page
+uses bounded cursors.
+
+The separate v17 authoring/tool path strictly validates inert `.flow.ts`, reports derived authority
+and invocation-resource classes, and promotes source plus external model exposure under one
+fail-closed recoverable registry transaction. Session-local workflow tool schemas include only
+model-exposed definitions and enumerate exact trusted measurement profiles at protected resource
+fields. The v16 coordinator remains the only launcher until cutover.

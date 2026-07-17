@@ -23,6 +23,10 @@ primary Pi session launches and controls runs but does not own their lifetime.
 > profiles through branded metric sets, persists baseline/pending/disposition state, and records
 > canonical experiment evidence. Exact `.flow.ts` rewrites of all six builtins now coexist with the
 > executable v16 `.flow.js` files and run end to end through the staged v17 control/effect runtime.
+> Schema-4 review and inspector projections now render keyed lanes, candidates, measurements,
+> experiments, dispositions, checkpoints, and apply directly from durable evidence. A separate v17
+> draft/tool path strictly reviews inert `.flow.ts`, atomically promotes source plus exposure policy,
+> and generates trust-filtered workflow schemas with exact measurement-profile enums.
 > The v16 coordinator remains the only installed launcher until the atomic cutover.
 
 This extension is intentionally local and Linux-only. It has no compatibility layer for old run or
@@ -362,6 +366,25 @@ segments.
 
 There is no implicit evaluator in v17. The old `builtin:runtime-baseline` remains reachable only by
 the still-executable v16 optimizer and will be deleted with that runtime at atomic cutover.
+
+The staged v17 projection path reads one coherent schema-4 snapshot and derives its operation tree
+from scope ownership, keyed lanes, source/descriptor sites, and dynamic titles. Candidate,
+verification, measurement, experiment, disposition, workspace checkpoint, causal replay, and apply
+evidence remain explicitly linked. Review projections show derived authority and dynamic resource
+classes before launch, then the exact invocation-selected profile/hash/output binding after launch.
+Keyset-bounded pages cover operations, attempts, artifacts, measurements, experiments, candidates,
+resources, and events. Plain renderer snapshots for research, optimize, goal, and execute-plan prove
+that no authored stage or loop node is needed for a useful inspector.
+
+The staged v17 draft service installs only inert `.flow.ts` definitions. Validation runs the strict
+frontend, schema compilation, helper/authority review, static profile/route checks, and definition-
+only protocol-17 control load without invoking `run()`. Promotion challenges bind the draft,
+installed preimage, review, current registry policy, and target human/model exposure. A durable
+registry transaction marker makes discovery fail closed while source and `registry.json` are replaced
+and permits exact retry after a crash. The model draft tool still cannot promote. The staged workflow
+tool schema contains only model-exposed definitions and replaces protected measurement-resource
+markers with exact profiles available under current project trust. Neither staged tool launches v17;
+primary-session execution remains deferred to the atomic coordinator cutover.
 
 The following describes the currently executable v16 layout.
 

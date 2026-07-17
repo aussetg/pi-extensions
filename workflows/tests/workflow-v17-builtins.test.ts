@@ -55,6 +55,10 @@ import type { CandidateWriteScope } from "../src/candidates/store.js";
 import type { JsonObject, JsonValue } from "../src/types.js";
 import { canonicalJsonObject } from "../src/definition/canonical-json.js";
 import { sha256, stableHash } from "../src/utils/hashes.js";
+import { readWorkflowV17RunProjection } from "../src/projection/run-projection-v17.js";
+import { renderWorkflowV17RunProjectionText } from "../src/projection/render-v17.js";
+import { projectWorkflowV17DefinitionReview } from "../src/projection/run-projection-v17.js";
+import { readWorkflowV17InspectorPage } from "../src/projection/inspector-pages-v17.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
@@ -110,6 +114,16 @@ describe("workflow v17 builtins", () => {
         expect.objectContaining({ kind: "measurement-profile" }),
       ],
     });
+    expect(projectWorkflowV17DefinitionReview(registry.resolve("builtin:optimize"))).toMatchObject({
+      exposure: "model",
+      authority: {
+        capabilities: expect.arrayContaining(["candidate-write", "host-command", "human-input"]),
+        dynamicResources: [
+          expect.objectContaining({ kind: "measurement-profile", inputPath: "/evaluator" }),
+          expect.objectContaining({ kind: "measurement-profile", inputPath: "/evaluator" }),
+        ],
+      },
+    });
   });
 
   it("runs and reconstructs research with keyed collected lanes and report revision", async () => {
@@ -126,6 +140,9 @@ describe("workflow v17 builtins", () => {
     expect(operationKinds(fixture)).toEqual({ agent: 6, map: 1 });
     expect(fixture.backends.agentCalls).toBe(6);
     fixture.database.validateIntegrity();
+    expect(renderWorkflowV17RunProjectionText(
+      readWorkflowV17RunProjection(fixture.database, fixture.snapshot),
+    )).toMatchSnapshot();
   });
 
   it("runs and reconstructs package-audit through an effectful local helper per map lane", async () => {
@@ -213,7 +230,38 @@ describe("workflow v17 builtins", () => {
     expect(operationKinds(fixture)).toMatchObject({
       accept: 2, agent: 6, apply: 1, candidate: 2, measure: 3, "record-experiment": 2, verify: 2,
     });
+    expect(projectWorkflowV17DefinitionReview(fixture.ref, fixture.snapshot)).toMatchObject({
+      launchBinding: {
+        authority: "model",
+        projectTrusted: true,
+        resources: [expect.objectContaining({ selector: "project:bench" })],
+      },
+    });
+    const operationsPage = readWorkflowV17InspectorPage(fixture.database, "operations", { limit: 4 });
+    expect(operationsPage.entries).toHaveLength(4);
+    expect(readWorkflowV17InspectorPage(fixture.database, "operations", {
+      limit: 4,
+      cursor: operationsPage.nextCursor,
+    }).entries).toHaveLength(4);
+    expect(() => readWorkflowV17InspectorPage(fixture.database, "events", {
+      cursor: operationsPage.nextCursor,
+    })).toThrow(/another page/);
+    expect(readWorkflowV17InspectorPage(fixture.database, "measurements", { limit: 2 })).toMatchObject({
+      entries: [
+        expect.objectContaining({ profileId: "project:bench", candidateId: null }),
+        expect.objectContaining({ profileId: "project:bench" }),
+      ],
+      nextCursor: expect.any(String),
+    });
+    for (const kind of ["attempts", "artifacts", "experiments", "candidates", "resources"] as const) {
+      const page = readWorkflowV17InspectorPage(fixture.database, kind, { limit: 3 });
+      expect(page.entries.length, `${kind} page`).toBeGreaterThan(0);
+      expect(page.bytes).toBeLessThanOrEqual(256 * 1024);
+    }
     fixture.database.validateIntegrity();
+    expect(renderWorkflowV17RunProjectionText(
+      readWorkflowV17RunProjection(fixture.database, fixture.snapshot),
+    )).toMatchSnapshot();
   });
 
   it("runs goal through a failed verification and a reconstructed corrected candidate", async () => {
@@ -238,6 +286,9 @@ describe("workflow v17 builtins", () => {
       accept: 1, agent: 3, apply: 1, candidate: 2, reject: 1, verify: 2,
     });
     fixture.database.validateIntegrity();
+    expect(renderWorkflowV17RunProjectionText(
+      readWorkflowV17RunProjection(fixture.database, fixture.snapshot),
+    )).toMatchSnapshot();
   });
 
   it("runs execute-plan through durable points, replan, reconstruction, and final apply", async () => {
@@ -271,6 +322,9 @@ describe("workflow v17 builtins", () => {
       expect.objectContaining({ state: "applied", changedPaths: ["src/plan.ts"] }),
     ]);
     fixture.database.validateIntegrity();
+    expect(renderWorkflowV17RunProjectionText(
+      readWorkflowV17RunProjection(fixture.database, fixture.snapshot),
+    )).toMatchSnapshot();
   });
 });
 
