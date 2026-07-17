@@ -9,8 +9,10 @@ primary Pi session launches and controls runs but does not own their lifetime.
 > [`src/definition/workflow-language-v17.ts`](src/definition/workflow-language-v17.ts). The executable
 > runtime and the authoring documentation below remain v16 until the atomic cutover; their temporary
 > declaration is [`workflow-api-v16.d.ts`](workflow-api-v16.d.ts). The isolated v17 frontend now
-> strictly typechecks, strips, reviews, and instruments `.flow.ts` source, but is intentionally not
-> connected to registry discovery or execution before the later cutover phases.
+> strictly typechecks, strips, reviews, and instruments `.flow.ts` source. A separate production v17
+> registry now discovers those definitions, applies fail-safe namespace exposure policy, and writes
+> immutable invocation/source/resource snapshots. The v16 launch service and executable runtime do
+> not consume that registry yet.
 
 This extension is intentionally local and Linux-only. It has no compatibility layer for old run or
 definition formats and no portability fallback.
@@ -241,6 +243,15 @@ diagnostics, diff policy, adversarial review, candidate tree/lineage/write scope
 and environment evidence.
 
 ## Persistence and recovery
+
+The staged v17 registry uses `registry.json` beside each namespace's definitions. Its strict shape is
+`{"formatVersion":1,"model":["explicitly-exposed-name"]}`; absent names are human-only. Exposure is
+snapshotted at launch but excluded from executable definition identity. The staged v17 invocation
+writer records the original `.flow.ts`, reviewed executable JavaScript, exact frontend transform,
+language descriptor, policy revision, launch actor/trust, and invocation-selected measurement
+profile snapshots. It remains disconnected from coordinator execution until the atomic cutover.
+
+The following describes the currently executable v16 layout.
 
 Runs live at `~/.pi/agent/workflow-runs/flow_<32 hex>/`:
 

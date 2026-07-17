@@ -154,5 +154,8 @@ No control-flow compiler is required.
   declarations, casts, ignored type errors, or duplicate hand-written result interfaces.
 - The production frontend now strictly typechecks and strip-parses all six fixtures, evaluates their
   schemas/descriptors, derives exact authority/review snapshots, validates helper contexts and native
-  loops, and injects non-semantic source-site tokens. Registry and runtime integration remain later
-  phases.
+  loops, and injects non-semantic source-site tokens.
+- The separate production v17 registry now discovers `.flow.ts` by namespace/filename, applies
+  fail-safe external exposure policy, derives definition identity, validates canonical invocation
+  input, pins trusted dynamic measurement resources, and writes independently reconstructable source,
+  executable, policy, resource, and language snapshots. The v16 launch/runtime path remains unchanged.
