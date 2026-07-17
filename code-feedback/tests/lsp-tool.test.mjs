@@ -216,6 +216,58 @@ test("explicit diagnostic timeouts fail without returning cached diagnostics", a
   }
 });
 
+test("explicit diagnostics expose an eventually consistent push state without calling it authoritative", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-eventual-"));
+  const runtime = createRuntime(createDefaultConfig());
+  setProjectRoot(runtime, root);
+  const snapshot = createDiagnosticSnapshot([{
+    uri: pathToFileURL(path.join(root, "probe.lua")).href,
+    range: { start: { line: 1, character: 1 }, end: { line: 1, character: 2 } },
+    severity: "warning",
+    source: "Lua Diagnostics",
+    code: "unused-local",
+    message: "Unused local.",
+  }]);
+  const lspService = {
+    configure() {},
+    getStatus() { return { activeClients: 1, clients: [], unavailableServers: [] }; },
+    async diagnosticsForFileDetailed() {
+      return {
+        snapshot,
+        fresh: false,
+        eventual: true,
+        timedOut: false,
+        requestedAt: 100,
+        completedAt: 175,
+      };
+    },
+  };
+  let tool;
+  registerLspTool({
+    registerTool(definition) { tool = definition; },
+    registerCommand() {},
+    on() {},
+  }, runtime, lspService, inactiveFormatService, directMutationQueue);
+
+  try {
+    const result = await tool.execute("lsp-eventual", {
+      method: "textDocument/diagnostic",
+      path: "probe.lua",
+    }, undefined, undefined, { cwd: root });
+
+    assert.equal(result.isError, undefined);
+    assert.equal(result.details.ok, true);
+    assert.equal(result.details.authoritative, false);
+    assert.equal(result.details.freshDiagnosticsOnly, false);
+    assert.equal(result.details.diagnosticRefresh.outcome, "eventual");
+    assert.match(result.content[0].text, /current push state \(75ms\)/);
+    assert.match(result.content[0].text, /Unused local/);
+    assert.match(result.details.hint, /may update asynchronously/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("lsp code actions return stable ids and apply by id", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-actions-"));
   const filePath = path.join(root, "probe.py");
@@ -1168,7 +1220,7 @@ test("lsp tool server selects one matching language server", async () => {
   }
 });
 
-test("lsp workspace diagnostics require an active path and return fresh-only scan results", async () => {
+test("lsp workspace diagnostics require an active path and label scan consistency", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-workspace-"));
   await writeFile(path.join(root, "a.py"), "a = 1\n", "utf8");
   await writeFile(path.join(root, "b.py"), "b = 2\n", "utf8");
@@ -1207,7 +1259,8 @@ test("lsp workspace diagnostics require an active path and return fresh-only sca
     assert.match(active.content[0].text, /target: \./);
     assert.match(active.content[0].text, /known LSP diagnostics: 1/);
     assert.match(active.content[0].text, /scan: bounded\/incomplete/);
-    assert.match(active.content[0].text, /files: 1 selected · 1 fresh · 0 timed out · 0 unavailable · 0 skipped/);
+    assert.match(active.content[0].text, /files: 1 selected · 1 fresh · 0 current push state · 0 timed out · 0 unavailable · 0 skipped/);
+    assert.match(active.content[0].text, /diagnostic state: fresh diagnostics only/);
     assert.match(active.content[0].text, /protocol: 1 workspace pull · 1 workspace-covered · 0 document-pulled · 0 push-batched · 0 pull failures/);
     assert.equal(active.details.ok, true);
     assert.equal(active.details.method, "workspace/diagnostic");
@@ -1215,6 +1268,8 @@ test("lsp workspace diagnostics require an active path and return fresh-only sca
     assert.equal(active.details.server, "python-ruff");
     assert.equal(active.details.freshDiagnosticsOnly, true);
     assert.equal(active.details.workspaceScan.selectedFiles, 1);
+    assert.equal(active.details.workspaceScan.eventualFiles, 0);
+    assert.equal(active.details.workspaceScan.eventualStateFiles, 0);
     assert.equal(active.details.workspaceScan.fileLimitReached, true);
     assert.equal(active.details.workspaceScan.workspacePullRequests, 1);
     assert.equal(active.details.workspaceScan.workspacePullFiles, 1);
@@ -1238,7 +1293,7 @@ test("lsp workspace diagnostics require an active path and return fresh-only sca
     }, undefined, undefined, { cwd: root });
     assert.equal(missingPath.isError, true);
     assert.equal(missingPath.details.ok, false);
-    assert.match(missingPath.content[0].text, /workspace\/diagnostic requires path for an active fresh scan/);
+    assert.match(missingPath.content[0].text, /workspace\/diagnostic requires path for an active scan/);
     assert.match(missingPath.content[0].text, /hint: Pass path="\."/);
 
     runtime.projectTrusted = false;
@@ -1248,6 +1303,66 @@ test("lsp workspace diagnostics require an active path and return fresh-only sca
     }, undefined, undefined, { cwd: root, isProjectTrusted: () => false });
     assert.equal(untrustedActive.isError, true);
     assert.match(untrustedActive.content[0].text, /Project is not trusted/);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace diagnostics label eventual state contributed by a partially unavailable route", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-lsp-tool-workspace-mixed-state-"));
+  const filePath = path.join(root, "probe.py");
+  const content = "value = 1\n";
+  await writeFile(filePath, content, "utf8");
+
+  const runtime = createRuntime(createDefaultConfig());
+  setProjectRoot(runtime, root);
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "ty", "T100", "1", "", "push-deduplicated"],
+      },
+      "python-ruff": {
+        command: process.execPath,
+        args: [fakeServer, "ruff", "R100", "2", "", "pull-invalid"],
+      },
+    },
+  });
+  let tool;
+  registerLspTool({
+    registerTool(definition) { tool = definition; },
+    registerCommand() {},
+    on() {},
+  }, runtime, service, inactiveFormatService, directMutationQueue);
+
+  try {
+    const initial = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 1000,
+      settleMs: 0,
+      server: "python",
+    });
+    assert.equal(initial?.fresh, true);
+
+    const result = await tool.execute("lsp-workspace-mixed-state", {
+      method: "workspace/diagnostic",
+      path: ".",
+    }, undefined, undefined, { cwd: root });
+
+    assert.equal(result.isError, undefined);
+    assert.equal(result.details.authoritative, false);
+    assert.equal(result.details.freshDiagnosticsOnly, false);
+    assert.equal(result.details.workspaceScan.freshFiles, 0);
+    assert.equal(result.details.workspaceScan.eventualFiles, 0);
+    assert.equal(result.details.workspaceScan.eventualStateFiles, 1);
+    assert.equal(result.details.workspaceScan.unavailableFiles, 1);
+    assert.equal(result.details.workspaceScan.files[0].outcome, "unavailable");
+    assert.match(result.content[0].text, /known LSP diagnostics: 1/);
+    assert.match(result.content[0].text, /diagnostic state: 1 file includes current push state/);
+    assert.match(result.content[0].text, /T100/);
+    assert.match(result.details.hint, /latest state published by push-only servers/);
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });

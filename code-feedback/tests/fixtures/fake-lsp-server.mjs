@@ -32,6 +32,8 @@ if (stderrMode === "warn") {
 
 let buffer = Buffer.alloc(0);
 let workspaceSourceUriCache = [];
+const publishedDiagnosticUris = new Set();
+let documentDiagnosticRequests = 0;
 
 process.stdin.on("data", (chunk) => {
   buffer = Buffer.concat([buffer, chunk]);
@@ -151,7 +153,8 @@ function handleMessage(message) {
 
   if (message.id !== undefined && message.method === "textDocument/diagnostic") {
     log({ method: message.method, params: message.params });
-    if (mode === "pull-unsupported") {
+    documentDiagnosticRequests += 1;
+    if (mode === "pull-unsupported" || (mode === "pull-fails-after-first" && documentDiagnosticRequests > 1)) {
       send({
         jsonrpc: "2.0",
         id: message.id,
@@ -669,14 +672,21 @@ function fileRenameEdit(files, serverMode) {
 function publishDiagnostics(uri, version) {
   if (typeof uri !== "string") return;
   if (!shouldPublishDiagnostics(mode)) return;
+  const alreadyPublished = publishedDiagnosticUris.has(uri);
+  if (mode === "push-deduplicated" && alreadyPublished) return;
+  publishedDiagnosticUris.add(uri);
 
   const message = {
     jsonrpc: "2.0",
     method: "textDocument/publishDiagnostics",
     params: {
       uri,
-      version: typeof version === "number" ? version : undefined,
-      diagnostics: diagnosticItems(),
+      version: mode === "push-malformed-version-after-first" && alreadyPublished
+        ? "invalid"
+        : typeof version === "number" ? version : undefined,
+      diagnostics: mode === "push-malformed-diagnostics-after-first" && alreadyPublished
+        ? {}
+        : diagnosticItems(),
     },
   };
 

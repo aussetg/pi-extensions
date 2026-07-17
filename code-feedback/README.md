@@ -5,9 +5,9 @@ agent changed, runs one deterministic formatter when a canonical or project-conf
 is available, refreshes real language-server diagnostics, and adds only relevant feedback to the
 tool result.
 
-It also exposes a strict `lsp` tool for navigation, fresh diagnostics, symbols, code actions,
-preview-first symbol renames, and transactional file renames. The human-facing control surface is
-the `/lsp` command and a compact footer status.
+It also exposes a strict `lsp` tool for navigation, consistency-labeled diagnostics, symbols, code
+actions, preview-first symbol renames, and transactional file renames. The human-facing control
+surface is the `/lsp` command and a compact footer status.
 
 ## What it registers
 
@@ -86,7 +86,7 @@ not supported.
 | `server/status` | — | Show configuration, clients, resource use, formatter availability, and recent failures. |
 | `server/capabilities` | — | Show known clients; add `path` to start matching clients and inspect their advertised capabilities. |
 | `server/reload` | — | Restart clients and clear startup cooldowns. It does not reread JSON configuration; use Pi's `/reload` for that. |
-| `textDocument/diagnostic` | `path` | Force a fresh diagnostic refresh for one file. |
+| `textDocument/diagnostic` | `path` | Refresh one file; report authoritative pull or eventually consistent push state. |
 | `workspace/diagnostic` | `path` | Run a bounded active scan; optional `limit` defaults to 50 and is capped at 200. |
 | `textDocument/hover` | `path`, position | Return the first non-empty hover from matching language routes. |
 | `textDocument/definition` | `path`, position | Return merged definitions. |
@@ -128,32 +128,42 @@ only with `symbol`. Identifier-like symbols require identifier boundaries. Symbo
 Unicode-aware and converts the match to the UTF-16 offset required by LSP, making it the safer form
 on Unicode-heavy lines.
 
-### Fresh diagnostics
+### Diagnostic consistency
 
-Explicit diagnostic methods have a separate 10-second budget and never substitute cached state:
+Explicit diagnostic methods have a separate 10-second budget and report the consistency model they
+actually obtained:
 
-- `textDocument/diagnostic` returns diagnostics only after an authoritative refresh of the current
-  file content. Timeout or unavailability is an error with no diagnostics.
-- `workspace/diagnostic` uses one absolute deadline for the whole scan and includes only files
-  refreshed during it. A partial scan may return diagnostics from fresh files while reporting
-  timed-out, unavailable, or skipped files separately.
+- Pull-capable servers return authoritative fresh diagnostics. Timeout or unavailability is an
+  error with no diagnostics.
+- Push-only servers have no request completion response. After a bounded observation window,
+  `textDocument/diagnostic` returns the server's persistent published state as eventually
+  consistent instead of misreporting an intentionally suppressed duplicate publication as a
+  timeout.
+- `workspace/diagnostic` uses one absolute deadline for the whole scan. It distinguishes fresh,
+  eventually consistent, timed-out, unavailable, and skipped files; only an all-fresh scan is
+  authoritative. When several servers cover one file, the aggregate file outcome and the returned
+  diagnostic-state consistency are reported separately, so an unavailable route cannot hide
+  eventually consistent diagnostics contributed by another route.
 
 The scan chooses the strongest protocol each server advertises. It first attempts one real
 `workspace/diagnostic` pull per routed workspace. Missing, malformed, oversized, or immediately
 unsupported workspace reports use bounded `textDocument/diagnostic` pulls when available. A
-push-only server receives one bulk document synchronization and the client waits for a
-post-synchronization publication from every selected file; scan-only documents are closed again.
-No fallback starts after the shared deadline, and a timed-out push batch stops its client so
-non-cancellable background work cannot continue consuming resources.
+push-only server receives one bulk document synchronization. New publications are fresh; files for
+which the server suppresses an unchanged publication retain their latest published state and are
+reported as eventually consistent. Scan-only documents are closed again. No fallback starts after
+the shared deadline, and a genuinely timed-out push batch stops its client so non-cancellable
+background work cannot continue consuming resources.
 
 `typescript-language-server` advertises only push diagnostics, but exposes fixed synchronous
 tsserver diagnostic commands. Code-feedback uses those commands as authoritative document pulls.
 This avoids a server behavior that suppresses repeated clean `publishDiagnostics` notifications,
 which otherwise makes an unchanged error-free file look as though diagnostics never completed.
 
-Push diagnostics do not have a protocol completion response. A push-batched file is fresh only
-after a valid post-synchronization publication and a short diagnostic quiet period; a missing or
-malformed publication is never interpreted as a clean file.
+Push diagnostic state is persistent until the server replaces it. Code-feedback therefore keeps a
+valid previous publication instead of invalidating it before a refresh. A push-batched file is
+fresh only after a valid post-synchronization publication and a short diagnostic quiet period;
+silence is labeled eventually consistent, while malformed publications remain unavailable and are
+never interpreted as clean.
 
 Workspace traversal stays inside the trusted project root, never follows symlinks, stops after
 50,000 entries and 8 MiB of selected source, and ignores common VCS, dependency,

@@ -54,7 +54,7 @@ const scenarioSpecs = [
   ["lsp/workspace-pull-clean-20", () => runFakeWorkspaceLspScenario(Math.max(3, Math.ceil(baseIterations / 10)))],
   ["lsp/workspace-push-batch-50", () => runFakePushWorkspaceLspScenario(Math.max(3, Math.ceil(baseIterations / 10)))],
   ["lsp/fake-delay-200", () => runFakeLspScenario({ name: "lsp/fake-delay-200", iterations: Math.max(3, Math.ceil(baseIterations / 10)), warmup: 1, mode: "diagnostics-delay-200", inlineTimeoutMs: 80, expectInline: false })],
-  ["lsp/fake-timeout-80", () => runFakeLspScenario({ name: "lsp/fake-timeout-80", iterations: Math.max(3, Math.ceil(baseIterations / 10)), warmup: 0, mode: "no-diagnostics", timeoutMs: 80, inlineTimeoutMs: 80, inline: "off" })],
+  ["lsp/fake-push-silence-80", () => runFakeLspScenario({ name: "lsp/fake-push-silence-80", iterations: Math.max(3, Math.ceil(baseIterations / 10)), warmup: 0, mode: "no-diagnostics", timeoutMs: 80, inlineTimeoutMs: 80, inline: "off" })],
 ];
 
 if (args.live) {
@@ -274,7 +274,7 @@ async function runFakeLspScenario(options) {
 function fakeLspNotes(options) {
   if (options.mode === "pull-clean") return "fake LSP advertises document pull diagnostics and returns an authoritative empty full report";
   if (options.mode === "diagnostics-delay-200") return `fake LSP delays diagnostics by 200ms; inline budget is ${options.inlineTimeoutMs ?? 200}ms and delayed diagnostics continue in the background`;
-  if (options.mode === "no-diagnostics") return `fake LSP never publishes diagnostics; inline wall time should track the ${options.inlineTimeoutMs ?? options.timeoutMs ?? 200}ms budget`;
+  if (options.mode === "no-diagnostics") return `fake push-only LSP never publishes diagnostics; observation wall time should track the ${options.inlineTimeoutMs ?? options.timeoutMs ?? 200}ms budget before returning eventual state`;
   return "deterministic stdio LSP with one post-edit diagnostic refresh; tool-call prewarm is asynchronous";
 }
 

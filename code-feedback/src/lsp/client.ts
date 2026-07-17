@@ -90,6 +90,7 @@ interface DiagnosticEntry {
   diagnostics: RawLspDiagnostic[];
   receivedAt: number;
   authoritative: boolean;
+  provisional?: boolean;
 }
 
 interface DiagnosticWaiter {
@@ -160,7 +161,7 @@ interface WorkspaceDiagnosticReportCollector {
   malformed: boolean;
 }
 
-type PullDiagnosticOutcome = "authoritative" | "timed-out" | "unavailable";
+type PullDiagnosticOutcome = "authoritative" | "timed-out" | "unavailable" | "malformed";
 
 interface TextDocumentContentChange {
   text: string;
@@ -207,10 +208,11 @@ export interface WorkspaceDiagnosticDocument {
 export type WorkspaceDocumentDiagnosticProtocol = "document-pull" | "push-batch";
 
 export interface WorkspaceDocumentDiagnosticResult {
-  outcome: "fresh" | "timed-out" | "unavailable";
+  outcome: "fresh" | "eventual" | "timed-out" | "unavailable";
   protocol: WorkspaceDocumentDiagnosticProtocol;
   snapshot?: DiagnosticSnapshot;
   reason?: string;
+  fallbackToPush?: boolean;
 }
 
 export interface WorkspaceDocumentDiagnosticsResult {
@@ -247,6 +249,9 @@ const TYPESCRIPT_DIAGNOSTIC_COMMANDS = [
   "semanticDiagnosticsSync",
   "suggestionDiagnosticsSync",
 ] as const;
+const PUSH_DIAGNOSTIC_REUSE_OBSERVATION_MS = 50;
+const PUSH_DIAGNOSTIC_INITIAL_OBSERVATION_MS = 2_000;
+const PUSH_DIAGNOSTIC_TIMEOUT_HEADROOM_MS = 50;
 const CLOSED_DOCUMENT_DIAGNOSTIC_SUPPRESSION_MS = 1_000;
 const PROCESS_KILL_GRACE_MS = 750;
 const FILE_CHANGE_CREATED = 1;
@@ -330,26 +335,47 @@ export class LspClient {
       const touchedAt = Date.now();
       const uri = filePathToUri(filePath);
       const pullProvider = hasAuthoritativeDocumentDiagnosticRequest(this.capabilities);
-      if (options.forceFresh) this.invalidateDiagnostics(uri);
+      const previousDocument = this.documents.get(uri);
+      const hadReusablePushState = !pullProvider && previousDocument?.content === content &&
+        isReusablePushDiagnosticEntry(this.diagnostics.get(uri));
+      // A failed pull must not let a pre-request pull result satisfy the push
+      // fallback as though the server had published after this refresh.
+      if (pullProvider) this.invalidateDiagnostics(uri);
       const document = this.syncDocument(filePath, content, options.forceFresh === true && !pullProvider);
       const documentVersion = document.version;
 
       this.notify("textDocument/didSave", textDocumentDidSaveParams(document.uri, content, this.capabilities));
 
-      let fresh: boolean;
+      let outcome: LspDiagnosticOutcome;
       try {
         const pullOutcome = await this.pullDiagnostics(document, documentVersion, touchedAt, options);
         if (pullOutcome === "authoritative") {
-          fresh = true;
+          outcome = "fresh";
+        } else if (pullOutcome === "timed-out") {
+          outcome = "timeout";
         } else {
-          fresh = await this.waitForDiagnostics(
+          const remaining = remainingDiagnosticTimeout(options.timeoutMs, touchedAt);
+          const waitMs = options.forceFresh
+            ? Math.min(
+                Math.max(0, remaining - PUSH_DIAGNOSTIC_TIMEOUT_HEADROOM_MS),
+                pushDiagnosticObservationBudget(hadReusablePushState, options.settleMs),
+              )
+            : Math.max(0, remaining - PUSH_DIAGNOSTIC_TIMEOUT_HEADROOM_MS);
+          const published = await this.waitForDiagnostics(
             document.uri,
             documentVersion,
             touchedAt,
-            remainingDiagnosticTimeout(options.timeoutMs, touchedAt),
+            waitMs,
             options.settleMs,
             options.signal,
           );
+          if (published) {
+            outcome = "fresh";
+          } else if (!pullProvider && pullOutcome === "unavailable" && this.ensureProvisionalPushDiagnostics(document.uri, documentVersion)) {
+            outcome = "eventual";
+          } else {
+            outcome = "unavailable";
+          }
         }
       } catch (error) {
         if (isCancellation(error, options.signal)) {
@@ -360,11 +386,12 @@ export class LspClient {
       }
       const completedAt = Date.now();
       this.lastDiagnosticDurationMs = completedAt - touchedAt;
-      this.lastDiagnosticOutcome = fresh ? "fresh" : "timeout";
+      this.lastDiagnosticOutcome = outcome;
       return {
         snapshot: this.snapshotForScope(document.uri, options.snapshotScope),
-        fresh,
-        timedOut: !fresh,
+        fresh: outcome === "fresh",
+        timedOut: outcome === "timeout",
+        eventual: outcome === "eventual",
         requestedAt: touchedAt,
         completedAt,
       };
@@ -516,7 +543,7 @@ export class LspClient {
         if (hasAuthoritativeDocumentDiagnosticRequest(this.capabilities)) {
           const pulled = await this.pullWorkspaceDocumentDiagnostics(documents, options, deadline);
           const pushFallbackDocuments = documents.filter((document) => (
-            pulled.get(filePathToUri(document.filePath))?.outcome === "unavailable"
+            pulled.get(filePathToUri(document.filePath))?.fallbackToPush === true
           ));
           if (pushFallbackDocuments.length === 0 || remainingUntil(options.deadlineAt) <= 0) {
             return { files: pulled };
@@ -588,7 +615,6 @@ export class LspClient {
 
         const touchedAt = Date.now();
         try {
-          this.invalidateDiagnostics(uri);
           const document = this.syncDocument(documentInput.filePath, documentInput.content);
           this.notify("textDocument/didSave", textDocumentDidSaveParams(document.uri, documentInput.content, this.capabilities));
           const outcome = await this.pullDiagnostics(document, document.version, touchedAt, {
@@ -605,12 +631,16 @@ export class LspClient {
               snapshot: this.snapshotForUri(uri),
             });
           } else {
+            const timedOut = outcome === "timed-out" || deadline.timedOut;
             files.set(uri, {
-              outcome: outcome === "timed-out" || deadline.timedOut ? "timed-out" : "unavailable",
+              outcome: timedOut ? "timed-out" : "unavailable",
               protocol: "document-pull",
-              reason: outcome === "timed-out" || deadline.timedOut
+              reason: timedOut
                 ? "workspace diagnostic deadline expired during document pull"
-                : "document diagnostic pull was unavailable or malformed",
+                : outcome === "malformed"
+                  ? "document diagnostic pull returned a malformed response"
+                  : "document diagnostic pull was unavailable",
+              ...(outcome === "unavailable" ? { fallbackToPush: true } : {}),
             });
           }
         } catch (error) {
@@ -636,7 +666,7 @@ export class LspClient {
     deadline: DeadlineSignal,
   ): Promise<Map<string, WorkspaceDocumentDiagnosticResult>> {
     const files = new Map<string, WorkspaceDocumentDiagnosticResult>();
-    const synchronized: Array<{ uri: string; version: number; touchedAt: number }> = [];
+    const synchronized: Array<{ uri: string; version: number; touchedAt: number; observationDeadlineAt: number }> = [];
 
     // Synchronize the whole target set in one event-loop turn. Push-only
     // servers commonly debounce these notifications into one diagnostic pass.
@@ -644,9 +674,17 @@ export class LspClient {
       throwIfAborted(deadline.signal);
       const uri = filePathToUri(documentInput.filePath);
       const touchedAt = Date.now();
-      this.invalidateDiagnostics(uri);
+      const previousDocument = this.documents.get(uri);
+      const hadReusablePushState = previousDocument?.content === documentInput.content &&
+        isReusablePushDiagnosticEntry(this.diagnostics.get(uri));
       const document = this.syncDocument(documentInput.filePath, documentInput.content, true);
-      synchronized.push({ uri, version: document.version, touchedAt });
+      const observationMs = pushDiagnosticObservationBudget(hadReusablePushState, options.settleMs);
+      synchronized.push({
+        uri,
+        version: document.version,
+        touchedAt,
+        observationDeadlineAt: Math.min(options.deadlineAt, touchedAt + observationMs),
+      });
     }
     for (let index = 0; index < documents.length; index += 1) {
       const documentInput = documents[index];
@@ -669,21 +707,36 @@ export class LspClient {
           document.uri,
           document.version,
           document.touchedAt,
-          Math.max(0, remainingUntil(options.deadlineAt)),
+          remainingUntil(document.observationDeadlineAt),
           0,
           deadline.signal,
         );
-        files.set(document.uri, fresh
-          ? {
-              outcome: "fresh",
-              protocol: "push-batch",
-              snapshot: this.snapshotForUri(document.uri),
-            }
-          : {
-              outcome: "timed-out",
-              protocol: "push-batch",
-              reason: "push-only server did not publish diagnostics before the workspace deadline",
-            });
+        if (fresh) {
+          files.set(document.uri, {
+            outcome: "fresh",
+            protocol: "push-batch",
+            snapshot: this.snapshotForUri(document.uri),
+          });
+        } else if (deadline.timedOut || remainingUntil(options.deadlineAt) <= 0) {
+          files.set(document.uri, {
+            outcome: "timed-out",
+            protocol: "push-batch",
+            reason: "push-only server did not publish diagnostics before the workspace deadline",
+          });
+        } else if (this.ensureProvisionalPushDiagnostics(document.uri, document.version)) {
+          files.set(document.uri, {
+            outcome: "eventual",
+            protocol: "push-batch",
+            snapshot: this.snapshotForUri(document.uri),
+            reason: "push-only server emitted no replacement; showing its latest published state",
+          });
+        } else {
+          files.set(document.uri, {
+            outcome: "unavailable",
+            protocol: "push-batch",
+            reason: "push-only server emitted malformed diagnostics and no usable replacement",
+          });
+        }
       } catch (error) {
         if (options.signal?.aborted) throw abortError(options.signal);
         if (!deadline.timedOut) throw error;
@@ -711,7 +764,11 @@ export class LspClient {
     const completedAt = Date.now();
     const requestedAt = Math.min(...synchronized.map((document) => document.touchedAt));
     this.lastDiagnosticDurationMs = Math.max(0, completedAt - requestedAt);
-    this.lastDiagnosticOutcome = [...files.values()].every((result) => result.outcome === "fresh") ? "fresh" : "timeout";
+    const outcomes = [...files.values()].map((result) => result.outcome);
+    if (outcomes.includes("timed-out")) this.lastDiagnosticOutcome = "timeout";
+    else if (outcomes.includes("unavailable")) this.lastDiagnosticOutcome = "unavailable";
+    else if (outcomes.includes("eventual")) this.lastDiagnosticOutcome = "eventual";
+    else this.lastDiagnosticOutcome = "fresh";
     return files;
   }
 
@@ -803,7 +860,9 @@ export class LspClient {
         watchedKeys.add(key);
         watchedChanges.push({ uri, type });
       }
-      this.invalidateDiagnostics(uri);
+      if (type === FILE_CHANGE_DELETED || !this.documents.has(uri) || hasAuthoritativeDocumentDiagnosticRequest(this.capabilities)) {
+        this.invalidateDiagnostics(uri);
+      }
     };
 
     for (const mutation of mutations) {
@@ -1648,7 +1707,7 @@ export class LspClient {
     }
 
     const report = parseDocumentDiagnosticReport(response);
-    if (!report) return "unavailable";
+    if (!report) return "malformed";
     if (this.documents.get(document.uri)?.version !== documentVersion) return "unavailable";
 
     const receivedAt = Date.now();
@@ -1660,7 +1719,7 @@ export class LspClient {
       this.workspaceDiagnosticResultIds.delete(related.uri);
       this.storeDiagnostics(related.uri, related.diagnostics, undefined, receivedAt, authoritative);
     }
-    if (!authoritative) return "unavailable";
+    if (!authoritative) return "malformed";
     await settleDiagnostics(options.settleMs, options.signal);
     return "authoritative";
   }
@@ -1689,7 +1748,7 @@ export class LspClient {
 
       const parsed = parseTsServerDiagnosticResponse(response, command);
       if (!parsed || diagnostics.length + parsed.diagnostics.length > MAX_WORKSPACE_DIAGNOSTIC_ENTRIES) {
-        return "unavailable";
+        return "malformed";
       }
       diagnostics.push(...parsed.diagnostics);
     }
@@ -1711,17 +1770,16 @@ export class LspClient {
       if (Date.now() < suppressedUntil) return;
       this.suppressedClosedDocumentDiagnostics.delete(diagnostics.uri);
     }
-    if (diagnostics.version !== undefined && !isLspInteger(diagnostics.version)) return;
+    const validVersion = diagnostics.version === undefined || isLspInteger(diagnostics.version);
     const parsed = parseDiagnosticItems(diagnostics.diagnostics);
-    if (!parsed) return;
 
     this.workspaceDiagnosticResultIds.delete(diagnostics.uri);
     this.storeDiagnostics(
       diagnostics.uri,
-      parsed.diagnostics,
-      diagnostics.version,
+      parsed?.diagnostics ?? [],
+      validVersion ? diagnostics.version : undefined,
       Date.now(),
-      !parsed.malformed,
+      validVersion && parsed !== undefined && !parsed.malformed,
     );
   }
 
@@ -1736,6 +1794,20 @@ export class LspClient {
     this.diagnostics.set(uri, entry);
     this.lastDiagnosticsAt = entry.receivedAt;
     this.notifyDiagnosticWaiters(entry);
+  }
+
+  private ensureProvisionalPushDiagnostics(uri: string, version: number): boolean {
+    const current = this.diagnostics.get(uri);
+    if (current) return isReusablePushDiagnosticEntry(current);
+    this.diagnostics.set(uri, {
+      uri,
+      version,
+      diagnostics: [],
+      receivedAt: Date.now(),
+      authoritative: false,
+      provisional: true,
+    });
+    return true;
   }
 
   private waitForDiagnostics(
@@ -1888,6 +1960,16 @@ function diagnosticsAreFresh(entry: DiagnosticEntry, minVersion: number, touched
   if (!entry.authoritative) return false;
   if (typeof entry.version === "number") return entry.version >= minVersion;
   return entry.receivedAt >= touchedAt;
+}
+
+function isReusablePushDiagnosticEntry(entry: DiagnosticEntry | undefined): boolean {
+  return entry?.authoritative === true || entry?.provisional === true;
+}
+
+function pushDiagnosticObservationBudget(reusableState: boolean, settleMs: number): number {
+  return reusableState
+    ? Math.max(PUSH_DIAGNOSTIC_REUSE_OBSERVATION_MS, settleMs)
+    : PUSH_DIAGNOSTIC_INITIAL_OBSERVATION_MS;
 }
 
 async function settleDiagnostics(settleMs: number, signal?: AbortSignal): Promise<boolean> {

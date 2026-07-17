@@ -9,7 +9,7 @@ import type { CodeFeedbackRuntime } from "./runtime.ts";
 import { LSP_METHODS, type CompletedEdit, type DelayedDiagnosticFeedback, type DiagnosticFilterResult, type DiagnosticSeverity, type DiagnosticSnapshot, type FormatServiceStatus, type FormatterSummary, type LinkedDiagnostic, type LspDiagnostic, type LspServiceStatus, type TouchedRangeComputation, type WorkspaceDiagnosticDelta, type WorkspaceDiagnosticScanResult } from "./types.ts";
 
 export interface ExplicitDiagnosticRefreshStatus {
-  outcome: "fresh" | "timed-out" | "unavailable";
+  outcome: "fresh" | "eventual" | "timed-out" | "unavailable";
   durationMs?: number;
 }
 
@@ -191,9 +191,13 @@ export function renderDiagnosticsStatus(
       summary.boundaryEntriesSkipped > 0 ? `${summary.boundaryEntriesSkipped} boundary mismatch${summary.boundaryEntriesSkipped === 1 ? "" : "es"}` : undefined,
       summary.walkErrors > 0 ? `${summary.walkErrors} unreadable director${summary.walkErrors === 1 ? "y" : "ies"}` : undefined,
     ].filter(Boolean).join(" · ");
+    const diagnosticState = summary.eventualStateFiles > 0
+      ? `${summary.eventualStateFiles} ${summary.eventualStateFiles === 1 ? "file includes" : "files include"} current push state`
+      : "fresh diagnostics only";
     lines.push(
       `  scan: ${completeness} (${summary.durationMs}ms)`,
-      `  files: ${summary.selectedFiles} selected · ${summary.freshFiles} fresh · ${summary.timedOutFiles} timed out · ${summary.unavailableFiles} unavailable · ${summary.skippedFiles} skipped`,
+      `  files: ${summary.selectedFiles} selected · ${summary.freshFiles} fresh · ${summary.eventualFiles} current push state · ${summary.timedOutFiles} timed out · ${summary.unavailableFiles} unavailable · ${summary.skippedFiles} skipped`,
+      `  diagnostic state: ${diagnosticState}`,
       `  protocol: ${summary.workspacePullRequests} workspace pull${summary.workspacePullRequests === 1 ? "" : "s"} · ${summary.workspacePullFiles} workspace-covered · ${summary.documentPullFiles} document-pulled · ${summary.pushBatchFiles} push-batched · ${summary.workspacePullFailures} pull failure${summary.workspacePullFailures === 1 ? "" : "s"}`,
       `  bounds: ${bounds}`,
     );
@@ -261,6 +265,8 @@ function formatExplicitDiagnosticRefresh(refresh: ExplicitDiagnosticRefreshStatu
   switch (refresh.outcome) {
     case "fresh":
       return `fresh${duration}`;
+    case "eventual":
+      return `current push state${duration} — server may update asynchronously`;
     case "timed-out":
       return `timed out${duration} — no diagnostics returned`;
     case "unavailable":
@@ -461,6 +467,10 @@ function formatClientDiagnosticLatency(client: LspServiceStatus["clients"][numbe
   if (client.lastDiagnosticDurationMs === undefined) return undefined;
   const duration = `${Math.max(0, Math.round(client.lastDiagnosticDurationMs))} ms`;
   switch (client.lastDiagnosticOutcome) {
+    case "unavailable":
+      return `unavailable ${duration}`;
+    case "eventual":
+      return `push ${duration}`;
     case "timeout":
       return `timeout ${duration}`;
     case "cancelled":

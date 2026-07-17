@@ -10,15 +10,22 @@ const packageRoot = path.dirname(here);
 export const CONFORMANCE_REQUIREMENTS = [
   requirement("authoritative document diagnostics", [
     evidence("tests/lsp-service.test.mjs", "an empty pull diagnostic report is fresh and authoritatively clean"),
-    evidence("tests/lsp-service.test.mjs", "a malformed pull response is never interpreted as clean"),
+    evidence("tests/lsp-service.test.mjs", "a malformed pull response is unavailable and never interpreted as clean"),
     evidence("tests/lsp-tool.test.mjs", "explicit diagnostic timeouts fail without returning cached diagnostics"),
+  ]),
+  requirement("protocol-correct push diagnostic state", [
+    evidence("tests/lsp-service.test.mjs", "push-only diagnostic refreshes keep the latest published state when the server suppresses duplicates"),
+    evidence("tests/lsp-service.test.mjs", "automatic push diagnostics retain published state across edits that produce no replacement"),
+    evidence("tests/lsp-service.test.mjs", "malformed publications are unavailable rather than eventually consistent"),
+    evidence("tests/lsp-service.test.mjs", "malformed push envelopes replace reusable state instead of preserving stale diagnostics"),
+    evidence("tests/lsp-tool.test.mjs", "explicit diagnostics expose an eventually consistent push state without calling it authoritative"),
   ]),
   requirement("stale-safe delayed feedback", [
     evidence("tests/delayed-staleness.test.mjs", "a newer mutation aborts an in-flight delayed diagnostic refresh"),
     evidence("tests/delayed-staleness.test.mjs", "context injection rejects feedback when the file changed outside tracked mutation hooks"),
   ]),
   requirement("active-client filesystem mutation propagation", [
-    evidence("tests/file-mutation-notifications.test.mjs", "watched-file notifications use LSP event types, clear stale diagnostics, and never start a client"),
+    evidence("tests/file-mutation-notifications.test.mjs", "watched-file notifications preserve push state, use LSP event types, and never start a client"),
     evidence("tests/file-mutation-notifications.test.mjs", "apply_patch announces the complete sibling batch before diagnostics and re-announces formatter writes"),
   ]),
   requirement("bounded and cancellable JSON-RPC transport", [
@@ -44,7 +51,10 @@ export const CONFORMANCE_REQUIREMENTS = [
     evidence("tests/workspace-diagnostics.test.mjs", "missing, malformed, oversized, and unsupported workspace reports fall back within the shared deadline"),
     evidence("tests/workspace-diagnostics.test.mjs", "a timed-out native workspace pull does not start fallback work after the scan deadline"),
     evidence("tests/workspace-diagnostics.test.mjs", "a falsely advertised document pull falls back to one push batch within the shared deadline"),
+    evidence("tests/workspace-diagnostics.test.mjs", "malformed document pulls stay unavailable instead of becoming eventual push state"),
     evidence("tests/workspace-diagnostics.test.mjs", "push-only workspace diagnostics synchronize once, publish as a batch, and close transient documents"),
+    evidence("tests/workspace-diagnostics.test.mjs", "push-only workspace scans report retained published state as eventual rather than timed out"),
+    evidence("tests/lsp-tool.test.mjs", "workspace diagnostics label eventual state contributed by a partially unavailable route"),
     evidence("tests/workspace-diagnostics.test.mjs", "active workspace diagnostics enforce file and traversal bounds"),
     evidence("tests/workspace-diagnostics.test.mjs", "active workspace diagnostics enforce a total source-byte bound"),
   ]),
@@ -90,7 +100,7 @@ export const PERFORMANCE_GATES = [
   wallGate("20-file workspace pull", "lsp/workspace-pull-clean-20", 10),
   wallGate("50-file workspace push batch", "lsp/workspace-push-batch-50", 100),
   wallGate("delayed diagnostic inline budget", "lsp/fake-delay-200", 90),
-  wallGate("diagnostic timeout budget", "lsp/fake-timeout-80", 90),
+  wallGate("push diagnostic observation budget", "lsp/fake-push-silence-80", 90),
 ];
 
 export function verifyConformanceCoverage(root = packageRoot) {

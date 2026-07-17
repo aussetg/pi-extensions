@@ -124,7 +124,7 @@ interface WorkspaceDiagnosticFilePlan {
 }
 
 interface WorkspaceDiagnosticClientFileResult {
-  outcome: "fresh" | "timed-out" | "unavailable";
+  outcome: "fresh" | "eventual" | "timed-out" | "unavailable";
   snapshot?: DiagnosticSnapshot;
   reason?: string;
   contentHash?: string;
@@ -373,6 +373,7 @@ export class LspService {
     throwIfAborted(options.signal);
     this.revalidateWorkspaceDiagnosticResults(discovery, plans, clientResults, executionStats, options.signal);
 
+    let eventualStateFiles = 0;
     for (const plan of plans) {
       const results = plan.clients
         .map((client) => clientResults.get(client)?.get(plan.filePath))
@@ -388,28 +389,35 @@ export class LspService {
       }
 
       const freshResults = results.filter((result) => result.outcome === "fresh" && result.snapshot !== undefined);
+      const eventualResults = results.filter((result) => result.outcome === "eventual" && result.snapshot !== undefined);
+      const diagnosticResults = [...freshResults, ...eventualResults];
+      if (eventualResults.length > 0) eventualStateFiles += 1;
       const timedOut = results.some((result) => result.outcome === "timed-out");
       const unavailable = results.length < plan.clients.length ||
-        results.some((result) => result.outcome === "unavailable" || (result.outcome === "fresh" && result.snapshot === undefined)) ||
-        (!timedOut && freshResults.length === 0);
-      const snapshot = mergeSnapshots(freshResults.map((result) => result.snapshot!));
-      if (freshResults.length > 0) snapshots[plan.index] = snapshot;
+        results.some((result) => result.outcome === "unavailable" ||
+          ((result.outcome === "fresh" || result.outcome === "eventual") && result.snapshot === undefined)) ||
+        (!timedOut && diagnosticResults.length === 0);
+      const eventual = !timedOut && !unavailable && eventualResults.length > 0;
+      const snapshot = mergeSnapshots(diagnosticResults.map((result) => result.snapshot!));
+      if (diagnosticResults.length > 0) snapshots[plan.index] = snapshot;
       files[plan.index] = {
         filePath: plan.filePath,
-        outcome: timedOut ? "timed-out" : unavailable ? "unavailable" : "fresh",
+        outcome: timedOut ? "timed-out" : unavailable ? "unavailable" : eventual ? "eventual" : "fresh",
         diagnostics: countDiagnosticSnapshotDiagnostics(snapshot),
         ...(!timedOut && unavailable ? { reason: workspaceDiagnosticUnavailableReason(results) } : {}),
+        ...(eventual ? { reason: workspaceDiagnosticEventualReason(results) } : {}),
       };
     }
 
     const snapshot = mergeSnapshots(snapshots.filter((entry): entry is DiagnosticSnapshot => entry !== undefined));
     const freshFiles = files.filter((file) => file.outcome === "fresh").length;
+    const eventualFiles = files.filter((file) => file.outcome === "eventual").length;
     const timedOutFiles = files.filter((file) => file.outcome === "timed-out").length;
     const unavailableFiles = files.filter((file) => file.outcome === "unavailable").length;
     const skippedFiles = files.filter((file) => file.outcome === "skipped").length;
     if (timedOutFiles > 0 && Date.now() >= deadlineAt) deadlineReached = true;
     const traversalComplete = !discovery.fileLimitReached && !discovery.entryLimitReached && !discovery.deadlineReached && discovery.walkErrors === 0;
-    const complete = traversalComplete && timedOutFiles === 0 && unavailableFiles === 0 && skippedFiles === 0;
+    const complete = traversalComplete && eventualFiles === 0 && timedOutFiles === 0 && unavailableFiles === 0 && skippedFiles === 0;
 
     return {
       snapshot,
@@ -423,6 +431,8 @@ export class LspService {
         entriesVisited: discovery.entriesVisited,
         selectedFiles: files.length,
         freshFiles,
+        eventualFiles,
+        eventualStateFiles,
         timedOutFiles,
         unavailableFiles,
         skippedFiles,
@@ -557,7 +567,7 @@ export class LspService {
               resultByFile.set(plan.filePath, {
                 outcome: documentResult.outcome,
                 ...(documentResult.snapshot ? { snapshot: documentResult.snapshot } : {}),
-                ...(documentResult.outcome === "fresh" ? { contentHash: fallback.contentHash } : {}),
+                ...(documentResult.outcome === "fresh" || documentResult.outcome === "eventual" ? { contentHash: fallback.contentHash } : {}),
                 protocol: documentResult.protocol,
                 ...(documentResult.reason ? { reason: documentResult.reason } : {}),
               });
@@ -596,7 +606,7 @@ export class LspService {
   ): void {
     for (const plan of plans) {
       throwIfAborted(signal);
-      const freshResults: Array<{
+      const diagnosticResults: Array<{
         client: LspClient;
         resultByFile: Map<string, WorkspaceDiagnosticClientFileResult>;
         result: WorkspaceDiagnosticClientFileResult;
@@ -604,13 +614,15 @@ export class LspService {
       for (const client of plan.clients) {
         const resultByFile = clientResults.get(client);
         const result = resultByFile?.get(plan.filePath);
-        if (resultByFile && result?.outcome === "fresh") freshResults.push({ client, resultByFile, result });
+        if (resultByFile && (result?.outcome === "fresh" || result?.outcome === "eventual")) {
+          diagnosticResults.push({ client, resultByFile, result });
+        }
       }
-      if (freshResults.length === 0) continue;
+      if (diagnosticResults.length === 0) continue;
 
       const source = readWorkspaceDiagnosticSource(discovery, plan.filePath, DEFAULT_LSP_SOURCE_FILE_MAX_BYTES);
       const currentContentHash = source.content === undefined ? undefined : contentHash(source.content);
-      for (const { client, resultByFile, result } of freshResults) {
+      for (const { client, resultByFile, result } of diagnosticResults) {
         if (currentContentHash !== undefined && result.contentHash === currentContentHash) continue;
         client.invalidateDiagnosticsForFile(plan.filePath);
         resultByFile.set(plan.filePath, {
@@ -1272,10 +1284,17 @@ export class LspService {
     if (successful.length === 0) return undefined;
 
     this.armIdleTimer();
+    const allClientsReturned = successful.length === clients.length;
+    const fresh = allClientsReturned && successful.every((result) => result.fresh);
+    const timedOut = successful.some((result) => result.timedOut);
+    const eventual = allClientsReturned && !fresh && !timedOut &&
+      successful.every((result) => result.fresh || result.eventual === true) &&
+      successful.some((result) => result.eventual === true);
     return {
       snapshot: mergeSnapshots(successful.map((result) => result.snapshot)),
-      fresh: successful.length === clients.length && successful.every((result) => result.fresh),
-      timedOut: successful.some((result) => result.timedOut),
+      fresh,
+      timedOut,
+      eventual,
       requestedAt: Math.min(...successful.map((result) => result.requestedAt)),
       completedAt: Math.max(...successful.map((result) => result.completedAt)),
     };
@@ -2151,6 +2170,14 @@ function workspaceSourceSkipReason(result: WorkspaceDiagnosticSourceReadResult):
 function workspaceDiagnosticUnavailableReason(results: WorkspaceDiagnosticClientFileResult[]): string {
   const reasons = [...new Set(results.map((result) => result.reason).filter((reason): reason is string => reason !== undefined))];
   return reasons.join("; ") || "no language server produced an authoritative diagnostic refresh";
+}
+
+function workspaceDiagnosticEventualReason(results: WorkspaceDiagnosticClientFileResult[]): string {
+  const reasons = [...new Set(results
+    .filter((result) => result.outcome === "eventual")
+    .map((result) => result.reason)
+    .filter((reason): reason is string => reason !== undefined))];
+  return reasons.join("; ") || "showing the latest state published by a push-only language server";
 }
 
 function clientKey(root: string, definition: LanguageServerDefinition): string {

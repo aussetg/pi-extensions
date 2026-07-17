@@ -117,11 +117,12 @@ export interface DiagnosticRefreshResult {
   snapshot: DiagnosticSnapshot;
   fresh: boolean;
   timedOut: boolean;
+  eventual?: boolean;
   requestedAt: number;
   completedAt: number;
 }
 
-export type WorkspaceDiagnosticFileOutcome = "fresh" | "timed-out" | "unavailable" | "skipped";
+export type WorkspaceDiagnosticFileOutcome = "fresh" | "eventual" | "timed-out" | "unavailable" | "skipped";
 
 export interface WorkspaceDiagnosticFileResult {
   filePath: string;
@@ -139,6 +140,8 @@ export interface WorkspaceDiagnosticScanSummary {
   entriesVisited: number;
   selectedFiles: number;
   freshFiles: number;
+  eventualFiles: number;
+  eventualStateFiles: number;
   timedOutFiles: number;
   unavailableFiles: number;
   skippedFiles: number;
@@ -168,7 +171,7 @@ export interface WorkspaceDiagnosticScanResult {
 }
 
 export type LspClientState = "queued" | "starting" | "ready" | "stopped" | "failed";
-export type LspDiagnosticOutcome = "fresh" | "timeout" | "cancelled";
+export type LspDiagnosticOutcome = "fresh" | "eventual" | "timeout" | "cancelled" | "unavailable";
 
 export type LspServerLogLevel = "info" | "warning" | "error";
 

@@ -16,7 +16,7 @@ import { readJsonLines as readJsonLog } from "./helpers/json-lines.mjs";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fakeServer = path.join(here, "fixtures", "fake-lsp-server.mjs");
 
-test("watched-file notifications use LSP event types, clear stale diagnostics, and never start a client", async () => {
+test("watched-file notifications preserve push state, use LSP event types, and never start a client", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-watched-files-"));
   const filePath = path.join(root, "probe.ts");
   const configPath = path.join(root, "tsconfig.json");
@@ -55,7 +55,7 @@ test("watched-file notifications use LSP event types, clear stale diagnostics, a
       { uri: pathToFileURL(configPath).href, type: 2 },
       { uri: pathToFileURL(deletedPath).href, type: 3 },
     ]);
-    assert.equal(service.cachedDiagnosticsIfKnown(filePath), undefined, "the mutation must invalidate authoritative cached diagnostics");
+    assert.ok(service.cachedDiagnosticsIfKnown(filePath), "push diagnostics remain current until the server replaces them");
     assert.equal(service.getStatus().clients.length, 1);
 
     const initialize = entries.find((entry) => entry.method === "initialize");

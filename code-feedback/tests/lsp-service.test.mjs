@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { LspClient } from "../src/lsp/client.ts";
 import { loadLanguageServerConfiguration } from "../src/lsp/server-config.ts";
 import { createLspService } from "../src/lsp/service.ts";
+import { resolveLanguageServers } from "../src/lsp/servers.ts";
 import { LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY, LSP_RESULT_SERVER_ID_KEY, LSP_RESULT_SERVER_SESSION_ID_KEY } from "../src/types.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -320,7 +321,51 @@ test("a falsely advertised pull method falls back to pushed diagnostics", async 
   }
 });
 
-test("a malformed pull response is never interpreted as clean", async () => {
+test("a failed repeated pull never reuses its cached result as fresh", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-pull-stale-fallback-"));
+  const filePath = path.join(root, "probe.py");
+  const content = "value = 1\n";
+  await writeFile(filePath, content, "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "pull-fails-after-first"],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    const first = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 200,
+      settleMs: 0,
+      forceFresh: true,
+    });
+    const failed = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 200,
+      settleMs: 0,
+      forceFresh: true,
+    });
+
+    assert.equal(first?.fresh, true);
+    assert.equal([...first.snapshot.byUri.values()].flat().length, 1);
+    assert.equal(failed?.fresh, false);
+    assert.equal(failed?.eventual, false);
+    assert.equal(failed?.timedOut, false);
+    assert.equal(failed?.snapshot.byUri.size, 0);
+    assert.equal(service.cachedDiagnosticsIfKnown(filePath), undefined);
+    assert.equal(service.getStatus().clients[0]?.lastDiagnosticOutcome, "unavailable");
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a malformed pull response is unavailable and never interpreted as clean", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-pull-invalid-"));
   const filePath = path.join(root, "probe.py");
   const content = "value = 1\n";
@@ -339,18 +384,20 @@ test("a malformed pull response is never interpreted as clean", async () => {
   });
 
   try {
+    await service.capabilities(filePath);
     const refresh = await service.diagnosticsForFileDetailed(filePath, content, {
-      timeoutMs: 30,
+      timeoutMs: 200,
       settleMs: 0,
     });
 
     assert.equal(refresh?.fresh, false);
-    assert.equal(refresh?.timedOut, true);
+    assert.equal(refresh?.timedOut, false);
+    assert.equal(refresh?.eventual, false);
     assert.equal(refresh?.snapshot.byUri.size, 0);
     for (let attempt = 0; attempt < 20 && service.getStatus().diagnosticRefreshes?.active !== 0; attempt += 1) {
       await sleep(10);
     }
-    assert.equal(service.getStatus().clients[0]?.lastDiagnosticOutcome, "timeout");
+    assert.equal(service.getStatus().clients[0]?.lastDiagnosticOutcome, "unavailable");
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });
@@ -377,15 +424,99 @@ test("malformed diagnostic item arrays are never interpreted as clean", async ()
     });
 
     try {
+      await service.capabilities(filePath);
       const refresh = await service.diagnosticsForFileDetailed(filePath, content, {
-        timeoutMs: 30,
+        timeoutMs: 200,
         settleMs: 0,
       });
 
       assert.equal(refresh?.fresh, false, mode);
-      assert.equal(refresh?.timedOut, true, mode);
-      assert.equal(refresh?.snapshot.byUri.size, 0, mode);
+      assert.equal(refresh?.timedOut, false, mode);
+      assert.equal(refresh?.eventual, false, mode);
       assert.equal(service.cachedDiagnosticsIfKnown(filePath), undefined, mode);
+    } finally {
+      await service.shutdownAll();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("malformed publications are unavailable rather than eventually consistent", async () => {
+  for (const mode of ["pull-malformed-items", "push-malformed-items"]) {
+    const root = await mkdtemp(path.join(os.tmpdir(), `pi-code-feedback-eventual-${mode}-`));
+    const filePath = path.join(root, "probe.py");
+    const content = "value = 1\n";
+    await writeFile(filePath, content, "utf8");
+
+    const service = createLspService({
+      projectRoot: root,
+      idleTimeoutMs: 0,
+      serverOverrides: {
+        python: {
+          command: process.execPath,
+          args: [fakeServer, "py", "T100", "1", "", mode],
+        },
+        "python-ruff": { disabled: true },
+      },
+    });
+
+    try {
+      const refresh = await service.diagnosticsForFileDetailed(filePath, content, {
+        timeoutMs: 200,
+        settleMs: 0,
+        forceFresh: true,
+      });
+
+      assert.equal(refresh?.fresh, false, mode);
+      assert.equal(refresh?.eventual, false, mode);
+      assert.equal(refresh?.timedOut, false, mode);
+      assert.equal(service.cachedDiagnosticsIfKnown(filePath), undefined, mode);
+      assert.equal(service.getStatus().clients[0]?.lastDiagnosticOutcome, "unavailable", mode);
+    } finally {
+      await service.shutdownAll();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("malformed push envelopes replace reusable state instead of preserving stale diagnostics", async () => {
+  for (const mode of ["push-malformed-version-after-first", "push-malformed-diagnostics-after-first"]) {
+    const root = await mkdtemp(path.join(os.tmpdir(), `pi-code-feedback-push-envelope-${mode}-`));
+    const filePath = path.join(root, "probe.py");
+    const content = "value = 1\n";
+    await writeFile(filePath, content, "utf8");
+
+    const service = createLspService({
+      projectRoot: root,
+      idleTimeoutMs: 0,
+      serverOverrides: {
+        python: {
+          command: process.execPath,
+          args: [fakeServer, "py", "T100", "1", "", mode],
+        },
+        "python-ruff": { disabled: true },
+      },
+    });
+
+    try {
+      const first = await service.diagnosticsForFileDetailed(filePath, content, {
+        timeoutMs: 1000,
+        settleMs: 0,
+        forceFresh: true,
+      });
+      const malformed = await service.diagnosticsForFileDetailed(filePath, content, {
+        timeoutMs: 200,
+        settleMs: 0,
+        forceFresh: true,
+      });
+
+      assert.equal(first?.fresh, true, mode);
+      assert.equal([...first.snapshot.byUri.values()].flat().length, 1, mode);
+      assert.equal(malformed?.fresh, false, mode);
+      assert.equal(malformed?.eventual, false, mode);
+      assert.equal(malformed?.timedOut, false, mode);
+      assert.equal(service.cachedDiagnosticsIfKnown(filePath), undefined, mode);
+      assert.equal(service.getStatus().clients[0]?.lastDiagnosticOutcome, "unavailable", mode);
     } finally {
       await service.shutdownAll();
       await rm(root, { recursive: true, force: true });
@@ -447,13 +578,15 @@ test("malformed diagnostic positions do not make valid diagnostics authoritative
   });
 
   try {
+    await service.capabilities(filePath);
     const result = await service.diagnosticsForFileDetailed(filePath, await readFile(filePath, "utf8"), {
-      timeoutMs: 30,
+      timeoutMs: 200,
       settleMs: 0,
     });
     const diagnostics = [...result.snapshot.byUri.values()].flat();
     assert.equal(result.fresh, false);
-    assert.equal(result.timedOut, true);
+    assert.equal(result.timedOut, false);
+    assert.equal(result.eventual, false);
     assert.equal(diagnostics.length, 1);
     assert.equal(diagnostics[0].code, "T100");
     assert.deepEqual(diagnostics[0].range.start, { line: 1, character: 1 });
@@ -610,6 +743,129 @@ test("forced diagnostic refreshes resync push-only documents instead of acceptin
   }
 });
 
+test("push-only diagnostic refreshes keep the latest published state when the server suppresses duplicates", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-push-deduplicated-"));
+  const filePath = path.join(root, "probe.py");
+  const content = "value = 1\n";
+  await writeFile(filePath, content, "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "push-deduplicated"],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    const first = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 1000,
+      settleMs: 0,
+      forceFresh: true,
+    });
+    const repeated = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 1000,
+      settleMs: 0,
+      forceFresh: true,
+    });
+
+    assert.equal(first?.fresh, true);
+    assert.equal(repeated?.fresh, false);
+    assert.equal(repeated?.eventual, true);
+    assert.equal(repeated?.timedOut, false);
+    assert.equal([...repeated.snapshot.byUri.values()].flat().length, 1);
+    assert.ok((repeated?.completedAt ?? 1000) - (repeated?.requestedAt ?? 0) < 250);
+    assert.equal(service.getStatus().clients[0]?.lastDiagnosticOutcome, "eventual");
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an initially silent push-only server yields an eventual empty state instead of a false timeout", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-push-silent-"));
+  const filePath = path.join(root, "probe.py");
+  const content = "value = 1\n";
+  await writeFile(filePath, content, "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "no-diagnostics"],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    const refresh = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 200,
+      settleMs: 0,
+      forceFresh: true,
+    });
+
+    assert.equal(refresh?.fresh, false);
+    assert.equal(refresh?.eventual, true);
+    assert.equal(refresh?.timedOut, false);
+    assert.equal(refresh?.snapshot.byUri.size, 0);
+    assert.equal(service.getStatus().clients[0]?.lastDiagnosticOutcome, "eventual");
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("automatic push diagnostics retain published state across edits that produce no replacement", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-push-edit-deduplicated-"));
+  const filePath = path.join(root, "probe.py");
+  const firstContent = "value = 1\n";
+  const nextContent = "value = 1\n# unchanged diagnostics\n";
+  await writeFile(filePath, firstContent, "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      python: {
+        command: process.execPath,
+        args: [fakeServer, "py", "T100", "1", "", "push-deduplicated"],
+      },
+      "python-ruff": { disabled: true },
+    },
+  });
+
+  try {
+    const first = await service.diagnosticsForFileDetailed(filePath, firstContent, {
+      timeoutMs: 1000,
+      settleMs: 0,
+    });
+    assert.equal(first?.fresh, true);
+
+    await writeFile(filePath, nextContent, "utf8");
+    service.notifyFileMutations([{ type: "changed", filePath }]);
+    const afterEdit = await service.diagnosticsForFileDetailed(filePath, nextContent, {
+      timeoutMs: 100,
+      settleMs: 0,
+    });
+
+    assert.equal(afterEdit?.fresh, false);
+    assert.equal(afterEdit?.eventual, true);
+    assert.equal(afterEdit?.timedOut, false);
+    assert.equal([...afterEdit.snapshot.byUri.values()].flat().length, 1);
+    assert.equal(service.getStatus().clients[0]?.lastDiagnosticOutcome, "eventual");
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("TypeScript diagnostics use authoritative tsserver requests when the LSP suppresses repeated clean publications", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-typescript-direct-clean-"));
   const filePath = path.join(root, "probe.ts");
@@ -756,6 +1012,73 @@ test("real typescript-language-server returns repeated clean diagnostics without
   }
 });
 
+test("real push-only servers retain diagnostics when unchanged publications are suppressed", async (t) => {
+  const cases = [
+    {
+      id: "clangd",
+      file: "probe.c",
+      content: "int answer = \"bad\";\n",
+      files: { "compile_flags.txt": "-std=c17\n" },
+    },
+    {
+      id: "haskell",
+      file: "Smoke.hs",
+      content: "module Smoke where\nanswer :: Int\nanswer = \"bad\"\n",
+      files: {},
+    },
+    {
+      id: "lua",
+      file: "probe.lua",
+      content: "local answer =\nreturn answer\n",
+      files: { ".luarc.json": "{}\n" },
+    },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.id, async (st) => {
+      const root = await mkdtemp(path.join(os.tmpdir(), `pi-code-feedback-real-${entry.id}-`));
+      const filePath = path.join(root, entry.file);
+      for (const [name, content] of Object.entries({ ...entry.files, [entry.file]: entry.content })) {
+        const target = path.join(root, name);
+        await mkdir(path.dirname(target), { recursive: true });
+        await writeFile(target, content, "utf8");
+      }
+
+      const route = resolveLanguageServers(filePath, { projectRoot: root, server: entry.id })[0];
+      if (!route?.available) {
+        await rm(root, { recursive: true, force: true });
+        st.skip(route?.unavailableReason ?? `${entry.id} is unavailable`);
+        return;
+      }
+
+      const service = createLspService({ projectRoot: root, idleTimeoutMs: 0 });
+      try {
+        const first = await service.diagnosticsForFileDetailed(filePath, entry.content, {
+          timeoutMs: 5000,
+          settleMs: 100,
+          forceFresh: true,
+          server: entry.id,
+        });
+        const repeated = await service.diagnosticsForFileDetailed(filePath, entry.content, {
+          timeoutMs: 5000,
+          settleMs: 100,
+          forceFresh: true,
+          server: entry.id,
+        });
+
+        assert.equal(first?.timedOut, false);
+        assert.equal(repeated?.timedOut, false);
+        assert.ok(repeated?.fresh || repeated?.eventual, entry.id);
+        assert.ok((repeated?.completedAt ?? 1000) - (repeated?.requestedAt ?? 0) < 1000, entry.id);
+        assert.ok([...repeated.snapshot.byUri.values()].flat().length > 0, entry.id);
+      } finally {
+        await service.shutdownAll();
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 test("document requests sync the file without forcing a save or diagnostic refresh", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-document-request-"));
   const filePath = path.join(root, "probe.py");
@@ -886,7 +1209,7 @@ test("diagnostic refresh status distinguishes timeouts from cancellation", async
     serverOverrides: {
       python: {
         command: process.execPath,
-        args: [fakeServer, "py", "T100", "1", "", "no-diagnostics"],
+        args: [fakeServer, "py", "T100", "1", "", "pull-delay-100"],
       },
       "python-ruff": { disabled: true },
     },

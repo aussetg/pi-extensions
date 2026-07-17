@@ -81,6 +81,29 @@ test("footer distinguishes cancelled diagnostic work from timeouts", () => {
   assert.equal(renderFooterStatus(rt, undefined, status), "lsp: typescript (cancelled 22 ms)");
 });
 
+test("footer labels eventually consistent push diagnostics without calling them timeouts", () => {
+  const rt = runtime();
+  const status = {
+    activeClients: 1,
+    clients: [client({ id: "clangd", command: "clangd", lastDiagnosticDurationMs: 51.2, lastDiagnosticOutcome: "eventual" })],
+    unavailableServers: [],
+  };
+
+  assert.equal(renderFooterStatus(rt, undefined, status), "lsp: clangd (push 51 ms)");
+});
+
+test("footer and full status label unavailable diagnostic refreshes", () => {
+  const rt = runtime();
+  const status = {
+    activeClients: 1,
+    clients: [client({ id: "python", command: "ty", lastDiagnosticDurationMs: 43.6, lastDiagnosticOutcome: "unavailable" })],
+    unavailableServers: [],
+  };
+
+  assert.equal(renderFooterStatus(rt, undefined, status), "lsp: ty (unavailable 44 ms)");
+  assert.match(renderStatus(rt, status), /diag_latency=unavailable 44 ms/);
+});
+
 test("footer includes trusted external roots after LSP status", () => {
   const rt = runtime();
   rt.trustedEnvironmentRoots = ["/tmp/external-a", "/tmp/external-b"];

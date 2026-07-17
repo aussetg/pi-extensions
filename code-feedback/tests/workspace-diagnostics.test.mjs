@@ -354,6 +354,39 @@ test("a falsely advertised document pull falls back to one push batch within the
   }
 });
 
+test("malformed document pulls stay unavailable instead of becoming eventual push state", async () => {
+  for (const mode of ["pull-invalid", "pull-malformed-items"]) {
+    const root = await mkdtemp(path.join(os.tmpdir(), `pi-code-feedback-workspace-document-${mode}-`));
+    const logPath = path.join(root, "lsp.jsonl");
+    await writeFile(path.join(root, "a.py"), "a = 1\n", "utf8");
+
+    const service = fakePythonService(root, mode, 2, logPath);
+    try {
+      const result = await service.diagnosticsForWorkspace(".", {
+        limit: 10,
+        timeoutMs: 1000,
+        settleMs: 0,
+        server: "python",
+      });
+
+      assert.equal(result.summary.complete, false, mode);
+      assert.equal(result.summary.freshFiles, 0, mode);
+      assert.equal(result.summary.eventualFiles, 0, mode);
+      assert.equal(result.summary.timedOutFiles, 0, mode);
+      assert.equal(result.summary.unavailableFiles, 1, mode);
+      assert.equal(result.summary.diagnostics, 0, mode);
+      assert.equal(result.summary.documentPullFiles, 1, mode);
+      assert.equal(result.summary.pushBatchFiles, 0, mode);
+      assert.equal(result.files[0]?.outcome, "unavailable", mode);
+      assert.match(result.files[0]?.reason ?? "", /malformed response/, mode);
+      assert.equal((await readJsonLog(logPath)).filter((entry) => entry.method === "textDocument/diagnostic").length, 1, mode);
+    } finally {
+      await service.shutdownAll();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("cancelling workspace pull diagnostics cancels the request without starting fallback work", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-workspace-protocol-cancel-"));
   const logPath = path.join(root, "lsp.jsonl");
@@ -642,6 +675,42 @@ test("push diagnostic batches preserve documents that were already open", async 
     assert.equal(service.getStatus().clients[0]?.openDocuments, 1);
     const closes = (await readJsonLog(logPath)).filter((entry) => entry.method === "textDocument/didClose");
     assert.deepEqual(closes.map((entry) => entry.params.textDocument.uri), [pathToFileURL(secondPath).href]);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("push-only workspace scans report retained published state as eventual rather than timed out", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-workspace-push-eventual-"));
+  const filePath = path.join(root, "a.py");
+  const content = "a = 1\n";
+  await writeFile(filePath, content, "utf8");
+
+  const service = fakePythonService(root, "push-deduplicated", 1);
+  try {
+    const initial = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 1000,
+      settleMs: 0,
+      server: "python",
+    });
+    assert.equal(initial?.fresh, true);
+
+    const result = await service.diagnosticsForWorkspace(".", {
+      limit: 10,
+      timeoutMs: 500,
+      settleMs: 0,
+      server: "python",
+    });
+
+    assert.equal(result.summary.complete, false);
+    assert.equal(result.summary.freshFiles, 0);
+    assert.equal(result.summary.eventualFiles, 1);
+    assert.equal(result.summary.eventualStateFiles, 1);
+    assert.equal(result.summary.timedOutFiles, 0);
+    assert.equal(result.files[0]?.outcome, "eventual");
+    assert.equal(result.files[0]?.diagnostics, 1);
+    assert.equal([...result.snapshot.byUri.values()].flat().length, 1);
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });

@@ -146,7 +146,7 @@ export function registerLspTool(
       "Use lsp with real LSP method names such as method=\"textDocument/hover\", method=\"textDocument/definition\", and method=\"workspace/symbol\"; positions use 1-based line plus either column or exact symbol and optional occurrence.",
       "Semantic requests automatically use language-role routes; diagnostics and code actions also use linter-role routes.",
       "Use the optional lsp server parameter to select one configured language server when multiple servers match a file.",
-      "Use lsp method=\"textDocument/diagnostic\" with path to refresh one file, or method=\"workspace/diagnostic\" with a project file/directory path for a bounded active scan. Explicit diagnostics use a 10-second budget; workspace scans share one absolute deadline across all selected files. Timeout, unavailable, or stale cache states are never returned as diagnostics.",
+      "Use lsp method=\"textDocument/diagnostic\" with path to refresh one file, or method=\"workspace/diagnostic\" with a project file/directory path for a bounded active scan. Explicit diagnostics use a 10-second budget; workspace scans share one absolute deadline across all selected files. Pull results are authoritative; push-only servers may return their latest published state as explicitly labeled eventually consistent diagnostics.",
       "Use lsp method=\"textDocument/codeAction\" or method=\"textDocument/rename\" to preview a WorkspaceEdit, then method=\"workspaceEdit/apply\" with its id to apply it safely.",
       "Use lsp method=\"workspace/renameFile\" with path and newPath to preview an LSP-aware file rename, then apply its id with workspaceEdit/apply; file moves are never applied during preview.",
       "Do not use lsp for formatting; formatting is handled by code-feedback's edit pipeline or normal shell/editor tools.",
@@ -370,7 +370,7 @@ async function handleDiagnostics(
   const diagnostics = await diagnosticsSnapshot(method, params, runtime, lspService, signal);
   const server = readServer(params);
   const workspaceScan = diagnostics.workspaceScan;
-  if (diagnostics.mode === "file" && diagnostics.refresh?.outcome !== "fresh") {
+  if (diagnostics.mode === "file" && diagnostics.refresh?.outcome !== "fresh" && diagnostics.refresh?.outcome !== "eventual") {
     return explicitDiagnosticFailure(method, diagnostics, server);
   }
   if (!diagnostics.snapshot) {
@@ -397,7 +397,9 @@ async function handleDiagnostics(
     server,
     authoritative: diagnosticsAreAuthoritative(diagnostics),
     diagnosticRefresh: diagnostics.refresh,
-    freshDiagnosticsOnly: true,
+    freshDiagnosticsOnly: diagnostics.mode === "file"
+      ? diagnostics.refresh?.outcome === "fresh"
+      : diagnostics.workspaceScan?.summary.eventualStateFiles === 0,
     workspaceScan: workspaceScanDetails,
     hint,
     recentTouchedRanges: runtime.completedEdits.slice(-5).map((edit) => ({
@@ -412,9 +414,16 @@ async function handleDiagnostics(
 }
 
 function workspaceDiagnosticHint(diagnostics: DiagnosticsToolSnapshot): string {
-  if (diagnostics.mode === "file") return "The displayed diagnostics are fresh for the current file content.";
+  if (diagnostics.mode === "file") {
+    return diagnostics.refresh?.outcome === "eventual"
+      ? "This push-only server has no diagnostic completion response. The displayed diagnostics are its latest published state and may update asynchronously."
+      : "The displayed diagnostics are fresh for the current file content.";
+  }
   const summary = diagnostics.workspaceScan?.summary;
   if (!summary) return "Pass path for an active workspace diagnostic scan.";
+  if (summary.eventualStateFiles > 0) {
+    return "Some displayed diagnostics are the latest state published by push-only servers and are not authoritative pull results; timeout and unavailable counts still cover other routed servers.";
+  }
   if (summary.deadlineReached) {
     return "The shared workspace diagnostic deadline was reached. Narrow the target before retrying; no fallback work continues after the deadline.";
   }
@@ -459,7 +468,7 @@ async function diagnosticsSnapshot(
   const server = readServer(params);
   if (method === "workspace/diagnostic") {
     const target = readToolPath(params);
-    if (!target) throw new Error("workspace/diagnostic requires path for an active fresh scan");
+    if (!target) throw new Error("workspace/diagnostic requires path for an active scan");
     const workspaceScan = await lspService.diagnosticsForWorkspace(target, {
       limit: readWorkspaceDiagnosticLimit(params),
       timeoutMs: EXPLICIT_LSP_DIAGNOSTIC_TIMEOUT_MS,
@@ -487,7 +496,7 @@ async function diagnosticsSnapshot(
     return {
       mode: "file",
       target: filePath,
-      ...(refresh.fresh ? { snapshot: refresh.snapshot } : {}),
+      ...(refresh.fresh || refresh.eventual ? { snapshot: refresh.snapshot } : {}),
       refresh: explicitDiagnosticRefreshStatus(refresh),
     };
   }
@@ -500,7 +509,7 @@ async function diagnosticsSnapshot(
 
 function explicitDiagnosticRefreshStatus(refresh: DiagnosticRefreshResult): ExplicitDiagnosticRefreshStatus {
   return {
-    outcome: refresh.fresh ? "fresh" : refresh.timedOut ? "timed-out" : "unavailable",
+    outcome: refresh.fresh ? "fresh" : refresh.eventual ? "eventual" : refresh.timedOut ? "timed-out" : "unavailable",
     durationMs: Math.max(0, refresh.completedAt - refresh.requestedAt),
   };
 }
@@ -1273,7 +1282,7 @@ function hintForError(message: string): string | undefined {
   if (/cannot (?:find|resolve) (?:occurrence .* of exact )?symbol|cannot find exact symbol/i.test(message)) {
     return "Check the exact case-sensitive symbol text, line, and 1-based occurrence.";
   }
-  if (/workspace\/diagnostic requires path/i.test(message)) return "Pass path=\".\" or a project file/directory for an active fresh scan.";
+  if (/workspace\/diagnostic requires path/i.test(message)) return "Pass path=\".\" or a project file/directory for an active scan.";
   if (/requires path/i.test(message)) return "Pass path for textDocument methods.";
   if (/workspace\/renameFile requires newPath/i.test(message)) return "Pass newPath for the destination file inside the trusted project root.";
   if (/File rename (?:source|destination).*outside project root/i.test(message)) return "Choose source and destination files inside the trusted project root.";
