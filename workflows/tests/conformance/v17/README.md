@@ -40,3 +40,10 @@ The production TypeScript frontend now exists under `src/definition/workflow-v17
 parse all six corpus files, pin exact derived review snapshots, and exercise malformed source with
 source locations. The reference models in this directory remain independent: later persistence and
 runtime phases must still reproduce them rather than importing away the oracle.
+
+The separate production v17 persistence substrate now exists in `src/persistence/run-database-v17*`.
+Its schema-4 tests use real WAL SQLite to cover root/local cursor identity, caught failure calls,
+atomic keyed scope preclaim, completion-order-independent join records, pinned resource integrity,
+candidate measurement/verification/disposition/apply state, automatic discard/abandonment, workspace
+lane ownership, revision conflicts, legacy-version refusal, and corruption detection. It remains
+unwired from v16 launch and execution; the next phase builds causal replay over these records.

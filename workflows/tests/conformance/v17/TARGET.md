@@ -159,3 +159,9 @@ No control-flow compiler is required.
   fail-safe external exposure policy, derives definition identity, validates canonical invocation
   input, pins trusted dynamic measurement resources, and writes independently reconstructable source,
   executable, policy, resource, and language snapshots. The v16 launch/runtime path remains unchanged.
+- The separate schema-4 v17 run database now persists immutable run/resource identity, sequential
+  scope cursors, keyed child scopes, local calls, structural joins, attempts/checkpoints/artifacts,
+  and explicit candidate workspace/measurement/verification/disposition/apply state. Real SQLite
+  tests enforce revision CAS, atomic preclaim, completion-order independence, lifecycle termination,
+  legacy refusal, and corruption detection. It remains disconnected until causal replay and the v17
+  semantic engine are ready for atomic cutover.

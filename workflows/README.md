@@ -11,8 +11,9 @@ primary Pi session launches and controls runs but does not own their lifetime.
 > declaration is [`workflow-api-v16.d.ts`](workflow-api-v16.d.ts). The isolated v17 frontend now
 > strictly typechecks, strips, reviews, and instruments `.flow.ts` source. A separate production v17
 > registry now discovers those definitions, applies fail-safe namespace exposure policy, and writes
-> immutable invocation/source/resource snapshots. The v16 launch service and executable runtime do
-> not consume that registry yet.
+> immutable invocation/source/resource snapshots. A separate schema-4 v17 run database now persists
+> scope-local cursors, keyed child scopes, structural joins, pinned resources, and explicit candidate
+> lifecycle state. The v16 launch service and executable runtime consume neither staged path yet.
 
 This extension is intentionally local and Linux-only. It has no compatibility layer for old run or
 definition formats and no portability fallback.
@@ -249,7 +250,20 @@ The staged v17 registry uses `registry.json` beside each namespace's definitions
 snapshotted at launch but excluded from executable definition identity. The staged v17 invocation
 writer records the original `.flow.ts`, reviewed executable JavaScript, exact frontend transform,
 language descriptor, policy revision, launch actor/trust, and invocation-selected measurement
-profile snapshots. It remains disconnected from coordinator execution until the atomic cutover.
+profile snapshots.
+
+The staged v17 `run.sqlite` is a clean schema-4 rebuild. A root, candidate body, parallel branch, or
+mapped item is one sequential scope with its own cursor and call chain. Global operation ordinals are
+retained only for event/UI ordering. Child scopes bind their owner operation, lane key, and seed;
+structural join rows bind exact output order and every child terminal key. Invocation resource rows
+store the exact launch snapshot rather than selectors into a live registry. Candidate workspaces,
+frozen authority, changed paths, pending measurement, verification, one disposition, and apply receipt
+are separate constrained records. Completion discards unchanged candidates, rejects changed pending
+candidates, and failure/stop abandons work and rejects pending measurements atomically. Schema-3 files
+remain untouched legacy evidence and are never migrated in place.
+
+This database remains disconnected from coordinator execution until causal replay and the cursor
+semantic engine are implemented and the runtime is cut over atomically.
 
 The following describes the currently executable v16 layout.
 
