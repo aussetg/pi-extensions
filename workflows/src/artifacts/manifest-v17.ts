@@ -1,5 +1,5 @@
 import { deepFreezeJson } from "../definition/canonical-json.js";
-import { DEFINITION_LIMITS, FLOW_NAME_PATTERN } from "../definition/limits.js";
+import { DEFINITION_LIMITS } from "../definition/limits.js";
 import type { WorkflowV17ProductKind } from "../definition/workflow-language-v17.js";
 import type { WorkflowArtifactV17Record } from "../persistence/run-database-v17-types.js";
 import type { JsonValue } from "../types.js";
@@ -17,6 +17,9 @@ export interface WorkflowV17ArtifactManifest {
   entries: readonly WorkflowV17ArtifactManifestEntry[];
   hash: string;
 }
+
+/** Safe filesystem segment for ordinary TypeScript artifact bundle keys. */
+export const WORKFLOW_V17_ARTIFACT_SEGMENT_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/u;
 
 /** Convert one named artifact algebra into a canonical, authority-checked leaf manifest. */
 export function workflowV17ArtifactManifest(
@@ -123,7 +126,7 @@ export class WorkflowV17ArtifactManifestError extends Error {
 }
 
 function assertSegment(value: string, displayPath: string): void {
-  if (!FLOW_NAME_PATTERN.test(value)) {
+  if (!WORKFLOW_V17_ARTIFACT_SEGMENT_PATTERN.test(value)) {
     throw new WorkflowV17ArtifactManifestError(`Invalid workflow v17 artifact segment ${displayPath}`);
   }
 }

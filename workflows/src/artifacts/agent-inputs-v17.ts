@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { AgentInputBundleHandle } from "../agents/executor.js";
-import { DEFINITION_LIMITS, FLOW_NAME_PATTERN } from "../definition/limits.js";
+import { DEFINITION_LIMITS } from "../definition/limits.js";
 import { WORKFLOW_V17_PRODUCT_KINDS } from "../definition/workflow-language-v17.js";
 import type { WorkflowArtifactV17Record } from "../persistence/run-database-v17-types.js";
 import type { ArtifactRef } from "../runtime/durable-types.js";
@@ -10,6 +10,7 @@ import { sha256 } from "../utils/hashes.js";
 import { stableJson } from "../utils/stable-json.js";
 import {
   workflowV17ArtifactManifestHash,
+  WORKFLOW_V17_ARTIFACT_SEGMENT_PATTERN,
   type WorkflowV17ArtifactManifest,
 } from "./manifest-v17.js";
 import { WorkflowV17ArtifactStore } from "./store-v17.js";
@@ -136,8 +137,8 @@ function assertManifest(value: WorkflowV17ArtifactManifest): void {
 
 function validManifestPath(value: string): boolean {
   const parts = value.split("/");
-  if (parts.length < 1 || !FLOW_NAME_PATTERN.test(parts[0]!)) return false;
-  return parts.slice(1).every(part => FLOW_NAME_PATTERN.test(part) || /^\d{6}$/u.test(part));
+  if (parts.length < 1 || !WORKFLOW_V17_ARTIFACT_SEGMENT_PATTERN.test(parts[0]!)) return false;
+  return parts.slice(1).every(part => WORKFLOW_V17_ARTIFACT_SEGMENT_PATTERN.test(part) || /^\d{6}$/u.test(part));
 }
 
 function artifactRef(record: WorkflowArtifactV17Record): ArtifactRef {

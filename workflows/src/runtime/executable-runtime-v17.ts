@@ -47,6 +47,7 @@ import {
   type WorkflowV17StaticEffectResources,
   type WorkflowV17VerificationExecutor,
 } from "./effect-adapters-v17.js";
+import { WorkflowV17StructuralValueCodec } from "./structural-values-v17.js";
 
 export interface WorkflowV17ExecutableRuntimeOptions {
   workflow: ParsedWorkflowV17;
@@ -105,6 +106,10 @@ export class WorkflowV17ExecutableRuntime {
     const adapters = this.adapters();
     const engine = new WorkflowV17SemanticEngine(this.options.database, adapters, {
       candidate: this.options.candidates,
+      structuralValues: new WorkflowV17StructuralValueCodec(
+        this.options.authority,
+        this.options.products,
+      ),
       ...(this.options.replay ? { replay: this.options.replay } : {}),
       ...(this.options.signal ? { signal: this.options.signal } : {}),
       ...(this.options.operationAdmissionLimit !== undefined
@@ -142,7 +147,7 @@ export class WorkflowV17ExecutableRuntime {
         return await semantic.parallel(
           Object.fromEntries(Object.entries(branches).map(([key, body]) => [
             key,
-            async () => await body() as JsonValue,
+            async () => await body(),
           ])),
           { sourceSite, ...options },
         );
@@ -155,7 +160,7 @@ export class WorkflowV17ExecutableRuntime {
         if (typeof options.key !== "function") throw new TypeError("Workflow v17 map key must be a callback");
         return await semantic.map(
           itemsValue as JsonValue[],
-          async (item, index) => await (bodyValue as (item: JsonValue, index: number) => Promise<JsonValue>)(item, index),
+          async (item, index) => await (bodyValue as (item: JsonValue, index: number) => Promise<unknown>)(item, index),
           {
             sourceSite,
             key: async (item, index) => await (options.key as (item: JsonValue, index: number) => Promise<string>)(item, index),

@@ -200,6 +200,34 @@ export class WorkflowV17EffectProductFactory {
     return this.artifact((await this.store.putJson({ kind: "experiment", value: body })).record);
   }
 
+  /** Rebuild one attachable product embedded in a completed structural result. */
+  restoreAttachableProduct(
+    identity: WorkflowV17ProductIdentity,
+    fields: Readonly<Record<string, unknown>>,
+  ): object {
+    if (identity.kind === "artifact" || !ATTACHABLE_PRODUCTS.has(identity.kind)) {
+      throw new WorkflowV17ArtifactAuthorityError(
+        `Workflow v17 product ${identity.kind} is not a restorable attachable product`,
+      );
+    }
+    const artifact = fields.artifact;
+    if (!artifact || typeof artifact !== "object") {
+      throw new WorkflowV17ArtifactAuthorityError(
+        `Workflow v17 product ${identity.authorityId} lacks its canonical artifact`,
+      );
+    }
+    this.artifactRecord(artifact);
+    const restored = this.product(identity.kind, identity.authorityId, fields, artifact);
+    const description = this.authority.describe(restored);
+    if (!description || description.family !== "product"
+      || stableJson(description.identity) !== stableJson(identity)) {
+      throw new WorkflowV17ArtifactAuthorityError(
+        `Workflow v17 product ${identity.authorityId} differs from its structural authority`,
+      );
+    }
+    return restored;
+  }
+
   artifactRecord(value: unknown): WorkflowArtifactV17Record {
     const description = this.authority.describe(value);
     if (!description || description.family !== "product" || description.identity.kind !== "artifact") {

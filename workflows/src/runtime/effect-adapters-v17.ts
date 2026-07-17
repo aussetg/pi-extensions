@@ -350,6 +350,7 @@ export interface WorkflowV17ApplyExecutor {
 
 export interface WorkflowV17MeasurementAuthorityResolver {
   resolve(value: unknown, candidate: WorkflowCandidateV17Record): WorkflowCandidateMeasurementV17Record;
+  observeDisposition?(candidate: WorkflowCandidateV17Record, disposition: "accepted" | "rejected"): void;
 }
 
 interface AdapterOptions {
@@ -875,6 +876,7 @@ export class WorkflowV17AcceptEffectAdapter implements WorkflowV17SemanticEffect
       ...(value.measurement ? { measurementId: value.measurement.measurementId } : {}),
       at: context.operation.endedAt ?? context.operation.updatedAt,
     }));
+    this.options.measurements?.observeDisposition?.(candidate, "accepted");
     return this.options.candidates.acceptedValue(candidate);
   }
   private resolve(value: unknown) {
@@ -920,7 +922,7 @@ export class WorkflowV17RejectEffectAdapter implements WorkflowV17SemanticEffect
   async restore(context: WorkflowV17EffectRestoreContext): Promise<unknown> {
     const value = this.resolve(context.input);
     const result = plainRecord(context.result, "workflow v17 rejection result");
-    await revisionRetry(async () => this.options.database.disposeCandidate({
+    const candidate = await revisionRetry(async () => this.options.database.disposeCandidate({
       expectedRevision: this.options.database.readRun().revision,
       candidateId: value.candidate.candidateId,
       operationId: context.operation.operationId,
@@ -930,6 +932,7 @@ export class WorkflowV17RejectEffectAdapter implements WorkflowV17SemanticEffect
       reason: reason("rejected", value.reason),
       at: context.operation.endedAt ?? context.operation.updatedAt,
     }));
+    this.options.measurements?.observeDisposition?.(candidate, "rejected");
     return deepFreezeJson({
       receiptId: result.receiptId as string,
       changedPaths: [...value.candidate.changedPaths],

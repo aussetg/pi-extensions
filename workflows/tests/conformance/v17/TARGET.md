@@ -145,7 +145,7 @@ No control-flow compiler is required.
 
 ## Laboratory evidence
 
-- 56 behavioral cases cover replay permutations/faults, same-run crash boundaries, artifacts,
+- 57 behavioral cases cover replay permutations/faults, same-run crash boundaries, artifacts,
   candidates, helpers, and invocation resources; strict TypeScript checks cover the compile-time
   contract separately.
 - Six complete workflows compile with strict TypeScript.
@@ -205,3 +205,13 @@ No control-flow compiler is required.
   synchronous method transport keeps `policy`, `summary`, `reachedTarget`, and `evaluate` host-
   authoritative. Tests cover acceptance, guardrail rejection, environment drift, profile switching,
   crash recovery, experiment evidence, profile revision identity, and causal baseline materialization.
+- The exact six-workflow corpus is now installed alongside v16 as staged `.flow.ts` builtins with
+  explicit model exposure and its own strict production typecheck. End-to-end tests run and crash-
+  reconstruct every builtin through control, effects, candidates, measurements, dispositions, and
+  apply. Research/package-audit preserve branded products through completed keyed structures;
+  optimize measures candidate-local file contents; goal reconstructs a failed-verification retry;
+  execute-plan reconstructs point and replan state.
+- Structured result persistence now uses an explicit authority tree when attachable products occur,
+  and metric methods use an encounter-local state view. These close two future-evidence leaks found
+  only by complete native-control workflows. Safe artifact names now admit ordinary ASCII camelCase
+  keys while still rejecting path traversal and unsafe segments.

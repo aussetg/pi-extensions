@@ -344,6 +344,7 @@ export class WorkflowV17MeasurementEffectAdapter implements WorkflowV17SemanticE
         },
       ));
     }
+    this.options.metrics.observeMeasurement(record);
     const diagnostics = record.diagnosticsArtifactDigest
       ? this.artifact(record.diagnosticsArtifactDigest) : undefined;
     return await this.options.products.measurement({

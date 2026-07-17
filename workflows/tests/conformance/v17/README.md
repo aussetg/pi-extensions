@@ -99,3 +99,17 @@ guardrail-rejected experiments, environment drift, runtime profile switching, lo
 recovery before both baseline and candidate disposition, profile-revision identity, and causal
 baseline replay without evaluator execution. The independent resource/candidate/replay models remain
 the contract.
+
+All six corpus definitions now also exist unchanged as staged production `.flow.ts` builtins and are
+strictly checked by `typecheck:flows:v17`. End-to-end schema-4 tests execute each definition through
+the v17 control and effect runtime, deliberately crash and reconstruct it, and assert its keyed lanes,
+candidate/metric/experiment evidence, dynamic titles, dispositions, and apply result. The optimize
+fixture measures a file in the candidate workspace rather than returning a canned sequence.
+
+This vertical pass made two explicit contract refinements. Safe artifact path segments allow ASCII
+camelCase names used naturally by TypeScript object keys while continuing to reject traversal and
+unsafe punctuation; the independent artifact oracle now covers that case. Completed structured
+results may contain attachable branded products, so production persistence uses a validated authority
+tree and reconstructs those products without re-entering completed callbacks. Metric control methods
+likewise observe only the measurement/disposition prefix encountered in the current reconstruction,
+not future durable rows.

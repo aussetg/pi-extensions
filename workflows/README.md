@@ -21,7 +21,9 @@ primary Pi session launches and controls runs but does not own their lifetime.
 > propagation, and external memory/segment limits. The v16 launch service still consumes none of the
 > staged v17 path. The staged executable path now also runs invocation-selected trusted measurement
 > profiles through branded metric sets, persists baseline/pending/disposition state, and records
-> canonical experiment evidence.
+> canonical experiment evidence. Exact `.flow.ts` rewrites of all six builtins now coexist with the
+> executable v16 `.flow.js` files and run end to end through the staged v17 control/effect runtime.
+> The v16 coordinator remains the only installed launcher until the atomic cutover.
 
 This extension is intentionally local and Linux-only. It has no compatibility layer for old run or
 definition formats and no portability fallback.
@@ -343,6 +345,21 @@ diagnostics, streams, and artifact authority, and `recordExperiment` binds the e
 measurement, disposition, lesson, and artifact. Causal replay can materialize an unchanged baseline
 into a fresh target metric set without running the evaluator.
 
+The six staged v17 builtins are the exact strict conformance corpus and are explicitly model-exposed
+by `src/builtins/registry.json`. Vertical tests execute research, package-audit, coding, optimize,
+goal, and execute-plan through reviewed control, schema-4 SQLite, branded products, candidate
+workspaces, restart reconstruction, verification, and apply. Optimize uses a pinned evaluator that
+reads the candidate workspace, proving measurements respond to actual candidate contents rather than
+an unrelated canned workload.
+
+Those vertical runs exposed and closed two reconstruction gaps. Completed `parallel`/`map` results
+now persist an explicit authority tree when they contain agent/command products, so restart restores
+branded products without callback re-entry or structural lookalikes. Metric methods now read a
+run-local causal view advanced as measurement and disposition operations are encountered, preventing
+future pending observations from changing earlier replayed prompts. Safe artifact bundle keys permit
+ordinary camelCase TypeScript names while still rejecting traversal, punctuation, and ambiguous
+segments.
+
 There is no implicit evaluator in v17. The old `builtin:runtime-baseline` remains reachable only by
 the still-executable v16 optimizer and will be deleted with that runtime at atomic cutover.
 
@@ -393,7 +410,8 @@ npm install
 npm run check
 ```
 
-`npm run check` runs TypeScript, authoring-interface checks, built-in flow checks, and Vitest. Real
+`npm run check` runs TypeScript, authoring-interface checks, v16 and strict v17 built-in checks, and
+Vitest. Real
 machine trials are separate; see [`benchmark/README.md`](benchmark/README.md).
 
 Security details are in [`SECURITY.md`](SECURITY.md). Projection and storage costs are in

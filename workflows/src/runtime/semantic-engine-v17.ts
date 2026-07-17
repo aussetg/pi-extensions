@@ -139,15 +139,15 @@ export interface WorkflowV17SemanticEffectAdapter {
 
 export interface WorkflowV17SequentialFlow {
   effect<T = JsonValue>(kind: WorkflowV17EffectKind, invocation: WorkflowV17EffectInvocation): Promise<T>;
-  parallel(
-    branches: Readonly<Record<string, () => JsonValue | Promise<JsonValue>>>,
+  parallel<const B extends Readonly<Record<string, () => unknown | Promise<unknown>>>>(
+    branches: B,
     options: WorkflowV17StructuredOptions,
-  ): Promise<JsonObject>;
-  map(
+  ): Promise<{ [K in keyof B]: Awaited<ReturnType<B[K]>> }>;
+  map<T>(
     items: readonly JsonValue[],
-    body: (item: JsonValue, index: number) => JsonValue | Promise<JsonValue>,
+    body: (item: JsonValue, index: number) => T | Promise<T>,
     options: WorkflowV17MapOptions,
-  ): Promise<JsonValue[]>;
+  ): Promise<T[]>;
   candidate(invocation: WorkflowV17CandidateInvocation): Promise<unknown>;
 }
 
@@ -162,6 +162,10 @@ export interface WorkflowV17SemanticEngineOptions {
   operationAdmissionLimit?: number;
   now?: () => Date;
   candidate?: WorkflowV17SemanticCandidateRuntime;
+  structuralValues?: {
+    encode(value: unknown): JsonValue;
+    decode(value: JsonValue): unknown;
+  };
   faultInjector?: (
     point: WorkflowV17SemanticEngineFaultPoint,
     operation?: WorkflowOperationV17Record,
@@ -179,7 +183,7 @@ interface CursorScope {
 interface StructuredLane {
   key: string;
   scope: WorkflowScopeV17Record;
-  body: () => JsonValue | Promise<JsonValue>;
+  body: () => unknown | Promise<unknown>;
   groupOperationId: string;
 }
 
@@ -188,7 +192,7 @@ interface StructuredLaneOutcome {
   scope: WorkflowScopeV17Record;
   outcome: "success" | "failure" | "cancelled";
   terminalKey: string;
-  value?: JsonValue;
+  value?: unknown;
   failure?: JsonObject;
 }
 
@@ -358,15 +362,15 @@ export class WorkflowV17SemanticEngine {
     return Object.freeze({
       effect: async <T>(kind: WorkflowV17EffectKind, invocation: WorkflowV17EffectInvocation): Promise<T> =>
         await this.effect(kind, invocation) as T,
-      parallel: async (
-        branches: Readonly<Record<string, () => JsonValue | Promise<JsonValue>>>,
+      parallel: async <B extends Readonly<Record<string, () => unknown | Promise<unknown>>>>(
+        branches: B,
         options: WorkflowV17StructuredOptions,
-      ): Promise<JsonObject> => await this.parallel(branches, options),
-      map: async (
+      ): Promise<{ [K in keyof B]: Awaited<ReturnType<B[K]>> }> => await this.parallel(branches, options),
+      map: async <T>(
         items: readonly JsonValue[],
-        body: (item: JsonValue, index: number) => JsonValue | Promise<JsonValue>,
+        body: (item: JsonValue, index: number) => T | Promise<T>,
         options: WorkflowV17MapOptions,
-      ): Promise<JsonValue[]> => await this.map(items, body, options),
+      ): Promise<T[]> => await this.map(items, body, options),
       candidate: async (invocation: WorkflowV17CandidateInvocation): Promise<unknown> =>
         await this.candidate(invocation),
     });
@@ -474,10 +478,10 @@ export class WorkflowV17SemanticEngine {
     return await this.completeSettlement(scope, adapter, invocation.input, semanticInput, operation, settled);
   }
 
-  private async parallel(
-    branches: Readonly<Record<string, () => JsonValue | Promise<JsonValue>>>,
+  private async parallel<B extends Readonly<Record<string, () => unknown | Promise<unknown>>>>(
+    branches: B,
     optionsValue: WorkflowV17StructuredOptions,
-  ): Promise<JsonObject> {
+  ): Promise<{ [K in keyof B]: Awaited<ReturnType<B[K]>> }> {
     const options = normalizeStructuredOptions(optionsValue, "parallel", this.limiter.limit);
     if (!branches || typeof branches !== "object" || Array.isArray(branches)) {
       throw new TypeError("Workflow v17 parallel branches must be an object");
@@ -502,14 +506,14 @@ export class WorkflowV17SemanticEngine {
     if (!values || typeof values !== "object" || Array.isArray(values)) {
       throw new Error("Workflow v17 parallel produced an invalid result");
     }
-    return values as JsonObject;
+    return values as { [K in keyof B]: Awaited<ReturnType<B[K]>> };
   }
 
-  private async map(
+  private async map<T>(
     itemsValue: readonly JsonValue[],
-    body: (item: JsonValue, index: number) => JsonValue | Promise<JsonValue>,
+    body: (item: JsonValue, index: number) => T | Promise<T>,
     optionsValue: WorkflowV17MapOptions,
-  ): Promise<JsonValue[]> {
+  ): Promise<T[]> {
     const options = normalizeMapOptions(optionsValue, this.limiter.limit);
     if (!Array.isArray(itemsValue) || itemsValue.length > DEFINITION_LIMITS.mapItems) {
       throw new TypeError(`Workflow v17 map accepts at most ${DEFINITION_LIMITS.mapItems} items`);
@@ -540,7 +544,7 @@ export class WorkflowV17SemanticEngine {
       options,
     );
     if (!Array.isArray(result)) throw new Error("Workflow v17 map produced an invalid result");
-    return result;
+    return result as T[];
   }
 
   private async candidate(invocation: WorkflowV17CandidateInvocation): Promise<unknown> {
@@ -679,10 +683,10 @@ export class WorkflowV17SemanticEngine {
 
   private async runStructure(
     kind: "parallel" | "map",
-    laneBodies: ReadonlyArray<{ key: string; body: () => JsonValue | Promise<JsonValue> }>,
+    laneBodies: ReadonlyArray<{ key: string; body: () => unknown | Promise<unknown> }>,
     semanticInput: JsonValue,
     options: NormalizedStructuredOptions,
-  ): Promise<JsonValue> {
+  ): Promise<unknown> {
     if (this.fatalFault !== undefined) throw this.fatalFault;
     const parent = this.scope();
     if (parent.signal.aborted) throw parent.signal.reason;
@@ -759,9 +763,10 @@ export class WorkflowV17SemanticEngine {
       await this.fault("after-structural-join", operation);
       throw new WorkflowV17RecordedStructuralError(operation.path, failure);
     }
-    const result = canonical(kind === "parallel"
+    const runtimeResult = kind === "parallel"
       ? Object.fromEntries(outcomes.map((lane) => [lane.key, laneResult(lane, options.errors)]))
-      : outcomes.map((lane) => laneResult(lane, options.errors)));
+      : outcomes.map((lane) => laneResult(lane, options.errors));
+    const result = this.encodeStructuralValue(runtimeResult);
     const joinKey = await this.completeSuccessfulStructure(operation, {
       previousCallKey: parent.previousCallKey,
       semanticKey,
@@ -772,7 +777,7 @@ export class WorkflowV17SemanticEngine {
     });
     parent.previousCallKey = joinKey;
     await this.fault("after-structural-join", operation);
-    return structuredClone(result);
+    return runtimeResult;
   }
 
   private restoreStructure(
@@ -781,7 +786,7 @@ export class WorkflowV17SemanticEngine {
     semanticKey: string,
     policyHash: string,
     outputOrder: readonly string[],
-  ): JsonValue {
+  ): unknown {
     const call = this.database.readScopeCall(operation.operationId);
     const join = this.database.readStructuralJoin(operation.operationId);
     if (!call || !join || call.previousCallKey !== parent.previousCallKey
@@ -803,7 +808,7 @@ export class WorkflowV17SemanticEngine {
     if (operation.status !== "completed" || operation.result === undefined) {
       throw new WorkflowV17SemanticDriftError(`Workflow v17 completed structure is corrupt at ${operation.path}`);
     }
-    return structuredClone(operation.result);
+    return this.decodeStructuralValue(operation.result);
   }
 
   private restoreCandidateStructure(
@@ -1065,7 +1070,7 @@ export class WorkflowV17SemanticEngine {
     };
     this.controlContexts.add(scope);
     try {
-      const value = canonical(await this.storage.run(scope, async () => await lane.body()));
+      const value = await this.storage.run(scope, async () => await lane.body());
       if (this.fatalFault !== undefined) throw this.fatalFault;
       if (signal.aborted) throw signal.reason;
       current = this.database.readScope(current.scopeId)!;
@@ -1202,6 +1207,18 @@ export class WorkflowV17SemanticEngine {
       }
     }
     throw new Error(`Could not complete workflow v17 ${operation.kind} join`);
+  }
+
+  private encodeStructuralValue(value: unknown): JsonValue {
+    return this.options.structuralValues
+      ? this.options.structuralValues.encode(value)
+      : canonical(value);
+  }
+
+  private decodeStructuralValue(value: JsonValue): unknown {
+    return this.options.structuralValues
+      ? this.options.structuralValues.decode(value)
+      : structuredClone(value);
   }
 
   private async completeFailedStructure(
@@ -1663,7 +1680,7 @@ function laneFromTerminal(scope: WorkflowScopeV17Record): StructuredLaneOutcome 
 function laneResult(
   lane: StructuredLaneOutcome,
   errors: "fail-fast" | "collect",
-): JsonValue {
+): unknown {
   if (errors === "collect") {
     return lane.outcome === "success"
       ? { ok: true, value: lane.value! }

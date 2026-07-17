@@ -70,6 +70,11 @@ test("unsafe dynamic names are rejected rather than sanitized ambiguously", () =
   assert.throws(() => host.manifest({ safe: { "not a segment": finding } }), /invalid artifact segment/);
 });
 
+test("ordinary TypeScript camelCase artifact names remain safe", () => {
+  const { host, finding } = fixture();
+  assert.deepEqual(host.manifest({ experimentPlan: finding }).map(entry => entry.path), ["experimentPlan"]);
+});
+
 test("empty containers have a deterministic empty manifest", () => {
   const { host } = fixture();
   assert.deepEqual(host.manifest({}), []);

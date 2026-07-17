@@ -1,5 +1,5 @@
 // Executable oracle for the workflow runtime v17 conformance contract.
-const SEGMENT = /^[a-z][a-z0-9_-]{0,63}$/;
+const SEGMENT = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 
 /** Shared host authority. Neither realm can mint refs without this registry. */
 export class ArtifactAuthority {

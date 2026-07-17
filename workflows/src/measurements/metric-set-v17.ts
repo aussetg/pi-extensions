@@ -21,6 +21,8 @@ import {
   type NormalizedMetricDefinition,
 } from "./metric-definition.js";
 import {
+  applyMetricCohortDeltaToSnapshot,
+  applyMetricDispositionToSnapshot,
   evaluateMeasurementPolicy,
   metricSummary,
   reachesTarget,
@@ -63,6 +65,9 @@ interface MetricSetPrivateAuthority {
 export class WorkflowV17MetricSetRuntime implements WorkflowV17MeasurementAuthorityResolver {
   private readonly occurrences = new Map<string, number>();
   private readonly references = new Map<string, object>();
+  private readonly executionStates = new Map<string, PersistedMetricState[]>();
+  private readonly observedMeasurements = new Set<string>();
+  private readonly observedDispositions = new Set<string>();
   private readonly now: () => Date;
 
   constructor(
@@ -79,6 +84,9 @@ export class WorkflowV17MetricSetRuntime implements WorkflowV17MeasurementAuthor
 
   beginExecution(): void {
     this.occurrences.clear();
+    this.executionStates.clear();
+    this.observedMeasurements.clear();
+    this.observedDispositions.clear();
   }
 
   create(sourceSite: string, policyValue: unknown, samplingValue?: unknown): object {
@@ -117,6 +125,7 @@ export class WorkflowV17MetricSetRuntime implements WorkflowV17MeasurementAuthor
       }
     }
     if (!record) throw new Error(`Could not register workflow v17 metric set ${sourceSite}`);
+    this.executionStates.set(record.metricSetId, []);
     const existing = this.references.get(record.metricSetId);
     if (existing) return existing;
     const authorityHash = metricSetAuthorityHash(record);
@@ -190,7 +199,37 @@ export class WorkflowV17MetricSetRuntime implements WorkflowV17MeasurementAuthor
       || privateAuthority.authorityHash !== identity.authorityHash) {
       throw new TypeError("Workflow v17 metric-set authority is stale or corrupt");
     }
-    return record;
+    return {
+      ...record,
+      states: structuredClone(this.executionStates.get(record.metricSetId) ?? []),
+    };
+  }
+
+  observeMeasurement(record: WorkflowMeasurementV17Record): void {
+    if (this.observedMeasurements.has(record.measurementId)) return;
+    const states = this.executionStates.get(record.metricSetId);
+    if (!states) throw new Error(`Workflow v17 metric set ${record.metricSetId} is not active in this execution`);
+    this.executionStates.set(
+      record.metricSetId,
+      applyMetricCohortDeltaToSnapshot(states, record.delta),
+    );
+    this.observedMeasurements.add(record.measurementId);
+  }
+
+  observeDisposition(candidate: WorkflowCandidateV17Record, disposition: "accepted" | "rejected"): void {
+    const binding = this.database.readCandidateMeasurement(candidate.candidateId);
+    if (!binding) return;
+    const key = `${candidate.candidateId}:${disposition}`;
+    if (this.observedDispositions.has(key)) return;
+    const measurement = this.database.readMeasurement(binding.measurementId);
+    if (!measurement) throw new Error(`Workflow v17 candidate measurement ${binding.measurementId} is unavailable`);
+    const states = this.executionStates.get(measurement.metricSetId);
+    if (!states) throw new Error(`Workflow v17 metric set ${measurement.metricSetId} is not active in this execution`);
+    this.executionStates.set(
+      measurement.metricSetId,
+      applyMetricDispositionToSnapshot(states, measurement.delta, disposition),
+    );
+    this.observedDispositions.add(key);
   }
 
   measurement(value: unknown): WorkflowMeasurementV17Record {

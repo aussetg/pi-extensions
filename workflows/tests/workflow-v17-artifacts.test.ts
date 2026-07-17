@@ -7,6 +7,7 @@ import {
   workflowV17ArtifactManifest,
 } from "../src/artifacts/manifest-v17.js";
 import { WorkflowV17EffectProductFactory } from "../src/artifacts/products-v17.js";
+import { WorkflowV17StructuralValueCodec } from "../src/runtime/structural-values-v17.js";
 import {
   WorkflowV17ArtifactStore,
   WorkflowV17ArtifactStoreError,
@@ -263,6 +264,39 @@ describe("workflow v17 artifacts and products", () => {
       .toThrow("artifact input unbound is not attachable");
     expect(workflowV17ArtifactManifest(fixture.products, {})).toMatchObject({ entries: [] });
     expect(workflowV17ArtifactManifest(fixture.products, { empty: [] })).toMatchObject({ entries: [] });
+  });
+
+  it("accepts safe camelCase bundle segments used by ordinary TypeScript", async () => {
+    const fixture = createFixture();
+    const artifact = fixture.products.artifact((await fixture.store.putText({
+      kind: "finding",
+      text: "evidence",
+    })).record);
+    expect(workflowV17ArtifactManifest(fixture.products, {
+      experimentPlan: artifact,
+      priorWorker: artifact,
+    }).entries.map(entry => entry.path)).toEqual(["experimentPlan", "priorWorker"]);
+  });
+
+  it("round-trips structured products without confusing plain tag-shaped data", async () => {
+    const fixture = createFixture();
+    const product = await fixture.products.agentResult({
+      authorityId: "agent-structured",
+      output: { summary: "finding" },
+    });
+    const codec = new WorkflowV17StructuralValueCodec(fixture.authority, fixture.products);
+    const plain = {
+      formatVersion: 1,
+      kind: "workflow-v17-authority-tree",
+      root: { type: "json", value: "ordinary workflow data" },
+    };
+    const decoded = codec.decode(codec.encode({ plain, product })) as {
+      plain: typeof plain;
+      product: object;
+    };
+    expect(decoded.plain).toEqual(plain);
+    expect(workflowV17ArtifactManifest(fixture.products, { product: decoded.product }).entries)
+      .toEqual([expect.objectContaining({ path: "product", productKind: "agent-result" })]);
   });
 
   it("materializes nested immutable agent inputs and detects later tampering", async () => {
