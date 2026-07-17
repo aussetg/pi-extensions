@@ -26,6 +26,7 @@ import {
   type WorkflowV17ControlProcessMessage,
   type WorkflowV17FlowMethod,
   type WorkflowV17HostProcessMessage,
+  type WorkflowV17MetricResponseMessage,
   type WorkflowV17SerializedError,
   type WorkflowV17SyncResponseMessage,
   type WorkflowV17WireValue,
@@ -56,6 +57,7 @@ export interface WorkflowV17ControlOptions<TContext> {
   rootContext: TContext;
   currentContext: () => TContext;
   runInContext: <T>(context: TContext, body: () => T) => T;
+  metricCall?: (metricSet: object, method: string, args: unknown[]) => unknown;
   segmentTimeoutMs?: number;
   onControlFailure?: (error: unknown) => void;
   onControlStart?: (pid: number) => void;
@@ -267,6 +269,11 @@ class WorkflowV17ControlProcessBridge<TContext> {
         this.handleSyncCall(message);
         return;
       }
+      if (message.type === "metric-call") {
+        this.claimRequestId(message.requestId);
+        this.handleMetricCall(message);
+        return;
+      }
       if (message.type === "callback-result") {
         this.handleCallbackResult(message);
         return;
@@ -337,6 +344,41 @@ class WorkflowV17ControlProcessBridge<TContext> {
       this.sendSync({ type: "sync-response", requestId, value: this.encode(value) });
     } catch (error) {
       this.sendSync({ type: "sync-response", requestId, error: this.serializeHostError(error) });
+    } finally {
+      this.invocationStates.set(invocationId, "runnable");
+      this.refreshTimer();
+    }
+  }
+
+  private handleMetricCall(
+    message: Extract<WorkflowV17ControlProcessMessage, { type: "metric-call" }>,
+  ): void {
+    const { requestId, invocationId, referenceId, method } = message;
+    if (!this.invocationContexts.has(invocationId)) {
+      this.fail(new WorkflowV17ControlExecutionError("Malformed workflow v17 metric invocation"));
+      return;
+    }
+    const context = this.invocationContexts.get(invocationId)!;
+    this.invocationStates.set(invocationId, "waiting");
+    this.refreshTimer();
+    try {
+      const metricSet = this.referenceValues.get(referenceId);
+      const description = metricSet ? this.options.authority.transport(metricSet) : undefined;
+      if (!metricSet || description?.family !== "reference" || description.identity.kind !== "metric-set") {
+        throw new WorkflowV17ControlExecutionError("Unknown workflow v17 metric-set reference");
+      }
+      if (typeof this.options.metricCall !== "function") {
+        throw new WorkflowV17ControlExecutionError("Workflow v17 metric-set methods are unavailable");
+      }
+      const args = this.decode(message.args);
+      if (!Array.isArray(args)) throw new WorkflowV17ControlExecutionError("Workflow v17 metric-set arguments are invalid");
+      const value = this.options.runInContext(context, () => this.options.metricCall!(metricSet, method, args));
+      if (value && typeof (value as PromiseLike<unknown>).then === "function") {
+        throw new WorkflowV17ControlExecutionError("Workflow v17 metric-set methods must be synchronous");
+      }
+      this.sendMetric({ type: "metric-response", requestId, value: this.encode(value) });
+    } catch (error) {
+      this.sendMetric({ type: "metric-response", requestId, error: this.serializeHostError(error) });
     } finally {
       this.invocationStates.set(invocationId, "runnable");
       this.refreshTimer();
@@ -606,6 +648,14 @@ class WorkflowV17ControlProcessBridge<TContext> {
     const line = `${JSON.stringify(message)}\n`;
     if (Buffer.byteLength(line) > WIRE_BYTES) throw new WorkflowV17ControlExecutionLimitError(
       "Workflow v17 synchronous response exceeds its structural limit",
+    );
+    this.syncInput.write(line);
+  }
+
+  private sendMetric(message: WorkflowV17MetricResponseMessage): void {
+    const line = `${JSON.stringify(message)}\n`;
+    if (Buffer.byteLength(line) > WIRE_BYTES) throw new WorkflowV17ControlExecutionLimitError(
+      "Workflow v17 metric response exceeds its structural limit",
     );
     this.syncInput.write(line);
   }

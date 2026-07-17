@@ -10,6 +10,13 @@ import type { SafetyConfiguration } from "../runtime/durable-types.js";
 import { stableHash } from "../utils/hashes.js";
 import { stableJson } from "../utils/stable-json.js";
 import {
+  applyMetricCohortDeltaToSnapshot,
+  applyMetricDispositionToSnapshot,
+  normalizeMetricCohortDelta,
+  type PersistedMetricState,
+} from "../measurements/metrics.js";
+import { normalizeMeasurementProfile } from "../measurements/profiles.js";
+import {
   WORKFLOW_V17_ROOT_SCOPE_SEED,
   workflowV17FreshCallKey,
   workflowV17LaneSeed,
@@ -52,6 +59,10 @@ import type {
   WorkflowCandidateWorkspaceV17Record,
   WorkflowEffectSettlementV17Record,
   WorkflowInvocationResourceV17Record,
+  WorkflowExperimentV17Record,
+  WorkflowMeasurementV17Record,
+  WorkflowMeasurementSampleV17Record,
+  WorkflowMetricSetV17Record,
   WorkflowOperationV17Kind,
   WorkflowOperationArtifactV17Record,
   WorkflowOperationV17Record,
@@ -584,6 +595,9 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
     for (const resource of resources) assertResourceRecord(resource, run.runId);
     for (const scope of scopes) this.assertScopeIntegrity(scope, run.runId);
     for (const candidate of this.listCandidates()) this.assertCandidateIntegrity(candidate);
+    for (const metricSet of this.listMetricSets()) this.assertMetricSetIntegrity(metricSet, run.runId);
+    for (const measurement of this.listMeasurements()) this.assertMeasurementIntegrity(measurement, run.runId);
+    for (const experiment of this.listExperiments()) this.assertExperimentIntegrity(experiment, run.runId);
     if (run.status === "completed") {
       const rootScope = this.readScope(run.rootScopeId)!;
       if (rootScope.status !== "completed" || rootScope.terminalKey !== run.rootTerminalKey) {
@@ -672,7 +686,7 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
       if (operation.descriptorSourceSite) assertSourceSite(operation.descriptorSourceSite);
       const settlement = this.readEffectSettlement(operation.operationId);
       if (settlement) {
-        if (settlement.runId !== runId || STRUCTURAL_KINDS.has(operation.kind) || operation.kind === "metrics") {
+        if (settlement.runId !== runId || STRUCTURAL_KINDS.has(operation.kind)) {
           throw corrupt(`Workflow v17 operation ${operation.path} has an invalid effect settlement`);
         }
         assertHash(settlement.semanticKey, `workflow v17 operation ${operation.path} settlement semantic key`);
@@ -869,6 +883,67 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
     }
   }
 
+  private assertMetricSetIntegrity(metricSet: WorkflowMetricSetV17Record, runId: string): void {
+    if (metricSet.runId !== runId || stableHash(metricSet.policy) !== metricSet.policyHash
+      || stableHash(metricSet.sampling) !== metricSet.samplingHash
+      || stableHash(metricSet.states) !== metricSet.stateHash) {
+      throw corrupt(`Workflow v17 metric set ${metricSet.metricSetId} identity is corrupt`);
+    }
+    let states: PersistedMetricState[] = [];
+    const measurements = this.listMeasurements().filter(value => value.metricSetId === metricSet.metricSetId);
+    for (const measurement of measurements) {
+      states = applyMetricCohortDeltaToSnapshot(states, measurement.delta);
+      if (measurement.candidateId) {
+        const disposition = this.readCandidateMeasurement(measurement.candidateId);
+        if (!disposition || disposition.measurementId !== measurement.measurementId) {
+          throw corrupt(`Workflow v17 candidate measurement ${measurement.measurementId} lacks disposition state`);
+        }
+        if (disposition.status !== "pending") {
+          states = applyMetricDispositionToSnapshot(states, measurement.delta, disposition.status);
+        }
+      }
+    }
+    if (stableJson(states) !== stableJson(metricSet.states)) {
+      throw corrupt(`Workflow v17 metric set ${metricSet.metricSetId} state is not reconstructable`);
+    }
+  }
+
+  private assertMeasurementIntegrity(measurement: WorkflowMeasurementV17Record, runId: string): void {
+    if (measurement.runId !== runId) throw corrupt(`Workflow v17 measurement ${measurement.measurementId} belongs elsewhere`);
+    try { assertWorkflowMeasurement(measurement); }
+    catch (error) { throw corrupt(`Workflow v17 measurement ${measurement.measurementId} is corrupt: ${errorMessage(error)}`); }
+    const operation = this.readOperation(measurement.operationId);
+    const metricSet = this.readMetricSet(measurement.metricSetId);
+    if (!operation || operation.kind !== "measure" || !metricSet
+      || !this.readArtifact(measurement.artifactDigest)
+      || (measurement.diagnosticsArtifactDigest && !this.readArtifact(measurement.diagnosticsArtifactDigest))) {
+      throw corrupt(`Workflow v17 measurement ${measurement.measurementId} evidence is incomplete`);
+    }
+    if (measurement.candidateId) {
+      const candidate = this.readCandidate(measurement.candidateId);
+      const pending = this.readCandidateMeasurement(measurement.candidateId);
+      if (!candidate || !pending || pending.measurementId !== measurement.measurementId
+        || pending.bindingHash !== measurement.bindingHash) {
+        throw corrupt(`Workflow v17 measurement ${measurement.measurementId} candidate binding is corrupt`);
+      }
+    }
+  }
+
+  private assertExperimentIntegrity(experiment: WorkflowExperimentV17Record, runId: string): void {
+    if (experiment.runId !== runId) throw corrupt(`Workflow v17 experiment ${experiment.experimentId} belongs elsewhere`);
+    try { assertWorkflowExperiment(experiment); }
+    catch (error) { throw corrupt(`Workflow v17 experiment ${experiment.experimentId} is corrupt: ${errorMessage(error)}`); }
+    const candidate = this.readCandidate(experiment.candidateId);
+    const measurement = this.readMeasurement(experiment.measurementId);
+    const operation = this.readOperation(experiment.operationId);
+    if (!candidate?.disposition || !measurement || operation?.kind !== "record-experiment"
+      || candidate.disposition.disposition !== experiment.disposition
+      || candidate.disposition.measurementId !== measurement.measurementId
+      || !this.readArtifact(experiment.artifactDigest)) {
+      throw corrupt(`Workflow v17 experiment ${experiment.experimentId} evidence is incomplete`);
+    }
+  }
+
   private candidateFromRow(row: SqlRow): WorkflowCandidateV17Record {
     const candidateId = requiredString(row, "candidate_id");
     const paths = (this.database.prepare(
@@ -913,6 +988,85 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
       "SELECT * FROM candidate_measurements WHERE candidate_id = ?",
     ).get(candidateId) as SqlRow | undefined;
     return row ? candidateMeasurementFromRow(row) : undefined;
+  }
+
+  readMetricSet(metricSetId: string): WorkflowMetricSetV17Record | undefined {
+    this.assertOpen();
+    assertIdentifier(metricSetId, "workflow v17 metric-set id");
+    const row = this.database.prepare("SELECT * FROM metric_sets WHERE metric_set_id = ?")
+      .get(metricSetId) as SqlRow | undefined;
+    return row ? metricSetFromRow(row) : undefined;
+  }
+
+  readMetricSetBySite(sourceSite: string, occurrence: number): WorkflowMetricSetV17Record | undefined {
+    this.assertOpen();
+    assertSourceSite(sourceSite);
+    assertNonNegativeInteger(occurrence, "workflow v17 metric-set occurrence");
+    const row = this.database.prepare(
+      "SELECT * FROM metric_sets WHERE run_id = ? AND source_site = ? AND occurrence = ?",
+    ).get(this.readRun().runId, sourceSite, occurrence) as SqlRow | undefined;
+    return row ? metricSetFromRow(row) : undefined;
+  }
+
+  listMetricSets(): WorkflowMetricSetV17Record[] {
+    this.assertOpen();
+    return (this.database.prepare(
+      "SELECT * FROM metric_sets ORDER BY source_site, occurrence",
+    ).all() as SqlRow[]).map(metricSetFromRow);
+  }
+
+  readMeasurement(measurementId: string): WorkflowMeasurementV17Record | undefined {
+    this.assertOpen();
+    assertIdentifier(measurementId, "workflow v17 measurement id");
+    const row = this.database.prepare(
+      "SELECT * FROM workflow_measurements WHERE measurement_id = ?",
+    ).get(measurementId) as SqlRow | undefined;
+    return row ? measurementFromRow(row) : undefined;
+  }
+
+  readMeasurementByOperation(operationId: string): WorkflowMeasurementV17Record | undefined {
+    this.assertOpen();
+    assertIdentifier(operationId, "workflow v17 measurement operation id");
+    const row = this.database.prepare(
+      "SELECT * FROM workflow_measurements WHERE operation_id = ?",
+    ).get(operationId) as SqlRow | undefined;
+    return row ? measurementFromRow(row) : undefined;
+  }
+
+  listMeasurements(): WorkflowMeasurementV17Record[] {
+    this.assertOpen();
+    return (this.database.prepare(
+      `SELECT measurement.* FROM workflow_measurements measurement
+       JOIN operations operation ON operation.operation_id = measurement.operation_id
+       ORDER BY operation.ordinal, measurement.measurement_id`,
+    ).all() as SqlRow[]).map(measurementFromRow);
+  }
+
+  readExperiment(experimentId: string): WorkflowExperimentV17Record | undefined {
+    this.assertOpen();
+    assertIdentifier(experimentId, "workflow v17 experiment id");
+    const row = this.database.prepare(
+      "SELECT * FROM workflow_experiments WHERE experiment_id = ?",
+    ).get(experimentId) as SqlRow | undefined;
+    return row ? experimentFromRow(row) : undefined;
+  }
+
+  readExperimentByOperation(operationId: string): WorkflowExperimentV17Record | undefined {
+    this.assertOpen();
+    assertIdentifier(operationId, "workflow v17 experiment operation id");
+    const row = this.database.prepare(
+      "SELECT * FROM workflow_experiments WHERE operation_id = ?",
+    ).get(operationId) as SqlRow | undefined;
+    return row ? experimentFromRow(row) : undefined;
+  }
+
+  listExperiments(): WorkflowExperimentV17Record[] {
+    this.assertOpen();
+    return (this.database.prepare(
+      `SELECT experiment.* FROM workflow_experiments experiment
+       JOIN operations operation ON operation.operation_id = experiment.operation_id
+       ORDER BY operation.ordinal, experiment.experiment_id`,
+    ).all() as SqlRow[]).map(experimentFromRow);
   }
 }
 
@@ -1241,7 +1395,7 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
       const run = this.readRun();
       assertExpectedRevision(run.revision, input.expectedRevision);
       const operation = this.requireOperation(input.operationId);
-      if (STRUCTURAL_KINDS.has(operation.kind) || operation.kind === "metrics") {
+      if (STRUCTURAL_KINDS.has(operation.kind)) {
         throw state(`Operation ${operation.path} cannot have a host effect settlement`);
       }
       const existing = this.readEffectSettlement(operation.operationId);
@@ -1745,6 +1899,15 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
     assertIdentifier(measurement.operationId, "workflow v17 measurement operation id");
     assertHash(measurement.bindingHash, "workflow v17 measurement binding hash");
     assertIsoDate(measurement.createdAt, "workflow v17 measurement time");
+    const existing = this.readCandidateMeasurement(measurement.candidateId);
+    if (existing) {
+      if (existing.measurementId !== measurement.measurementId
+        || existing.operationId !== measurement.operationId
+        || existing.bindingHash !== measurement.bindingHash) {
+        throw state(`Candidate ${measurement.candidateId} measurement changed identity`);
+      }
+      return existing;
+    }
     this.mutate(expectedRevision, {
       type: "candidate-measurement-pending",
       operationId: measurement.operationId,
@@ -1758,6 +1921,12 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
         throw state("Candidate measurement evidence requires a completed measure operation");
       }
       if (candidate.runId !== run.runId) throw state("Candidate belongs to another workflow run");
+      const full = this.readMeasurement(measurement.measurementId);
+      if (full && (full.operationId !== operation.operationId
+        || full.candidateId !== candidate.candidateId
+        || full.bindingHash !== measurement.bindingHash)) {
+        throw state("Candidate measurement differs from its full cohort evidence");
+      }
       this.database.prepare(`
         INSERT INTO candidate_measurements(
           measurement_id, run_id, candidate_id, operation_id, binding_hash, status, created_at
@@ -1770,6 +1939,186 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
       return {};
     });
     return this.readCandidateMeasurement(measurement.candidateId)!;
+  }
+
+  registerMetricSet(
+    expectedRevision: number,
+    input: Omit<WorkflowMetricSetV17Record, "runId" | "states" | "stateHash" | "updatedAt">,
+  ): WorkflowMetricSetV17Record {
+    assertIdentifier(input.metricSetId, "workflow v17 metric-set id");
+    assertIdentifier(input.authorityId, "workflow v17 metric-set authority id");
+    assertSourceSite(input.sourceSite);
+    assertNonNegativeInteger(input.occurrence, "workflow v17 metric-set occurrence");
+    const policy = canonicalJsonValue(input.policy, jsonLimits()) as JsonObject;
+    const sampling = canonicalJsonValue(input.sampling, jsonLimits()) as JsonObject;
+    if (stableHash(policy) !== input.policyHash || stableHash(sampling) !== input.samplingHash) {
+      throw new TypeError("Workflow v17 metric-set policy or sampling hash is invalid");
+    }
+    assertIsoDate(input.createdAt, "workflow v17 metric-set time");
+    const existing = this.readMetricSetBySite(input.sourceSite, input.occurrence);
+    const proposed = {
+      ...input,
+      runId: this.readRun().runId,
+      policy,
+      sampling,
+      states: [] as PersistedMetricState[],
+      stateHash: stableHash([]),
+      updatedAt: input.createdAt,
+    };
+    if (existing) {
+      if (existing.metricSetId !== proposed.metricSetId
+        || existing.runId !== proposed.runId
+        || existing.authorityId !== proposed.authorityId
+        || existing.policyHash !== proposed.policyHash
+        || existing.samplingHash !== proposed.samplingHash
+        || stableJson(existing.policy) !== stableJson(proposed.policy)
+        || stableJson(existing.sampling) !== stableJson(proposed.sampling)) {
+        throw state(`Workflow v17 metric set ${input.sourceSite}/${input.occurrence} changed identity`);
+      }
+      return existing;
+    }
+    this.mutate(expectedRevision, {
+      type: "metric-set-registered",
+      payload: { metricSetId: input.metricSetId, sourceSite: input.sourceSite, occurrence: input.occurrence },
+      at: input.createdAt,
+    }, (run, nextRevision) => {
+      this.database.prepare(`
+        INSERT INTO metric_sets(
+          metric_set_id, run_id, authority_id, source_site, occurrence,
+          policy_json, policy_hash, sampling_json, sampling_hash,
+          states_json, state_hash, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        input.metricSetId, run.runId, input.authorityId, input.sourceSite, input.occurrence,
+        json(policy), input.policyHash, json(sampling), input.samplingHash,
+        json([]), stableHash([]), input.createdAt, input.createdAt,
+      );
+      this.setRunRevisionOnly(run.revision, nextRevision, input.createdAt);
+      return {};
+    });
+    return this.readMetricSet(input.metricSetId)!;
+  }
+
+  recordMeasurement(
+    expectedRevision: number,
+    input: Omit<WorkflowMeasurementV17Record, "runId">,
+  ): WorkflowMeasurementV17Record {
+    assertWorkflowMeasurement(input);
+    const existing = this.readMeasurementByOperation(input.operationId);
+    const proposed = { ...input, runId: this.readRun().runId };
+    if (existing) {
+      if (stableJson(existing) !== stableJson(proposed)) {
+        throw state(`Workflow v17 measurement ${input.operationId} changed identity`);
+      }
+      return existing;
+    }
+    this.mutate(expectedRevision, {
+      type: "measurement-recorded",
+      operationId: input.operationId,
+      ...(input.candidateId ? { candidateId: input.candidateId } : {}),
+      payload: { measurementId: input.measurementId, metricSetId: input.metricSetId },
+      at: input.createdAt,
+    }, (run, nextRevision) => {
+      const operation = this.requireOperation(input.operationId);
+      if (operation.kind !== "measure" || !["running", "completed"].includes(operation.status)) {
+        throw state("Workflow v17 measurement requires its measure operation");
+      }
+      const metricSet = this.readMetricSet(input.metricSetId);
+      if (!metricSet || metricSet.runId !== run.runId) throw state("Workflow v17 measurement metric set is unavailable");
+      if (input.candidateId) {
+        const candidate = this.requirePendingCandidate(input.candidateId);
+        if (candidate.runId !== run.runId) throw state("Workflow v17 measurement candidate belongs elsewhere");
+      }
+      this.requireArtifact(input.artifactDigest);
+      if (input.diagnosticsArtifactDigest) this.requireArtifact(input.diagnosticsArtifactDigest);
+      for (const sample of input.samples) {
+        this.requireArtifact(sample.stdoutArtifactDigest);
+        this.requireArtifact(sample.stderrArtifactDigest);
+      }
+      const states = applyMetricCohortDeltaToSnapshot(metricSet.states, input.delta);
+      const stateHash = stableHash(states);
+      this.database.prepare(`
+        INSERT INTO workflow_measurements(
+          measurement_id, run_id, operation_id, metric_set_id, profile_json, profile_hash,
+          command_hash, environment_json, environment_hash, workspace_tree_hash, candidate_id,
+          binding_hash, delta_json, observations_json, artifact_digest,
+          diagnostics_artifact_digest, samples_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        input.measurementId, run.runId, operation.operationId, metricSet.metricSetId,
+        json(input.profile as unknown as JsonValue), input.profileHash, input.commandHash,
+        json(input.environment), input.environmentHash, input.workspaceTreeHash,
+        input.candidateId ?? null, input.bindingHash, json(input.delta as unknown as JsonValue),
+        json(input.observations), input.artifactDigest, input.diagnosticsArtifactDigest ?? null,
+        json(input.samples as unknown as JsonValue), input.createdAt,
+      );
+      if (input.candidateId) {
+        this.database.prepare(`
+          INSERT INTO candidate_measurements(
+            measurement_id, run_id, candidate_id, operation_id, binding_hash, status, created_at
+          ) VALUES (?, ?, ?, ?, ?, 'pending', ?)
+        `).run(
+          input.measurementId, run.runId, input.candidateId, operation.operationId,
+          input.bindingHash, input.createdAt,
+        );
+      }
+      this.database.prepare(`
+        UPDATE metric_sets SET states_json = ?, state_hash = ?, updated_at = ? WHERE metric_set_id = ?
+      `).run(json(states as unknown as JsonValue), stateHash, input.createdAt, metricSet.metricSetId);
+      this.setRunRevisionOnly(run.revision, nextRevision, input.createdAt);
+      return {};
+    });
+    return this.readMeasurement(input.measurementId)!;
+  }
+
+  registerExperiment(
+    expectedRevision: number,
+    input: Omit<WorkflowExperimentV17Record, "runId">,
+  ): WorkflowExperimentV17Record {
+    assertWorkflowExperiment(input);
+    const existing = this.readExperimentByOperation(input.operationId);
+    const proposed = { ...input, runId: this.readRun().runId };
+    if (existing) {
+      if (stableJson(existing) !== stableJson(proposed)) {
+        throw state(`Workflow v17 experiment ${input.operationId} changed identity`);
+      }
+      return existing;
+    }
+    this.mutate(expectedRevision, {
+      type: "experiment-recorded",
+      operationId: input.operationId,
+      candidateId: input.candidateId,
+      payload: { experimentId: input.experimentId, disposition: input.disposition },
+      at: input.createdAt,
+    }, (run, nextRevision) => {
+      const operation = this.requireOperation(input.operationId);
+      if (operation.kind !== "record-experiment" || operation.status !== "completed") {
+        throw state("Workflow v17 experiment requires its completed operation");
+      }
+      const candidate = this.readCandidate(input.candidateId);
+      const measurement = this.readMeasurement(input.measurementId);
+      if (!candidate?.disposition || !measurement || measurement.candidateId !== candidate.candidateId) {
+        throw state("Workflow v17 experiment evidence is incomplete");
+      }
+      if (candidate.disposition.disposition !== input.disposition
+        || candidate.disposition.measurementId !== measurement.measurementId) {
+        throw state("Workflow v17 experiment disposition differs from candidate evidence");
+      }
+      this.requireArtifact(input.artifactDigest);
+      this.database.prepare(`
+        INSERT INTO workflow_experiments(
+          experiment_id, run_id, operation_id, candidate_id, measurement_id,
+          disposition, learned, binding_hash, artifact_digest, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        input.experimentId, run.runId, operation.operationId, candidate.candidateId,
+        measurement.measurementId, input.disposition, input.learned, input.bindingHash,
+        input.artifactDigest, input.createdAt,
+      );
+      this.setRunRevisionOnly(run.revision, nextRevision, input.createdAt);
+      return {};
+    });
+    return this.readExperiment(input.experimentId)!;
   }
 
   registerCandidateVerification(
@@ -1897,6 +2246,11 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
           UPDATE candidate_measurements SET status = ?, finalized_at = ?
           WHERE measurement_id = ? AND status = 'pending'
         `).run(input.disposition === "accepted" ? "accepted" : "rejected", input.at, measurement.measurementId);
+        this.finalizeMeasurementMetricState(
+          measurement.measurementId,
+          input.disposition === "accepted" ? "accepted" : "rejected",
+          input.at,
+        );
       }
       this.setRunRevisionOnly(run.revision, nextRevision, input.at);
       return {};
@@ -2342,7 +2696,23 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
         UPDATE candidate_measurements SET status = 'rejected', finalized_at = ?
         WHERE measurement_id = ? AND status = 'pending'
       `).run(at, measurement.measurementId);
+      this.finalizeMeasurementMetricState(measurement.measurementId, "rejected", at);
     }
+  }
+
+  private finalizeMeasurementMetricState(
+    measurementId: string,
+    disposition: "accepted" | "rejected",
+    at: string,
+  ): void {
+    const measurement = this.readMeasurement(measurementId);
+    if (!measurement) return; // Pre-v17-metric test evidence has no full measurement cohort.
+    const metricSet = this.readMetricSet(measurement.metricSetId);
+    if (!metricSet) throw state(`Workflow v17 measurement ${measurementId} lost its metric set`);
+    const states = applyMetricDispositionToSnapshot(metricSet.states, measurement.delta, disposition);
+    this.database.prepare(`
+      UPDATE metric_sets SET states_json = ?, state_hash = ?, updated_at = ? WHERE metric_set_id = ?
+    `).run(json(states as unknown as JsonValue), stableHash(states), at, metricSet.metricSetId);
   }
 
   private terminateActiveExecution(
@@ -2776,6 +3146,64 @@ function candidateMeasurementFromRow(row: SqlRow): WorkflowCandidateMeasurementV
   };
 }
 
+function metricSetFromRow(row: SqlRow): WorkflowMetricSetV17Record {
+  return {
+    metricSetId: requiredString(row, "metric_set_id"),
+    runId: requiredString(row, "run_id"),
+    authorityId: requiredString(row, "authority_id"),
+    sourceSite: requiredString(row, "source_site"),
+    occurrence: requiredNumber(row, "occurrence"),
+    policy: jsonColumnRequired<JsonObject>(row, "policy_json"),
+    policyHash: requiredString(row, "policy_hash"),
+    sampling: jsonColumnRequired<JsonObject>(row, "sampling_json"),
+    samplingHash: requiredString(row, "sampling_hash"),
+    states: jsonColumnRequired<JsonValue>(row, "states_json") as unknown as PersistedMetricState[],
+    stateHash: requiredString(row, "state_hash"),
+    createdAt: requiredString(row, "created_at"),
+    updatedAt: requiredString(row, "updated_at"),
+  };
+}
+
+function measurementFromRow(row: SqlRow): WorkflowMeasurementV17Record {
+  return {
+    measurementId: requiredString(row, "measurement_id"),
+    runId: requiredString(row, "run_id"),
+    operationId: requiredString(row, "operation_id"),
+    metricSetId: requiredString(row, "metric_set_id"),
+    profile: jsonColumnRequired<JsonValue>(row, "profile_json") as unknown as WorkflowMeasurementV17Record["profile"],
+    profileHash: requiredString(row, "profile_hash"),
+    commandHash: requiredString(row, "command_hash"),
+    environment: jsonColumnRequired<JsonObject>(row, "environment_json"),
+    environmentHash: requiredString(row, "environment_hash"),
+    workspaceTreeHash: requiredString(row, "workspace_tree_hash"),
+    ...(optionalString(row, "candidate_id") ? { candidateId: optionalString(row, "candidate_id")! } : {}),
+    bindingHash: requiredString(row, "binding_hash"),
+    delta: jsonColumnRequired<JsonValue>(row, "delta_json") as unknown as WorkflowMeasurementV17Record["delta"],
+    observations: jsonColumnRequired<JsonObject>(row, "observations_json"),
+    artifactDigest: requiredString(row, "artifact_digest"),
+    ...(optionalString(row, "diagnostics_artifact_digest") ? {
+      diagnosticsArtifactDigest: optionalString(row, "diagnostics_artifact_digest")!,
+    } : {}),
+    samples: jsonColumnRequired<JsonValue>(row, "samples_json") as unknown as WorkflowMeasurementSampleV17Record[],
+    createdAt: requiredString(row, "created_at"),
+  };
+}
+
+function experimentFromRow(row: SqlRow): WorkflowExperimentV17Record {
+  return {
+    experimentId: requiredString(row, "experiment_id"),
+    runId: requiredString(row, "run_id"),
+    operationId: requiredString(row, "operation_id"),
+    candidateId: requiredString(row, "candidate_id"),
+    measurementId: requiredString(row, "measurement_id"),
+    disposition: requiredString(row, "disposition") as WorkflowExperimentV17Record["disposition"],
+    learned: requiredString(row, "learned"),
+    bindingHash: requiredString(row, "binding_hash"),
+    artifactDigest: requiredString(row, "artifact_digest"),
+    createdAt: requiredString(row, "created_at"),
+  };
+}
+
 function candidateVerificationFromRow(row: SqlRow): WorkflowCandidateVerificationV17Record {
   return {
     verificationId: requiredString(row, "verification_id"),
@@ -2928,7 +3356,7 @@ function assertClaimInput(input: ClaimWorkflowOperationV17Input): void {
   assertNonNegativeInteger(input.cursor, "workflow v17 operation cursor");
   if (input.cursor > 999_999) throw new TypeError("Workflow v17 operation cursor exceeds path bound");
   if (!new Set<WorkflowOperationV17Kind>([
-    "parallel", "map", "agent", "command", "ask", "metrics", "measure", "candidate",
+    "parallel", "map", "agent", "command", "ask", "measure", "candidate",
     "verify", "accept", "reject", "record-experiment", "apply",
   ]).has(input.kind)) throw new TypeError("Invalid workflow v17 operation kind");
   assertSourceSite(input.sourceSite);
@@ -3342,6 +3770,83 @@ function assertSourceSite(value: string): void {
   if (typeof value !== "string" || !SOURCE_SITE.test(value)) throw new TypeError("Invalid workflow v17 source site");
 }
 
+function assertWorkflowMeasurement(input: Omit<WorkflowMeasurementV17Record, "runId">): void {
+  assertIdentifier(input.measurementId, "workflow v17 measurement id");
+  assertIdentifier(input.operationId, "workflow v17 measurement operation id");
+  assertIdentifier(input.metricSetId, "workflow v17 measurement metric-set id");
+  assertHash(input.profileHash, "workflow v17 measurement profile hash");
+  assertHash(input.commandHash, "workflow v17 measurement command hash");
+  assertHash(input.environmentHash, "workflow v17 measurement environment hash");
+  assertHash(input.workspaceTreeHash, "workflow v17 measurement workspace tree hash");
+  assertHash(input.bindingHash, "workflow v17 measurement binding hash");
+  assertHash(input.artifactDigest, "workflow v17 measurement artifact digest");
+  if (input.diagnosticsArtifactDigest) {
+    assertHash(input.diagnosticsArtifactDigest, "workflow v17 measurement diagnostics artifact digest");
+  }
+  if (input.candidateId) assertIdentifier(input.candidateId, "workflow v17 measurement candidate id");
+  const profile = input.profile;
+  if (!profile || profile.id !== `${profile.namespace}:${profile.name}` || profile.hash !== input.profileHash) {
+    throw new TypeError("Workflow v17 measurement profile identity is invalid");
+  }
+  const { id: _id, namespace, path: _path, hash, ...definition } = profile;
+  const normalized = normalizeMeasurementProfile(definition);
+  if (stableJson(normalized) !== stableJson(definition)
+    || stableHash({ namespace, definition }) !== hash) {
+    throw new TypeError("Workflow v17 measurement profile snapshot is corrupt");
+  }
+  const environment = canonicalJsonValue(input.environment, jsonLimits()) as JsonObject;
+  if (stableHash(environment) !== input.environmentHash) {
+    throw new TypeError("Workflow v17 measurement environment fingerprint is invalid");
+  }
+  const delta = normalizeMetricCohortDelta(input.delta);
+  const observations = canonicalJsonValue(input.observations, jsonLimits()) as JsonObject;
+  const expectedObservations = Object.fromEntries(delta.observations.map(value => [value.outputId, {
+    observationId: value.observationId,
+    metricId: value.metricId,
+    outputId: value.outputId,
+    value: value.value,
+    samples: value.samples,
+  }]));
+  if (stableJson(observations) !== stableJson(expectedObservations)) {
+    throw new TypeError("Workflow v17 measurement observations differ from their cohort");
+  }
+  if (!Array.isArray(input.samples) || input.samples.length < 1) {
+    throw new TypeError("Workflow v17 measurement samples are empty");
+  }
+  for (let ordinal = 0; ordinal < input.samples.length; ordinal++) {
+    const sample = input.samples[ordinal]!;
+    if (sample.ordinal !== ordinal || !["warmup", "sample"].includes(sample.kind)
+      || !Number.isSafeInteger(sample.sampleIndex) || sample.sampleIndex < 0
+      || !["completed", "timed-out", "output-limited", "infrastructure-failure", "cancelled"].includes(sample.status)
+      || (sample.exitCode !== null && !Number.isSafeInteger(sample.exitCode))
+      || typeof sample.timedOut !== "boolean") {
+      throw new TypeError(`Workflow v17 measurement sample ${ordinal} is invalid`);
+    }
+    assertIdentifier(sample.executionId, `workflow v17 measurement sample ${ordinal} execution id`);
+    assertHash(sample.stdoutArtifactDigest, `workflow v17 measurement sample ${ordinal} stdout artifact`);
+    assertHash(sample.stderrArtifactDigest, `workflow v17 measurement sample ${ordinal} stderr artifact`);
+    assertIsoDate(sample.startedAt, `workflow v17 measurement sample ${ordinal} start`);
+    assertIsoDate(sample.endedAt, `workflow v17 measurement sample ${ordinal} end`);
+    if (sample.resources) canonicalJsonValue(sample.resources, jsonLimits());
+  }
+  assertIsoDate(input.createdAt, "workflow v17 measurement time");
+}
+
+function assertWorkflowExperiment(input: Omit<WorkflowExperimentV17Record, "runId">): void {
+  assertIdentifier(input.experimentId, "workflow v17 experiment id");
+  assertIdentifier(input.operationId, "workflow v17 experiment operation id");
+  assertIdentifier(input.candidateId, "workflow v17 experiment candidate id");
+  assertIdentifier(input.measurementId, "workflow v17 experiment measurement id");
+  if (input.disposition !== "accepted" && input.disposition !== "rejected") {
+    throw new TypeError("Workflow v17 experiment disposition is invalid");
+  }
+  assertText(input.learned, "workflow v17 experiment lesson", 8_000);
+  if (!input.learned.trim()) throw new TypeError("Workflow v17 experiment lesson is empty");
+  assertHash(input.bindingHash, "workflow v17 experiment binding hash");
+  assertHash(input.artifactDigest, "workflow v17 experiment artifact digest");
+  assertIsoDate(input.createdAt, "workflow v17 experiment time");
+}
+
 function assertDisplayTitle(value: string): void {
   if (typeof value !== "string" || !value.trim() || Array.from(value).length > 192
     || /[\u0000-\u001f\u007f]/u.test(value)) {
@@ -3523,6 +4028,10 @@ function normalizeConstraint(error: unknown): unknown {
   const message = error instanceof Error ? error.message : String(error);
   if (/constraint|foreign key|unique/iu.test(message)) return state(`Workflow v17 database rejected state: ${message}`);
   return error;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function state(message: string): WorkflowRunDatabaseV17StateError {

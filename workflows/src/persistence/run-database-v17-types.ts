@@ -1,6 +1,8 @@
 import type { WorkflowV17MeasurementResourceBinding } from "./workflow-v17-invocation.js";
 import type { JsonObject, JsonValue } from "../types.js";
 import type { SafetyConfiguration } from "../runtime/durable-types.js";
+import type { MetricCohortDelta, PersistedMetricState } from "../measurements/metrics.js";
+import type { MeasurementProfileSnapshot } from "../measurements/profiles.js";
 
 export type WorkflowRunV17Status =
   | "queued"
@@ -20,7 +22,6 @@ export type WorkflowOperationV17Kind =
   | "agent"
   | "command"
   | "ask"
-  | "metrics"
   | "measure"
   | "candidate"
   | "verify"
@@ -313,6 +314,72 @@ export interface WorkflowCandidateMeasurementV17Record {
   status: "pending" | "accepted" | "rejected";
   createdAt: string;
   finalizedAt?: string;
+}
+
+export interface WorkflowMetricSetV17Record {
+  metricSetId: string;
+  runId: string;
+  authorityId: string;
+  sourceSite: string;
+  occurrence: number;
+  policy: JsonObject;
+  policyHash: string;
+  sampling: JsonObject;
+  samplingHash: string;
+  states: PersistedMetricState[];
+  stateHash: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkflowMeasurementSampleV17Record {
+  ordinal: number;
+  kind: "warmup" | "sample";
+  sampleIndex: number;
+  executionId: string;
+  status: "completed" | "timed-out" | "output-limited" | "infrastructure-failure" | "cancelled";
+  exitCode: number | null;
+  signal?: string;
+  timedOut: boolean;
+  stdoutArtifactDigest: string;
+  stderrArtifactDigest: string;
+  resources?: JsonObject;
+  startedAt: string;
+  endedAt: string;
+}
+
+export interface WorkflowMeasurementV17Record {
+  measurementId: string;
+  runId: string;
+  operationId: string;
+  metricSetId: string;
+  profile: MeasurementProfileSnapshot;
+  profileHash: string;
+  commandHash: string;
+  environment: JsonObject;
+  environmentHash: string;
+  workspaceTreeHash: string;
+  candidateId?: string;
+  bindingHash: string;
+  delta: MetricCohortDelta;
+  observations: JsonObject;
+  artifactDigest: string;
+  diagnosticsArtifactDigest?: string;
+  samples: WorkflowMeasurementSampleV17Record[];
+  createdAt: string;
+}
+
+export interface WorkflowExperimentV17Record {
+  experimentId: string;
+  runId: string;
+  operationId: string;
+  candidateId: string;
+  measurementId: string;
+  disposition: "accepted" | "rejected";
+  learned: string;
+  bindingHash: string;
+  artifactDigest: string;
+  createdAt: string;
 }
 
 export interface WorkflowCandidateVerificationV17Record {

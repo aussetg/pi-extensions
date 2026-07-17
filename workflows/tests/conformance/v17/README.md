@@ -88,4 +88,14 @@ canonical products, cursor effects, candidate-body scopes, workspace checkpoints
 dispositions, and never-replayed apply. Real SQLite/control-worker tests cover accepted/rejected/
 unchanged/pending candidates, schema-invalid human input, stale apply evidence, authority lookalikes,
 and restart after candidate freeze without callback re-entry. It remains separate from the v16
-coordinator and from Phase 13 metric execution.
+coordinator.
+
+The production metric path now exists in `src/measurements/{metric-set,adapter}-v17.ts`. Synchronous
+metric-set methods cross a dedicated authority-checked protocol channel; profile execution accepts
+only exact static or invocation-pinned resources and binds policy, sampling, executor, environment,
+workspace, and candidate authority. Schema-4 metric/measurement/experiment rows reconstruct baseline
+and candidate cohorts transactionally with candidate dispositions. Vertical tests cover accepted and
+guardrail-rejected experiments, environment drift, runtime profile switching, lookalikes, crash
+recovery before both baseline and candidate disposition, profile-revision identity, and causal
+baseline replay without evaluator execution. The independent resource/candidate/replay models remain
+the contract.

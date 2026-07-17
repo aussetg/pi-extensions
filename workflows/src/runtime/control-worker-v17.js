@@ -183,6 +183,7 @@ function startControl() {
     syncMethods: SYNC_METHODS,
     hostCall: bridgeHostCall,
     hostSyncCall: bridgeHostSyncCall,
+    metricCall: bridgeMetricCall,
     metadata,
     descriptors,
     operationSites: configuration.operationSites,
@@ -292,6 +293,32 @@ function bridgeHostSyncCall(method, args) {
     send({ type: "sync-call", requestId, invocationId, method, args: encodeWire(args) });
     const response = parseSyncResponse(readSyncResponse());
     if (response.requestId !== requestId) throw new Error("Workflow v17 synchronous response id changed");
+    if (response.error !== undefined) throw deserializeError(response.error);
+    return decodeWire(response.value);
+  } catch (error) {
+    throw controlRealm.createError(serializeError(error));
+  }
+}
+
+function bridgeMetricCall(referenceId, method, args) {
+  try {
+    if (typeof referenceId !== "string" || !ID.test(referenceId)
+      || !["policy", "summary", "reachedTarget", "evaluate"].includes(method)
+      || !Array.isArray(args)) {
+      throw new Error("Invalid workflow v17 metric-set call");
+    }
+    const invocationId = currentInvocation();
+    const requestId = `request-${nextRequest++}`;
+    send({
+      type: "metric-call",
+      requestId,
+      invocationId,
+      referenceId,
+      method,
+      args: encodeWire(args),
+    });
+    const response = parseMetricResponse(readSyncResponse());
+    if (response.requestId !== requestId) throw new Error("Workflow v17 metric response id changed");
     if (response.error !== undefined) throw deserializeError(response.error);
     return decodeWire(response.value);
   } catch (error) {
@@ -477,6 +504,16 @@ function parseSyncResponse(value) {
   if (message.type !== "sync-response") throw new Error("Workflow v17 synchronous response type is invalid");
   assertOutcomeKeys(message, ["type", "requestId"], "workflow v17 synchronous response");
   const base = { type: "sync-response", requestId: requireId(message.requestId, "synchronous request") };
+  return Object.prototype.hasOwnProperty.call(message, "error")
+    ? { ...base, error: parseSerializedError(message.error) }
+    : { ...base, value: requireWire(message.value) };
+}
+
+function parseMetricResponse(value) {
+  const message = requireRecord(value, "workflow v17 metric response");
+  if (message.type !== "metric-response") throw new Error("Workflow v17 metric response type is invalid");
+  assertOutcomeKeys(message, ["type", "requestId"], "workflow v17 metric response");
+  const base = { type: "metric-response", requestId: requireId(message.requestId, "metric request") };
   return Object.prototype.hasOwnProperty.call(message, "error")
     ? { ...base, error: parseSerializedError(message.error) }
     : { ...base, value: requireWire(message.value) };

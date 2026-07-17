@@ -199,3 +199,9 @@ No control-flow compiler is required.
   join; and verification-bound accept/reject/apply restores branded authority from SQLite. Tests cover
   accepted, rejected, unchanged, pending, crashed, forged, and stale-apply paths without weakening the
   independent candidate oracle.
+- The production v17 metric runtime now mints unforgeable run-local metric sets, executes only exact
+  launch-pinned profiles through a pinned command/environment substrate, persists grouped baseline and
+  candidate cohorts, and finalizes state in the same candidate disposition transaction. Dedicated
+  synchronous method transport keeps `policy`, `summary`, `reachedTarget`, and `evaluate` host-
+  authoritative. Tests cover acceptance, guardrail rejection, environment drift, profile switching,
+  crash recovery, experiment evidence, profile revision identity, and causal baseline materialization.

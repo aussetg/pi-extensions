@@ -123,7 +123,7 @@ CREATE TABLE operations (
   cursor INTEGER NOT NULL CHECK (cursor >= 0),
   path TEXT NOT NULL,
   kind TEXT NOT NULL CHECK (kind IN (
-    'parallel', 'map', 'agent', 'command', 'ask', 'metrics', 'measure', 'candidate',
+    'parallel', 'map', 'agent', 'command', 'ask', 'measure', 'candidate',
     'verify', 'accept', 'reject', 'record-experiment', 'apply'
   )),
   ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
@@ -334,6 +334,49 @@ CREATE TABLE candidate_changed_paths (
   UNIQUE (candidate_id, path)
 ) STRICT;
 
+CREATE TABLE metric_sets (
+  metric_set_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+  authority_id TEXT NOT NULL,
+  source_site TEXT NOT NULL,
+  occurrence INTEGER NOT NULL CHECK (occurrence >= 0),
+  policy_json TEXT NOT NULL CHECK (json_valid(policy_json)),
+  policy_hash TEXT NOT NULL,
+  sampling_json TEXT NOT NULL CHECK (json_valid(sampling_json)),
+  sampling_hash TEXT NOT NULL,
+  states_json TEXT NOT NULL CHECK (json_valid(states_json)),
+  state_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (run_id, authority_id),
+  UNIQUE (run_id, source_site, occurrence)
+) STRICT;
+CREATE INDEX metric_sets_run_created ON metric_sets(run_id, created_at, metric_set_id);
+
+CREATE TABLE workflow_measurements (
+  measurement_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+  operation_id TEXT NOT NULL UNIQUE REFERENCES operations(operation_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+  metric_set_id TEXT NOT NULL REFERENCES metric_sets(metric_set_id) DEFERRABLE INITIALLY DEFERRED,
+  profile_json TEXT NOT NULL CHECK (json_valid(profile_json)),
+  profile_hash TEXT NOT NULL,
+  command_hash TEXT NOT NULL,
+  environment_json TEXT NOT NULL CHECK (json_valid(environment_json)),
+  environment_hash TEXT NOT NULL,
+  workspace_tree_hash TEXT NOT NULL,
+  candidate_id TEXT REFERENCES candidates(candidate_id) DEFERRABLE INITIALLY DEFERRED,
+  binding_hash TEXT NOT NULL,
+  delta_json TEXT NOT NULL CHECK (json_valid(delta_json)),
+  observations_json TEXT NOT NULL CHECK (json_valid(observations_json)),
+  artifact_digest TEXT NOT NULL REFERENCES artifacts(digest) DEFERRABLE INITIALLY DEFERRED,
+  diagnostics_artifact_digest TEXT REFERENCES artifacts(digest) DEFERRABLE INITIALLY DEFERRED,
+  samples_json TEXT NOT NULL CHECK (json_valid(samples_json)),
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX workflow_measurements_metric_created
+  ON workflow_measurements(metric_set_id, created_at, measurement_id);
+CREATE INDEX workflow_measurements_candidate ON workflow_measurements(candidate_id, measurement_id);
+
 CREATE TABLE candidate_measurements (
   measurement_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
@@ -345,6 +388,20 @@ CREATE TABLE candidate_measurements (
   finalized_at TEXT,
   CHECK ((status = 'pending') = (finalized_at IS NULL))
 ) STRICT;
+
+CREATE TABLE workflow_experiments (
+  experiment_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+  operation_id TEXT NOT NULL UNIQUE REFERENCES operations(operation_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+  candidate_id TEXT NOT NULL UNIQUE REFERENCES candidate_dispositions(candidate_id) DEFERRABLE INITIALLY DEFERRED,
+  measurement_id TEXT NOT NULL UNIQUE REFERENCES workflow_measurements(measurement_id) DEFERRABLE INITIALLY DEFERRED,
+  disposition TEXT NOT NULL CHECK (disposition IN ('accepted', 'rejected')),
+  learned TEXT NOT NULL,
+  binding_hash TEXT NOT NULL,
+  artifact_digest TEXT NOT NULL REFERENCES artifacts(digest) DEFERRABLE INITIALLY DEFERRED,
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX workflow_experiments_run_created ON workflow_experiments(run_id, created_at, experiment_id);
 
 CREATE TABLE candidate_verifications (
   verification_id TEXT PRIMARY KEY,

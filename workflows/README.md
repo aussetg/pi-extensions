@@ -19,7 +19,9 @@ primary Pi session launches and controls runs but does not own their lifetime.
 > process now evaluates the reviewed executable with realm-owned language/schema/descriptor
 > constructors, source-site checks, explicit branded product/reference transport, callback-context
 > propagation, and external memory/segment limits. The v16 launch service still consumes none of the
-> staged v17 path.
+> staged v17 path. The staged executable path now also runs invocation-selected trusted measurement
+> profiles through branded metric sets, persists baseline/pending/disposition state, and records
+> canonical experiment evidence.
 
 This extension is intentionally local and Linux-only. It has no compatibility layer for old run or
 definition formats and no portability fallback.
@@ -329,6 +331,20 @@ evidence. Apply receives only an accepted product, reloads its bound verificatio
 and admits a receipt only when candidate, approval, verification binding, and changed paths agree.
 Run completion fails before closing the root scope when a changed candidate remains pending; terminal
 failure/stop behavior continues to abandon pending candidates transactionally.
+
+The staged v17 measurement runtime creates one unforgeable run-local `MetricSet` from a required
+primary policy plus optional guardrails/observations. A selected `s.measurementProfile()` is resolved
+and output-validated at launch, then rechecked against the exact operation site, policy, sampling,
+profile snapshot, command executor, and environment provider at execution. Baselines and candidate
+cohorts are persisted in schema 4; acceptance advances the grouped best state, while rejection or
+abandonment finalizes the same pending cohort without advancing it. Profile/environment changes stop
+comparison and alter causal identity. Measurement products retain canonical observations,
+diagnostics, streams, and artifact authority, and `recordExperiment` binds the exact candidate,
+measurement, disposition, lesson, and artifact. Causal replay can materialize an unchanged baseline
+into a fresh target metric set without running the evaluator.
+
+There is no implicit evaluator in v17. The old `builtin:runtime-baseline` remains reachable only by
+the still-executable v16 optimizer and will be deleted with that runtime at atomic cutover.
 
 The following describes the currently executable v16 layout.
 

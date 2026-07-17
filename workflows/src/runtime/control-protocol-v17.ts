@@ -96,6 +96,14 @@ export type WorkflowV17ControlProcessMessage =
       method: WorkflowV17SyncFlowMethod;
       args: WorkflowV17WireValue;
     }
+  | {
+      type: "metric-call";
+      requestId: string;
+      invocationId: string;
+      referenceId: string;
+      method: "policy" | "summary" | "reachedTarget" | "evaluate";
+      args: WorkflowV17WireValue;
+    }
   | ({ type: "callback-result"; invocationId: string } & MessageOutcome)
   | ({ type: "done" } & MessageOutcome);
 
@@ -124,6 +132,11 @@ export type WorkflowV17HostProcessMessage =
 
 export type WorkflowV17SyncResponseMessage = {
   type: "sync-response";
+  requestId: string;
+} & MessageOutcome;
+
+export type WorkflowV17MetricResponseMessage = {
+  type: "metric-response";
   requestId: string;
 } & MessageOutcome;
 
@@ -166,6 +179,25 @@ export function parseWorkflowV17ControlProcessMessage(value: unknown): WorkflowV
       requestId: requireId(message.requestId, "synchronous request"),
       invocationId: requireId(message.invocationId, "control invocation"),
       method: message.method as WorkflowV17SyncFlowMethod,
+      args: requireWire(message.args),
+    };
+  }
+  if (message.type === "metric-call") {
+    assertKeys(
+      message,
+      ["type", "requestId", "invocationId", "referenceId", "method", "args"],
+      "metric-call message",
+    );
+    if (typeof message.method !== "string"
+      || !["policy", "summary", "reachedTarget", "evaluate"].includes(message.method)) {
+      throw new WorkflowV17ControlProtocolError(`Unknown workflow v17 metric-set method ${String(message.method)}`);
+    }
+    return {
+      type: "metric-call",
+      requestId: requireId(message.requestId, "metric request"),
+      invocationId: requireId(message.invocationId, "control invocation"),
+      referenceId: requireId(message.referenceId, "metric reference"),
+      method: message.method as "policy" | "summary" | "reachedTarget" | "evaluate",
       args: requireWire(message.args),
     };
   }

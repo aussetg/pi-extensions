@@ -19,6 +19,14 @@ import {
 } from "../persistence/run-database-v17.js";
 import type { WorkflowV17InvocationSnapshot } from "../persistence/workflow-v17-invocation.js";
 import type { JsonSchema, JsonValue } from "../types.js";
+import type { HostCommandExecutor } from "../commands/executor.js";
+import type { MeasurementEnvironmentProvider } from "../measurements/environment.js";
+import { WorkflowV17MetricSetRuntime } from "../measurements/metric-set-v17.js";
+import {
+  WorkflowV17ExperimentEffectAdapter,
+  WorkflowV17MeasurementEffectAdapter,
+  type WorkflowV17MeasurementLaunchWorkspace,
+} from "../measurements/adapter-v17.js";
 import { WorkflowV17EffectProductFactory } from "../artifacts/products-v17.js";
 import { workflowV17ArtifactManifest } from "../artifacts/manifest-v17.js";
 import { WorkflowV17CandidateRuntime } from "../candidates/runtime-v17.js";
@@ -54,6 +62,12 @@ export interface WorkflowV17ExecutableRuntimeOptions {
   verification?: WorkflowV17VerificationExecutor;
   apply?: WorkflowV17ApplyExecutor;
   measurements?: WorkflowV17MeasurementAuthorityResolver;
+  metrics?: WorkflowV17MetricSetRuntime;
+  measurement?: {
+    executor: HostCommandExecutor;
+    environment: MeasurementEnvironmentProvider;
+    launchWorkspace: WorkflowV17MeasurementLaunchWorkspace;
+  };
   replay?: WorkflowV17CausalReplay;
   signal?: AbortSignal;
   operationAdmissionLimit?: number;
@@ -79,10 +93,15 @@ export class WorkflowV17ExecutableRuntime {
       || options.candidates.authority !== options.authority) {
       throw new Error("Workflow v17 executable runtime authority differs from its run");
     }
+    if (options.metrics && (options.metrics.database !== options.database
+      || options.metrics.products !== options.products || options.metrics.workflow !== options.workflow)) {
+      throw new Error("Workflow v17 metric runtime authority differs from its executable runtime");
+    }
     this.requireExecutors();
   }
 
   async run(): Promise<WorkflowV17SemanticRunOutcome> {
+    this.options.metrics?.beginExecution();
     const adapters = this.adapters();
     const engine = new WorkflowV17SemanticEngine(this.options.database, adapters, {
       candidate: this.options.candidates,
@@ -104,6 +123,9 @@ export class WorkflowV17ExecutableRuntime {
         rootContext: engine.currentControlContext(),
         currentContext: () => engine.currentControlContext(),
         runInContext: (context, body) => engine.runInControlContext(context, body),
+        ...(this.options.metrics ? {
+          metricCall: (metricSet, method, args) => this.options.metrics!.call(metricSet, method, args),
+        } : {}),
         ...(this.options.segmentTimeoutMs !== undefined ? { segmentTimeoutMs: this.options.segmentTimeoutMs } : {}),
       });
       validateSchema(this.options.workflow.metadata.output, result, "workflow output");
@@ -190,6 +212,24 @@ export class WorkflowV17ExecutableRuntime {
           },
         });
       },
+      metrics: (sourceSite, policy, sampling) => {
+        if (!this.options.metrics) throw new Error("Workflow v17 metric runtime is unavailable");
+        return this.options.metrics.create(sourceSite, policy, sampling);
+      },
+      measure: async (sourceSite, profile, metrics, optionsValue) => {
+        const options = optionsValue === undefined
+          ? {} : plainRecord(optionsValue, "workflow v17 measurement options");
+        return await semantic.effect("measure", {
+          sourceSite,
+          ...(typeof options.title === "string" ? { title: options.title } : {}),
+          input: {
+            operationSite: sourceSite,
+            profile,
+            metrics,
+            ...(options.candidate ? { candidate: options.candidate } : {}),
+          },
+        });
+      },
       candidate: async (sourceSite, bodyValue, optionsValue) => {
         if (typeof bodyValue !== "function") throw new TypeError("Workflow v17 candidate body must be a callback");
         const options = optionsValue === undefined
@@ -225,6 +265,17 @@ export class WorkflowV17ExecutableRuntime {
             reason: evidence.reason,
             ...(evidence.verification ? { verification: evidence.verification } : {}),
             ...(evidence.measurement ? { measurement: evidence.measurement } : {}),
+          },
+        });
+      },
+      recordExperiment: async (sourceSite, requestValue) => {
+        const request = plainRecord(requestValue, "workflow v17 experiment request");
+        return await semantic.effect("record-experiment", {
+          sourceSite,
+          input: {
+            candidate: request.candidate,
+            measurement: request.measurement,
+            learned: request.learned,
           },
         });
       },
@@ -274,14 +325,31 @@ export class WorkflowV17ExecutableRuntime {
       ...(this.options.ask ? [new WorkflowV17AskEffectAdapter({ ...common, executor: this.options.ask })] : []),
       ...(this.options.verification
         ? [new WorkflowV17VerificationEffectAdapter({ ...common, executor: this.options.verification })] : []),
+      ...(this.options.measurement && this.options.metrics ? [new WorkflowV17MeasurementEffectAdapter({
+        ...common,
+        invocation: this.options.invocation,
+        metrics: this.options.metrics,
+        executor: this.options.measurement.executor,
+        environment: this.options.measurement.environment,
+        launchWorkspace: this.options.measurement.launchWorkspace,
+      })] : []),
       new WorkflowV17AcceptEffectAdapter({
         ...common,
-        ...(this.options.measurements ? { measurements: this.options.measurements } : {}),
+        ...((this.options.metrics ?? this.options.measurements)
+          ? { measurements: this.options.metrics ?? this.options.measurements } : {}),
       }),
       new WorkflowV17RejectEffectAdapter({
         ...common,
-        ...(this.options.measurements ? { measurements: this.options.measurements } : {}),
+        ...((this.options.metrics ?? this.options.measurements)
+          ? { measurements: this.options.metrics ?? this.options.measurements } : {}),
       }),
+      ...(this.options.metrics ? [new WorkflowV17ExperimentEffectAdapter({
+        database: this.options.database,
+        products: this.options.products,
+        candidates: this.options.candidates,
+        metrics: this.options.metrics,
+        ...(this.options.now ? { now: this.options.now } : {}),
+      })] : []),
       ...(this.options.apply ? [new WorkflowV17ApplyEffectAdapter({ ...common, executor: this.options.apply })] : []),
     ];
   }
@@ -294,6 +362,9 @@ export class WorkflowV17ExecutableRuntime {
       ["ask", Boolean(this.options.ask)],
       ["verify", Boolean(this.options.verification)],
       ["apply", Boolean(this.options.apply)],
+      ["metrics", Boolean(this.options.metrics)],
+      ["measure", Boolean(this.options.measurement && this.options.metrics)],
+      ["recordExperiment", Boolean(this.options.metrics)],
     ] as const) {
       if (methods.has(method) && !available) throw new Error(`Workflow v17 ${method} executor is unavailable`);
     }

@@ -5,7 +5,7 @@ const SAFE_PATH_PATTERN = "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*\\\\)[^
 /** Build every v17 author-visible value from control-realm intrinsics. */
 export function createWorkflowV17ControlRealm(context, options) {
   const bootstrap = new vm.Script(`
-    ((hostCall, hostSyncCall, configuration) => {
+    ((hostCall, hostSyncCall, metricCall, configuration) => {
       "use strict";
       const create = Object.create;
       const defineProperty = Object.defineProperty;
@@ -319,7 +319,39 @@ export function createWorkflowV17ControlRealm(context, options) {
         },
       });
 
+      const createMetricSetAuthority = (family, id, identity, fieldEntries) => {
+        if (family !== "reference" || identity.kind !== "metric-set" || fieldEntries.length !== 0) {
+          throw new SafeTypeError("Workflow metric-set transport is invalid");
+        }
+        const key = family + ":" + id;
+        const existing = remoteAuthorities.get(key);
+        if (existing) {
+          const record = authorityRecords.get(existing);
+          if (!same(record.identity, identity)) throw new SafeTypeError("Workflow metric-set identity changed");
+          return existing;
+        }
+        const invoke = (method, args) => metricCall(id, method, args);
+        const primary = create(null);
+        defineProperty(primary, "reachedTarget", {
+          value: () => invoke("reachedTarget", []), enumerable: true, writable: false, configurable: false,
+        });
+        freeze(primary);
+        const value = create(null);
+        defineProperties(value, {
+          primary: { value: primary, enumerable: true, writable: false, configurable: false },
+          policy: { value: () => invoke("policy", []), enumerable: true, writable: false, configurable: false },
+          summary: { value: () => invoke("summary", []), enumerable: true, writable: false, configurable: false },
+          evaluate: { value: measurement => invoke("evaluate", [measurement]), enumerable: true, writable: false, configurable: false },
+        });
+        freeze(value);
+        authorityRecords.set(value, freeze({ family, id, identity, fields: freeze(create(null)) }));
+        remoteAuthorities.set(key, value);
+        return value;
+      };
       const createRemoteAuthority = (family, id, identity, fieldEntries) => {
+        if (family === "reference" && identity.kind === "metric-set") {
+          return createMetricSetAuthority(family, id, identity, fieldEntries);
+        }
         const key = family + ":" + id;
         const fieldShape = create(null);
         for (const entry of fieldEntries) {
@@ -413,7 +445,7 @@ export function createWorkflowV17ControlRealm(context, options) {
     })
   `, { filename: "workflow-v17-control-realm.js" });
   const initialize = bootstrap.runInContext(context, { timeout: 1_000 });
-  return initialize(options.hostCall, options.hostSyncCall, Object.freeze({
+  return initialize(options.hostCall, options.hostSyncCall, options.metricCall, Object.freeze({
     asyncMethods: [...options.asyncMethods],
     syncMethods: [...options.syncMethods],
     metadata: options.metadata,

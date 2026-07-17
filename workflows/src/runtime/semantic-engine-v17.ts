@@ -50,7 +50,7 @@ export type WorkflowV17SemanticEngineFaultPoint =
   | "after-root-scope-complete"
   | "after-root-scope-failure";
 
-type WorkflowV17EffectKind = Exclude<WorkflowOperationV17Kind, "parallel" | "map" | "metrics" | "candidate">;
+type WorkflowV17EffectKind = Exclude<WorkflowOperationV17Kind, "parallel" | "map" | "candidate">;
 
 export interface WorkflowV17EffectInvocation {
   sourceSite: string;

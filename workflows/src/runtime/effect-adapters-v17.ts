@@ -21,6 +21,10 @@ import {
   WorkflowRunDatabaseV17RevisionConflictError,
 } from "../persistence/run-database-v17.js";
 import type { JsonObject, JsonSchema, JsonValue } from "../types.js";
+import {
+  normalizeMeasurementProfile,
+  type MeasurementProfileSnapshot,
+} from "../measurements/profiles.js";
 import { stableHash } from "../utils/hashes.js";
 import { stableJson } from "../utils/stable-json.js";
 import { assertIdentifier } from "../persistence/run-database-codec.js";
@@ -58,6 +62,18 @@ export interface WorkflowV17StaticEffectResources {
   agents: Record<string, WorkflowV17StaticEffectBinding>;
   commands: Record<string, WorkflowV17StaticEffectBinding>;
   verifications: Record<string, WorkflowV17StaticEffectBinding>;
+  measurements: Record<string, {
+    selector: string;
+    profile: MeasurementProfileSnapshot;
+    hash: string;
+  }>;
+  measurementRuntime?: {
+    executor: JsonObject;
+    executorHash: string;
+    environment: JsonObject;
+    environmentHash: string;
+    hash: string;
+  };
   hash: string;
 }
 
@@ -67,6 +83,8 @@ export function workflowV17StaticEffectResources(input: {
   agents?: Record<string, { selector: string; authority: JsonObject }>;
   commands?: Record<string, { selector: string; authority: JsonObject }>;
   verifications?: Record<string, { selector: string; authority: JsonObject }>;
+  measurements?: Record<string, MeasurementProfileSnapshot>;
+  measurementRuntime?: { executor: JsonObject; environment: JsonObject };
 }): WorkflowV17StaticEffectResources {
   if (!/^sha256:[a-f0-9]{64}$/u.test(input.definitionHash)) {
     throw new TypeError("Workflow v17 static resource definition hash is invalid");
@@ -74,6 +92,22 @@ export function workflowV17StaticEffectResources(input: {
   const agents = bindings(input.agents ?? {});
   const commands = bindings(input.commands ?? {});
   const verifications = bindings(input.verifications ?? {});
+  const measurements = Object.fromEntries(Object.entries(input.measurements ?? {}).sort(([left], [right]) =>
+    left.localeCompare(right)).map(([selector, profile]) => {
+      assertPinnedMeasurementProfile(profile, selector);
+      return [selector, { selector, profile: structuredClone(profile), hash: stableHash({ selector, profile }) }];
+    }));
+  const measurementRuntime = input.measurementRuntime ? (() => {
+    const executor = canonicalJsonObject(input.measurementRuntime!.executor, limits());
+    const environment = canonicalJsonObject(input.measurementRuntime!.environment, limits());
+    const value = {
+      executor,
+      executorHash: stableHash(executor),
+      environment,
+      environmentHash: stableHash(environment),
+    };
+    return { ...value, hash: stableHash(value) };
+  })() : undefined;
   for (const descriptor of input.workflow.descriptors) {
     const table = descriptor.kind === "agent-task" ? agents : commands;
     const binding = table[descriptor.identity.sourceSite];
@@ -101,12 +135,24 @@ export function workflowV17StaticEffectResources(input: {
       throw new Error(`Workflow v17 verification profile ${profile} has invalid pinned hashes`);
     }
   }
+  const expectedMeasurements = [...input.workflow.review.measurementProfiles].sort();
+  if (Object.keys(measurements).sort().join("\0") !== expectedMeasurements.join("\0")) {
+    throw new Error("Workflow v17 static measurement profile surface differs from review");
+  }
+  const usesMeasurements = input.workflow.operations.some(site => site.method === "measure");
+  if (usesMeasurements !== Boolean(measurementRuntime)) {
+    throw new Error(usesMeasurements
+      ? "Workflow v17 measurement runtime authority is required"
+      : "Workflow v17 measurement runtime authority is unused");
+  }
   const body = {
     formatVersion: 1 as const,
     definitionHash: input.definitionHash,
     agents,
     commands,
     verifications,
+    measurements,
+    ...(measurementRuntime ? { measurementRuntime } : {}),
   };
   return deepFreezeJson({ ...body, hash: stableHash(body) } as unknown as JsonValue) as unknown as WorkflowV17StaticEffectResources;
 }
@@ -127,7 +173,9 @@ export function assertWorkflowV17StaticEffectResources(
   const expectedVerifications = [...workflow.review.verificationProfiles].sort();
   if (Object.keys(resources.agents).sort().join("\0") !== expectedAgents.join("\0")
     || Object.keys(resources.commands).sort().join("\0") !== expectedCommands.join("\0")
-    || Object.keys(resources.verifications).sort().join("\0") !== expectedVerifications.join("\0")) {
+    || Object.keys(resources.verifications).sort().join("\0") !== expectedVerifications.join("\0")
+    || Object.keys(resources.measurements ?? {}).sort().join("\0")
+      !== [...workflow.review.measurementProfiles].sort().join("\0")) {
     throw new TypeError("Workflow v17 static effect resource surface differs from review");
   }
   for (const descriptor of workflow.descriptors) {
@@ -156,6 +204,44 @@ export function assertWorkflowV17StaticEffectResources(
       || !/^sha256:[a-f0-9]{64}$/u.test(binding.authority.environmentHash)) {
       throw new TypeError(`Workflow v17 verification ${selector} has invalid pinned authority`);
     }
+  }
+  for (const selector of workflow.review.measurementProfiles) {
+    const binding = resources.measurements[selector];
+    if (!binding || binding.selector !== selector || binding.profile.id !== selector
+      || binding.hash !== stableHash({ selector, profile: binding.profile })) {
+      throw new TypeError(`Workflow v17 measurement ${selector} has invalid pinned authority`);
+    }
+    assertPinnedMeasurementProfile(binding.profile, selector);
+  }
+  const usesMeasurements = workflow.operations.some(site => site.method === "measure");
+  if (usesMeasurements !== Boolean(resources.measurementRuntime)) {
+    throw new TypeError("Workflow v17 measurement runtime authority differs from review");
+  }
+  if (resources.measurementRuntime) {
+    const runtime = resources.measurementRuntime;
+    if (stableHash(runtime.executor) !== runtime.executorHash
+      || stableHash(runtime.environment) !== runtime.environmentHash
+      || stableHash({
+        executor: runtime.executor,
+        executorHash: runtime.executorHash,
+        environment: runtime.environment,
+        environmentHash: runtime.environmentHash,
+      }) !== runtime.hash) {
+      throw new TypeError("Workflow v17 measurement runtime authority is corrupt");
+    }
+  }
+}
+
+function assertPinnedMeasurementProfile(profile: MeasurementProfileSnapshot, selector: string): void {
+  if (!profile || profile.id !== selector || profile.id !== `${profile.namespace}:${profile.name}`
+    || typeof profile.path !== "string" || typeof profile.hash !== "string") {
+    throw new TypeError(`Workflow v17 measurement profile ${selector} identity is invalid`);
+  }
+  const { id: _id, namespace, path: profilePath, hash, ...definition } = profile;
+  const normalized = normalizeMeasurementProfile(definition, profilePath);
+  if (stableJson(normalized) !== stableJson(definition)
+    || stableHash({ namespace, definition }) !== hash) {
+    throw new TypeError(`Workflow v17 measurement profile ${selector} snapshot is corrupt`);
   }
 }
 
