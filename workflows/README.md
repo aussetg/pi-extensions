@@ -15,8 +15,11 @@ primary Pi session launches and controls runs but does not own their lifetime.
 > scope-local cursors, keyed child scopes, structural joins, pinned resources, and explicit candidate
 > lifecycle state. Its cursor semantic engine now reconstructs ordinary TypeScript control from
 > durable effect settlements and scope-local calls, runs bounded keyed `parallel`/`map` child scopes,
-> commits deterministic success/failure joins, and consumes causal replay. The v16 launch service and
-> control worker still consume none of the staged v17 path.
+> commits deterministic success/failure joins, and consumes causal replay. A separate v17 control
+> process now evaluates the reviewed executable with realm-owned language/schema/descriptor
+> constructors, source-site checks, explicit branded product/reference transport, callback-context
+> propagation, and external memory/segment limits. The v16 launch service still consumes none of the
+> staged v17 path.
 
 This extension is intentionally local and Linux-only. It has no compatibility layer for old run or
 definition formats and no portability fallback.
@@ -284,9 +287,15 @@ collected groups retain successful siblings and return typed failures. Completed
 without re-entering capture-boundary callbacks, while incomplete lanes reconstruct from local calls.
 Mutable candidate workspace lane ownership is enforced by the schema-4 database.
 
-The external control worker and its runnable-segment watchdog remain v16 until the v17 control realm
-and wire products are built. The v17 engine remains disconnected from coordinator execution; the
-control realm and branded wire-product phase is next before the atomic cutover.
+The staged v17 control process executes the exact frontend output in a hardened, memory-bounded child.
+Its realm owns `workflow`, the strict schema facade, reviewed agent/command descriptor objects,
+instrumented source-site tokens, flow wrappers, and frozen public authority products. Explicit wire
+variants preserve private host-side descriptor/product/reference authority across callbacks without
+exposing identity fields to workflow source; plain lookalikes remain plain data, and foreign or
+revoked authority fails closed. The host watchdog covers synchronous code and asynchronous runnable
+continuations, while IPC byte/depth/node limits and callback invocation contexts remain bounded.
+All six v17 definitions load in this realm. It remains disconnected from coordinator execution until
+the effect-product/adapters and atomic cutover phases.
 
 The following describes the currently executable v16 layout.
 

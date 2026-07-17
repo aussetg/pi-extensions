@@ -64,3 +64,12 @@ fail-fast cancellation and typed collection, restores terminal structures withou
 re-entry, and commits deterministic success/failure joins. Real SQLite tests cover sequential and
 structured crash matrices, nested groups, cancellation, map reorder, independent sibling replay,
 drift, and no duplicate settled physical execution.
+
+The separate v17 control implementation now exists under `src/runtime/control-*-v17.*`. It evaluates
+the frontend's exact instrumented executable in a hardened child process, reconstructs the virtual
+language with control-realm intrinsics, validates reviewed descriptor and operation sites, and uses
+explicit product/reference wire variants backed by host WeakMap authority. Production tests load all
+six corpus definitions and cover descriptor/product/reference round trips, nested public artifacts,
+lookalikes, foreign/revoked authority, callback contexts, synchronous references, source tampering,
+protocol/wire limits, cancellation, worker death, runnable-segment runaway, and heap exhaustion. It
+remains unwired from the v16 coordinator pending canonical effect products and adapters.

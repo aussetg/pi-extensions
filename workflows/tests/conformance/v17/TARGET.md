@@ -179,5 +179,11 @@ No control-flow compiler is required.
   sibling cancellation and typed collected failures, persists deterministic success/failure joins,
   restores completed capture boundaries directly, and reconstructs incomplete lanes from local calls.
   Real-SQLite tests cover nested groups, scheduler timing, cancellation, structural crash boundaries,
-  independent sibling replay, map reorder, and semantic-policy drift. The control realm/wire-product
-  phase remains isolated before runtime cutover.
+  independent sibling replay, map reorder, and semantic-policy drift.
+- The production v17 control process now reconstructs the strict schema facade, workflow wrapper,
+  reviewed descriptors, flow/source-site wrappers, callbacks, and frozen product/reference views from
+  control-realm intrinsics. Explicit wire variants retain host WeakMap authority while rejecting plain
+  lookalikes, foreign scopes, revocation, changed identities, malformed messages, and unreviewed
+  source sites. Tests load all six definitions and contain memory, wire, callback, cancellation,
+  worker-crash, and asynchronous-runaway failures. The path remains isolated before effect adapters
+  and runtime cutover.
