@@ -4,6 +4,12 @@ Durable named workflows for Pi. A reviewed JavaScript definition describes deter
 flow; one coordinator owns each run; agents and host effects return through typed receipts. The
 primary Pi session launches and controls runs but does not own their lifetime.
 
+> **v17 implementation branch:** the canonical future authoring contract is now
+> [`workflow-api.d.ts`](workflow-api.d.ts), with its pinned language identity in
+> [`src/definition/workflow-language-v17.ts`](src/definition/workflow-language-v17.ts). The executable
+> runtime and the authoring documentation below remain v16 until the atomic cutover; their temporary
+> declaration is [`workflow-api-v16.d.ts`](workflow-api-v16.d.ts).
+
 This extension is intentionally local and Linux-only. It has no compatibility layer for old run or
 definition formats and no portability fallback.
 
@@ -141,7 +147,7 @@ dynamic operation identity, code generation, and undeclared authority. A definit
 less parallelism than the machine ceiling, never more. A running workflow cannot launch another
 workflow.
 
-The complete editor contract is [`workflow-api.d.ts`](workflow-api.d.ts). Built-ins under
+The current v16 editor contract is [`workflow-api-v16.d.ts`](workflow-api-v16.d.ts). Built-ins under
 [`src/builtins/`](src/builtins/) are complete examples and are checked with
 `npm run typecheck:flows`.
 

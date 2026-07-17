@@ -8,7 +8,8 @@ It contains:
 
 - framework-independent reference models for causal replay, same-run recovery, artifacts, candidate
   lifecycle, helper analysis, and invocation-selected resources;
-- the candidate `pi/workflows` declaration;
+- the production `pi/workflows` declaration in `workflow-api.d.ts`;
+- the pinned runtime/API identity in `src/definition/workflow-language-v17.ts`;
 - all six complete target workflows as strict TypeScript compile fixtures;
 - positive inference and negative authority checks;
 - the consolidated target specification.
@@ -28,7 +29,9 @@ Compile the target API and workflow corpus:
 npm run typecheck:conformance:v17
 ```
 
-The normal `npm run check` runs both commands. A production implementation may replace model code
+The normal `npm run check` runs both commands. The v17 declaration is now the canonical public
+contract; the separate `workflow-api-v16.d.ts` exists only to typecheck the old runtime until the
+atomic cutover. A production implementation may replace model code
 with imports from `src/` only after the corresponding behavior exists there. Changing expected
 behavior requires an explicit contract decision; tests must not be weakened merely to accommodate an
 implementation.

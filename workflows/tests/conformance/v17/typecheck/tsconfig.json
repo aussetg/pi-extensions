@@ -10,5 +10,5 @@
     "skipLibCheck": false,
     "types": []
   },
-  "include": ["pi-workflows.d.ts", "corpus/**/*.flow.ts", "contracts/**/*.ts", "schema/**/*.ts"]
+  "include": ["../../../../workflow-api.d.ts", "corpus/**/*.flow.ts", "contracts/**/*.ts", "schema/**/*.ts"]
 }

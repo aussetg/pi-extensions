@@ -1,135 +1,232 @@
-/** Ambient authoring declarations for reviewed `.flow.js` definitions. */
-export {};
+/** Public authoring contract for workflow runtime v17 `.flow.ts` modules. */
+declare module "pi/workflows" {
+  export type JsonPrimitive = null | boolean | number | string;
+  export type JsonValue = JsonPrimitive | readonly JsonValue[] | { readonly [key: string]: JsonValue };
+  export type JsonObject = { readonly [key: string]: JsonValue };
 
-declare global {
-  type FlowJsonPrimitive = null | boolean | number | string;
-  type FlowJsonValue = FlowJsonPrimitive | FlowJsonValue[] | { [key: string]: FlowJsonValue };
-  type FlowJsonObject = { [key: string]: FlowJsonValue };
-  type FlowJsonSchema = Record<string, unknown>;
-  /** Registered semantic/profile selector. Source validation requires a literal. */
-  type FlowProfileSelector = string;
-  type FlowCapability =
-    | "read-project"
-    | "candidate-write"
-    | "host-command"
-    | "mediated-network"
-    | "human-input";
+  const schemaValue: unique symbol;
+  const optionalValue: unique symbol;
+  const opaqueValue: unique symbol;
+  const attachableValue: unique symbol;
+  const taskValue: unique symbol;
 
-  interface FlowWorkflowDefinition {
-    name: string;
-    title?: string;
-    description: string;
-    inputSchema: FlowJsonSchema;
-    outputSchema: FlowJsonSchema;
-    capabilities: FlowCapability[];
-    modelVisible: boolean;
-    /** May only lower the host-owned concurrency ceiling. */
-    maxParallelism?: number;
-    run(flow: FlowApi, args: any): Promise<any>;
+  export interface Schema<T> {
+    readonly [schemaValue]: T;
   }
 
-  function defineWorkflow(definition: FlowWorkflowDefinition): Readonly<FlowWorkflowDefinition>;
-
-  interface FlowConditionResult {
-    result: boolean;
-    label: string;
-    operands?: FlowJsonObject;
+  export interface OptionalSchema<T> extends Schema<T | undefined> {
+    readonly [optionalValue]: true;
   }
 
-  interface FlowBranchFailure {
-    operationPath: string;
-    kind: "agent" | "command" | "output" | "control" | "infrastructure";
-    summary: string;
-    evidence?: FlowArtifactRef[];
+  export type Infer<S extends Schema<unknown>> = S extends Schema<infer T> ? T : never;
+
+  type Properties = Readonly<Record<string, Schema<unknown>>>;
+  type OptionalKeys<P extends Properties> = {
+    [K in keyof P]-?: P[K] extends OptionalSchema<unknown> ? K : never;
+  }[keyof P];
+  type RequiredKeys<P extends Properties> = Exclude<keyof P, OptionalKeys<P>>;
+  type ObjectType<P extends Properties> = {
+    readonly [K in RequiredKeys<P>]: Infer<P[K]>;
+  } & {
+    readonly [K in OptionalKeys<P>]?: Exclude<Infer<P[K]>, undefined>;
+  };
+
+  export interface StringOptions {
+    minLength?: number;
+    maxLength?: number;
+    pattern?: string;
+    format?: string;
   }
 
-  type FlowBranchResult<T> = { ok: true; value: T } | { ok: false; failure: FlowBranchFailure };
-
-  interface FlowParallelOptions {
-    title?: string;
-    /** A lower request only; the host always enforces its machine ceiling. */
-    concurrency?: number;
-    failure?: "fail-fast";
+  export interface NumberOptions {
+    minimum?: number;
+    maximum?: number;
+    exclusiveMinimum?: number;
+    exclusiveMaximum?: number;
   }
 
-  interface FlowCollectParallelOptions {
-    title?: string;
-    concurrency?: number;
-    failure: "collect";
+  export interface ArrayOptions {
+    minItems?: number;
+    maxItems?: number;
+    uniqueItems?: boolean;
   }
 
-  interface FlowAgentArtifactInput {
-    id: string;
-    artifact: FlowArtifactRef;
+  export type MeasurementProfileSelector = string & {
+    readonly [opaqueValue]: "measurement-profile-selector";
+  };
+
+  export const schema: {
+    string(options?: StringOptions): Schema<string>;
+    number(options?: NumberOptions): Schema<number>;
+    integer(options?: NumberOptions): Schema<number>;
+    boolean(): Schema<boolean>;
+    literal<const T extends JsonPrimitive>(value: T): Schema<T>;
+    enum<const T extends readonly string[]>(values: T): Schema<T[number]>;
+    nullable<S extends Schema<unknown>>(value: S): Schema<Infer<S> | null>;
+    optional<S extends Schema<unknown>>(value: S): OptionalSchema<Infer<S>>;
+    array<S extends Schema<unknown>>(items: S, options?: ArrayOptions): Schema<ReadonlyArray<Infer<S>>>;
+    object<const P extends Properties>(properties: P): Schema<ObjectType<P>>;
+    union<const S extends readonly Schema<unknown>[]>(members: S): Schema<Infer<S[number]>>;
+    record<S extends Schema<unknown>>(values: S): Schema<Record<string, Infer<S>>>;
+    id(): Schema<string>;
+    safePath(): Schema<string>;
+    json(): Schema<JsonValue>;
+    measurementProfile(): Schema<MeasurementProfileSelector>;
+    raw<T extends JsonValue = JsonValue>(schema: Readonly<Record<string, JsonValue>>): Schema<T>;
+  };
+
+  export type ProfileSelector = `${"builtin" | "user" | "project"}:${string}`;
+  export type WorkspaceClass = "snapshot" | "candidate";
+
+  interface TaskDescriptor {
+    readonly [taskValue]: unknown;
   }
 
-  interface FlowAgentProduct<T extends FlowJsonValue> {
-    value: T;
-    artifact: FlowArtifactRef<"agent-output">;
-    /** Present for candidate agents after the host commits their exact post-workspace checkpoint. */
-    workspaceCheckpointArtifact?: FlowArtifactRef<"workspace-checkpoint">;
-  }
-
-  interface FlowAgentOptions {
-    title?: string;
-    profile: FlowProfileSelector;
-    prompt: string;
-    inputs?: FlowAgentArtifactInput[];
-    outputSchema?: FlowJsonSchema;
-    workspace?: FlowCandidateWorkspace;
-    network?: "none" | "research";
-    resultMode?: "value" | "artifact" | "value-and-artifact";
-  }
-
-  interface FlowCommandResult {
-    ok: boolean;
-    exitCode: number;
-    durationMs: number;
-    stdout?: string;
-    json?: FlowJsonValue;
-    stderrPreview?: string;
-    outputArtifact?: FlowArtifactRef<"command-output">;
-  }
-
-  interface FlowCommandBaseOptions {
-    title?: string;
-    profile: FlowProfileSelector;
-    /** Bounded scalar values declared by the reviewed command profile. */
-    args?: Record<string, string | number | boolean>;
-    output?: "summary" | "stdout" | "json";
-    allowFailure?: boolean;
-  }
-
-  type FlowCommandOptions =
-    | (FlowCommandBaseOptions & {
-        effect?: "read-only" | "temporary";
-        workspace?: never;
-      })
-    | (FlowCommandBaseOptions & {
-        effect: "candidate";
-        workspace: FlowCandidateWorkspace;
-      });
-
-  interface FlowMetricDefinition {
-    title?: string;
-    direction: "minimize" | "maximize";
-    unit?: string;
-    primary?: boolean;
-    format?: "number" | "percent" | "duration" | "bytes";
-    target?:
-      | { kind: "value"; value: number }
-      | { kind: "relativeGain"; value: number }
-      | { kind: "absoluteGain"; value: number };
-    sampling?: { warmups?: number; samples: number; aggregate: "median" | "mean" | "min" | "max" };
-    improvement?: { minimumAbsolute?: number; minimumRelative?: number };
-    guardrail?: {
-      reference: "baseline" | "best";
-      maximumAbsoluteRegression?: number;
-      maximumRelativeRegression?: number;
+  export interface AgentTask<
+    Output extends JsonObject,
+    Workspace extends WorkspaceClass,
+  > extends TaskDescriptor {
+    readonly [taskValue]: {
+      readonly kind: "agent";
+      readonly output: Output;
+      readonly workspace: Workspace;
     };
   }
 
-  interface FlowMetricObservation {
+  export function agent<
+    S extends Schema<JsonObject>,
+    W extends WorkspaceClass = "snapshot",
+  >(definition: {
+    profile: ProfileSelector;
+    output: S;
+    workspace?: W;
+    network?: "none" | "research";
+    instructions?: string;
+    title?: string;
+  }): AgentTask<Infer<S>, W>;
+
+  export type CommandMode = "summary" | "text" | "json";
+  export type CommandEffect = "read-only" | "temporary" | "candidate";
+
+  export interface CommandTask<
+    Mode extends CommandMode,
+    Effect extends CommandEffect,
+  > extends TaskDescriptor {
+    readonly [taskValue]: {
+      readonly kind: "command";
+      readonly mode: Mode;
+      readonly effect: Effect;
+    };
+  }
+
+  export function command<
+    M extends CommandMode = "summary",
+    E extends CommandEffect = "read-only",
+  >(definition: {
+    profile: ProfileSelector;
+    output?: M;
+    effect?: E;
+    allowFailure?: boolean;
+    title?: string;
+  }): CommandTask<M, E>;
+
+  export interface Artifact<T extends JsonValue = JsonValue> {
+    readonly [opaqueValue]: "artifact";
+    readonly [attachableValue]: true;
+  }
+
+  export interface WorkspaceCheckpoint extends Artifact<JsonObject> {
+    readonly [opaqueValue]: "artifact";
+  }
+
+  interface AttachableProduct {
+    readonly [attachableValue]: true;
+  }
+
+  export type AgentResult<
+    Output extends JsonObject,
+    Workspace extends WorkspaceClass,
+  > = Readonly<{
+    output: Output;
+    artifact: Artifact<Output>;
+    published: readonly Artifact[];
+  } & (Workspace extends "candidate" ? { checkpoint: WorkspaceCheckpoint } : {})> & AttachableProduct;
+
+  export interface CommandSummary extends JsonObject {
+    ok: boolean;
+    exitCode: number;
+    durationMs: number;
+  }
+
+  export type CommandOutput<M extends CommandMode> =
+    M extends "text" ? string
+      : M extends "json" ? JsonValue
+        : CommandSummary;
+
+  export interface CommandResult<M extends CommandMode> extends AttachableProduct {
+    readonly ok: boolean;
+    readonly exitCode: number;
+    readonly durationMs: number;
+    readonly output: CommandOutput<M>;
+    readonly artifact: Artifact;
+    readonly stderrPreview?: string;
+  }
+
+  export type ArtifactInput =
+    | Artifact
+    | AttachableProduct
+    | readonly ArtifactInput[]
+    | { readonly [name: string]: ArtifactInput };
+
+  export interface LaunchSnapshot {
+    readonly [opaqueValue]: "launch-snapshot";
+  }
+
+  export interface CandidateWorkspace {
+    readonly [opaqueValue]: "candidate-workspace";
+  }
+
+  export interface Candidate<T extends JsonValue> {
+    readonly [opaqueValue]: "candidate-product";
+    readonly output: T;
+    readonly changedPaths: readonly string[];
+  }
+
+  export interface AcceptedCandidate<T extends JsonValue> {
+    readonly [opaqueValue]: "accepted-candidate-product";
+    readonly output: T;
+    readonly changedPaths: readonly string[];
+  }
+
+  export interface BranchError {
+    kind: "agent" | "command" | "output" | "control" | "infrastructure";
+    summary: string;
+    evidence: Artifact[];
+  }
+
+  export type Result<T, E> =
+    | { readonly ok: true; readonly value: T }
+    | { readonly ok: false; readonly error: E };
+
+  interface VerificationProduct extends AttachableProduct {
+    readonly [opaqueValue]: "verification-product";
+    readonly receiptId: string;
+    readonly artifact: Artifact;
+  }
+
+  export interface PassedVerification extends VerificationProduct {
+    readonly passed: true;
+    readonly status: "passed";
+  }
+
+  export interface NonPassedVerification extends VerificationProduct {
+    readonly passed: false;
+    readonly status: "failed" | "blocked";
+  }
+
+  export type Verification = PassedVerification | NonPassedVerification;
+
+  export interface Observation extends JsonObject {
     observationId: string;
     metricId: string;
     outputId: string;
@@ -137,238 +234,247 @@ declare global {
     samples: number[];
   }
 
-  interface FlowMeasurementEvidence {
-    measurementId: string;
-    profile: string;
-    profileHash: string;
-    environmentHash: string;
-    diagnostics: Array<{ sample: number; data: FlowJsonObject }>;
-    diagnosticsArtifact?: FlowArtifactRef<"measurement-diagnostics">;
-  }
-
-  interface FlowMeasurementResult extends FlowMeasurementEvidence {
-    observation: FlowMetricObservation;
-  }
-
-  interface FlowMeasurementSetResult extends FlowMeasurementEvidence {
-    observations: Record<string, FlowMetricObservation>;
-  }
-
-  interface FlowMetricSummary {
-    baseline: number | null;
-    current: number | null;
-    best: number | null;
+  export interface MetricSummary extends JsonObject {
+    baseline: number;
+    current: number;
+    best: number;
     relativeGain: number | null;
     observationCount: number;
   }
 
-  interface FlowMetricHandle {
-    readonly baseline: number | null;
-    readonly current: number | null;
-    readonly best: number | null;
-    readonly relativeGain: number | null;
-    reachesTarget(): FlowConditionResult;
-    needsImprovement(): FlowConditionResult;
-    isImprovement(result: FlowMetricObservation): boolean;
-    isWithinGuardrail(result: FlowMetricObservation): boolean;
-    summary(): FlowMetricSummary;
+  export interface MetricTarget extends JsonObject {
+    kind: "value" | "relativeGain" | "absoluteGain";
+    value: number;
   }
 
-  const __flowOpaque: unique symbol;
-  type FlowOpaqueRef<K extends string> = Readonly<{ readonly [__flowOpaque]: K }>;
-  type FlowArtifactKind = "agent-output" | "command-output" | "measurement-diagnostics" | "published" | "workspace-checkpoint";
-  type FlowArtifactRef<K extends FlowArtifactKind = FlowArtifactKind> = FlowOpaqueRef<`artifact-${K}`>;
-  type FlowCandidateRef = FlowOpaqueRef<"immutable-candidate" | "accepted-candidate">;
-  type FlowAcceptedCandidateRef = FlowOpaqueRef<"accepted-candidate">;
-  type FlowCandidateWorkspace = FlowOpaqueRef<"mutable-candidate-workspace">;
-  type FlowLaunchSnapshotRef = FlowOpaqueRef<"launch-snapshot">;
-  type FlowCandidateMeasurement = FlowMeasurementResult | FlowMeasurementSetResult;
-
-  interface FlowProducedCandidate<T extends FlowJsonValue> {
-    candidate: FlowCandidateRef;
-    metadata: T;
-    /** Exact changed paths from the frozen candidate, not an agent claim. */
-    changedPaths: string[];
+  export interface MetricImprovement extends JsonObject {
+    minimumAbsolute?: number;
+    minimumRelative?: number;
   }
 
-  interface FlowRejectionReceipt {
+  export interface MetricBase extends JsonObject {
+    output: string;
+    title?: string;
+    direction: "minimize" | "maximize";
+    unit?: string;
+    format?: "number" | "percent" | "duration" | "bytes";
+    aggregate?: "median" | "mean" | "min" | "max";
+  }
+
+  export interface PrimaryMetricPolicy extends MetricBase {
+    target?: MetricTarget;
+    improvement?: MetricImprovement;
+  }
+
+  export interface GuardrailMetricPolicy extends MetricBase {
+    reference: "baseline" | "best";
+    maximumAbsoluteRegression?: number;
+    maximumRelativeRegression?: number;
+  }
+
+  export interface ObservedMetricPolicy extends MetricBase {
+  }
+
+  export interface MetricPolicySet {
+    primary: PrimaryMetricPolicy;
+    guardrails?: readonly GuardrailMetricPolicy[];
+    observe?: readonly ObservedMetricPolicy[];
+  }
+
+  export interface SamplingPolicy extends JsonObject {
+    warmups: number;
+    samples: number;
+  }
+
+  export interface MetricPolicyEvaluation extends JsonObject {
+    acceptable: boolean;
+    summary: string;
+    violations: string[];
+  }
+
+  export interface MetricSet {
+    readonly [opaqueValue]: "metric-set";
+    readonly primary: {
+      reachedTarget(): boolean;
+    };
+    policy(): MetricPolicySet;
+    summary(): Record<string, MetricSummary>;
+    evaluate(measurement: Measurement): MetricPolicyEvaluation;
+  }
+
+  export interface Measurement extends AttachableProduct {
+    readonly measurementId: string;
+    readonly observations: Record<string, Observation>;
+    readonly diagnostics?: Artifact;
+    readonly artifact: Artifact;
+  }
+
+  export interface Rejection extends JsonObject {
     receiptId: string;
-    candidateId: string;
     changedPaths: string[];
     reason: string;
-    measurementId?: string;
-    verificationReceiptId?: string;
   }
 
-  interface FlowApplyReceipt {
+  export interface ApplyReceipt extends JsonObject {
     applied: true;
     receiptId: string;
-    candidateId: string;
     changedPaths: string[];
   }
 
-  interface FlowVerificationReceiptEvidence {
-    receiptId: string;
-    candidateId: string;
-    candidateLineageHash: string;
-    candidateTreeHash: string;
-    candidateWriteScopeHash: string;
-    profileHash: string;
-    policyHash: string;
-    gateEvidenceHashes: string[];
-    environmentHash: string;
-  }
-
-  interface FlowPassedVerificationReceipt extends FlowVerificationReceiptEvidence {
-    passed: true;
-    status: "passed";
-  }
-
-  interface FlowNonPassedVerificationReceipt extends FlowVerificationReceiptEvidence {
-    passed: false;
-    status: "failed" | "blocked";
-  }
-
-  type FlowVerificationReceipt = FlowPassedVerificationReceipt | FlowNonPassedVerificationReceipt;
-
-  interface FlowExperimentMetadata extends FlowJsonObject {
+  export interface ExperimentMetadata extends JsonObject {
     hypothesis: string;
     changeSummary: string;
     expectedEffect: string;
     nextFocus: string;
   }
 
-  interface FlowExperimentSummary {
+  export interface ExperimentSummary extends JsonObject {
     experimentId: string;
-    candidateId: string;
-    iteration?: number;
     disposition: "accepted" | "rejected";
-    hypothesis: string;
-    primary?: { metricId: string; value: number; relativeChange: number | null };
-    guardrails: Array<{ metricId: string; value: number; passed: boolean }>;
-    diagnostics: Array<{ sample: number; data: FlowJsonObject }>;
     learned: string;
-    nextFocus: string;
   }
 
-  interface FlowApi {
-    readonly snapshot: FlowLaunchSnapshotRef;
+  export interface Flow {
+    readonly snapshot: LaunchSnapshot;
 
-    stage<T>(id: string, body: () => Promise<T>, options?: { title?: string }): Promise<T>;
-    loop<T>(
-      id: string,
-      options:
-        | { title?: string; maxIterations: number; while: () => FlowConditionResult; until?: never }
-        | { title?: string; maxIterations: number; while?: never; until: () => FlowConditionResult },
-      body: (context: { iteration: number }) => Promise<T>,
-    ): Promise<{ iterations: number; last?: T; stoppedBy: "condition" | "limit" }>;
-    parallel<T>(
-      id: string,
-      branches: Record<string, () => Promise<T>>,
-      options?: FlowParallelOptions,
-    ): Promise<Record<string, T>>;
-    parallel<T>(
-      id: string,
-      branches: Record<string, () => Promise<T>>,
-      options: FlowCollectParallelOptions,
-    ): Promise<Record<string, FlowBranchResult<T>>>;
-    fanOut<TItem, TResult>(
-      id: string,
-      items: readonly TItem[],
-      options: {
-        key: (item: TItem, index: number) => string;
+    agent<T extends JsonObject>(
+      task: AgentTask<T, "snapshot">,
+      invocation: {
+        prompt: string;
+        artifacts?: Readonly<Record<string, ArtifactInput>>;
         title?: string;
-        concurrency?: number;
-        failure?: "fail-fast";
       },
-      body: (item: TItem, context: { key: string; index: number }) => Promise<TResult>,
-    ): Promise<TResult[]>;
-    fanOut<TItem, TResult>(
-      id: string,
-      items: readonly TItem[],
-      options: {
-        key: (item: TItem, index: number) => string;
-        title?: string;
-        concurrency?: number;
-        failure: "collect";
-      },
-      body: (item: TItem, context: { key: string; index: number }) => Promise<TResult>,
-    ): Promise<Array<FlowBranchResult<TResult>>>;
+    ): Promise<AgentResult<T, "snapshot">>;
 
-    agent<T extends FlowJsonValue = FlowJsonValue>(
-      id: string,
-      options: FlowAgentOptions & { resultMode?: "value" },
-    ): Promise<T>;
-    agent(id: string, options: FlowAgentOptions & { resultMode: "artifact" }): Promise<FlowArtifactRef<"agent-output">>;
-    agent<T extends FlowJsonValue = FlowJsonValue>(
-      id: string,
-      options: FlowAgentOptions & { resultMode: "value-and-artifact" },
-    ): Promise<FlowAgentProduct<T>>;
-    command(id: string, options: FlowCommandOptions): Promise<FlowCommandResult>;
-    checkpoint(id: string, options: { kind: "confirm"; title?: string; prompt: string }): Promise<boolean>;
-    checkpoint(
-      id: string,
-      options: { kind: "choice"; title?: string; prompt: string; choices: Array<{ id: string; label: string }> },
-    ): Promise<string>;
-    checkpoint<T extends FlowJsonValue>(
-      id: string,
-      options: { kind: "input"; title?: string; prompt: string; responseSchema: FlowJsonSchema },
-    ): Promise<T>;
-    metric(id: string, definition: FlowMetricDefinition): FlowMetricHandle;
+    agent<T extends JsonObject>(
+      task: AgentTask<T, "candidate">,
+      invocation: {
+        workspace: CandidateWorkspace;
+        prompt: string;
+        artifacts?: Readonly<Record<string, ArtifactInput>>;
+        title?: string;
+      },
+    ): Promise<AgentResult<T, "candidate">>;
+
+    command<M extends CommandMode>(
+      task: CommandTask<M, "read-only" | "temporary">,
+      invocation?: { args?: Readonly<Record<string, string | number | boolean>>; title?: string },
+    ): Promise<CommandResult<M>>;
+
+    command<M extends CommandMode>(
+      task: CommandTask<M, "candidate">,
+      invocation: {
+        workspace: CandidateWorkspace;
+        args?: Readonly<Record<string, string | number | boolean>>;
+        title?: string;
+      },
+    ): Promise<CommandResult<M>>;
+
+    parallel<const B extends Readonly<Record<string, () => Promise<unknown>>>>(
+      branches: B,
+      options?: { concurrency?: number; errors?: "fail-fast" },
+    ): Promise<{ [K in keyof B]: Awaited<ReturnType<B[K]>> }>;
+
+    parallel<const B extends Readonly<Record<string, () => Promise<unknown>>>>(
+      branches: B,
+      options: { concurrency?: number; errors: "collect" },
+    ): Promise<{ [K in keyof B]: Result<Awaited<ReturnType<B[K]>>, BranchError> }>;
+
+    map<Item, Output>(
+      items: readonly Item[],
+      body: (item: Item, index: number) => Promise<Output>,
+      options: {
+        key: (item: Item, index: number) => string;
+        concurrency?: number;
+        errors?: "fail-fast";
+      },
+    ): Promise<Output[]>;
+
+    map<Item, Output>(
+      items: readonly Item[],
+      body: (item: Item, index: number) => Promise<Output>,
+      options: {
+        key: (item: Item, index: number) => string;
+        concurrency?: number;
+        errors: "collect";
+      },
+    ): Promise<Array<Result<Output, BranchError>>>;
+
+    ask<S extends Schema<JsonValue>>(request: {
+      prompt: string;
+      response: S;
+      title?: string;
+    }): Promise<Infer<S>>;
+
+    metrics(policy: MetricPolicySet, sampling?: SamplingPolicy): MetricSet;
+
     measure(
-      id: string,
-      options: { title?: string; metric: FlowMetricHandle; measurement: FlowProfileSelector; output?: string; workspace?: FlowCandidateRef },
-    ): Promise<FlowMeasurementResult>;
-    measure(
-      id: string,
-      options: { title?: string; metrics: Record<string, FlowMetricHandle>; measurement: FlowProfileSelector; workspace?: FlowCandidateRef },
-    ): Promise<FlowMeasurementSetResult>;
-    candidate<T extends FlowJsonValue>(
-      id: string,
-      body: (workspace: FlowCandidateWorkspace) => Promise<T>,
+      profile: ProfileSelector | MeasurementProfileSelector,
+      metrics: MetricSet,
+      options?: { candidate?: Candidate<JsonValue>; title?: string },
+    ): Promise<Measurement>;
+
+    candidate<T extends JsonValue>(
+      body: (workspace: CandidateWorkspace) => Promise<T>,
       options?: {
+        base?: LaunchSnapshot | AcceptedCandidate<JsonValue>;
+        writes?: readonly string[] | {
+          allow: readonly string[];
+          deny?: readonly string[];
+        };
         title?: string;
-        base?: FlowLaunchSnapshotRef | FlowAcceptedCandidateRef;
-        metadataSchema?: FlowJsonSchema;
-        writes?: { allow: string[]; deny?: string[] };
       },
-    ): Promise<FlowProducedCandidate<T>>;
-    verify(
-      id: string,
-      options: { title?: string; candidate: FlowCandidateRef; profile: FlowProfileSelector },
-    ): Promise<FlowVerificationReceipt>;
-    accept(
-      id: string,
-      options: {
-        candidate: FlowCandidateRef;
-        verification: FlowPassedVerificationReceipt;
-        measurement?: FlowCandidateMeasurement;
+    ): Promise<Candidate<T>>;
+
+    verify<T extends JsonValue>(
+      candidate: Candidate<T>,
+      profile: ProfileSelector,
+    ): Promise<Verification>;
+
+    accept<T extends JsonValue>(
+      candidate: Candidate<T>,
+      evidence: {
+        verification: PassedVerification;
+        measurement?: Measurement;
       },
-    ): Promise<FlowAcceptedCandidateRef>;
-    reject(
-      id: string,
-      options: {
-        candidate: FlowCandidateRef;
+    ): Promise<AcceptedCandidate<T>>;
+
+    reject<T extends JsonValue>(
+      candidate: Candidate<T>,
+      evidence: {
         reason: string;
-        measurement?: FlowCandidateMeasurement;
-        verification?: FlowVerificationReceipt;
+        verification?: Verification;
+        measurement?: Measurement;
       },
-    ): Promise<FlowRejectionReceipt>;
-    recordExperiment(
-      id: string,
-      options: {
-        candidate: FlowProducedCandidate<FlowExperimentMetadata>;
-        measurement: FlowCandidateMeasurement;
-        learned: string;
-      },
-    ): Promise<FlowExperimentSummary>;
-    apply(
-      id: string,
-      /** Every apply site enters an exact human approval checkpoint. */
-      options: {
-        candidate: FlowAcceptedCandidateRef;
-        verification: FlowPassedVerificationReceipt;
-      },
-    ): Promise<FlowApplyReceipt>;
+    ): Promise<Rejection>;
+
+    recordExperiment(request: {
+      candidate: Candidate<ExperimentMetadata>;
+      measurement: Measurement;
+      learned: string;
+    }): Promise<ExperimentSummary>;
+
+    apply<T extends JsonValue>(candidate: AcceptedCandidate<T>): Promise<ApplyReceipt>;
   }
+
+  export interface WorkflowDefinition<Input extends JsonObject, Output extends JsonValue> {
+    readonly description: string;
+    readonly title?: string;
+    readonly input: Schema<Input>;
+    readonly output: Schema<Output>;
+    readonly concurrency?: number;
+    readonly run: (flow: Flow, input: Readonly<Input>) => Promise<Output>;
+  }
+
+  export function workflow<
+    I extends Schema<JsonObject>,
+    O extends Schema<JsonValue>,
+  >(definition: {
+    description: string;
+    title?: string;
+    input: I;
+    output: O;
+    concurrency?: number;
+    run(flow: Flow, input: Readonly<Infer<I>>): Promise<NoInfer<Infer<O>>>;
+  }): WorkflowDefinition<Infer<I>, Infer<O>>;
 }

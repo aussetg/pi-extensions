@@ -66,7 +66,7 @@ concurrency.
 
 - Every agent result has `output`, guaranteed canonical `artifact`, additional `published` evidence,
   and a required workspace `checkpoint` for candidate tasks.
-- Every command/measurement result has a canonical artifact.
+- Every command, measurement, and verification result has a canonical artifact.
 - Branded products are directly attachable in named artifact bundles.
 - Candidate products expose `output` and `changedPaths` and carry private host authority.
 - Accepted products bind exact passed verification/measurement evidence; `apply(accepted)` looks it
@@ -145,8 +145,9 @@ No control-flow compiler is required.
 
 ## Laboratory evidence
 
-- 57 model tests cover replay permutations/faults, same-run crash boundaries, artifacts, candidates,
-  helpers, and invocation resources.
+- 56 behavioral cases cover replay permutations/faults, same-run crash boundaries, artifacts,
+  candidates, helpers, and invocation resources; strict TypeScript checks cover the compile-time
+  contract separately.
 - Six complete workflows compile with strict TypeScript.
 - Target corpus: 1,013 lines; current built-ins: 1,436 lines.
 - No target workflow uses structural control APIs, manual operation IDs, result modes, capability
