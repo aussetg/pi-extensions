@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
+import { createRequire, registerHooks } from "node:module";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
-const actualTui = new URL(
-  "../../workflows/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.js",
-  import.meta.url,
-).href;
+const workflowRequire = createRequire(new URL("../../workflows/package.json", import.meta.url));
+const actualTui = pathToFileURL(workflowRequire.resolve("@earendil-works/pi-tui")).href;
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier === "@earendil-works/pi-tui") {
