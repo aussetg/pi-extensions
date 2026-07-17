@@ -1,0 +1,1421 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`workflow v17 TypeScript frontend > derives the exact review surface for all six workflows 1`] = `
+{
+  "coding.flow.ts": {
+    "descriptors": [
+      {
+        "binding": "inspect",
+        "identity": {
+          "definitionHash": "sha256:b2c72d44663cebe4ebb562e1eca891b4b47bca07dfd498c262f9ea91cb44d695",
+          "formatVersion": 1,
+          "kind": "agent-task",
+          "sourceSite": "descriptor-000000",
+        },
+        "kind": "agent-task",
+        "location": {
+          "column": 17,
+          "line": 21,
+        },
+        "network": "none",
+        "output": "sha256:d9b0379f9c4595d4ae7b7abf9acff2686a3e0b947e8d8831a15b759eb4aa5f31",
+        "profile": "builtin:reviewer",
+        "workspace": "snapshot",
+      },
+      {
+        "binding": "implement",
+        "identity": {
+          "definitionHash": "sha256:15db53ad52815536da88cae5a6e2c9a801e421edde3a071eb86dfe37dec237e0",
+          "formatVersion": 1,
+          "kind": "agent-task",
+          "sourceSite": "descriptor-000001",
+        },
+        "kind": "agent-task",
+        "location": {
+          "column": 19,
+          "line": 26,
+        },
+        "network": "research",
+        "output": "sha256:d6674557b41359edee1b78443807e8634f96150287bf0b1e38bd3334749d8d16",
+        "profile": "builtin:implementer",
+        "workspace": "candidate",
+      },
+    ],
+    "helpers": [],
+    "installedName": "coding",
+    "metadata": {
+      "concurrency": 3,
+      "description": "Produce, verify, approve, and apply one immutable candidate.",
+      "inputHash": "sha256:c5601a1a29c5a4896f1c25d390f510c0214764f5fe2d3ae766bdd3abbd5aba2c",
+      "outputHash": "sha256:16c99e6bc875dbd41607120224084f3445a8e8663db46ebb454edaa3a56be335",
+      "title": null,
+    },
+    "operations": [
+      {
+        "contexts": [
+          "root",
+        ],
+        "errors": "fail-fast",
+        "function": "run",
+        "location": {
+          "column": 30,
+          "line": 42,
+        },
+        "method": "parallel",
+        "parallelKeys": [
+          "architecture",
+          "tests",
+          "risks",
+        ],
+        "requestedConcurrency": 3,
+        "sourceSite": "site-000000",
+      },
+      {
+        "contexts": [
+          "concurrent",
+        ],
+        "descriptorSourceSite": "descriptor-000000",
+        "function": "<callback@43:21>",
+        "location": {
+          "column": 27,
+          "line": 43,
+        },
+        "method": "agent",
+        "sourceSite": "site-000001",
+      },
+      {
+        "contexts": [
+          "concurrent",
+        ],
+        "descriptorSourceSite": "descriptor-000000",
+        "function": "<callback@46:14>",
+        "location": {
+          "column": 20,
+          "line": 46,
+        },
+        "method": "agent",
+        "sourceSite": "site-000002",
+      },
+      {
+        "contexts": [
+          "concurrent",
+        ],
+        "descriptorSourceSite": "descriptor-000000",
+        "function": "<callback@49:14>",
+        "location": {
+          "column": 20,
+          "line": 49,
+        },
+        "method": "agent",
+        "sourceSite": "site-000003",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 29,
+          "line": 54,
+        },
+        "method": "candidate",
+        "sourceSite": "site-000004",
+      },
+      {
+        "contexts": [
+          "candidate",
+        ],
+        "descriptorSourceSite": "descriptor-000001",
+        "function": "<callback@54:44>",
+        "location": {
+          "column": 21,
+          "line": 55,
+        },
+        "method": "agent",
+        "sourceSite": "site-000005",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 32,
+          "line": 66,
+        },
+        "method": "verify",
+        "sourceSite": "site-000006",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 31,
+          "line": 68,
+        },
+        "method": "reject",
+        "sourceSite": "site-000007",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 28,
+          "line": 79,
+        },
+        "method": "accept",
+        "sourceSite": "site-000008",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 27,
+          "line": 80,
+        },
+        "method": "apply",
+        "sourceSite": "site-000009",
+      },
+    ],
+    "review": {
+      "agentProfiles": [
+        "builtin:implementer",
+        "builtin:reviewer",
+      ],
+      "applySites": [
+        "site-000009",
+      ],
+      "candidateWrites": [
+        {
+          "mode": "default",
+          "operationSite": "site-000004",
+        },
+      ],
+      "capabilities": [
+        "candidate-write",
+        "human-input",
+        "mediated-network",
+        "read-project",
+      ],
+      "commandProfiles": [],
+      "dynamicResources": [],
+      "humanInteractionSites": [
+        "site-000009",
+      ],
+      "maximumConcurrency": 3,
+      "measurementProfiles": [],
+      "nativeLoops": [],
+      "suspiciousUnboundedLoops": [],
+      "usesCandidateWrites": true,
+      "usesMediatedNetwork": true,
+      "verificationProfiles": [
+        "builtin:coding",
+      ],
+    },
+  },
+  "execute-plan.flow.ts": {
+    "descriptors": [
+      {
+        "binding": "createPlan",
+        "identity": {
+          "definitionHash": "sha256:fdf72d80f6f74fc458a12c2ea6388058bc68c6eff74e3a92704ef8fcbecc2feb",
+          "formatVersion": 1,
+          "kind": "agent-task",
+          "sourceSite": "descriptor-000000",
+        },
+        "kind": "agent-task",
+        "location": {
+          "column": 20,
+          "line": 75,
+        },
+        "network": "research",
+        "output": "sha256:8724a605c4bd67e5d98237259a3d3a9ed11aaa17dce3b01d0bd8dcdbabc30b8d",
+        "profile": "builtin:researcher",
+        "workspace": "snapshot",
+      },
+      {
+        "binding": "executePoint",
+        "identity": {
+          "definitionHash": "sha256:d459e3cd10099b994fe23ae8e899d27025a9863fe5571ffadb45ebbdbd5fe7ae",
+          "formatVersion": 1,
+          "kind": "agent-task",
+          "sourceSite": "descriptor-000001",
+        },
+        "kind": "agent-task",
+        "location": {
+          "column": 22,
+          "line": 81,
+        },
+        "network": "research",
+        "output": "sha256:af4785eade4392995b4af0ea7a6f375eaa5c9a3246c920418fb4fd16ffb7421b",
+        "profile": "builtin:implementer",
+        "workspace": "candidate",
+      },
+      {
+        "binding": "revisePlan",
+        "identity": {
+          "definitionHash": "sha256:a889317feeb69b5eba039feb806a66c5ca7744b6e11946de24e03ffd3a9b9f80",
+          "formatVersion": 1,
+          "kind": "agent-task",
+          "sourceSite": "descriptor-000002",
+        },
+        "kind": "agent-task",
+        "location": {
+          "column": 20,
+          "line": 88,
+        },
+        "network": "research",
+        "output": "sha256:8724a605c4bd67e5d98237259a3d3a9ed11aaa17dce3b01d0bd8dcdbabc30b8d",
+        "profile": "builtin:researcher",
+        "workspace": "candidate",
+      },
+    ],
+    "helpers": [
+      {
+        "contexts": [
+          "candidate",
+        ],
+        "effectful": false,
+        "effects": [],
+        "location": {
+          "column": 1,
+          "line": 95,
+        },
+        "name": "duplicatePointId",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "effectful": false,
+        "effects": [],
+        "location": {
+          "column": 20,
+          "line": 247,
+        },
+        "name": "result",
+      },
+    ],
+    "installedName": "execute-plan",
+    "metadata": {
+      "concurrency": null,
+      "description": "Plan and execute stable sequential points in one durable candidate with explicit replanning.",
+      "inputHash": "sha256:c5601a1a29c5a4896f1c25d390f510c0214764f5fe2d3ae766bdd3abbd5aba2c",
+      "outputHash": "sha256:4ad3fb8d48dfee040b50fc941c3cb89b042fc63010357306a335a169a10a63ca",
+      "title": null,
+    },
+    "operations": [
+      {
+        "contexts": [
+          "root",
+        ],
+        "descriptorSourceSite": "descriptor-000000",
+        "function": "run",
+        "location": {
+          "column": 27,
+          "line": 108,
+        },
+        "method": "agent",
+        "sourceSite": "site-000000",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 58,
+          "line": 118,
+        },
+        "method": "candidate",
+        "sourceSite": "site-000001",
+      },
+      {
+        "contexts": [
+          "candidate",
+        ],
+        "descriptorSourceSite": "descriptor-000001",
+        "function": "<callback@118:73>",
+        "location": {
+          "column": 75,
+          "line": 147,
+        },
+        "method": "agent",
+        "sourceSite": "site-000002",
+      },
+      {
+        "contexts": [
+          "candidate",
+        ],
+        "descriptorSourceSite": "descriptor-000002",
+        "function": "<callback@118:73>",
+        "location": {
+          "column": 65,
+          "line": 200,
+        },
+        "method": "agent",
+        "sourceSite": "site-000003",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 13,
+          "line": 263,
+        },
+        "method": "reject",
+        "sourceSite": "site-000004",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 30,
+          "line": 268,
+        },
+        "method": "ask",
+        "sourceSite": "site-000005",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 15,
+          "line": 274,
+        },
+        "method": "reject",
+        "sourceSite": "site-000006",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 32,
+          "line": 279,
+        },
+        "method": "verify",
+        "sourceSite": "site-000007",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 13,
+          "line": 281,
+        },
+        "method": "reject",
+        "sourceSite": "site-000008",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 28,
+          "line": 291,
+        },
+        "method": "accept",
+        "sourceSite": "site-000009",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 27,
+          "line": 292,
+        },
+        "method": "apply",
+        "sourceSite": "site-000010",
+      },
+    ],
+    "review": {
+      "agentProfiles": [
+        "builtin:implementer",
+        "builtin:researcher",
+      ],
+      "applySites": [
+        "site-000010",
+      ],
+      "candidateWrites": [
+        {
+          "mode": "default",
+          "operationSite": "site-000001",
+        },
+      ],
+      "capabilities": [
+        "candidate-write",
+        "human-input",
+        "mediated-network",
+        "read-project",
+      ],
+      "commandProfiles": [],
+      "dynamicResources": [],
+      "humanInteractionSites": [
+        "site-000005",
+        "site-000010",
+      ],
+      "measurementProfiles": [],
+      "nativeLoops": [
+        {
+          "bound": "literal",
+          "containsEffects": true,
+          "kind": "for",
+          "location": {
+            "column": 7,
+            "line": 133,
+          },
+        },
+      ],
+      "suspiciousUnboundedLoops": [],
+      "usesCandidateWrites": true,
+      "usesMediatedNetwork": true,
+      "verificationProfiles": [
+        "builtin:coding",
+      ],
+    },
+  },
+  "goal.flow.ts": {
+    "descriptors": [
+      {
+        "binding": "inspectGoal",
+        "identity": {
+          "definitionHash": "sha256:d1b301b63f857ec509e18b0f6f2af7cefca1def0ea0567113dc7e50110ecd174",
+          "formatVersion": 1,
+          "kind": "agent-task",
+          "sourceSite": "descriptor-000000",
+        },
+        "kind": "agent-task",
+        "location": {
+          "column": 21,
+          "line": 43,
+        },
+        "network": "research",
+        "output": "sha256:a0dc848c01648c682dd1891145eadd899277f57b206680493e4821aed35fc49e",
+        "profile": "builtin:researcher",
+        "workspace": "snapshot",
+      },
+      {
+        "binding": "implementGoal",
+        "identity": {
+          "definitionHash": "sha256:9ee01a564c6a754ec336ce056a9e5c4c17009cda2f1b7fc076d9104ef75432fa",
+          "formatVersion": 1,
+          "kind": "agent-task",
+          "sourceSite": "descriptor-000001",
+        },
+        "kind": "agent-task",
+        "location": {
+          "column": 23,
+          "line": 49,
+        },
+        "network": "research",
+        "output": "sha256:a0dc848c01648c682dd1891145eadd899277f57b206680493e4821aed35fc49e",
+        "profile": "builtin:implementer",
+        "workspace": "candidate",
+      },
+    ],
+    "helpers": [
+      {
+        "contexts": [
+          "root",
+        ],
+        "effectful": false,
+        "effects": [],
+        "location": {
+          "column": 20,
+          "line": 111,
+        },
+        "name": "finish",
+      },
+    ],
+    "installedName": "goal",
+    "metadata": {
+      "concurrency": null,
+      "description": "Pursue an open-ended objective through durable worker handoffs and verified candidate work.",
+      "inputHash": "sha256:c5601a1a29c5a4896f1c25d390f510c0214764f5fe2d3ae766bdd3abbd5aba2c",
+      "outputHash": "sha256:43588f13daa0fbaafe0eb5418488b861b61ffdcf50bba9fcff507ee69380832b",
+      "title": null,
+    },
+    "operations": [
+      {
+        "contexts": [
+          "root",
+        ],
+        "descriptorSourceSite": "descriptor-000000",
+        "function": "run",
+        "location": {
+          "column": 68,
+          "line": 78,
+        },
+        "method": "agent",
+        "sourceSite": "site-000000",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 32,
+          "line": 101,
+        },
+        "method": "ask",
+        "sourceSite": "site-000001",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 57,
+          "line": 128,
+        },
+        "method": "candidate",
+        "sourceSite": "site-000002",
+      },
+      {
+        "contexts": [
+          "candidate",
+        ],
+        "descriptorSourceSite": "descriptor-000001",
+        "function": "<callback@128:72>",
+        "location": {
+          "column": 73,
+          "line": 136,
+        },
+        "method": "agent",
+        "sourceSite": "site-000003",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 32,
+          "line": 174,
+        },
+        "method": "ask",
+        "sourceSite": "site-000004",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 15,
+          "line": 179,
+        },
+        "method": "reject",
+        "sourceSite": "site-000005",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 34,
+          "line": 191,
+        },
+        "method": "verify",
+        "sourceSite": "site-000006",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 15,
+          "line": 194,
+        },
+        "method": "reject",
+        "sourceSite": "site-000007",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 30,
+          "line": 205,
+        },
+        "method": "accept",
+        "sourceSite": "site-000008",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 29,
+          "line": 206,
+        },
+        "method": "apply",
+        "sourceSite": "site-000009",
+      },
+    ],
+    "review": {
+      "agentProfiles": [
+        "builtin:implementer",
+        "builtin:researcher",
+      ],
+      "applySites": [
+        "site-000009",
+      ],
+      "candidateWrites": [
+        {
+          "mode": "default",
+          "operationSite": "site-000002",
+        },
+      ],
+      "capabilities": [
+        "candidate-write",
+        "human-input",
+        "mediated-network",
+        "read-project",
+      ],
+      "commandProfiles": [],
+      "dynamicResources": [],
+      "humanInteractionSites": [
+        "site-000001",
+        "site-000004",
+        "site-000009",
+      ],
+      "measurementProfiles": [],
+      "nativeLoops": [
+        {
+          "bound": "literal",
+          "containsEffects": true,
+          "kind": "for",
+          "location": {
+            "column": 5,
+            "line": 73,
+          },
+        },
+        {
+          "bound": "literal",
+          "containsEffects": true,
+          "kind": "for",
+          "location": {
+            "column": 5,
+            "line": 127,
+          },
+        },
+        {
+          "bound": "literal",
+          "containsEffects": true,
+          "kind": "for",
+          "location": {
+            "column": 9,
+            "line": 135,
+          },
+        },
+      ],
+      "suspiciousUnboundedLoops": [],
+      "usesCandidateWrites": true,
+      "usesMediatedNetwork": true,
+      "verificationProfiles": [
+        "builtin:coding",
+      ],
+    },
+  },
+  "optimize.flow.ts": {
+    "descriptors": [
+      {
+        "binding": "proposeExperiment",
+        "identity": {
+          "definitionHash": "sha256:4d5642c341cf7229adbdc5e7b35c559994a9a6bd3395c569891dd760a84769c1",
+          "formatVersion": 1,
+          "kind": "agent-task",
+          "sourceSite": "descriptor-000000",
+        },
+        "kind": "agent-task",
+        "location": {
+          "column": 27,
+          "line": 84,
+        },
+        "network": "research",
+        "output": "sha256:d042f7397fe723b34016ae46a8e37f0906d3bdb8075cb453600493665ec0b6b9",
+        "profile": "builtin:researcher",
+        "workspace": "snapshot",
+      },
+      {
+        "binding": "implementExperiment",
+        "identity": {
+          "definitionHash": "sha256:b5587ab8f1d468b9f0ae9d9473915e4af5d9e6c454b8b97d3fc8e2b7cc8bd49f",
+          "formatVersion": 1,
+          "kind": "agent-task",
+          "sourceSite": "descriptor-000001",
+        },
+        "kind": "agent-task",
+        "location": {
+          "column": 29,
+          "line": 90,
+        },
+        "network": "research",
+        "output": "sha256:d042f7397fe723b34016ae46a8e37f0906d3bdb8075cb453600493665ec0b6b9",
+        "profile": "builtin:implementer",
+        "workspace": "candidate",
+      },
+      {
+        "binding": "reflect",
+        "identity": {
+          "definitionHash": "sha256:aa4a3fdbf1dd0dcb713ff79070ef9738ee18ac7136c387722f3ee877a45dc75e",
+          "formatVersion": 1,
+          "kind": "agent-task",
+          "sourceSite": "descriptor-000002",
+        },
+        "kind": "agent-task",
+        "location": {
+          "column": 17,
+          "line": 97,
+        },
+        "network": "none",
+        "output": "sha256:ff919ea1dbecc4459cd86a8b963208661d9e8cee3d9e41c324817b449e6af6f7",
+        "profile": "builtin:synthesizer",
+        "workspace": "snapshot",
+      },
+    ],
+    "helpers": [],
+    "installedName": "optimize",
+    "metadata": {
+      "concurrency": null,
+      "description": "Optimize caller-selected trusted measurements under explicit targets and guardrails.",
+      "inputHash": "sha256:19b97d847e78a0e5775b79c4a4c3b8e3b7577db1dffec759509d2c9338913a68",
+      "outputHash": "sha256:359648dac38262f48f725e00973e3525bb2828597d1fae58460baec6b3c7629e",
+      "title": null,
+    },
+    "operations": [
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 21,
+          "line": 122,
+        },
+        "method": "metrics",
+        "sourceSite": "site-000000",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 11,
+          "line": 123,
+        },
+        "method": "measure",
+        "sourceSite": "site-000001",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "descriptorSourceSite": "descriptor-000000",
+        "function": "run",
+        "location": {
+          "column": 69,
+          "line": 132,
+        },
+        "method": "agent",
+        "sourceSite": "site-000002",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 54,
+          "line": 143,
+        },
+        "method": "candidate",
+        "sourceSite": "site-000003",
+      },
+      {
+        "contexts": [
+          "candidate",
+        ],
+        "descriptorSourceSite": "descriptor-000001",
+        "function": "<callback@143:69>",
+        "location": {
+          "column": 23,
+          "line": 144,
+        },
+        "method": "agent",
+        "sourceSite": "site-000004",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 33,
+          "line": 158,
+        },
+        "method": "measure",
+        "sourceSite": "site-000005",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 15,
+          "line": 163,
+        },
+        "method": "reject",
+        "sourceSite": "site-000006",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 36,
+          "line": 166,
+        },
+        "method": "verify",
+        "sourceSite": "site-000007",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 17,
+          "line": 168,
+        },
+        "method": "reject",
+        "sourceSite": "site-000008",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 24,
+          "line": 175,
+        },
+        "method": "accept",
+        "sourceSite": "site-000009",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 26,
+          "line": 180,
+        },
+        "method": "recordExperiment",
+        "sourceSite": "site-000010",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "descriptorSourceSite": "descriptor-000002",
+        "function": "run",
+        "location": {
+          "column": 32,
+          "line": 181,
+        },
+        "method": "agent",
+        "sourceSite": "site-000011",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "function": "run",
+        "location": {
+          "column": 21,
+          "line": 192,
+        },
+        "method": "apply",
+        "sourceSite": "site-000012",
+      },
+    ],
+    "review": {
+      "agentProfiles": [
+        "builtin:implementer",
+        "builtin:researcher",
+        "builtin:synthesizer",
+      ],
+      "applySites": [
+        "site-000012",
+      ],
+      "candidateWrites": [
+        {
+          "inputPath": "/writePaths",
+          "mode": "input",
+          "operationSite": "site-000003",
+        },
+      ],
+      "capabilities": [
+        "candidate-write",
+        "host-command",
+        "human-input",
+        "mediated-network",
+        "read-project",
+      ],
+      "commandProfiles": [],
+      "dynamicResources": [
+        {
+          "inputPath": "/evaluator",
+          "kind": "measurement-profile",
+          "metricPolicyPath": "/metrics",
+          "operationSite": "site-000001",
+          "samplingPath": "/sampling",
+        },
+        {
+          "inputPath": "/evaluator",
+          "kind": "measurement-profile",
+          "metricPolicyPath": "/metrics",
+          "operationSite": "site-000005",
+          "samplingPath": "/sampling",
+        },
+      ],
+      "humanInteractionSites": [
+        "site-000012",
+      ],
+      "measurementProfiles": [],
+      "nativeLoops": [
+        {
+          "bound": "input-schema",
+          "containsEffects": true,
+          "kind": "for",
+          "location": {
+            "column": 5,
+            "line": 129,
+          },
+        },
+      ],
+      "suspiciousUnboundedLoops": [],
+      "usesCandidateWrites": true,
+      "usesMediatedNetwork": true,
+      "verificationProfiles": [
+        "builtin:coding",
+      ],
+    },
+  },
+  "package-audit.flow.ts": {
+    "descriptors": [
+      {
+        "allowFailure": false,
+        "binding": "trackedFiles",
+        "effect": "read-only",
+        "identity": {
+          "definitionHash": "sha256:29969c0e5c73bfe5ab9680f8d49cdb58920444047c75e363d85982c986599e08",
+          "formatVersion": 1,
+          "kind": "command-task",
+          "sourceSite": "descriptor-000000",
+        },
+        "kind": "command-task",
+        "location": {
+          "column": 22,
+          "line": 33,
+        },
+        "output": "text",
+        "profile": "builtin:tracked-files",
+      },
+      {
+        "binding": "inventoryPackage",
+        "identity": {
+          "definitionHash": "sha256:ea678a73270986e618d603c772c43652dcb492e96658af11248988ea3305c771",
+          "formatVersion": 1,
+          "kind": "agent-task",
+          "sourceSite": "descriptor-000001",
+        },
+        "kind": "agent-task",
+        "location": {
+          "column": 26,
+          "line": 38,
+        },
+        "network": "none",
+        "output": "sha256:57b7898a9e82d8157e569083023fac2778e00c64c80937e7156dee45b75bcbb5",
+        "profile": "builtin:reviewer",
+        "workspace": "snapshot",
+      },
+      {
+        "binding": "analyzeRisks",
+        "identity": {
+          "definitionHash": "sha256:9abdcefe70f21d6ba231a69b052446a5c9742b28561b264ae10006382e009e06",
+          "formatVersion": 1,
+          "kind": "agent-task",
+          "sourceSite": "descriptor-000002",
+        },
+        "kind": "agent-task",
+        "location": {
+          "column": 22,
+          "line": 43,
+        },
+        "network": "none",
+        "output": "sha256:2e2e451e31d3caf6a59f75af21044530c9645c51657b60de07b03fc8c1e02941",
+        "profile": "builtin:reviewer",
+        "workspace": "snapshot",
+      },
+      {
+        "binding": "proposeTests",
+        "identity": {
+          "definitionHash": "sha256:6a40cad70cc58e29235ca44d672a20fdfb2b8567e480d272ce821b555a19fd75",
+          "formatVersion": 1,
+          "kind": "agent-task",
+          "sourceSite": "descriptor-000003",
+        },
+        "kind": "agent-task",
+        "location": {
+          "column": 22,
+          "line": 48,
+        },
+        "network": "none",
+        "output": "sha256:2fa7e8bf433162f21a83e5d0d303ccbe1f0aada69bc66d587f8fb1f7854e26cb",
+        "profile": "builtin:reviewer",
+        "workspace": "snapshot",
+      },
+      {
+        "binding": "synthesizePortfolio",
+        "identity": {
+          "definitionHash": "sha256:90864aa2531032790561367d83e39f6fafade543f05704f16bb059e91d5c2f53",
+          "formatVersion": 1,
+          "kind": "agent-task",
+          "sourceSite": "descriptor-000004",
+        },
+        "kind": "agent-task",
+        "location": {
+          "column": 29,
+          "line": 53,
+        },
+        "network": "none",
+        "output": "sha256:4a27cec0e5b6d7e5a0afb21b8bd808574eddbfcd105619b2d98423003a919398",
+        "profile": "builtin:synthesizer",
+        "workspace": "snapshot",
+      },
+    ],
+    "helpers": [
+      {
+        "contexts": [
+          "concurrent",
+        ],
+        "effectful": true,
+        "effects": [
+          "command",
+          "agent",
+          "agent",
+          "agent",
+        ],
+        "location": {
+          "column": 5,
+          "line": 67,
+        },
+        "name": "auditPackage",
+      },
+    ],
+    "installedName": "package-audit",
+    "metadata": {
+      "concurrency": 4,
+      "description": "Inventory, analyze, and propose tests for each package concurrently.",
+      "inputHash": "sha256:faea6290fc41942a1273243f0df52ad663b6b301650db89f12d88059bd2fcd1c",
+      "outputHash": "sha256:4a27cec0e5b6d7e5a0afb21b8bd808574eddbfcd105619b2d98423003a919398",
+      "title": null,
+    },
+    "operations": [
+      {
+        "contexts": [
+          "concurrent",
+        ],
+        "descriptorSourceSite": "descriptor-000000",
+        "function": "auditPackage",
+        "location": {
+          "column": 27,
+          "line": 68,
+        },
+        "method": "command",
+        "sourceSite": "site-000000",
+      },
+      {
+        "contexts": [
+          "concurrent",
+        ],
+        "descriptorSourceSite": "descriptor-000001",
+        "function": "auditPackage",
+        "location": {
+          "column": 31,
+          "line": 70,
+        },
+        "method": "agent",
+        "sourceSite": "site-000001",
+      },
+      {
+        "contexts": [
+          "concurrent",
+        ],
+        "descriptorSourceSite": "descriptor-000002",
+        "function": "auditPackage",
+        "location": {
+          "column": 27,
+          "line": 75,
+        },
+        "method": "agent",
+        "sourceSite": "site-000002",
+      },
+      {
+        "contexts": [
+          "concurrent",
+        ],
+        "descriptorSourceSite": "descriptor-000003",
+        "function": "auditPackage",
+        "location": {
+          "column": 27,
+          "line": 80,
+        },
+        "method": "agent",
+        "sourceSite": "site-000003",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "errors": "fail-fast",
+        "function": "run",
+        "location": {
+          "column": 28,
+          "line": 88,
+        },
+        "method": "map",
+        "requestedConcurrency": 4,
+        "sourceSite": "site-000004",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "descriptorSourceSite": "descriptor-000004",
+        "function": "run",
+        "location": {
+          "column": 19,
+          "line": 93,
+        },
+        "method": "agent",
+        "sourceSite": "site-000005",
+      },
+    ],
+    "review": {
+      "agentProfiles": [
+        "builtin:reviewer",
+        "builtin:synthesizer",
+      ],
+      "applySites": [],
+      "candidateWrites": [],
+      "capabilities": [
+        "host-command",
+        "read-project",
+      ],
+      "commandProfiles": [
+        "builtin:tracked-files",
+      ],
+      "dynamicResources": [],
+      "humanInteractionSites": [],
+      "maximumConcurrency": 4,
+      "measurementProfiles": [],
+      "nativeLoops": [],
+      "suspiciousUnboundedLoops": [],
+      "usesCandidateWrites": false,
+      "usesMediatedNetwork": false,
+      "verificationProfiles": [],
+    },
+  },
+  "research.flow.ts": {
+    "descriptors": [
+      {
+        "binding": "researchAngle",
+        "identity": {
+          "definitionHash": "sha256:420287246aeab7b7c8c3caa6b3f06b87d9743ce58613769598af7ef4e8ce60ff",
+          "formatVersion": 1,
+          "kind": "agent-task",
+          "sourceSite": "descriptor-000000",
+        },
+        "kind": "agent-task",
+        "location": {
+          "column": 23,
+          "line": 35,
+        },
+        "network": "research",
+        "output": "sha256:e410f82ec37eac0db61101c518aa5f53b36eccadd3055bddd76d1af059b98aff",
+        "profile": "builtin:researcher",
+        "workspace": "snapshot",
+      },
+      {
+        "binding": "writeReport",
+        "identity": {
+          "definitionHash": "sha256:f18c6768320e4ce5a7c67792f92b1d52c5a00410f0db94180c6414a058eed70c",
+          "formatVersion": 1,
+          "kind": "agent-task",
+          "sourceSite": "descriptor-000001",
+        },
+        "kind": "agent-task",
+        "location": {
+          "column": 21,
+          "line": 41,
+        },
+        "network": "none",
+        "output": "sha256:cb17a756df591eaf3bcdef8603e78163ed25197fd756bde54ef9be528e0c94b1",
+        "profile": "builtin:synthesizer",
+        "workspace": "snapshot",
+      },
+      {
+        "binding": "critiqueReport",
+        "identity": {
+          "definitionHash": "sha256:54e6f86d1e62a18e0c7a724a523e8c5eb01ecd9e0121227cd47dc7883478f5f3",
+          "formatVersion": 1,
+          "kind": "agent-task",
+          "sourceSite": "descriptor-000002",
+        },
+        "kind": "agent-task",
+        "location": {
+          "column": 24,
+          "line": 46,
+        },
+        "network": "research",
+        "output": "sha256:b0d2b8f594cbe83362c6c2bda25ce3660f50175cc09e4bafcd8738e4dc232d2a",
+        "profile": "builtin:reviewer",
+        "workspace": "snapshot",
+      },
+    ],
+    "helpers": [],
+    "installedName": "research",
+    "metadata": {
+      "concurrency": 4,
+      "description": "Research independent angles, synthesize, and challenge the result.",
+      "inputHash": "sha256:e9a9e2b9394125e208a54085c668b978e2a0ac049c998b02206f781b5312ba24",
+      "outputHash": "sha256:cb17a756df591eaf3bcdef8603e78163ed25197fd756bde54ef9be528e0c94b1",
+      "title": null,
+    },
+    "operations": [
+      {
+        "contexts": [
+          "root",
+        ],
+        "errors": "collect",
+        "function": "run",
+        "location": {
+          "column": 27,
+          "line": 68,
+        },
+        "method": "map",
+        "requestedConcurrency": 4,
+        "sourceSite": "site-000000",
+      },
+      {
+        "contexts": [
+          "concurrent",
+        ],
+        "descriptorSourceSite": "descriptor-000000",
+        "function": "<callback@68:44>",
+        "location": {
+          "column": 22,
+          "line": 70,
+        },
+        "method": "agent",
+        "sourceSite": "site-000001",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "descriptorSourceSite": "descriptor-000001",
+        "function": "run",
+        "location": {
+          "column": 25,
+          "line": 87,
+        },
+        "method": "agent",
+        "sourceSite": "site-000002",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "descriptorSourceSite": "descriptor-000002",
+        "function": "run",
+        "location": {
+          "column": 26,
+          "line": 100,
+        },
+        "method": "agent",
+        "sourceSite": "site-000003",
+      },
+      {
+        "contexts": [
+          "root",
+        ],
+        "descriptorSourceSite": "descriptor-000001",
+        "function": "run",
+        "location": {
+          "column": 19,
+          "line": 113,
+        },
+        "method": "agent",
+        "sourceSite": "site-000004",
+      },
+    ],
+    "review": {
+      "agentProfiles": [
+        "builtin:researcher",
+        "builtin:reviewer",
+        "builtin:synthesizer",
+      ],
+      "applySites": [],
+      "candidateWrites": [],
+      "capabilities": [
+        "mediated-network",
+        "read-project",
+      ],
+      "commandProfiles": [],
+      "dynamicResources": [],
+      "humanInteractionSites": [],
+      "maximumConcurrency": 4,
+      "measurementProfiles": [],
+      "nativeLoops": [],
+      "suspiciousUnboundedLoops": [],
+      "usesCandidateWrites": false,
+      "usesMediatedNetwork": true,
+      "verificationProfiles": [],
+    },
+  },
+}
+`;

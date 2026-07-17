@@ -35,3 +35,8 @@ atomic cutover. A production implementation may replace model code
 with imports from `src/` only after the corresponding behavior exists there. Changing expected
 behavior requires an explicit contract decision; tests must not be weakened merely to accommodate an
 implementation.
+
+The production TypeScript frontend now exists under `src/definition/workflow-v17-*`. Its own tests
+parse all six corpus files, pin exact derived review snapshots, and exercise malformed source with
+source locations. The reference models in this directory remain independent: later persistence and
+runtime phases must still reproduce them rather than importing away the oracle.

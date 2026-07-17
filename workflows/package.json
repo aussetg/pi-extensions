@@ -26,7 +26,8 @@
   },
   "dependencies": {
     "acorn": "8.16.0",
-    "ajv": "8.20.0"
+    "ajv": "8.20.0",
+    "typescript": "6.0.3"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "0.80.6",
@@ -36,7 +37,6 @@
     "@earendil-works/pi-coding-agent": "0.80.6",
     "@types/node": "25.9.1",
     "typebox": "1.1.39",
-    "typescript": "6.0.3",
     "vitest": "4.1.7"
   },
   "pi": {

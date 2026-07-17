@@ -8,7 +8,9 @@ primary Pi session launches and controls runs but does not own their lifetime.
 > [`workflow-api.d.ts`](workflow-api.d.ts), with its pinned language identity in
 > [`src/definition/workflow-language-v17.ts`](src/definition/workflow-language-v17.ts). The executable
 > runtime and the authoring documentation below remain v16 until the atomic cutover; their temporary
-> declaration is [`workflow-api-v16.d.ts`](workflow-api-v16.d.ts).
+> declaration is [`workflow-api-v16.d.ts`](workflow-api-v16.d.ts). The isolated v17 frontend now
+> strictly typechecks, strips, reviews, and instruments `.flow.ts` source, but is intentionally not
+> connected to registry discovery or execution before the later cutover phases.
 
 This extension is intentionally local and Linux-only. It has no compatibility layer for old run or
 definition formats and no portability fallback.

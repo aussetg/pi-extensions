@@ -152,3 +152,7 @@ No control-flow compiler is required.
 - Target corpus: 1,013 lines; current built-ins: 1,436 lines.
 - No target workflow uses structural control APIs, manual operation IDs, result modes, capability
   declarations, casts, ignored type errors, or duplicate hand-written result interfaces.
+- The production frontend now strictly typechecks and strip-parses all six fixtures, evaluates their
+  schemas/descriptors, derives exact authority/review snapshots, validates helper contexts and native
+  loops, and injects non-semantic source-site tokens. Registry and runtime integration remain later
+  phases.
