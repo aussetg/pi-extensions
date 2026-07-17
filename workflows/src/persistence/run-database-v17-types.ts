@@ -189,6 +189,21 @@ export interface WorkflowArtifactV17Record {
   createdAt: string;
 }
 
+export interface WorkflowOperationArtifactV17Record {
+  operationId: string;
+  role: "input" | "output" | "evidence" | "progress";
+  name?: string;
+  ordinal: number;
+  artifact: WorkflowArtifactV17Record;
+}
+
+export interface WorkflowCallArtifactV17Input {
+  role: WorkflowOperationArtifactV17Record["role"];
+  name?: string;
+  ordinal: number;
+  artifact: WorkflowArtifactV17Record;
+}
+
 export interface WorkflowAttemptV17Record {
   attemptId: string;
   runId: string;
@@ -338,6 +353,8 @@ export interface CompleteWorkflowCallV17Input {
   result?: JsonValue;
   failure?: JsonObject;
   postWorkspaceCheckpointId?: string;
+  workspaceCheckpoint?: WorkflowWorkspaceCheckpointV17Record;
+  artifacts?: WorkflowCallArtifactV17Input[];
   replay?: NonNullable<WorkflowScopeCallV17Record["replay"]>;
   at: string;
 }

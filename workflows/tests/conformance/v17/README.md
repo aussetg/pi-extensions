@@ -46,4 +46,12 @@ Its schema-4 tests use real WAL SQLite to cover root/local cursor identity, caug
 atomic keyed scope preclaim, completion-order-independent join records, pinned resource integrity,
 candidate measurement/verification/disposition/apply state, automatic discard/abandonment, workspace
 lane ownership, revision conflicts, legacy-version refusal, and corruption detection. It remains
-unwired from v16 launch and execution; the next phase builds causal replay over these records.
+unwired from v16 launch and execution.
+
+The production causal identity/replay implementation now exists under
+`src/runtime/causal-{identity,replay}-v17.ts`, with bounded artifact and workspace materializers. Real
+SQLite tests reproduce the oracle's lane-prefix, scheduler-permutation, map-reorder, structural-join,
+failure, apply, result/key provenance, restart, artifact, workspace, and corruption behavior. The next
+phase connects these records to a cursor-based semantic engine. Fault tests also restart after
+artifact publication, workspace restoration, call commit, and join commit; the independent oracle
+remains the contract.

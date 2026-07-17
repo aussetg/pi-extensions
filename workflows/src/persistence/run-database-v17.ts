@@ -9,6 +9,13 @@ import type { SafetyConfiguration } from "../runtime/durable-types.js";
 import { stableHash } from "../utils/hashes.js";
 import { stableJson } from "../utils/stable-json.js";
 import {
+  WORKFLOW_V17_ROOT_SCOPE_SEED,
+  workflowV17FreshCallKey,
+  workflowV17LaneSeed,
+  workflowV17OperationIdentity,
+  workflowV17StructuralJoinKey,
+} from "../runtime/causal-identity-v17.js";
+import {
   assertHash,
   assertIdentifier,
   assertIsoDate,
@@ -42,6 +49,7 @@ import type {
   WorkflowCandidateWorkspaceV17Record,
   WorkflowInvocationResourceV17Record,
   WorkflowOperationV17Kind,
+  WorkflowOperationArtifactV17Record,
   WorkflowOperationV17Record,
   WorkflowRunV17Event,
   WorkflowRunV17Record,
@@ -56,10 +64,7 @@ import type {
 export { WORKFLOW_RUN_DATABASE_V17_SCHEMA_VERSION } from "./run-database-v17-schema.js";
 export type * from "./run-database-v17-types.js";
 
-export const WORKFLOW_V17_ROOT_SCOPE_SEED = stableHash({
-  formatVersion: 1,
-  kind: "workflow-v17-root-scope",
-});
+export { WORKFLOW_V17_ROOT_SCOPE_SEED } from "../runtime/causal-identity-v17.js";
 
 const SOURCE_SITE = /^[a-z][a-z0-9-]{0,127}$/u;
 const LANE_KEY = /^[a-z][a-z0-9_-]{0,63}$/u;
@@ -424,6 +429,33 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
     return row ? artifactFromRow(row) : undefined;
   }
 
+  listOperationArtifacts(operationId: string): WorkflowOperationArtifactV17Record[] {
+    this.assertOpen();
+    assertIdentifier(operationId, "workflow v17 operation id");
+    return (this.database.prepare(`
+      SELECT link.operation_id, link.role, link.name, link.ordinal, artifact.*
+      FROM operation_artifacts link
+      JOIN artifacts artifact ON artifact.digest = link.artifact_digest
+      WHERE link.operation_id = ?
+      ORDER BY link.role, link.ordinal
+    `).all(operationId) as SqlRow[]).map((row) => ({
+      operationId: requiredString(row, "operation_id"),
+      role: requiredString(row, "role") as WorkflowOperationArtifactV17Record["role"],
+      ...(optionalString(row, "name") ? { name: optionalString(row, "name")! } : {}),
+      ordinal: requiredNumber(row, "ordinal"),
+      artifact: artifactFromRow(row),
+    }));
+  }
+
+  readWorkspaceCheckpoint(checkpointId: string): WorkflowWorkspaceCheckpointV17Record | undefined {
+    this.assertOpen();
+    assertIdentifier(checkpointId, "workflow v17 checkpoint id");
+    const row = this.database.prepare(
+      "SELECT * FROM workspace_checkpoints WHERE checkpoint_id = ?",
+    ).get(checkpointId) as SqlRow | undefined;
+    return row ? workspaceCheckpointFromRow(row) : undefined;
+  }
+
   readAttempt(attemptId: string): WorkflowAttemptV17Record | undefined {
     this.assertOpen();
     assertIdentifier(attemptId, "workflow v17 attempt id");
@@ -501,6 +533,18 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
     if (this.closed) throw new Error("Workflow v17 run database connection is closed");
   }
 
+  protected expectedPreviousCallKey(scope: WorkflowScopeV17Record, cursor?: number): string {
+    const target = cursor ?? requiredNumber(this.database.prepare(
+      "SELECT coalesce(max(cursor), -1) + 1 AS value FROM scope_calls WHERE scope_id = ?",
+    ).get(scope.scopeId) as SqlRow, "value");
+    if (target === 0) return scope.seedKey;
+    const row = this.database.prepare(
+      "SELECT call_key FROM scope_calls WHERE scope_id = ? AND cursor = ?",
+    ).get(scope.scopeId, target - 1) as SqlRow | undefined;
+    if (!row) throw state(`Scope ${scope.path} is missing call cursor ${target - 1}`);
+    return requiredString(row, "call_key");
+  }
+
   private assertBasicIdentity(): void {
     const run = this.readRun();
     const root = this.readScope(run.rootScopeId);
@@ -512,6 +556,24 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
   private assertScopeIntegrity(scope: WorkflowScopeV17Record, runId: string): void {
     if (scope.runId !== runId || scope.scopeId !== workflowV17ScopeId(runId, scope.path)) {
       throw corrupt(`Workflow v17 scope ${scope.path} identity is corrupt`);
+    }
+    if (scope.kind !== "root") {
+      const owner = scope.ownerOperationId ? this.readOperation(scope.ownerOperationId) : undefined;
+      const parent = scope.parentScopeId ? this.readScope(scope.parentScopeId) : undefined;
+      if (!owner || !parent || owner.scopeId !== parent.scopeId
+        || (owner.kind !== "parallel" && owner.kind !== "map" && owner.kind !== "candidate")) {
+        throw corrupt(`Workflow v17 scope ${scope.path} owner identity is corrupt`);
+      }
+      const expectedSeed = workflowV17LaneSeed({
+        parentPreviousCallKey: this.expectedPreviousCallKey(parent, owner.cursor),
+        ownerOperationPath: owner.path,
+        ownerKind: owner.kind,
+        childKind: scope.kind,
+        ...(scope.laneKey !== undefined ? { laneKey: scope.laneKey } : {}),
+      });
+      if (scope.seedKey !== expectedSeed) {
+        throw corrupt(`Workflow v17 scope ${scope.path} causal seed is corrupt`);
+      }
     }
     const operations = (this.database.prepare(
       "SELECT * FROM operations WHERE scope_id = ? ORDER BY cursor",
@@ -545,6 +607,36 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
           || call.replay.sourceCallKey !== call.callKey || call.replayPolicy === "never")) {
           throw corrupt(`Workflow v17 scope ${scope.path} has invalid replay evidence at cursor ${index}`);
         }
+        if ((call.replayPolicy === "workspace") !== Boolean(call.postWorkspaceCheckpointId)) {
+          throw corrupt(`Workflow v17 scope ${scope.path} has invalid workspace replay evidence at cursor ${index}`);
+        }
+        if (call.postWorkspaceCheckpointId) {
+          const checkpoint = this.readWorkspaceCheckpoint(call.postWorkspaceCheckpointId);
+          if (!checkpoint || checkpoint.operationId !== operation.operationId
+            || checkpoint.runId !== runId) {
+            throw corrupt(`Workflow v17 scope ${scope.path} checkpoint is corrupt at cursor ${index}`);
+          }
+        }
+        if (!call.replay && call.completionAuthority !== "structural-join") {
+          const expectedCallKey = workflowV17FreshCallKey({
+            runId,
+            previousCallKey: call.previousCallKey,
+            operation: workflowV17OperationIdentity(operation),
+            semanticKey: call.semanticKey,
+            outcome: call.outcome,
+            completionAuthority: call.completionAuthority,
+            replayPolicy: call.replayPolicy,
+            result: terminal,
+          });
+          if (call.callKey !== expectedCallKey) {
+            throw corrupt(`Workflow v17 scope ${scope.path} causal call key is corrupt at cursor ${index}`);
+          }
+        }
+        for (const link of this.listOperationArtifacts(operation.operationId)) {
+          if (link.operationId !== operation.operationId || link.artifact.runId !== runId) {
+            throw corrupt(`Workflow v17 operation ${operation.path} artifact evidence is corrupt`);
+          }
+        }
         previous = call.callKey;
       } else if (index !== operations.length - 1 || !["running", "waiting", "stopped", "cancelled"].includes(operation.status)) {
         throw corrupt(`Workflow v17 scope ${scope.path} has an uncommitted operation before its tail`);
@@ -565,6 +657,18 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
     if (!call || call.completionAuthority !== "structural-join" || call.callKey !== join.joinKey
       || join.kind !== operation.kind || join.previousCallKey !== call.previousCallKey) {
       throw corrupt(`Workflow v17 structural join ${operation.path} differs from its scope call`);
+    }
+    const expectedJoinKey = workflowV17StructuralJoinKey({
+      previousCallKey: join.previousCallKey,
+      operation: workflowV17OperationIdentity(operation),
+      semanticKey: call.semanticKey,
+      policyHash: join.policyHash,
+      outputOrder: join.outputOrder,
+      lanes: join.lanes,
+      result: operation.result!,
+    });
+    if (join.joinKey !== expectedJoinKey) {
+      throw corrupt(`Workflow v17 structural join ${operation.path} causal key is corrupt`);
     }
     const children = this.listChildScopes(operation.operationId);
     if (children.length !== join.lanes.length) {
@@ -921,6 +1025,20 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
         throw state(`Operation ${owner.path} cannot own child scopes`);
       }
       assertChildKinds(owner.kind, specs);
+      const parent = this.requireScope(owner.scopeId);
+      const parentPreviousCallKey = this.expectedPreviousCallKey(parent, owner.cursor);
+      for (const spec of specs) {
+        const expectedSeed = workflowV17LaneSeed({
+          parentPreviousCallKey,
+          ownerOperationPath: owner.path,
+          ownerKind: owner.kind as "parallel" | "map" | "candidate",
+          childKind: spec.kind,
+          ...(spec.laneKey !== undefined ? { laneKey: spec.laneKey } : {}),
+        });
+        if (spec.seedKey !== expectedSeed) {
+          throw state(`Child scope ${childScopePath(owner, spec)} has an invalid causal seed`);
+        }
+      }
       const existing = this.listChildScopes(owner.operationId);
       if (existing.length > 0) {
         assertExistingChildScopes(existing, owner, specs);
@@ -931,7 +1049,6 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
         this.database.exec("COMMIT");
         return { scopes: [], created: false };
       }
-      const parent = this.requireScope(owner.scopeId);
       const created: WorkflowScopeV17Record[] = [];
       for (let ordinal = 0; ordinal < specs.length; ordinal++) {
         const spec = specs[ordinal]!;
@@ -1532,6 +1649,37 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
       )) {
         throw state("Cross-run replay evidence does not retain an eligible source call key");
       }
+      const terminalValue = input.outcome === "success" ? input.result! : input.failure!;
+      const resultHash = stableHash(terminalValue);
+      if (join) {
+        const expectedJoinKey = workflowV17StructuralJoinKey({
+          previousCallKey: input.previousCallKey,
+          operation: workflowV17OperationIdentity(operation),
+          semanticKey: input.semanticKey,
+          policyHash: join.policyHash,
+          outputOrder: join.outputOrder,
+          lanes: join.lanes,
+          result: input.result!,
+        });
+        if (input.callKey !== expectedJoinKey || join.joinKey !== expectedJoinKey) {
+          throw state(`Structural join ${operation.path} has an invalid causal key`);
+        }
+      } else if (!input.replay) {
+        const expectedCallKey = workflowV17FreshCallKey({
+          runId: run.runId,
+          previousCallKey: input.previousCallKey,
+          operation: workflowV17OperationIdentity(operation),
+          semanticKey: input.semanticKey,
+          outcome: input.outcome,
+          completionAuthority: input.completionAuthority,
+          replayPolicy: input.replayPolicy,
+          result: terminalValue,
+        });
+        if (input.callKey !== expectedCallKey) {
+          throw state(`Operation ${operation.path} has an invalid fresh causal call key`);
+        }
+      }
+      this.insertCallEvidence(run.runId, operation, input);
       if (join) this.insertStructuralJoin(operation, join);
       else if (STRUCTURAL_KINDS.has(operation.kind) && input.outcome === "success") {
         throw state(`Successful structural operation ${operation.path} requires a structural join`);
@@ -1547,8 +1695,6 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
           throw state("Post-workspace checkpoint is not bound to this operation");
         }
       }
-      const terminalValue = input.outcome === "success" ? input.result! : input.failure!;
-      const resultHash = stableHash(terminalValue);
       this.database.prepare(`
         INSERT INTO scope_calls(
           operation_id, run_id, scope_id, cursor, previous_call_key, semantic_key, call_key,
@@ -1661,6 +1807,59 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
     }
   }
 
+  private insertCallEvidence(
+    runId: string,
+    operation: WorkflowOperationV17Record,
+    input: CompleteWorkflowCallV17Input,
+  ): void {
+    if (input.workspaceCheckpoint) {
+      const checkpoint = input.workspaceCheckpoint;
+      if (checkpoint.runId !== runId || checkpoint.operationId !== operation.operationId
+        || checkpoint.checkpointId !== input.postWorkspaceCheckpointId) {
+        throw state("Atomic workspace checkpoint differs from its completed operation");
+      }
+      const existing = this.readWorkspaceCheckpoint(checkpoint.checkpointId);
+      if (existing) {
+        if (stableJson(existing) !== stableJson(checkpoint)) {
+          throw state(`Workspace checkpoint ${checkpoint.checkpointId} changed identity`);
+        }
+      } else {
+        this.database.prepare(`
+          INSERT INTO workspace_checkpoints(
+            checkpoint_id, run_id, operation_id, workspace_id, tree_hash, lineage_hash,
+            write_scope_hash, storage_path, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          checkpoint.checkpointId, checkpoint.runId, checkpoint.operationId, checkpoint.workspaceId,
+          checkpoint.treeHash, checkpoint.lineageHash ?? null, checkpoint.writeScopeHash ?? null,
+          checkpoint.storagePath, checkpoint.createdAt,
+        );
+      }
+    }
+    for (const link of input.artifacts ?? []) {
+      const artifact = link.artifact;
+      if (artifact.runId !== runId) throw state(`Artifact ${artifact.digest} belongs to another run`);
+      const existing = this.readArtifact(artifact.digest);
+      if (existing) {
+        if (!sameArtifactIdentity(existing, artifact)) {
+          throw state(`Artifact ${artifact.digest} changed identity`);
+        }
+      } else {
+        this.database.prepare(`
+          INSERT INTO artifacts(digest, run_id, kind, media_type, bytes, body_path, metadata_json, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          artifact.digest, artifact.runId, artifact.kind, artifact.mediaType, artifact.bytes,
+          artifact.bodyPath, json(artifact.metadata), artifact.createdAt,
+        );
+      }
+      this.database.prepare(`
+        INSERT INTO operation_artifacts(operation_id, artifact_digest, role, name, ordinal)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(operation.operationId, artifact.digest, link.role, link.name ?? null, link.ordinal);
+    }
+  }
+
   private mutate(
     expectedRevision: number,
     event: Omit<WorkflowRunV17Event, "runId" | "sequence" | "revision">,
@@ -1709,18 +1908,6 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
       WHERE singleton = 1 AND revision = ?
     `).run(next, at, currentOperationId, expected);
     assertOneChange(changed, "workflow v17 run revision");
-  }
-
-  private expectedPreviousCallKey(scope: WorkflowScopeV17Record, cursor?: number): string {
-    const target = cursor ?? requiredNumber(this.database.prepare(
-      "SELECT coalesce(max(cursor), -1) + 1 AS value FROM scope_calls WHERE scope_id = ?",
-    ).get(scope.scopeId) as SqlRow, "value");
-    if (target === 0) return scope.seedKey;
-    const row = this.database.prepare(
-      "SELECT call_key FROM scope_calls WHERE scope_id = ? AND cursor = ?",
-    ).get(scope.scopeId, target - 1) as SqlRow | undefined;
-    if (!row) throw state(`Scope ${scope.path} is missing call cursor ${target - 1}`);
-    return requiredString(row, "call_key");
   }
 
   private finishSuccessfulCandidates(runId: string, at: string): number {
@@ -2364,6 +2551,25 @@ function assertCompleteCallInput(input: CompleteWorkflowCallV17Input): void {
     throw new TypeError("Workflow v17 call requires exactly its success result or failure");
   }
   if (input.postWorkspaceCheckpointId) assertIdentifier(input.postWorkspaceCheckpointId, "workflow v17 checkpoint id");
+  if (input.replayPolicy === "workspace" && !input.postWorkspaceCheckpointId) {
+    throw new TypeError("Workflow v17 workspace call requires a post-workspace checkpoint");
+  }
+  if (input.replayPolicy !== "workspace" && input.postWorkspaceCheckpointId) {
+    throw new TypeError("Only workflow v17 workspace calls may bind a post-workspace checkpoint");
+  }
+  if (input.workspaceCheckpoint) assertWorkspaceCheckpoint(input.workspaceCheckpoint);
+  const artifactKeys = new Set<string>();
+  for (const link of input.artifacts ?? []) {
+    if (!new Set(["input", "output", "evidence", "progress"]).has(link.role)) {
+      throw new TypeError("Invalid workflow v17 operation artifact role");
+    }
+    if (link.name !== undefined) assertText(link.name, "workflow v17 operation artifact name", 256);
+    assertNonNegativeInteger(link.ordinal, "workflow v17 operation artifact ordinal");
+    assertArtifactRecord(link.artifact);
+    const key = `${link.role}\0${link.ordinal}`;
+    if (artifactKeys.has(key)) throw new TypeError("Duplicate workflow v17 operation artifact ordinal");
+    artifactKeys.add(key);
+  }
   if (input.replay) {
     assertIdentifier(input.replay.sourceRunId, "workflow v17 replay source run id");
     assertIdentifier(input.replay.sourceOperationId, "workflow v17 replay source operation id");
@@ -2526,6 +2732,19 @@ function assertArtifactRecord(artifact: WorkflowArtifactV17Record): void {
   assertRelativeStoragePath(artifact.bodyPath, "workflow v17 artifact body path");
   canonicalJsonValue(artifact.metadata, jsonLimits());
   assertIsoDate(artifact.createdAt, "workflow v17 artifact time");
+}
+
+function sameArtifactIdentity(
+  left: WorkflowArtifactV17Record,
+  right: WorkflowArtifactV17Record,
+): boolean {
+  return left.runId === right.runId
+    && left.digest === right.digest
+    && left.kind === right.kind
+    && left.mediaType === right.mediaType
+    && left.bytes === right.bytes
+    && left.bodyPath === right.bodyPath
+    && stableJson(left.metadata) === stableJson(right.metadata);
 }
 
 function assertAttemptRecord(attempt: WorkflowAttemptV17Record): void {

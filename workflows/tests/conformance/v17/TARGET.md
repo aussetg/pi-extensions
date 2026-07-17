@@ -163,5 +163,10 @@ No control-flow compiler is required.
   scope cursors, keyed child scopes, local calls, structural joins, attempts/checkpoints/artifacts,
   and explicit candidate workspace/measurement/verification/disposition/apply state. Real SQLite
   tests enforce revision CAS, atomic preclaim, completion-order independence, lifecycle termination,
-  legacy refusal, and corruption detection. It remains disconnected until causal replay and the v17
-  semantic engine are ready for atomic cutover.
+  legacy refusal, and corruption detection.
+- The production causal replay importer now validates one explicit schema-4 source, reconstructs
+  durable per-scope prefix eligibility, reuses keyed siblings independently, authenticates structural
+  joins, retains exact source results/call keys, imports artifact evidence, and restores exact Btrfs
+  workspace checkpoints before atomic replay completion. Failed, changed, and `never` calls remain
+  fresh. Restart tests cover each materialization/commit boundary. It stays disconnected until the
+  cursor semantic engine is ready for atomic cutover.

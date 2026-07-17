@@ -22,6 +22,18 @@ import { defaultWorkflowV17RegistryPolicy } from "../src/registry/workflow-v17-p
 import { sha256, stableHash } from "../src/utils/hashes.js";
 import type { MeasurementProfileSnapshot } from "../src/measurements/profiles.js";
 import type { JsonValue } from "../src/types.js";
+import {
+  workflowV17FreshCallKey,
+  workflowV17LaneSeed,
+  workflowV17OperationIdentity,
+  workflowV17StructuralJoinKey,
+} from "../src/runtime/causal-identity-v17.js";
+import type {
+  WorkflowOperationV17Record,
+  WorkflowScopeCallV17Record,
+  WorkflowScopeV17Kind,
+  WorkflowStructuralJoinLaneV17Record,
+} from "../src/persistence/run-database-v17-types.js";
 
 const roots: string[] = [];
 const open = new Set<{ close(): void }>();
@@ -170,16 +182,25 @@ describe("workflow v17 run database", () => {
       at: later(3),
     })).toThrow(/unsettled cursor/);
 
+    const firstFailure = { category: "effect", code: "expected", summary: "caught", retryable: false };
+    const firstCallKey = causalCallKey(fixture.database, first.operation, {
+      previousCallKey: WORKFLOW_V17_ROOT_SCOPE_SEED,
+      semanticKey: hash("first-semantic"),
+      outcome: "failure",
+      completionAuthority: "host-effect",
+      replayPolicy: "never",
+      result: firstFailure,
+    });
     fixture.database.completeCall({
       expectedRevision: 3,
       operationId: first.operation.operationId,
       previousCallKey: WORKFLOW_V17_ROOT_SCOPE_SEED,
       semanticKey: hash("first-semantic"),
-      callKey: hash("first-failure-call"),
+      callKey: firstCallKey,
       outcome: "failure",
       completionAuthority: "host-effect",
       replayPolicy: "never",
-      failure: { category: "effect", code: "expected", summary: "caught", retryable: false },
+      failure: firstFailure,
       at: later(4),
     });
     const second = fixture.database.claimOperation({
@@ -191,12 +212,20 @@ describe("workflow v17 run database", () => {
       semanticInputHash: hash("second-input"),
       at: later(5),
     }).operation;
+    const secondCallKey = causalCallKey(fixture.database, second, {
+      previousCallKey: firstCallKey,
+      semanticKey: hash("second-semantic"),
+      outcome: "success",
+      completionAuthority: "host-effect",
+      replayPolicy: "immutable",
+      result: { ok: true },
+    });
     fixture.database.completeCall({
       expectedRevision: 5,
       operationId: second.operationId,
-      previousCallKey: hash("first-failure-call"),
+      previousCallKey: firstCallKey,
       semanticKey: hash("second-semantic"),
-      callKey: hash("second-call"),
+      callKey: secondCallKey,
       outcome: "success",
       completionAuthority: "host-effect",
       replayPolicy: "immutable",
@@ -205,18 +234,18 @@ describe("workflow v17 run database", () => {
     });
     expect(fixture.database.listScopeCalls(root)).toEqual([
       expect.objectContaining({ cursor: 0, outcome: "failure", replayPolicy: "never" }),
-      expect.objectContaining({ cursor: 1, previousCallKey: hash("first-failure-call"), outcome: "success" }),
+      expect.objectContaining({ cursor: 1, previousCallKey: firstCallKey, outcome: "success" }),
     ]);
     fixture.database.completeScope({
       expectedRevision: 6,
       scopeId: root,
       status: "completed",
-      terminalKey: hash("second-call"),
+      terminalKey: secondCallKey,
       at: later(7),
     });
     fixture.database.transitionRun(7, {
       status: "completed",
-      rootTerminalKey: hash("second-call"),
+      rootTerminalKey: secondCallKey,
       at: later(8),
     });
     fixture.database.validateIntegrity();
@@ -236,8 +265,12 @@ describe("workflow v17 run database", () => {
       semanticInputHash: hash("parallel-input"),
       at: later(2),
     }).operation;
-    const alphaSeed = hash("alpha-seed");
-    const betaSeed = hash("beta-seed");
+    const alphaSeed = causalLaneSeed(database, group, {
+      childKind: "parallel-branch", laneKey: "alpha",
+    });
+    const betaSeed = causalLaneSeed(database, group, {
+      childKind: "parallel-branch", laneKey: "beta",
+    });
     const created = database.createChildScopes(3, group.operationId, [
       { kind: "parallel-branch", laneKey: "alpha", seedKey: alphaSeed },
       { kind: "parallel-branch", laneKey: "beta", seedKey: betaSeed },
@@ -275,12 +308,20 @@ describe("workflow v17 run database", () => {
     }).operation;
 
     // Beta settles first. Its local chain is still betaSeed → betaCall.
+    const betaCallKey = causalCallKey(database, beta, {
+      previousCallKey: betaSeed,
+      semanticKey: hash("beta-semantic"),
+      outcome: "success",
+      completionAuthority: "finish-work",
+      replayPolicy: "immutable",
+      result: { lane: "beta" },
+    });
     database.completeCall({
       expectedRevision: 6,
       operationId: beta.operationId,
       previousCallKey: betaSeed,
       semanticKey: hash("beta-semantic"),
-      callKey: hash("beta-call"),
+      callKey: betaCallKey,
       outcome: "success",
       completionAuthority: "finish-work",
       replayPolicy: "immutable",
@@ -291,15 +332,23 @@ describe("workflow v17 run database", () => {
       expectedRevision: 7,
       scopeId: created.scopes[1]!.scopeId,
       status: "completed",
-      terminalKey: hash("beta-call"),
+      terminalKey: betaCallKey,
       at: later(8),
+    });
+    const alphaCallKey = causalCallKey(database, alpha, {
+      previousCallKey: alphaSeed,
+      semanticKey: hash("alpha-semantic"),
+      outcome: "success",
+      completionAuthority: "finish-work",
+      replayPolicy: "immutable",
+      result: { lane: "alpha" },
     });
     database.completeCall({
       expectedRevision: 8,
       operationId: alpha.operationId,
       previousCallKey: alphaSeed,
       semanticKey: hash("alpha-semantic"),
-      callKey: hash("alpha-call"),
+      callKey: alphaCallKey,
       outcome: "success",
       completionAuthority: "finish-work",
       replayPolicy: "immutable",
@@ -310,67 +359,83 @@ describe("workflow v17 run database", () => {
       expectedRevision: 9,
       scopeId: created.scopes[0]!.scopeId,
       status: "completed",
-      terminalKey: hash("alpha-call"),
+      terminalKey: alphaCallKey,
       at: later(10),
     });
 
     const revisionBeforeRejectedJoin = database.readRun().revision;
+    const rejectedLanes = [{
+      laneKey: "alpha",
+      scopeId: created.scopes[0]!.scopeId,
+      terminalKey: alphaCallKey,
+      outcome: "success" as const,
+    }];
+    const rejectedResult = { alpha: { lane: "alpha" } };
+    const rejectedJoinKey = causalJoinKey(group, {
+      previousCallKey: WORKFLOW_V17_ROOT_SCOPE_SEED,
+      semanticKey: hash("parallel-semantic"),
+      policyHash: hash("parallel-policy"),
+      outputOrder: ["alpha"],
+      lanes: rejectedLanes,
+      result: rejectedResult,
+    });
     expect(() => database.completeStructuralJoin({
       expectedRevision: revisionBeforeRejectedJoin,
       operationId: group.operationId,
       previousCallKey: WORKFLOW_V17_ROOT_SCOPE_SEED,
       semanticKey: hash("parallel-semantic"),
-      callKey: hash("parallel-join"),
-      joinKey: hash("parallel-join"),
+      callKey: rejectedJoinKey,
+      joinKey: rejectedJoinKey,
       kind: "parallel",
       policyHash: hash("parallel-policy"),
       outputOrder: ["alpha"],
-      lanes: [{
-        laneKey: "alpha",
-        scopeId: created.scopes[0]!.scopeId,
-        terminalKey: hash("alpha-call"),
-        outcome: "success",
-      }],
-      result: { alpha: { lane: "alpha" } },
+      lanes: rejectedLanes,
+      result: rejectedResult,
       at: later(11),
     })).toThrow(/does not settle every child scope/);
     expect(database.readRun().revision).toBe(revisionBeforeRejectedJoin);
     expect(database.readStructuralJoin(group.operationId)).toBeUndefined();
 
+    const joinedLanes = [
+      {
+        laneKey: "alpha", scopeId: created.scopes[0]!.scopeId,
+        terminalKey: alphaCallKey, outcome: "success" as const,
+      },
+      {
+        laneKey: "beta", scopeId: created.scopes[1]!.scopeId,
+        terminalKey: betaCallKey, outcome: "success" as const,
+      },
+    ];
+    const joinedResult = { alpha: { lane: "alpha" }, beta: { lane: "beta" } };
+    const parallelJoinKey = causalJoinKey(group, {
+      previousCallKey: WORKFLOW_V17_ROOT_SCOPE_SEED,
+      semanticKey: hash("parallel-semantic"),
+      policyHash: hash("parallel-policy"),
+      outputOrder: ["alpha", "beta"],
+      lanes: joinedLanes,
+      result: joinedResult,
+    });
     database.completeStructuralJoin({
       expectedRevision: revisionBeforeRejectedJoin,
       operationId: group.operationId,
       previousCallKey: WORKFLOW_V17_ROOT_SCOPE_SEED,
       semanticKey: hash("parallel-semantic"),
-      callKey: hash("parallel-join"),
-      joinKey: hash("parallel-join"),
+      callKey: parallelJoinKey,
+      joinKey: parallelJoinKey,
       kind: "parallel",
       policyHash: hash("parallel-policy"),
       outputOrder: ["alpha", "beta"],
-      lanes: [
-        {
-          laneKey: "alpha",
-          scopeId: created.scopes[0]!.scopeId,
-          terminalKey: hash("alpha-call"),
-          outcome: "success",
-        },
-        {
-          laneKey: "beta",
-          scopeId: created.scopes[1]!.scopeId,
-          terminalKey: hash("beta-call"),
-          outcome: "success",
-        },
-      ],
-      result: { alpha: { lane: "alpha" }, beta: { lane: "beta" } },
+      lanes: joinedLanes,
+      result: joinedResult,
       at: later(12),
     });
     expect(database.readStructuralJoin(group.operationId)).toEqual(expect.objectContaining({
       kind: "parallel",
       outputOrder: ["alpha", "beta"],
-      joinKey: hash("parallel-join"),
+      joinKey: parallelJoinKey,
       lanes: [
-        expect.objectContaining({ laneKey: "alpha", terminalKey: hash("alpha-call") }),
-        expect.objectContaining({ laneKey: "beta", terminalKey: hash("beta-call") }),
+        expect.objectContaining({ laneKey: "alpha", terminalKey: alphaCallKey }),
+        expect.objectContaining({ laneKey: "beta", terminalKey: betaCallKey }),
       ],
     }));
     expect(database.listOperations().map((operation) => operation.path)).toEqual([
@@ -745,7 +810,7 @@ describe("workflow v17 run database", () => {
     }).operation;
     const body = database.createChildScopes(database.readRun().revision, candidate.operationId, [{
       kind: "candidate-body",
-      seedKey: hash("mutable-body-seed"),
+      seedKey: causalLaneSeed(database, candidate, { childKind: "candidate-body" }),
     }], later(database.readRun().revision + 1)).scopes[0]!;
     database.createCandidateWorkspace({
       expectedRevision: database.readRun().revision,
@@ -787,8 +852,14 @@ describe("workflow v17 run database", () => {
       at: later(database.readRun().revision + 1),
     }).operation;
     const lanes = database.createChildScopes(database.readRun().revision, group.operationId, [
-      { kind: "parallel-branch", laneKey: "left", seedKey: hash("left-seed") },
-      { kind: "parallel-branch", laneKey: "right", seedKey: hash("right-seed") },
+      {
+        kind: "parallel-branch", laneKey: "left",
+        seedKey: causalLaneSeed(database, group, { childKind: "parallel-branch", laneKey: "left" }),
+      },
+      {
+        kind: "parallel-branch", laneKey: "right",
+        seedKey: causalLaneSeed(database, group, { childKind: "parallel-branch", laneKey: "right" }),
+      },
     ], later(database.readRun().revision + 1)).scopes;
     const candidate = database.claimOperation({
       expectedRevision: database.readRun().revision,
@@ -801,7 +872,7 @@ describe("workflow v17 run database", () => {
     }).operation;
     const body = database.createChildScopes(database.readRun().revision, candidate.operationId, [{
       kind: "candidate-body",
-      seedKey: hash("lane-candidate-body"),
+      seedKey: causalLaneSeed(database, candidate, { childKind: "candidate-body" }),
     }], later(database.readRun().revision + 1)).scopes[0]!;
     database.createCandidateWorkspace({
       expectedRevision: database.readRun().revision,
@@ -887,16 +958,25 @@ describe("workflow v17 run database", () => {
       usage: { elapsedMs: 12 },
       resources: { cpuUsec: 4 },
     });
+    const checkpointResult = { checkpointId: checkpoint.checkpointId };
+    const checkpointCallKey = causalCallKey(database, operation, {
+      previousCallKey: WORKFLOW_V17_ROOT_SCOPE_SEED,
+      semanticKey: hash("checkpoint-semantic"),
+      outcome: "success",
+      completionAuthority: "host-effect",
+      replayPolicy: "workspace",
+      result: checkpointResult,
+    });
     database.completeCall({
       expectedRevision: database.readRun().revision,
       operationId: operation.operationId,
       previousCallKey: WORKFLOW_V17_ROOT_SCOPE_SEED,
       semanticKey: hash("checkpoint-semantic"),
-      callKey: hash("checkpoint-call"),
+      callKey: checkpointCallKey,
       outcome: "success",
       completionAuthority: "host-effect",
       replayPolicy: "workspace",
-      result: { checkpointId: checkpoint.checkpointId },
+      result: checkpointResult,
       postWorkspaceCheckpointId: checkpoint.checkpointId,
       at: later(database.readRun().revision + 1),
     });
@@ -904,12 +984,12 @@ describe("workflow v17 run database", () => {
       expectedRevision: database.readRun().revision,
       scopeId: rootScopeId,
       status: "completed",
-      terminalKey: hash("checkpoint-call"),
+      terminalKey: checkpointCallKey,
       at: later(database.readRun().revision + 1),
     });
     database.transitionRun(database.readRun().revision, {
       status: "completed",
-      rootTerminalKey: hash("checkpoint-call"),
+      rootTerminalKey: checkpointCallKey,
       at: later(database.readRun().revision + 1),
     });
     database.validateIntegrity();
@@ -987,6 +1067,65 @@ function createRunningDatabase() {
   return fixture;
 }
 
+function causalLaneSeed(
+  database: WorkflowRunDatabaseV17,
+  owner: WorkflowOperationV17Record,
+  spec: { childKind: Exclude<WorkflowScopeV17Kind, "root">; laneKey?: string },
+) {
+  const scope = database.readScope(owner.scopeId)!;
+  const previous = owner.cursor === 0
+    ? scope.seedKey
+    : database.listScopeCalls(scope.scopeId)[owner.cursor - 1]!.callKey;
+  return workflowV17LaneSeed({
+    parentPreviousCallKey: previous,
+    ownerOperationPath: owner.path,
+    ownerKind: owner.kind as "parallel" | "map" | "candidate",
+    childKind: spec.childKind,
+    ...(spec.laneKey !== undefined ? { laneKey: spec.laneKey } : {}),
+  });
+}
+
+function causalCallKey(
+  database: WorkflowRunDatabaseV17,
+  operation: WorkflowOperationV17Record,
+  input: {
+    previousCallKey: string;
+    semanticKey: string;
+    outcome: WorkflowScopeCallV17Record["outcome"];
+    completionAuthority: Exclude<WorkflowScopeCallV17Record["completionAuthority"], "structural-join">;
+    replayPolicy: WorkflowScopeCallV17Record["replayPolicy"];
+    result: JsonValue;
+  },
+) {
+  return workflowV17FreshCallKey({
+    runId: database.readRun().runId,
+    previousCallKey: input.previousCallKey,
+    operation: workflowV17OperationIdentity(operation),
+    semanticKey: input.semanticKey,
+    outcome: input.outcome,
+    completionAuthority: input.completionAuthority,
+    replayPolicy: input.replayPolicy,
+    result: input.result,
+  });
+}
+
+function causalJoinKey(
+  operation: WorkflowOperationV17Record,
+  input: {
+    previousCallKey: string;
+    semanticKey: string;
+    policyHash: string;
+    outputOrder: string[];
+    lanes: Array<Pick<WorkflowStructuralJoinLaneV17Record, "laneKey" | "terminalKey" | "outcome">>;
+    result: JsonValue;
+  },
+) {
+  return workflowV17StructuralJoinKey({
+    ...input,
+    operation: workflowV17OperationIdentity(operation),
+  });
+}
+
 function completeRootEffect(
   database: WorkflowRunDatabaseV17,
   scopeId: string,
@@ -1005,16 +1144,26 @@ function completeRootEffect(
     semanticInputHash: hash(`${label}-input`),
     at: later(database.readRun().revision + 1),
   }).operation;
-  const callKey = hash(`${label}-call`);
+  const semanticKey = hash(`${label}-semantic`);
+  const completionAuthority = kind === "agent" ? "finish-work" as const : "host-effect" as const;
+  const replayPolicy = kind === "apply" ? "never" as const : "immutable" as const;
+  const callKey = causalCallKey(database, claimed, {
+    previousCallKey,
+    semanticKey,
+    outcome: "success",
+    completionAuthority,
+    replayPolicy,
+    result,
+  });
   database.completeCall({
     expectedRevision: database.readRun().revision,
     operationId: claimed.operationId,
     previousCallKey,
-    semanticKey: hash(`${label}-semantic`),
+    semanticKey,
     callKey,
     outcome: "success",
-    completionAuthority: kind === "agent" ? "finish-work" : "host-effect",
-    replayPolicy: kind === "apply" ? "never" : "immutable",
+    completionAuthority,
+    replayPolicy,
     result,
     at: later(database.readRun().revision + 1),
   });
@@ -1034,7 +1183,7 @@ function createFrozenCandidate(changedPaths: string[]) {
     semanticInputHash: hash("candidate-input"),
     at: later(database.readRun().revision + 1),
   }).operation;
-  const bodySeed = hash("candidate-body-seed");
+  const bodySeed = causalLaneSeed(database, operation, { childKind: "candidate-body" });
   const body = database.createChildScopes(database.readRun().revision, operation.operationId, [{
     kind: "candidate-body",
     seedKey: bodySeed,
@@ -1071,7 +1220,21 @@ function createFrozenCandidate(changedPaths: string[]) {
     diffArtifactDigest: diff.digest,
     at: later(database.readRun().revision + 1),
   });
-  const candidateCallKey = hash("candidate-join-call");
+  const candidateLanes = [{
+    laneKey: "candidate",
+    scopeId: body.scopeId,
+    terminalKey: bodySeed,
+    outcome: "success" as const,
+  }];
+  const candidateResult = { candidateId: candidate.candidateId, changedPaths };
+  const candidateCallKey = causalJoinKey(operation, {
+    previousCallKey: WORKFLOW_V17_ROOT_SCOPE_SEED,
+    semanticKey: hash("candidate-semantic"),
+    policyHash: hash("candidate-policy"),
+    outputOrder: ["candidate"],
+    lanes: candidateLanes,
+    result: candidateResult,
+  });
   database.completeStructuralJoin({
     expectedRevision: database.readRun().revision,
     operationId: operation.operationId,
@@ -1082,13 +1245,8 @@ function createFrozenCandidate(changedPaths: string[]) {
     kind: "candidate",
     policyHash: hash("candidate-policy"),
     outputOrder: ["candidate"],
-    lanes: [{
-      laneKey: "candidate",
-      scopeId: body.scopeId,
-      terminalKey: bodySeed,
-      outcome: "success",
-    }],
-    result: { candidateId: candidate.candidateId, changedPaths },
+    lanes: candidateLanes,
+    result: candidateResult,
     at: later(database.readRun().revision + 1),
   });
   database.validateIntegrity();

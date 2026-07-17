@@ -262,8 +262,14 @@ are separate constrained records. Completion discards unchanged candidates, reje
 candidates, and failure/stop abandons work and rejects pending measurements atomically. Schema-3 files
 remain untouched legacy evidence and are never migrated in place.
 
-This database remains disconnected from coordinator execution until causal replay and the cursor
-semantic engine are implemented and the runtime is cut over atomically.
+The staged v17 causal replay layer now consumes one explicitly selected schema-4 source run. It uses
+scope-local prefix eligibility, keyed lane seeds, deterministic joins, and source call keys, so sibling
+reuse is independent of scheduler completion order. A changed lane or join ends only its causal parent
+prefix. Successful immutable artifacts and exact workspace checkpoints are validated, materialized,
+restored, and committed atomically with replay evidence; failed and `never` calls execute fresh.
+
+The v17 path remains disconnected from coordinator execution until the cursor semantic engine is
+implemented and the runtime is cut over atomically.
 
 The following describes the currently executable v16 layout.
 
