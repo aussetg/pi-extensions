@@ -61,6 +61,10 @@ export function renderReadCall(args: unknown, theme: ThemeLike, context?: ShellC
   return new Text(formatReadCall(args, theme), 1, 1, toolBackground(theme, context));
 }
 
+export function renderViewImageCall(args: unknown, theme: ThemeLike, context?: ShellContextLike): Component {
+  return new Text(formatReadCall(args, theme, "view_image"), 1, 1, toolBackground(theme, context));
+}
+
 export function renderWriteCall(args: unknown, theme: ThemeLike, context?: ShellContextLike): Component {
   const path = stringArg(args, "path") ?? "";
   const content = stringArg(args, "content") ?? "";
@@ -637,7 +641,7 @@ function formatReadLineRange(args: unknown, theme: ThemeLike): string {
   return theme.fg("warning", `:${startLine}${endLine ? `-${endLine}` : ""}`);
 }
 
-function formatReadCall(args: unknown, theme: ThemeLike): string {
+function formatReadCall(args: unknown, theme: ThemeLike, title = "read"): string {
   const rawPath = renderStringArg(args, "file_path", "path");
   const path = rawPath !== null ? shortenPathForDisplay(rawPath) : null;
   const pathDisplay = path === null
@@ -645,7 +649,7 @@ function formatReadCall(args: unknown, theme: ThemeLike): string {
     : path
       ? theme.fg("accent", path)
       : theme.fg("toolOutput", "...");
-  return `${theme.fg("toolTitle", theme.bold("read"))} ${pathDisplay}${formatReadLineRange(args, theme)}`;
+  return `${theme.fg("toolTitle", theme.bold(title))} ${pathDisplay}${formatReadLineRange(args, theme)}`;
 }
 
 function formatCompactReadCall(

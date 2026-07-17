@@ -6,6 +6,10 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import path from "node:path";
 import { Type } from "typebox";
+import { renderReadResult, renderViewImageCall } from "./rich-tools/render.ts";
+import type { ShellContextLike, ThemeLike, ToolResultLike } from "./rich-tools/util.ts";
+
+type RenderOptions = { expanded: boolean; isPartial: boolean };
 
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 
@@ -24,6 +28,20 @@ export function registerViewImageTool(pi: ExtensionAPI): void {
     promptSnippet: "View an image file",
     promptGuidelines: ["Use view_image when you need to inspect an image file."],
     parameters: VIEW_IMAGE_PARAMS,
+    renderShell: "self",
+
+    renderCall(args: unknown, theme: ThemeLike, context?: ShellContextLike) {
+      return renderViewImageCall(args, theme, context);
+    },
+
+    renderResult(
+      result: ToolResultLike,
+      options: RenderOptions,
+      theme: ThemeLike,
+      context?: ShellContextLike,
+    ) {
+      return renderReadResult(result, options, theme, context);
+    },
 
     async execute(
       toolCallId: string,
