@@ -146,6 +146,11 @@ post-synchronization publication from every selected file; scan-only documents a
 No fallback starts after the shared deadline, and a timed-out push batch stops its client so
 non-cancellable background work cannot continue consuming resources.
 
+`typescript-language-server` advertises only push diagnostics, but exposes fixed synchronous
+tsserver diagnostic commands. Code-feedback uses those commands as authoritative document pulls.
+This avoids a server behavior that suppresses repeated clean `publishDiagnostics` notifications,
+which otherwise makes an unchanged error-free file look as though diagnostics never completed.
+
 Push diagnostics do not have a protocol completion response. A push-batched file is fresh only
 after a valid post-synchronization publication and a short diagnostic quiet period; a missing or
 malformed publication is never interpreted as a clean file.

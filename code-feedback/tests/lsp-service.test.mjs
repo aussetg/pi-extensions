@@ -12,6 +12,7 @@ import { LSP_RESULT_CODE_ACTION_CAN_RESOLVE_KEY, LSP_RESULT_SERVER_ID_KEY, LSP_R
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fakeServer = path.join(here, "fixtures", "fake-lsp-server.mjs");
+const realTypeScriptLanguageServer = path.join(here, "..", "node_modules", ".bin", "typescript-language-server");
 
 test("diagnostic refresh concurrency is configurable and clamped", () => {
   const root = os.tmpdir();
@@ -603,6 +604,152 @@ test("forced diagnostic refreshes resync push-only documents instead of acceptin
     assert.equal(entries.filter((entry) => entry.method === "textDocument/didOpen").length, 1);
     assert.equal(entries.filter((entry) => entry.method === "textDocument/didChange").length, 1);
     assert.deepEqual(entries.find((entry) => entry.method === "textDocument/didChange")?.params.contentChanges, [{ text: content }]);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("TypeScript diagnostics use authoritative tsserver requests when the LSP suppresses repeated clean publications", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-typescript-direct-clean-"));
+  const filePath = path.join(root, "probe.ts");
+  const logPath = path.join(root, "lsp.jsonl");
+  const content = "export const value = 1;\n";
+  await writeFile(filePath, content, "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      typescript: {
+        command: process.execPath,
+        args: [fakeServer, "typescript", "TS100", "1", "", "typescript-direct-clean", logPath],
+      },
+    },
+  });
+
+  try {
+    const first = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 1000,
+      settleMs: 0,
+      forceFresh: true,
+    });
+    const second = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 1000,
+      settleMs: 0,
+      forceFresh: true,
+    });
+
+    assert.equal(first?.fresh, true);
+    assert.equal(second?.fresh, true);
+    assert.equal([...second.snapshot.byUri.values()].flat().length, 0);
+    const entries = await waitForJsonLog(logPath, (items) => (
+      items.filter((entry) => entry.method === "workspace/executeCommand").length === 6
+    ));
+    assert.deepEqual(
+      entries.filter((entry) => entry.method === "workspace/executeCommand").map((entry) => entry.command),
+      [
+        "syntacticDiagnosticsSync",
+        "semanticDiagnosticsSync",
+        "suggestionDiagnosticsSync",
+        "syntacticDiagnosticsSync",
+        "semanticDiagnosticsSync",
+        "suggestionDiagnosticsSync",
+      ],
+    );
+    assert.equal(entries.some((entry) => entry.method === "textDocument/didChange"), false);
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("authoritative tsserver diagnostic responses are normalized as LSP diagnostics", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-typescript-direct-items-"));
+  const filePath = path.join(root, "probe.ts");
+  const logPath = path.join(root, "lsp.jsonl");
+  const content = "export const value: string = 1;\n";
+  await writeFile(filePath, content, "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      typescript: {
+        command: process.execPath,
+        args: [fakeServer, "typescript", "TS100", "1", "", "typescript-direct-diagnostics", logPath],
+      },
+    },
+  });
+
+  try {
+    const refresh = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 1000,
+      settleMs: 0,
+      forceFresh: true,
+    });
+    assert.equal(refresh?.fresh, true);
+    const diagnostic = refresh?.snapshot.byUri.get(pathToFileURL(filePath).href)?.[0];
+    assert.deepEqual(diagnostic, {
+      uri: pathToFileURL(filePath).href,
+      range: {
+        start: { line: 2, character: 3 },
+        end: { line: 2, character: 8 },
+      },
+      severity: "error",
+      message: "typescript direct diagnostic",
+      source: "typescript",
+      code: 2322,
+      relatedInformation: [{
+        uri: pathToFileURL(path.join(root, "related.ts")).href,
+        range: {
+          start: { line: 1, character: 2 },
+          end: { line: 1, character: 4 },
+        },
+        message: "related TypeScript location",
+      }],
+      version: 1,
+    });
+  } finally {
+    await service.shutdownAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("real typescript-language-server returns repeated clean diagnostics without waiting for a suppressed push", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pi-code-feedback-typescript-real-clean-"));
+  const filePath = path.join(root, "probe.ts");
+  const content = "export const value: number = 1;\n";
+  await writeFile(filePath, content, "utf8");
+  await writeFile(path.join(root, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true }, include: ["*.ts"] }), "utf8");
+
+  const service = createLspService({
+    projectRoot: root,
+    idleTimeoutMs: 0,
+    serverOverrides: {
+      typescript: {
+        command: realTypeScriptLanguageServer,
+        args: ["--stdio"],
+      },
+    },
+  });
+
+  try {
+    const first = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 5000,
+      settleMs: 0,
+      forceFresh: true,
+      server: "typescript",
+    });
+    const second = await service.diagnosticsForFileDetailed(filePath, content, {
+      timeoutMs: 5000,
+      settleMs: 0,
+      forceFresh: true,
+      server: "typescript",
+    });
+    assert.equal(first?.fresh, true);
+    assert.equal(second?.fresh, true);
+    assert.equal([...second.snapshot.byUri.values()].flat().length, 0);
   } finally {
     await service.shutdownAll();
     await rm(root, { recursive: true, force: true });

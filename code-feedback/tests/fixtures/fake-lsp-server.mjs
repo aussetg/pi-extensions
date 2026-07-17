@@ -103,6 +103,9 @@ function handleMessage(message) {
         capabilities: {
           textDocumentSync: mode === "incremental-log" || mode === "sync-log" ? 2 : 1,
           ...(diagnosticProvider ? { diagnosticProvider } : {}),
+          ...(mode.startsWith("typescript-direct-") ? {
+            executeCommandProvider: { commands: ["typescript.tsserverRequest"] },
+          } : {}),
           codeActionProvider: codeActionProviderCapability(mode),
           hoverProvider: true,
           renameProvider: true,
@@ -199,6 +202,28 @@ function handleMessage(message) {
       ? []
       : [codeActionResult(message.params?.textDocument?.uri, { deferEdit: codeActionsDeferEdit(mode) })];
     send({ jsonrpc: "2.0", id: message.id, result });
+    return;
+  }
+
+  if (message.id !== undefined && message.method === "workspace/executeCommand" && mode.startsWith("typescript-direct-")) {
+    const command = message.params?.arguments?.[0];
+    const args = message.params?.arguments?.[1];
+    log({ method: message.method, command, args });
+    const diagnostics = mode === "typescript-direct-diagnostics" && command === "semanticDiagnosticsSync"
+      ? [tsServerDiagnostic(args?.file)]
+      : [];
+    send({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: {
+        seq: 0,
+        type: "response",
+        command,
+        request_seq: message.id,
+        success: true,
+        body: diagnostics,
+      },
+    });
     return;
   }
 
@@ -694,8 +719,30 @@ function diagnosticItems() {
 
 function shouldPublishDiagnostics(value) {
   return value !== "no-diagnostics" &&
+    !value.startsWith("typescript-direct-") &&
     (!value.startsWith("pull-") || value === "pull-unsupported") &&
     !value.startsWith("workspace-pull-");
+}
+
+function tsServerDiagnostic(file) {
+  const relatedFile = typeof file === "string" ? path.join(path.dirname(file), "related.ts") : "/tmp/related.ts";
+  return {
+    start: { line: 2, offset: 3 },
+    end: { line: 2, offset: 8 },
+    text: "typescript direct diagnostic",
+    code: 2322,
+    category: "error",
+    relatedInformation: [{
+      span: {
+        file: relatedFile,
+        start: { line: 1, offset: 2 },
+        end: { line: 1, offset: 4 },
+      },
+      message: "related TypeScript location",
+      category: "message",
+      code: 2322,
+    }],
+  };
 }
 
 function relatedDiagnosticReports(uri) {

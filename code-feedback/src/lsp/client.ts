@@ -140,6 +140,10 @@ interface ParsedDiagnosticItems {
   malformed: boolean;
 }
 
+interface TsServerDiagnosticResponse {
+  diagnostics: RawLspDiagnostic[];
+}
+
 interface ParsedWorkspaceDocumentDiagnosticReport {
   uri: string;
   version: number | null;
@@ -237,6 +241,12 @@ const MAX_INBOUND_MESSAGE_BYTES = 16 * 1024 * 1024;
 const MAX_WORKSPACE_DIAGNOSTIC_REPORT_ENTRIES = 10_000;
 const MAX_WORKSPACE_DIAGNOSTIC_ENTRIES = 50_000;
 const MAX_WORKSPACE_DIAGNOSTIC_COLLECTED_BYTES = 16 * 1024 * 1024;
+const TYPESCRIPT_TSSERVER_REQUEST_COMMAND = "typescript.tsserverRequest";
+const TYPESCRIPT_DIAGNOSTIC_COMMANDS = [
+  "syntacticDiagnosticsSync",
+  "semanticDiagnosticsSync",
+  "suggestionDiagnosticsSync",
+] as const;
 const CLOSED_DOCUMENT_DIAGNOSTIC_SUPPRESSION_MS = 1_000;
 const PROCESS_KILL_GRACE_MS = 750;
 const FILE_CHANGE_CREATED = 1;
@@ -319,7 +329,7 @@ export class LspClient {
 
       const touchedAt = Date.now();
       const uri = filePathToUri(filePath);
-      const pullProvider = documentDiagnosticProvider(this.capabilities);
+      const pullProvider = hasAuthoritativeDocumentDiagnosticRequest(this.capabilities);
       if (options.forceFresh) this.invalidateDiagnostics(uri);
       const document = this.syncDocument(filePath, content, options.forceFresh === true && !pullProvider);
       const documentVersion = document.version;
@@ -490,20 +500,20 @@ export class LspClient {
         } catch (error) {
           if (options.signal?.aborted) throw abortError(options.signal);
           if (!deadline.timedOut) throw error;
-          const protocol = documentDiagnosticProvider(this.capabilities) ? "document-pull" : "push-batch";
+          const protocol = hasAuthoritativeDocumentDiagnosticRequest(this.capabilities) ? "document-pull" : "push-batch";
           return {
             files: workspaceDocumentOutcomeMap(documents, protocol, "timed-out", "workspace diagnostic deadline expired during server initialization"),
           };
         }
 
         if (remainingUntil(options.deadlineAt) <= 0) {
-          const protocol = documentDiagnosticProvider(this.capabilities) ? "document-pull" : "push-batch";
+          const protocol = hasAuthoritativeDocumentDiagnosticRequest(this.capabilities) ? "document-pull" : "push-batch";
           return {
             files: workspaceDocumentOutcomeMap(documents, protocol, "timed-out", "workspace diagnostic deadline expired before document refresh"),
           };
         }
 
-        if (documentDiagnosticProvider(this.capabilities)) {
+        if (hasAuthoritativeDocumentDiagnosticRequest(this.capabilities)) {
           const pulled = await this.pullWorkspaceDocumentDiagnostics(documents, options, deadline);
           const pushFallbackDocuments = documents.filter((document) => (
             pulled.get(filePathToUri(document.filePath))?.outcome === "unavailable"
@@ -1617,7 +1627,11 @@ export class LspClient {
     options: TouchDocumentOptions,
   ): Promise<PullDiagnosticOutcome> {
     const provider = documentDiagnosticProvider(this.capabilities);
-    if (!provider) return "unavailable";
+    if (!provider) {
+      return typescriptTsserverDiagnosticProvider(this.capabilities)
+        ? this.pullTypescriptTsserverDiagnostics(document, documentVersion, touchedAt, options)
+        : "unavailable";
+    }
 
     const timeoutMs = remainingDiagnosticTimeout(options.timeoutMs, touchedAt);
     if (timeoutMs <= 0) return "timed-out";
@@ -1647,6 +1661,43 @@ export class LspClient {
       this.storeDiagnostics(related.uri, related.diagnostics, undefined, receivedAt, authoritative);
     }
     if (!authoritative) return "unavailable";
+    await settleDiagnostics(options.settleMs, options.signal);
+    return "authoritative";
+  }
+
+  private async pullTypescriptTsserverDiagnostics(
+    document: OpenDocument,
+    documentVersion: number,
+    touchedAt: number,
+    options: TouchDocumentOptions,
+  ): Promise<PullDiagnosticOutcome> {
+    const diagnostics: RawLspDiagnostic[] = [];
+    for (const command of TYPESCRIPT_DIAGNOSTIC_COMMANDS) {
+      const timeoutMs = remainingDiagnosticTimeout(options.timeoutMs, touchedAt);
+      if (timeoutMs <= 0) return "timed-out";
+
+      let response: unknown;
+      try {
+        response = await this.sendRequest("workspace/executeCommand", {
+          command: TYPESCRIPT_TSSERVER_REQUEST_COMMAND,
+          arguments: [command, { file: document.filePath }, {}],
+        }, timeoutMs, options.signal);
+      } catch (error) {
+        if (isCancellation(error, options.signal)) throw error;
+        return isRequestTimeout(error, "workspace/executeCommand") ? "timed-out" : "unavailable";
+      }
+
+      const parsed = parseTsServerDiagnosticResponse(response, command);
+      if (!parsed || diagnostics.length + parsed.diagnostics.length > MAX_WORKSPACE_DIAGNOSTIC_ENTRIES) {
+        return "unavailable";
+      }
+      diagnostics.push(...parsed.diagnostics);
+    }
+
+    if (this.documents.get(document.uri)?.version !== documentVersion) return "unavailable";
+    const receivedAt = Date.now();
+    this.workspaceDiagnosticResultIds.delete(document.uri);
+    this.storeDiagnostics(document.uri, diagnostics, documentVersion, receivedAt, true);
     await settleDiagnostics(options.settleMs, options.signal);
     return "authoritative";
   }
@@ -1934,6 +1985,17 @@ function documentDiagnosticProvider(capabilities: unknown): DocumentDiagnosticPr
   return typeof provider.identifier === "string" ? { identifier: provider.identifier } : {};
 }
 
+function hasAuthoritativeDocumentDiagnosticRequest(capabilities: unknown): boolean {
+  return documentDiagnosticProvider(capabilities) !== undefined || typescriptTsserverDiagnosticProvider(capabilities);
+}
+
+function typescriptTsserverDiagnosticProvider(capabilities: unknown): boolean {
+  const provider = isRecord(capabilities) ? capabilities.executeCommandProvider : undefined;
+  return isRecord(provider) &&
+    Array.isArray(provider.commands) &&
+    provider.commands.includes(TYPESCRIPT_TSSERVER_REQUEST_COMMAND);
+}
+
 function workspaceDiagnosticProvider(capabilities: unknown): WorkspaceDiagnosticProvider | undefined {
   const provider = isRecord(capabilities) ? capabilities.diagnosticProvider : undefined;
   if (!isRecord(provider) || provider.workspaceDiagnostics !== true) return undefined;
@@ -2041,6 +2103,85 @@ function parseDiagnosticItems(value: unknown): ParsedDiagnosticItems | undefined
     else malformed = true;
   }
   return { diagnostics, malformed };
+}
+
+function parseTsServerDiagnosticResponse(value: unknown, command: string): TsServerDiagnosticResponse | undefined {
+  if (
+    !isRecord(value) ||
+    value.type !== "response" ||
+    value.success !== true ||
+    value.command !== command ||
+    !Array.isArray(value.body)
+  ) {
+    return undefined;
+  }
+
+  const diagnostics: RawLspDiagnostic[] = [];
+  for (const item of value.body) {
+    const diagnostic = parseTsServerDiagnostic(item);
+    if (!diagnostic) return undefined;
+    diagnostics.push(diagnostic);
+  }
+  return { diagnostics };
+}
+
+function parseTsServerDiagnostic(value: unknown): RawLspDiagnostic | undefined {
+  if (!isRecord(value) || typeof value.text !== "string") return undefined;
+  const start = tsServerPositionToLsp(value.start);
+  const end = tsServerPositionToLsp(value.end);
+  const range = start && end ? { start, end } : undefined;
+  if (!range || !isLspRange(range)) return undefined;
+  if (value.code !== undefined && typeof value.code !== "string" && !isLspInteger(value.code)) return undefined;
+  if (value.source !== undefined && typeof value.source !== "string") return undefined;
+
+  return {
+    range,
+    severity: tsServerDiagnosticSeverity(value.category),
+    code: value.code as string | number | undefined,
+    source: typeof value.source === "string" ? value.source : "typescript",
+    message: value.text,
+    relatedInformation: parseTsServerRelatedInformation(value.relatedInformation),
+  };
+}
+
+function tsServerPositionToLsp(value: unknown): { line: number; character: number } | undefined {
+  if (!isRecord(value) || !isOneBasedLspInteger(value.line) || !isOneBasedLspInteger(value.offset)) return undefined;
+  return { line: value.line - 1, character: value.offset - 1 };
+}
+
+function isOneBasedLspInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 2_147_483_648;
+}
+
+function tsServerDiagnosticSeverity(value: unknown): number {
+  switch (value) {
+    case "warning":
+      return 2;
+    case "suggestion":
+      return 4;
+    case "error":
+    default:
+      return 1;
+  }
+}
+
+function parseTsServerRelatedInformation(value: unknown): RawRelatedInformation[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const related: RawRelatedInformation[] = [];
+  for (const item of value) {
+    if (!isRecord(item) || typeof item.message !== "string" || !isRecord(item.span) || typeof item.span.file !== "string") {
+      continue;
+    }
+    const start = tsServerPositionToLsp(item.span.start);
+    const end = tsServerPositionToLsp(item.span.end);
+    const range = start && end ? { start, end } : undefined;
+    if (!range || !isLspRange(range)) continue;
+    related.push({
+      location: { uri: filePathToUri(item.span.file), range },
+      message: item.message,
+    });
+  }
+  return related.length > 0 ? related : undefined;
 }
 
 function copyRawLspDiagnostic(diagnostic: RawLspDiagnostic): RawLspDiagnostic {
