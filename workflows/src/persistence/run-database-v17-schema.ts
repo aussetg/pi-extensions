@@ -152,6 +152,22 @@ CREATE INDEX operations_scope_cursor ON operations(scope_id, cursor);
 CREATE INDEX operations_run_ordinal ON operations(run_id, ordinal);
 CREATE INDEX operations_run_status ON operations(run_id, status, ordinal);
 
+CREATE TABLE effect_settlements (
+  operation_id TEXT PRIMARY KEY REFERENCES operations(operation_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+  semantic_key TEXT NOT NULL,
+  outcome TEXT NOT NULL CHECK (outcome IN ('success', 'failure')),
+  completion_authority TEXT NOT NULL CHECK (completion_authority IN ('finish-work', 'host-effect')),
+  replay_policy TEXT NOT NULL CHECK (replay_policy IN ('immutable', 'workspace', 'never')),
+  result_json TEXT CHECK (result_json IS NULL OR json_valid(result_json)),
+  failure_json TEXT CHECK (failure_json IS NULL OR json_valid(failure_json)),
+  settled_at TEXT NOT NULL,
+  CHECK ((outcome = 'success') = (result_json IS NOT NULL)),
+  CHECK ((outcome = 'failure') = (failure_json IS NOT NULL)),
+  CHECK (outcome = 'success' OR replay_policy = 'never')
+) STRICT;
+CREATE INDEX effect_settlements_run_time ON effect_settlements(run_id, settled_at, operation_id);
+
 CREATE TABLE artifacts (
   digest TEXT PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,

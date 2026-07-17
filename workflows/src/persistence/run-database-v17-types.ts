@@ -145,6 +145,19 @@ export interface WorkflowScopeCallV17Record {
   committedAt: string;
 }
 
+/** Durable host settlement consumed before a scope call is committed. */
+export interface WorkflowEffectSettlementV17Record {
+  operationId: string;
+  runId: string;
+  semanticKey: string;
+  outcome: "success" | "failure";
+  completionAuthority: Exclude<WorkflowScopeCallV17Record["completionAuthority"], "structural-join">;
+  replayPolicy: WorkflowScopeCallV17Record["replayPolicy"];
+  result?: JsonValue;
+  failure?: JsonObject;
+  settledAt: string;
+}
+
 export interface WorkflowStructuralJoinLaneV17Record {
   ordinal: number;
   laneKey: string;
@@ -332,6 +345,20 @@ export interface ClaimWorkflowOperationV17Input {
   descriptorSourceSite?: string;
   title?: string;
   semanticInputHash: string;
+  maximumOperations?: number;
+  maximumAgentOperations?: number;
+  at: string;
+}
+
+export interface SettleWorkflowEffectV17Input {
+  expectedRevision: number;
+  operationId: string;
+  semanticKey: string;
+  outcome: "success" | "failure";
+  completionAuthority: Exclude<WorkflowScopeCallV17Record["completionAuthority"], "structural-join">;
+  replayPolicy: WorkflowScopeCallV17Record["replayPolicy"];
+  result?: JsonValue;
+  failure?: JsonObject;
   at: string;
 }
 

@@ -168,5 +168,10 @@ No control-flow compiler is required.
   durable per-scope prefix eligibility, reuses keyed siblings independently, authenticates structural
   joins, retains exact source results/call keys, imports artifact evidence, and restores exact Btrfs
   workspace checkpoints before atomic replay completion. Failed, changed, and `never` calls remain
-  fresh. Restart tests cover each materialization/commit boundary. It stays disconnected until the
-  cursor semantic engine is ready for atomic cutover.
+  fresh. Restart tests cover each materialization/commit boundary.
+- The production sequential cursor engine now reruns ordinary control against `{scope, cursor,
+  previousCallKey}`, consumes completed calls and durable pre-call settlements, restores failures into
+  ordinary catch, rejects semantic drift at the first slot, consults causal replay before fresh host
+  execution, and enforces operation/agent admission. Crash-matrix tests cover every sequential
+  durable boundary without duplicate settled execution. Keyed structured concurrency remains the
+  next isolated phase before runtime cutover.

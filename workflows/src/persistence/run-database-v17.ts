@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { canonicalJsonValue, deepFreezeJson } from "../definition/canonical-json.js";
+import { DEFINITION_LIMITS } from "../definition/limits.js";
 import { WORKFLOW_V17_RUNTIME_API_HASH } from "../definition/workflow-language-v17.js";
 import type { WorkflowV17InvocationSnapshot } from "./workflow-v17-invocation.js";
 import { assertWorkflowV17InvocationSnapshot } from "./workflow-v17-invocation.js";
@@ -39,6 +40,7 @@ import type {
   CompleteWorkflowCallV17Input,
   CompleteWorkflowStructuralJoinV17Input,
   CreateWorkflowChildScopeV17Spec,
+  SettleWorkflowEffectV17Input,
   WorkflowArtifactV17Record,
   WorkflowAttemptV17Record,
   WorkflowCandidateApplyV17Record,
@@ -47,6 +49,7 @@ import type {
   WorkflowCandidateV17Record,
   WorkflowCandidateVerificationV17Record,
   WorkflowCandidateWorkspaceV17Record,
+  WorkflowEffectSettlementV17Record,
   WorkflowInvocationResourceV17Record,
   WorkflowOperationV17Kind,
   WorkflowOperationArtifactV17Record,
@@ -171,6 +174,16 @@ export class WorkflowRunDatabaseV17RevisionConflictError extends Error {
   constructor(readonly expected: number, readonly actual: number) {
     super(`Workflow run revision changed: expected ${expected}, found ${actual}`);
     this.name = "WorkflowRunDatabaseV17RevisionConflictError";
+  }
+}
+
+export class WorkflowRunDatabaseV17AdmissionError extends Error {
+  constructor(
+    readonly limit: "operations" | "agents",
+    message: string,
+  ) {
+    super(message);
+    this.name = "WorkflowRunDatabaseV17AdmissionError";
   }
 }
 
@@ -403,6 +416,15 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
     return row ? scopeCallFromRow(row) : undefined;
   }
 
+  readEffectSettlement(operationId: string): WorkflowEffectSettlementV17Record | undefined {
+    this.assertOpen();
+    assertIdentifier(operationId, "workflow v17 operation id");
+    const row = this.database.prepare(
+      "SELECT * FROM effect_settlements WHERE operation_id = ?",
+    ).get(operationId) as SqlRow | undefined;
+    return row ? effectSettlementFromRow(row) : undefined;
+  }
+
   listScopeCalls(scopeId: string): WorkflowScopeCallV17Record[] {
     this.assertOpen();
     assertIdentifier(scopeId, "workflow v17 scope id");
@@ -588,6 +610,17 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
       assertHash(operation.semanticInputHash, `workflow v17 operation ${operation.path} semantic input hash`);
       assertSourceSite(operation.sourceSite);
       if (operation.descriptorSourceSite) assertSourceSite(operation.descriptorSourceSite);
+      const settlement = this.readEffectSettlement(operation.operationId);
+      if (settlement) {
+        if (settlement.runId !== runId || STRUCTURAL_KINDS.has(operation.kind) || operation.kind === "metrics") {
+          throw corrupt(`Workflow v17 operation ${operation.path} has an invalid effect settlement`);
+        }
+        assertHash(settlement.semanticKey, `workflow v17 operation ${operation.path} settlement semantic key`);
+        const settledTerminal = settlement.outcome === "success" ? settlement.result : settlement.failure;
+        if (settledTerminal === undefined || (settlement.outcome === "failure" && settlement.replayPolicy !== "never")) {
+          throw corrupt(`Workflow v17 operation ${operation.path} settlement outcome is corrupt`);
+        }
+      }
       const call = this.readScopeCall(operation.operationId);
       if (call) {
         if (call.scopeId !== scope.scopeId || call.cursor !== index || call.previousCallKey !== previous
@@ -631,6 +664,17 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
           if (call.callKey !== expectedCallKey) {
             throw corrupt(`Workflow v17 scope ${scope.path} causal call key is corrupt at cursor ${index}`);
           }
+        }
+        if (settlement && (
+          call.replay !== undefined
+          || call.semanticKey !== settlement.semanticKey
+          || call.outcome !== settlement.outcome
+          || call.completionAuthority !== settlement.completionAuthority
+          || call.replayPolicy !== settlement.replayPolicy
+          || stableHash(settlement.outcome === "success" ? settlement.result! : settlement.failure!)
+            !== call.resultHash
+        )) {
+          throw corrupt(`Workflow v17 scope ${scope.path} call differs from its effect settlement at cursor ${index}`);
         }
         for (const link of this.listOperationArtifacts(operation.operationId)) {
           if (link.operationId !== operation.operationId || link.artifact.runId !== runId) {
@@ -948,7 +992,6 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
       const run = this.readRun();
       assertExpectedRevision(run.revision, input.expectedRevision);
       const scope = this.requireScope(input.scopeId);
-      if (scope.status !== "active") throw state(`Cannot claim an operation in ${scope.status} scope ${scope.path}`);
       const existing = this.readOperationAt(scope.scopeId, input.cursor);
       if (existing) {
         if (existing.kind !== input.kind || existing.semanticInputHash !== input.semanticInputHash) {
@@ -957,6 +1000,7 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
         this.database.exec("COMMIT");
         return { operation: existing, claimed: false };
       }
+      if (scope.status !== "active") throw state(`Cannot claim a new operation in ${scope.status} scope ${scope.path}`);
       const nextCursor = requiredNumber(this.database.prepare(
         "SELECT coalesce(max(cursor), -1) + 1 AS value FROM operations WHERE scope_id = ?",
       ).get(scope.scopeId) as SqlRow, "value");
@@ -968,6 +1012,31 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
           "SELECT call_key FROM scope_calls WHERE scope_id = ? AND cursor = ?",
         ).get(scope.scopeId, input.cursor - 1) as SqlRow | undefined;
         if (!previous) throw state(`Scope ${scope.path} cannot advance beyond an unsettled cursor`);
+      }
+      const operationCount = requiredNumber(this.database.prepare(
+        "SELECT count(*) AS value FROM operations WHERE run_id = ?",
+      ).get(run.runId) as SqlRow, "value");
+      const maximumOperations = input.maximumOperations ?? DEFINITION_LIMITS.semanticOperations;
+      const maximumAgentOperations = Math.min(
+        input.maximumAgentOperations ?? run.safety.maximumAgentLaunches,
+        run.safety.maximumAgentLaunches,
+      );
+      if (operationCount >= maximumOperations) {
+        throw new WorkflowRunDatabaseV17AdmissionError(
+          "operations",
+          `Workflow v17 operation admission limit ${maximumOperations} was reached`,
+        );
+      }
+      if (input.kind === "agent") {
+        const agentCount = requiredNumber(this.database.prepare(
+          "SELECT count(*) AS value FROM operations WHERE run_id = ? AND kind = 'agent'",
+        ).get(run.runId) as SqlRow, "value");
+        if (agentCount >= maximumAgentOperations) {
+          throw new WorkflowRunDatabaseV17AdmissionError(
+            "agents",
+            `Workflow v17 agent admission limit ${maximumAgentOperations} was reached`,
+          );
+        }
       }
       const operationPathValue = operationPath(scope.path, input.cursor);
       const operationId = workflowV17OperationId(run.runId, operationPathValue);
@@ -1079,6 +1148,67 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
       });
       this.database.exec("COMMIT");
       return { scopes: created, created: true };
+    } catch (error) {
+      try { this.database.exec("ROLLBACK"); } catch { /* preserve original error */ }
+      throw normalizeConstraint(error);
+    }
+  }
+
+  settleEffect(input: SettleWorkflowEffectV17Input): WorkflowEffectSettlementV17Record {
+    assertSettleEffectInput(input);
+    this.assertOpen();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const run = this.readRun();
+      assertExpectedRevision(run.revision, input.expectedRevision);
+      const operation = this.requireOperation(input.operationId);
+      if (STRUCTURAL_KINDS.has(operation.kind) || operation.kind === "metrics") {
+        throw state(`Operation ${operation.path} cannot have a host effect settlement`);
+      }
+      const existing = this.readEffectSettlement(operation.operationId);
+      if (existing) {
+        if (!sameEffectSettlement(existing, input)) {
+          throw state(`Workflow v17 effect settlement ${operation.path} changed identity`);
+        }
+        this.database.exec("COMMIT");
+        return existing;
+      }
+      if (operation.status !== "running" && operation.status !== "waiting") {
+        throw state(`Operation ${operation.path} is ${operation.status}`);
+      }
+      if (operation.kind === "apply" && input.replayPolicy !== "never") {
+        throw state("Apply settlements must never be replayable");
+      }
+      this.database.prepare(`
+        INSERT INTO effect_settlements(
+          operation_id, run_id, semantic_key, outcome, completion_authority,
+          replay_policy, result_json, failure_json, settled_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        operation.operationId,
+        run.runId,
+        input.semanticKey,
+        input.outcome,
+        input.completionAuthority,
+        input.replayPolicy,
+        input.outcome === "success" ? json(input.result!) : null,
+        input.outcome === "failure" ? json(input.failure!) : null,
+        input.at,
+      );
+      const nextRevision = input.expectedRevision + 1;
+      this.bumpRunRevision(input.expectedRevision, nextRevision, input.at, operation.operationId);
+      insertEvent(this.database, {
+        runId: run.runId,
+        sequence: nextRevision,
+        revision: nextRevision,
+        type: "effect-settled",
+        operationId: operation.operationId,
+        scopeId: operation.scopeId,
+        payload: { outcome: input.outcome, replayPolicy: input.replayPolicy },
+        at: input.at,
+      });
+      this.database.exec("COMMIT");
+      return this.readEffectSettlement(operation.operationId)!;
     } catch (error) {
       try { this.database.exec("ROLLBACK"); } catch { /* preserve original error */ }
       throw normalizeConstraint(error);
@@ -1650,6 +1780,17 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
         throw state("Cross-run replay evidence does not retain an eligible source call key");
       }
       const terminalValue = input.outcome === "success" ? input.result! : input.failure!;
+      const settlement = this.readEffectSettlement(operation.operationId);
+      if (settlement && (
+        settlement.semanticKey !== input.semanticKey
+        || settlement.outcome !== input.outcome
+        || settlement.completionAuthority !== input.completionAuthority
+        || settlement.replayPolicy !== input.replayPolicy
+        || stableHash(settlement.outcome === "success" ? settlement.result! : settlement.failure!)
+          !== stableHash(terminalValue)
+      )) {
+        throw state(`Operation ${operation.path} differs from its durable effect settlement`);
+      }
       const resultHash = stableHash(terminalValue);
       if (join) {
         const expectedJoinKey = workflowV17StructuralJoinKey({
@@ -2279,6 +2420,21 @@ function scopeCallFromRow(row: SqlRow): WorkflowScopeCallV17Record {
   };
 }
 
+function effectSettlementFromRow(row: SqlRow): WorkflowEffectSettlementV17Record {
+  const outcome = requiredString(row, "outcome") as WorkflowEffectSettlementV17Record["outcome"];
+  return {
+    operationId: requiredString(row, "operation_id"),
+    runId: requiredString(row, "run_id"),
+    semanticKey: requiredString(row, "semantic_key"),
+    outcome,
+    completionAuthority: requiredString(row, "completion_authority") as WorkflowEffectSettlementV17Record["completionAuthority"],
+    replayPolicy: requiredString(row, "replay_policy") as WorkflowEffectSettlementV17Record["replayPolicy"],
+    ...(outcome === "success" ? { result: jsonColumnRequired<JsonValue>(row, "result_json") } : {}),
+    ...(outcome === "failure" ? { failure: jsonColumnRequired<JsonObject>(row, "failure_json") } : {}),
+    settledAt: requiredString(row, "settled_at"),
+  };
+}
+
 function structuralJoinFromRow(
   row: SqlRow,
   lanes: WorkflowStructuralJoinLaneV17Record[],
@@ -2532,7 +2688,48 @@ function assertClaimInput(input: ClaimWorkflowOperationV17Input): void {
   if (input.descriptorSourceSite) assertSourceSite(input.descriptorSourceSite);
   if (input.title !== undefined) assertDisplayTitle(input.title);
   assertHash(input.semanticInputHash, "workflow v17 semantic input hash");
+  if (input.maximumOperations !== undefined) {
+    assertPositiveInteger(input.maximumOperations, "workflow v17 maximum operations");
+    if (input.maximumOperations > DEFINITION_LIMITS.semanticOperations) {
+      throw new TypeError(`Workflow v17 maximum operations exceeds ${DEFINITION_LIMITS.semanticOperations}`);
+    }
+  }
+  if (input.maximumAgentOperations !== undefined) {
+    assertPositiveInteger(input.maximumAgentOperations, "workflow v17 maximum agent operations");
+  }
   assertIsoDate(input.at, "workflow v17 operation claim time");
+}
+
+function assertSettleEffectInput(input: SettleWorkflowEffectV17Input): void {
+  assertPositiveRevision(input.expectedRevision);
+  assertIdentifier(input.operationId, "workflow v17 operation id");
+  assertHash(input.semanticKey, "workflow v17 settlement semantic key");
+  if (!new Set(["success", "failure"]).has(input.outcome)
+    || !new Set(["finish-work", "host-effect"]).has(input.completionAuthority)
+    || !new Set(["immutable", "workspace", "never"]).has(input.replayPolicy)) {
+    throw new TypeError("Invalid workflow v17 effect settlement policy");
+  }
+  if ((input.outcome === "success") !== Object.prototype.hasOwnProperty.call(input, "result")
+    || (input.outcome === "failure") !== Object.prototype.hasOwnProperty.call(input, "failure")) {
+    throw new TypeError("Workflow v17 settlement requires exactly its success result or failure");
+  }
+  if (input.outcome === "failure" && input.replayPolicy !== "never") {
+    throw new TypeError("Failed workflow v17 settlements must never be replayable");
+  }
+  canonicalJsonValue(input.outcome === "success" ? input.result! : input.failure!, jsonLimits());
+  assertIsoDate(input.at, "workflow v17 effect settlement time");
+}
+
+function sameEffectSettlement(
+  current: WorkflowEffectSettlementV17Record,
+  input: SettleWorkflowEffectV17Input,
+): boolean {
+  return current.semanticKey === input.semanticKey
+    && current.outcome === input.outcome
+    && current.completionAuthority === input.completionAuthority
+    && current.replayPolicy === input.replayPolicy
+    && stableHash(current.outcome === "success" ? current.result! : current.failure!)
+      === stableHash(input.outcome === "success" ? input.result! : input.failure!);
 }
 
 function assertCompleteCallInput(input: CompleteWorkflowCallV17Input): void {
@@ -3039,6 +3236,7 @@ function removeDatabaseFiles(databasePath: string): void {
 function normalizeConstraint(error: unknown): unknown {
   if (error instanceof WorkflowRunDatabaseV17StateError
     || error instanceof WorkflowRunDatabaseV17RevisionConflictError
+    || error instanceof WorkflowRunDatabaseV17AdmissionError
     || error instanceof WorkflowRunDatabaseV17CorruptionError
     || error instanceof TypeError) return error;
   const message = error instanceof Error ? error.message : String(error);

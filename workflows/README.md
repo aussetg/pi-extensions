@@ -13,7 +13,9 @@ primary Pi session launches and controls runs but does not own their lifetime.
 > registry now discovers those definitions, applies fail-safe namespace exposure policy, and writes
 > immutable invocation/source/resource snapshots. A separate schema-4 v17 run database now persists
 > scope-local cursors, keyed child scopes, structural joins, pinned resources, and explicit candidate
-> lifecycle state. The v16 launch service and executable runtime consume neither staged path yet.
+> lifecycle state. Its cursor semantic engine now reconstructs ordinary sequential TypeScript control
+> from durable effect settlements and scope-local calls, and can consume causal replay. The v16 launch
+> service and control worker still consume none of the staged v17 path.
 
 This extension is intentionally local and Linux-only. It has no compatibility layer for old run or
 definition formats and no portability fallback.
@@ -268,8 +270,17 @@ reuse is independent of scheduler completion order. A changed lane or join ends 
 prefix. Successful immutable artifacts and exact workspace checkpoints are validated, materialized,
 restored, and committed atomically with replay evidence; failed and `never` calls execute fresh.
 
-The v17 path remains disconnected from coordinator execution until the cursor semantic engine is
-implemented and the runtime is cut over atomically.
+The staged v17 sequential semantic engine owns an encounter cursor and previous call key in each
+`AsyncLocalStorage` scope. Native loops and local mutation reconstruct by re-running source and
+restoring committed calls in order. A separate durable effect-settlement row closes the modeled crash
+boundary between host completion and call-chain commit, so restart does not repeat settled physical
+work. Recorded failures re-enter ordinary `catch`; source/semantic drift fails at its first cursor.
+Operation and agent admission limits pause runaway effectful control. Fresh execution consults causal
+replay before invoking an adapter.
+
+The external control worker and its runnable-segment watchdog remain v16 until the v17 control realm
+and wire products are built. The v17 engine remains disconnected from coordinator execution; keyed
+structured concurrency is the next phase before the atomic cutover.
 
 The following describes the currently executable v16 layout.
 

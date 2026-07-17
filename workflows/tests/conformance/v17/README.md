@@ -51,7 +51,14 @@ unwired from v16 launch and execution.
 The production causal identity/replay implementation now exists under
 `src/runtime/causal-{identity,replay}-v17.ts`, with bounded artifact and workspace materializers. Real
 SQLite tests reproduce the oracle's lane-prefix, scheduler-permutation, map-reorder, structural-join,
-failure, apply, result/key provenance, restart, artifact, workspace, and corruption behavior. The next
-phase connects these records to a cursor-based semantic engine. Fault tests also restart after
+failure, apply, result/key provenance, restart, artifact, workspace, and corruption behavior. Fault
+tests also restart after
 artifact publication, workspace restoration, call commit, and join commit; the independent oracle
 remains the contract.
+
+The production sequential cursor engine now exists in `src/runtime/semantic-engine-v17.ts`. It uses
+scope-local encounter cursors, durable host settlements, same-run call restoration, recorded failure
+rethrow, causal replay before fresh execution, and database-enforced operation/agent admission. Real
+SQLite tests crash at every run/claim/settle/call/root boundary, reopen the database after settlement,
+reconstruct native-loop locals, reject first-cursor drift, preserve non-semantic display changes, and
+verify no settled physical effect executes twice. Structured branch/map scopes remain phase 9.
