@@ -87,12 +87,16 @@ export function workflowV17StructuralJoinKey(input: {
   outputOrder: readonly string[];
   lanes: readonly Pick<WorkflowStructuralJoinLaneV17Record,
     "laneKey" | "terminalKey" | "outcome">[];
-  result: JsonValue;
-}): string {
+} & (
+  | { outcome?: "success"; result: JsonValue; failure?: never }
+  | { outcome: "failure"; result?: never; failure: JsonObject }
+)): string {
   if (input.operation.kind !== "parallel" && input.operation.kind !== "map"
     && input.operation.kind !== "candidate") {
     throw new TypeError(`Workflow v17 ${input.operation.kind} is not structural`);
   }
+  const outcome = input.outcome ?? "success";
+  const terminal = outcome === "success" ? input.result : input.failure;
   return stableHash({
     formatVersion: 1,
     kind: "workflow-v17-structural-join",
@@ -100,13 +104,14 @@ export function workflowV17StructuralJoinKey(input: {
     operation: causalOperation(input.operation),
     semanticKey: input.semanticKey,
     policyHash: input.policyHash,
+    outcome,
     outputOrder: [...input.outputOrder],
     lanes: input.lanes.map((lane) => ({
       laneKey: lane.laneKey,
       terminalKey: lane.terminalKey,
       outcome: lane.outcome,
     })),
-    resultHash: stableHash(input.result),
+    resultHash: stableHash(terminal),
   });
 }
 

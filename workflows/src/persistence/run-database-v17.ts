@@ -38,6 +38,7 @@ import {
 import type {
   ClaimWorkflowOperationV17Input,
   CompleteWorkflowCallV17Input,
+  CompleteWorkflowStructuralFailureV17Input,
   CompleteWorkflowStructuralJoinV17Input,
   CreateWorkflowChildScopeV17Spec,
   SettleWorkflowEffectV17Input,
@@ -102,6 +103,13 @@ export interface CompleteWorkflowScopeV17Input {
   status: "completed" | "failed" | "cancelled";
   terminalKey: string;
   failure?: JsonObject;
+  at: string;
+}
+
+export interface CancelWorkflowScopeTreeV17Input {
+  expectedRevision: number;
+  scopeId: string;
+  failure: JsonObject;
   at: string;
 }
 
@@ -536,7 +544,10 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
       if (pending.length > 0) throw corrupt("Completed workflow v17 run has pending candidates");
       const interrupted = requiredNumber(this.database.prepare(`
         SELECT
-          (SELECT count(*) FROM operations WHERE status IN ('running', 'waiting', 'stopped', 'cancelled'))
+          (SELECT count(*) FROM operations operation
+            JOIN scopes scope ON scope.scope_id = operation.scope_id
+            WHERE operation.status IN ('running', 'waiting', 'stopped')
+              OR (operation.status = 'cancelled' AND scope.status <> 'cancelled'))
           + (SELECT count(*) FROM attempts WHERE status IN ('running', 'waiting')) AS value
       `).get() as SqlRow, "value");
       if (interrupted !== 0) throw corrupt("Completed workflow v17 run has interrupted execution records");
@@ -709,7 +720,9 @@ export class WorkflowRunDatabaseV17Reader implements Disposable {
       policyHash: join.policyHash,
       outputOrder: join.outputOrder,
       lanes: join.lanes,
-      result: operation.result!,
+      ...(call.outcome === "success"
+        ? { outcome: "success" as const, result: operation.result! }
+        : { outcome: "failure" as const, failure: operation.failure! }),
     });
     if (join.joinKey !== expectedJoinKey) {
       throw corrupt(`Workflow v17 structural join ${operation.path} causal key is corrupt`);
@@ -932,7 +945,10 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
         ).get() as SqlRow, "value");
         if (activeScopes !== 0) throw state("Workflow completion has active semantic scopes");
         const interruptedOperations = requiredNumber(this.database.prepare(`
-          SELECT count(*) AS value FROM operations WHERE status IN ('running', 'waiting', 'stopped', 'cancelled')
+          SELECT count(*) AS value FROM operations operation
+          JOIN scopes scope ON scope.scope_id = operation.scope_id
+          WHERE operation.status IN ('running', 'waiting', 'stopped')
+            OR (operation.status = 'cancelled' AND scope.status <> 'cancelled')
         `).get() as SqlRow, "value");
         const liveAttempts = requiredNumber(this.database.prepare(`
           SELECT count(*) AS value FROM attempts WHERE status IN ('running', 'waiting')
@@ -1252,6 +1268,78 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
     return this.readScope(input.scopeId)!;
   }
 
+  cancelScopeTree(input: CancelWorkflowScopeTreeV17Input): WorkflowScopeV17Record {
+    assertPositiveRevision(input.expectedRevision);
+    assertIdentifier(input.scopeId, "workflow v17 cancelled scope id");
+    canonicalJsonValue(input.failure, jsonLimits());
+    assertIsoDate(input.at, "workflow v17 scope cancellation time");
+    this.assertOpen();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const run = this.readRun();
+      assertExpectedRevision(run.revision, input.expectedRevision);
+      const root = this.requireScope(input.scopeId);
+      if (root.status !== "active") {
+        this.database.exec("COMMIT");
+        return root;
+      }
+      const rows = this.database.prepare(`
+        WITH RECURSIVE tree(scope_id) AS (
+          SELECT scope_id FROM scopes WHERE scope_id = ?
+          UNION ALL
+          SELECT child.scope_id FROM scopes child JOIN tree ON child.parent_scope_id = tree.scope_id
+        )
+        SELECT scope.* FROM scopes scope JOIN tree ON tree.scope_id = scope.scope_id
+        ORDER BY length(scope.path) DESC, scope.path DESC
+      `).all(root.scopeId) as SqlRow[];
+      const scopes = rows.map(scopeFromRow);
+      const scopeIds = scopes.map((scope) => scope.scopeId);
+      const placeholders = scopeIds.map(() => "?").join(", ");
+      this.database.prepare(`
+        UPDATE attempts SET status = 'cancelled', updated_at = ?, ended_at = ?
+        WHERE operation_id IN (
+          SELECT operation_id FROM operations WHERE scope_id IN (${placeholders})
+        ) AND status IN ('running', 'waiting')
+      `).run(input.at, input.at, ...scopeIds);
+      this.database.prepare(`
+        UPDATE operations SET status = 'cancelled', updated_at = ?, ended_at = ?
+        WHERE scope_id IN (${placeholders}) AND status IN ('running', 'waiting')
+      `).run(input.at, input.at, ...scopeIds);
+      let cancelled = 0;
+      for (const scope of scopes) {
+        if (scope.status !== "active") continue;
+        const previousCallKey = this.expectedPreviousCallKey(scope);
+        const terminalKey = stableHash({
+          formatVersion: 1,
+          kind: "workflow-v17-scope-cancellation",
+          previousCallKey,
+          failure: input.failure,
+        });
+        this.database.prepare(`
+          UPDATE scopes SET status = 'cancelled', terminal_key = ?, failure_json = ?, ended_at = ?
+          WHERE scope_id = ? AND status = 'active'
+        `).run(terminalKey, json(input.failure), input.at, scope.scopeId);
+        cancelled++;
+      }
+      const nextRevision = input.expectedRevision + 1;
+      this.bumpRunRevision(input.expectedRevision, nextRevision, input.at, null);
+      insertEvent(this.database, {
+        runId: run.runId,
+        sequence: nextRevision,
+        revision: nextRevision,
+        type: "scope-tree-cancelled",
+        scopeId: root.scopeId,
+        payload: { scopes: cancelled, failure: input.failure },
+        at: input.at,
+      });
+      this.database.exec("COMMIT");
+      return this.readScope(root.scopeId)!;
+    } catch (error) {
+      try { this.database.exec("ROLLBACK"); } catch { /* preserve original error */ }
+      throw normalizeConstraint(error);
+    }
+  }
+
   completeCall(input: CompleteWorkflowCallV17Input): WorkflowOperationV17Record {
     assertCompleteCallInput(input);
     return this.commitCallTransaction(input, undefined);
@@ -1264,6 +1352,16 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
       outcome: "success",
       completionAuthority: "structural-join",
       replayPolicy: "immutable",
+    }, input);
+  }
+
+  completeStructuralFailure(input: CompleteWorkflowStructuralFailureV17Input): WorkflowOperationV17Record {
+    assertCompleteStructuralFailureInput(input);
+    return this.commitCallTransaction({
+      ...input,
+      outcome: "failure",
+      completionAuthority: "structural-join",
+      replayPolicy: "never",
     }, input);
   }
 
@@ -1749,7 +1847,7 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
 
   private commitCallTransaction(
     input: CompleteWorkflowCallV17Input,
-    join: CompleteWorkflowStructuralJoinV17Input | undefined,
+    join: CompleteWorkflowStructuralJoinV17Input | CompleteWorkflowStructuralFailureV17Input | undefined,
   ): WorkflowOperationV17Record {
     this.assertOpen();
     this.database.exec("BEGIN IMMEDIATE");
@@ -1800,7 +1898,9 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
           policyHash: join.policyHash,
           outputOrder: join.outputOrder,
           lanes: join.lanes,
-          result: input.result!,
+          ...(input.outcome === "success"
+            ? { outcome: "success" as const, result: input.result! }
+            : { outcome: "failure" as const, failure: input.failure! }),
         });
         if (input.callKey !== expectedJoinKey || join.joinKey !== expectedJoinKey) {
           throw state(`Structural join ${operation.path} has an invalid causal key`);
@@ -1822,8 +1922,8 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
       }
       this.insertCallEvidence(run.runId, operation, input);
       if (join) this.insertStructuralJoin(operation, join);
-      else if (STRUCTURAL_KINDS.has(operation.kind) && input.outcome === "success") {
-        throw state(`Successful structural operation ${operation.path} requires a structural join`);
+      else if (STRUCTURAL_KINDS.has(operation.kind)) {
+        throw state(`Structural operation ${operation.path} requires a structural join`);
       }
       if (!join && input.completionAuthority === "structural-join") {
         throw state("Non-structural call cannot use structural-join completion authority");
@@ -1890,7 +1990,7 @@ export class WorkflowRunDatabaseV17 extends WorkflowRunDatabaseV17Reader {
 
   private insertStructuralJoin(
     operation: WorkflowOperationV17Record,
-    input: CompleteWorkflowStructuralJoinV17Input,
+    input: CompleteWorkflowStructuralJoinV17Input | CompleteWorkflowStructuralFailureV17Input,
   ): void {
     if (operation.kind !== input.kind || input.callKey !== input.joinKey) {
       throw state(`Structural join identity differs from operation ${operation.path}`);
@@ -2794,6 +2894,32 @@ function assertCompleteStructuralJoinInput(input: CompleteWorkflowStructuralJoin
     assertIdentifier(lane.scopeId, "workflow v17 structural lane scope id");
     assertHash(lane.terminalKey, "workflow v17 structural lane terminal key");
     if (!new Set(["success", "failure", "cancelled"]).has(lane.outcome)) throw new TypeError("Invalid structural lane outcome");
+  }
+}
+
+function assertCompleteStructuralFailureInput(input: CompleteWorkflowStructuralFailureV17Input): void {
+  assertCompleteCallInput({
+    ...input,
+    outcome: "failure",
+    completionAuthority: "structural-join",
+    replayPolicy: "never",
+  });
+  if (!new Set(["parallel", "map", "candidate"]).has(input.kind)) {
+    throw new TypeError("Invalid workflow v17 failed join kind");
+  }
+  assertHash(input.policyHash, "workflow v17 failed structural policy hash");
+  assertHash(input.joinKey, "workflow v17 failed structural join key");
+  if (!Array.isArray(input.outputOrder) || !Array.isArray(input.lanes)) {
+    throw new TypeError("Invalid workflow v17 failed structural lanes");
+  }
+  for (const key of input.outputOrder) assertLaneOrCandidateKey(key);
+  for (const lane of input.lanes) {
+    assertLaneOrCandidateKey(lane.laneKey);
+    assertIdentifier(lane.scopeId, "workflow v17 failed structural lane scope id");
+    assertHash(lane.terminalKey, "workflow v17 failed structural lane terminal key");
+    if (!new Set(["success", "failure", "cancelled"]).has(lane.outcome)) {
+      throw new TypeError("Invalid failed structural lane outcome");
+    }
   }
 }
 

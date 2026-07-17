@@ -395,3 +395,14 @@ export interface CompleteWorkflowStructuralJoinV17Input
   outputOrder: string[];
   lanes: Array<Omit<WorkflowStructuralJoinLaneV17Record, "ordinal">>;
 }
+
+export interface CompleteWorkflowStructuralFailureV17Input
+  extends Omit<CompleteWorkflowCallV17Input,
+    "completionAuthority" | "outcome" | "replayPolicy" | "result" | "replay"> {
+  kind: WorkflowStructuralJoinV17Record["kind"];
+  policyHash: string;
+  joinKey: string;
+  outputOrder: string[];
+  lanes: Array<Omit<WorkflowStructuralJoinLaneV17Record, "ordinal">>;
+  failure: JsonObject;
+}

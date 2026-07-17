@@ -173,5 +173,11 @@ No control-flow compiler is required.
   previousCallKey}`, consumes completed calls and durable pre-call settlements, restores failures into
   ordinary catch, rejects semantic drift at the first slot, consults causal replay before fresh host
   execution, and enforces operation/agent admission. Crash-matrix tests cover every sequential
-  durable boundary without duplicate settled execution. Keyed structured concurrency remains the
-  next isolated phase before runtime cutover.
+  durable boundary without duplicate settled execution.
+- The production structured runtime now preclaims keyed parallel/map scopes atomically, uses bounded
+  scheduling plus a run-wide host-effect limiter, preserves target output order, supports fail-fast
+  sibling cancellation and typed collected failures, persists deterministic success/failure joins,
+  restores completed capture boundaries directly, and reconstructs incomplete lanes from local calls.
+  Real-SQLite tests cover nested groups, scheduler timing, cancellation, structural crash boundaries,
+  independent sibling replay, map reorder, and semantic-policy drift. The control realm/wire-product
+  phase remains isolated before runtime cutover.

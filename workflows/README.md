@@ -13,9 +13,10 @@ primary Pi session launches and controls runs but does not own their lifetime.
 > registry now discovers those definitions, applies fail-safe namespace exposure policy, and writes
 > immutable invocation/source/resource snapshots. A separate schema-4 v17 run database now persists
 > scope-local cursors, keyed child scopes, structural joins, pinned resources, and explicit candidate
-> lifecycle state. Its cursor semantic engine now reconstructs ordinary sequential TypeScript control
-> from durable effect settlements and scope-local calls, and can consume causal replay. The v16 launch
-> service and control worker still consume none of the staged v17 path.
+> lifecycle state. Its cursor semantic engine now reconstructs ordinary TypeScript control from
+> durable effect settlements and scope-local calls, runs bounded keyed `parallel`/`map` child scopes,
+> commits deterministic success/failure joins, and consumes causal replay. The v16 launch service and
+> control worker still consume none of the staged v17 path.
 
 This extension is intentionally local and Linux-only. It has no compatibility layer for old run or
 definition formats and no portability fallback.
@@ -276,11 +277,16 @@ restoring committed calls in order. A separate durable effect-settlement row clo
 boundary between host completion and call-chain commit, so restart does not repeat settled physical
 work. Recorded failures re-enter ordinary `catch`; source/semantic drift fails at its first cursor.
 Operation and agent admission limits pause runaway effectful control. Fresh execution consults causal
-replay before invoking an adapter.
+replay before invoking an adapter. Keyed parallel/map groups preclaim every lane atomically, run under
+the workflow and host concurrency ceilings, and preserve target output order independently of
+completion timing. Fail-fast groups durably fail the parent join and cancel sibling scope trees;
+collected groups retain successful siblings and return typed failures. Completed structures restore
+without re-entering capture-boundary callbacks, while incomplete lanes reconstruct from local calls.
+Mutable candidate workspace lane ownership is enforced by the schema-4 database.
 
 The external control worker and its runnable-segment watchdog remain v16 until the v17 control realm
-and wire products are built. The v17 engine remains disconnected from coordinator execution; keyed
-structured concurrency is the next phase before the atomic cutover.
+and wire products are built. The v17 engine remains disconnected from coordinator execution; the
+control realm and branded wire-product phase is next before the atomic cutover.
 
 The following describes the currently executable v16 layout.
 

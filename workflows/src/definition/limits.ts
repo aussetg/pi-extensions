@@ -21,6 +21,7 @@ export const DEFINITION_LIMITS = {
   structuralValueNodes: 10_000,
   structuralStringScalars: 20_000,
   parallelBranches: 256,
+  mapItems: 256,
   fanOutItems: 256,
   loopIterations: 1_000,
   localLoopIterations: 10_000,

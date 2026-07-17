@@ -56,9 +56,11 @@ tests also restart after
 artifact publication, workspace restoration, call commit, and join commit; the independent oracle
 remains the contract.
 
-The production sequential cursor engine now exists in `src/runtime/semantic-engine-v17.ts`. It uses
-scope-local encounter cursors, durable host settlements, same-run call restoration, recorded failure
-rethrow, causal replay before fresh execution, and database-enforced operation/agent admission. Real
-SQLite tests crash at every run/claim/settle/call/root boundary, reopen the database after settlement,
-reconstruct native-loop locals, reject first-cursor drift, preserve non-semantic display changes, and
-verify no settled physical effect executes twice. Structured branch/map scopes remain phase 9.
+The production cursor engine now exists in `src/runtime/semantic-engine-v17.ts`. It uses scope-local
+encounter cursors, durable host settlements, same-run call restoration, recorded failure rethrow,
+causal replay before fresh execution, and database-enforced operation/agent admission. Keyed
+`parallel`/`map` execution preclaims child scopes, bounds scheduling, preserves output order, supports
+fail-fast cancellation and typed collection, restores terminal structures without callback
+re-entry, and commits deterministic success/failure joins. Real SQLite tests cover sequential and
+structured crash matrices, nested groups, cancellation, map reorder, independent sibling replay,
+drift, and no duplicate settled physical execution.
