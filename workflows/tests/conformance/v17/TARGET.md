@@ -1,0 +1,153 @@
+# Target workflow system
+
+This is the normative design exercised by the adjacent conformance fixtures.
+
+## Principle
+
+**TypeScript owns control flow. The workflow runtime owns durable effects, resource scopes, and
+structured concurrency.**
+
+Graphs are projections of execution, not source syntax.
+
+## Source form
+
+```ts
+import { agent, schema as s, workflow } from "pi/workflows";
+
+const inspect = agent({
+  profile: "builtin:reviewer",
+  output: Inspection,
+});
+
+export default workflow({
+  description: "Inspect and decide.",
+  input: Input,
+  output: Result,
+
+  async run(flow, args) {
+    const result = await flow.agent(inspect, { prompt: args.objective });
+    if (result.output.done) return result.output;
+    // ordinary loops, switch, try/catch, local helpers, and mutation
+  },
+});
+```
+
+- `.flow.ts` permits erasable TypeScript only.
+- One exact virtual import is allowed and removed before sandbox execution.
+- Filename/registry supplies installed identity and exposure policy.
+- Capabilities and invocation-selected resource classes are derived review output.
+- Input/output schemas use one small strict facade and infer deeply readonly types.
+- Agent/command descriptors are mandatory static authority contracts.
+
+## Public operation surface
+
+Structured concurrency:
+
+```text
+parallel   map
+```
+
+Durable effects/resources:
+
+```text
+agent      command      ask
+metrics    measure
+candidate  verify       accept       reject
+recordExperiment        apply
+```
+
+`metrics` is a synchronous run-local policy/state declaration. All other listed methods except
+structured callbacks cross the host boundary.
+
+There is no `stage`, `loop`, `fanOut`, condition receipt, operation ID argument, or direct Promise
+concurrency.
+
+## Values
+
+- Every agent result has `output`, guaranteed canonical `artifact`, additional `published` evidence,
+  and a required workspace `checkpoint` for candidate tasks.
+- Every command/measurement result has a canonical artifact.
+- Branded products are directly attachable in named artifact bundles.
+- Candidate products expose `output` and `changedPaths` and carry private host authority.
+- Accepted products bind exact passed verification/measurement evidence; `apply(accepted)` looks it
+  up and rechecks current policy/environment binding.
+- Apply always enters exact human approval.
+
+## Deterministic execution
+
+- Every sequential scope owns an encounter cursor.
+- Root, candidate bodies, fixed branches, and mapped items are scopes.
+- Dynamic parallel keys are the only routine author identity.
+- Same-run restart executes exact snapshotted source and restores each encountered operation.
+- Native loops reconstruct locals by consuming recorded effects in order.
+- Candidate callbacks may mutate local state but not captured outer state; completed candidates
+  restore without re-entering callbacks.
+- Concurrent callbacks may not mutate captured state or share mutable workspace capability.
+- Local effectful helpers are allowed through a finite nonrecursive direct call/effect graph.
+
+## Causal replay
+
+- Each sequential scope is a prefix hash chain.
+- Child lane seeds bind the parent prefix and key.
+- Structural joins hash lane terminal keys, output order, and failure policy.
+- Sibling lane prefixes replay independently.
+- A changed join stops later parent-lane reuse.
+- Replayed calls retain exact source call keys/results; fresh calls use target-run identity.
+- Apply and failed effects execute fresh.
+
+This removes completion-order-dependent global replay without allowing reuse past causal changes.
+
+## Generic optimization
+
+Optimize receives a trusted pinned evaluator and caller-defined policy:
+
+```ts
+const metrics = flow.metrics(args.metrics, args.sampling);
+await flow.measure(args.evaluator, metrics);
+
+for (let iteration = 0; iteration < args.maxIterations; iteration++) {
+  if (metrics.primary.reachedTarget()) break;
+  // propose → candidate → measure → evaluate → disposition → reflect
+}
+```
+
+`s.measurementProfile()` marks a constrained invocation resource. Launch resolves it through the
+trusted registry, validates selected output IDs, snapshots exact command/extractor/hash authority,
+and permits no profile switching during the run.
+
+One primary metric is structurally required. Guardrails and observed metrics are optional. This is a
+single-objective optimizer with constraints, not an underspecified multiobjective algorithm.
+
+## Safety
+
+- The external control-process segment watchdog contains synchronous runaway loops.
+- Host operation/agent admission limits contain effectful runaway loops.
+- Candidate workspace capabilities are structurally lane-owned.
+- Successful completion refuses nonempty undisposed candidates.
+- Failure/stop/cancellation abandons pending candidates and finalizes pending measurements rejected.
+- Static review derives exact descriptors, profile classes, network, writes, human sites, apply sites,
+  dynamic resources, concurrency, and suspicious unbounded loops.
+- Runtime still validates every opaque capability, resource snapshot, schema, and semantic hash.
+
+## Feasibility
+
+No control-flow compiler is required.
+
+- Node 22 type stripping preserves source positions.
+- Existing Acorn review can be extended for the virtual import, schema/descriptor constructors,
+  native loops, and finite helper graph.
+- Existing semantic AsyncLocalStorage scopes become cursor scopes.
+- Existing parallel/map preclaim and cancellation machinery becomes keyed causal lanes.
+- Persistence is rebuilt around lane-local call chains and structural joins.
+- Existing control-wire host refs extend to explicit branded product variants.
+- Existing finish receipts, artifact store, candidate checkpoints, measurement disposition, and
+  acceptance records already provide most value authority.
+
+## Laboratory evidence
+
+- 57 model tests cover replay permutations/faults, same-run crash boundaries, artifacts, candidates,
+  helpers, and invocation resources.
+- Six complete workflows compile with strict TypeScript.
+- Target corpus: 1,013 lines; current built-ins: 1,436 lines.
+- No target workflow uses structural control APIs, manual operation IDs, result modes, capability
+  declarations, casts, ignored type errors, or duplicate hand-written result interfaces.
