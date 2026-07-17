@@ -313,6 +313,23 @@ read-only nested agent-input tree; it never accepts the old ad-hoc flat input sh
 survives the protocol-17 host/worker round trip and resolves back to the same host value before
 manifest admission.
 
+The staged v17 effect runtime now connects that control bridge to the cursor engine. Agent and command
+descriptors resolve only through exact definition-bound static resource snapshots; prompts, scalar
+arguments, artifact manifests, workspace class, profile binding, and candidate authority enter their
+semantic identities while display titles do not. Candidate workspace effects persist exact post-call
+checkpoints for same-run recovery and causal replay. `ask` validates the trusted human response against
+its reviewed schema before settlement.
+
+Candidate callbacks now own real candidate-body scopes and private workspace references. Freeze
+atomically commits the body terminal key, immutable manifest/diff evidence, output, lineage, and
+changed paths; a crash after freeze restores the product without callback re-entry. Empty candidates
+are discarded automatically. Verification products bind exact candidate/profile/environment/evidence
+hashes, acceptance requires the durable passed receipt, and rejection finalizes the same candidate
+evidence. Apply receives only an accepted product, reloads its bound verification, is never replayed,
+and admits a receipt only when candidate, approval, verification binding, and changed paths agree.
+Run completion fails before closing the root scope when a changed candidate remains pending; terminal
+failure/stop behavior continues to abandon pending candidates transactionally.
+
 The following describes the currently executable v16 layout.
 
 Runs live at `~/.pi/agent/workflow-runs/flow_<32 hex>/`:

@@ -20,6 +20,7 @@ CREATE TABLE runs (
   resources_hash TEXT NOT NULL,
   project_snapshot_hash TEXT NOT NULL,
   route_snapshot_hash TEXT NOT NULL,
+  static_resources_hash TEXT NOT NULL,
   context_identity_hash TEXT NOT NULL,
   launch_authority TEXT NOT NULL CHECK (launch_authority IN ('model', 'user', 'rpc')),
   exposure TEXT NOT NULL CHECK (exposure IN ('human', 'model')),
@@ -161,10 +162,12 @@ CREATE TABLE effect_settlements (
   replay_policy TEXT NOT NULL CHECK (replay_policy IN ('immutable', 'workspace', 'never')),
   result_json TEXT CHECK (result_json IS NULL OR json_valid(result_json)),
   failure_json TEXT CHECK (failure_json IS NULL OR json_valid(failure_json)),
+  post_workspace_checkpoint_id TEXT REFERENCES workspace_checkpoints(checkpoint_id) DEFERRABLE INITIALLY DEFERRED,
   settled_at TEXT NOT NULL,
   CHECK ((outcome = 'success') = (result_json IS NOT NULL)),
   CHECK ((outcome = 'failure') = (failure_json IS NOT NULL)),
-  CHECK (outcome = 'success' OR replay_policy = 'never')
+  CHECK (outcome = 'success' OR replay_policy = 'never'),
+  CHECK ((replay_policy = 'workspace') = (post_workspace_checkpoint_id IS NOT NULL))
 ) STRICT;
 CREATE INDEX effect_settlements_run_time ON effect_settlements(run_id, settled_at, operation_id);
 

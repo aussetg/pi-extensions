@@ -81,3 +81,11 @@ authority registry. The recursive manifest and read-only materializer reproduce 
 artifact oracle for nested/repeated/empty inputs, exact path failures, anti-forgery, and unsafe names.
 Production tests additionally cover crash recovery before SQLite admission, binary/file safety,
 filesystem tampering, and a complete branded control-wire → manifest → agent-input round trip.
+
+The staged production effect path now exists in `src/runtime/{effect-adapters,executable-runtime}-v17.ts`
+and `src/candidates/runtime-v17.ts`. It runs reviewed descriptor calls through static pinned bindings,
+canonical products, cursor effects, candidate-body scopes, workspace checkpoints, verification-bound
+dispositions, and never-replayed apply. Real SQLite/control-worker tests cover accepted/rejected/
+unchanged/pending candidates, schema-invalid human input, stale apply evidence, authority lookalikes,
+and restart after candidate freeze without callback re-entry. It remains separate from the v16
+coordinator and from Phase 13 metric execution.

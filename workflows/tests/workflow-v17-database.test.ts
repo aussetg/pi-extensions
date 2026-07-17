@@ -492,6 +492,7 @@ describe("workflow v17 run database", () => {
       snapshot,
       projectSnapshotHash: hash("resource-project"),
       routeSnapshotHash: hash("resource-routes"),
+      staticResourcesHash: hash("resource-static-resources"),
       contextIdentityHash: hash("resource-context"),
       safety: safety(),
       createdAt: NOW,
@@ -633,7 +634,14 @@ describe("workflow v17 run database", () => {
       operationId: appliedEffect.operation.operationId,
       approvalId: "approval_candidate",
       verificationBindingHash: hash("verification-binding"),
-      authorityHash: hash("apply-authority"),
+      authorityHash: stableHash({
+        formatVersion: 1,
+        candidateId: candidate.candidateId,
+        approvalId: "approval_candidate",
+        receiptId: "apply_receipt_candidate",
+        verificationBindingHash: hash("verification-binding"),
+        changedPaths: candidate.changedPaths,
+      }),
       appliedAt: later(database.readRun().revision + 1),
     });
     expect(applied).toMatchObject({ state: "applied", appliedReceiptId: "apply_receipt_candidate" });
@@ -1054,6 +1062,7 @@ function createDatabase() {
     snapshot,
     projectSnapshotHash: hash("project"),
     routeSnapshotHash: hash("routes"),
+    staticResourcesHash: hash("static-resources"),
     contextIdentityHash: hash("context"),
     safety: safety(),
     createdAt: NOW,
@@ -1212,6 +1221,7 @@ function createFrozenCandidate(changedPaths: string[]) {
   const candidate = database.freezeCandidate({
     expectedRevision: database.readRun().revision,
     workspaceId: "candidate_workspace_test",
+    bodyTerminalKey: bodySeed,
     treeHash: hash(changedPaths.length > 0 ? "candidate-changed-tree" : "candidate-initial-tree"),
     lineageHash: hash("candidate-lineage"),
     output: { summary: "candidate output" },

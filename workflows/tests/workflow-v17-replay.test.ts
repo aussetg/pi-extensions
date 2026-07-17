@@ -683,6 +683,7 @@ function createRun(runDir: string, runId: string, workflowId: string, source = S
     snapshot,
     projectSnapshotHash: hash("project"),
     routeSnapshotHash: hash("routes"),
+    staticResourcesHash: hash("static-resources"),
     contextIdentityHash: hash("context"),
     safety: safety(),
     createdAt: iso(0),

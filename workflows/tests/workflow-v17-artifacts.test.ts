@@ -389,6 +389,7 @@ function createFixture() {
     snapshot,
     projectSnapshotHash: sha256("project"),
     routeSnapshotHash: sha256("routes"),
+    staticResourcesHash: sha256("static-resources"),
     contextIdentityHash: sha256("context"),
     safety: {
       concurrency: 4,

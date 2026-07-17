@@ -193,3 +193,9 @@ No control-flow compiler is required.
   agent-input trees validate every digest and reject plain leaves, lookalikes, nonattachable products,
   unsafe segments, cycles, foreign identity, and filesystem tampering. A protocol-17 test exercises a
   whole agent product from host to worker and back through manifest materialization.
+- The production v17 effect runtime now connects reviewed control calls to cursor effects. Static
+  agent/command/verification bindings are definition-hashed; candidate workspace effects carry exact
+  checkpoint authority; `ask` validates response schemas; candidate freeze owns a durable structural
+  join; and verification-bound accept/reject/apply restores branded authority from SQLite. Tests cover
+  accepted, rejected, unchanged, pending, crashed, forged, and stale-apply paths without weakening the
+  independent candidate oracle.

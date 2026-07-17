@@ -9,6 +9,7 @@ import type {
   WorkflowScopeCallV17Record,
   WorkflowScopeV17Record,
   WorkflowStructuralJoinLaneV17Record,
+  WorkflowCallArtifactV17Input,
 } from "../persistence/run-database-v17-types.js";
 import {
   WorkflowRunDatabaseV17,
@@ -26,6 +27,7 @@ import {
 } from "./causal-identity-v17.js";
 import type { WorkflowV17CausalReplay } from "./causal-replay-v17.js";
 import { SemanticConcurrencyLimiter } from "./semantic-engine-concurrency.js";
+import type { WorkflowV17ReplayWorkspaceTarget } from "../workspaces/replay-v17.js";
 
 const MAX_REVISION_RETRIES = 16;
 const HASH = /^sha256:[a-f0-9]{64}$/u;
@@ -43,6 +45,7 @@ export type WorkflowV17SemanticEngineFaultPoint =
   | "after-lane-scope-complete"
   | "after-lane-scope-failure"
   | "after-lane-scope-cancelled"
+  | "after-candidate-frozen"
   | "after-structural-join"
   | "after-root-scope-complete"
   | "after-root-scope-failure";
@@ -68,10 +71,44 @@ export interface WorkflowV17MapOptions extends WorkflowV17StructuredOptions {
   key(item: JsonValue, index: number): string | Promise<string>;
 }
 
+export interface WorkflowV17CandidateInvocation {
+  sourceSite: string;
+  title?: string;
+  body(workspace: unknown): JsonValue | Promise<JsonValue>;
+  input: unknown;
+}
+
+export interface WorkflowV17CandidateRuntimeContext {
+  run: WorkflowRunV17Record;
+  operation: WorkflowOperationV17Record;
+  bodyScope: WorkflowScopeV17Record;
+  input: unknown;
+  signal: AbortSignal;
+}
+
+export interface WorkflowV17CandidateRuntimeValue {
+  result: JsonValue;
+  value: unknown;
+  artifacts?: WorkflowCallArtifactV17Input[];
+}
+
+export interface WorkflowV17SemanticCandidateRuntime {
+  semanticInput(context: { run: WorkflowRunV17Record; input: unknown; signal: AbortSignal }): JsonValue | Promise<JsonValue>;
+  existing(context: WorkflowV17CandidateRuntimeContext): WorkflowV17CandidateRuntimeValue | undefined | Promise<WorkflowV17CandidateRuntimeValue | undefined>;
+  open(context: WorkflowV17CandidateRuntimeContext): unknown | Promise<unknown>;
+  freeze(
+    context: WorkflowV17CandidateRuntimeContext & { output: JsonValue; bodyTerminalKey: string },
+  ): WorkflowV17CandidateRuntimeValue | Promise<WorkflowV17CandidateRuntimeValue>;
+  restore(context: WorkflowV17CandidateRuntimeContext & { result: JsonValue }): unknown;
+  abandon(context: WorkflowV17CandidateRuntimeContext, failure: JsonObject): void | Promise<void>;
+}
+
 export interface WorkflowV17EffectIdentity {
   semanticKey: string;
   completionAuthority: Exclude<WorkflowScopeCallV17Record["completionAuthority"], "structural-join">;
   replayPolicy: WorkflowScopeCallV17Record["replayPolicy"];
+  workspace?: WorkflowV17ReplayWorkspaceTarget;
+  postWorkspaceCheckpointId?: string;
 }
 
 export interface WorkflowV17EffectAdapterContext {
@@ -93,7 +130,11 @@ export interface WorkflowV17SemanticEffectAdapter {
   semanticInput(context: Omit<WorkflowV17EffectAdapterContext, "semanticInput" | "operation">): JsonValue | Promise<JsonValue>;
   journalIdentity(context: WorkflowV17EffectAdapterContext & { operation: WorkflowOperationV17Record }): WorkflowV17EffectIdentity | Promise<WorkflowV17EffectIdentity>;
   execute(context: WorkflowV17EffectAdapterContext & { operation: WorkflowOperationV17Record }): JsonValue | Promise<JsonValue>;
-  restore?(context: WorkflowV17EffectRestoreContext): unknown;
+  evidence?(context: WorkflowV17EffectAdapterContext & {
+    operation: WorkflowOperationV17Record;
+    result: JsonValue;
+  }): { artifacts?: WorkflowCallArtifactV17Input[] } | Promise<{ artifacts?: WorkflowCallArtifactV17Input[] }>;
+  restore?(context: WorkflowV17EffectRestoreContext): unknown | Promise<unknown>;
 }
 
 export interface WorkflowV17SequentialFlow {
@@ -107,6 +148,7 @@ export interface WorkflowV17SequentialFlow {
     body: (item: JsonValue, index: number) => JsonValue | Promise<JsonValue>,
     options: WorkflowV17MapOptions,
   ): Promise<JsonValue[]>;
+  candidate(invocation: WorkflowV17CandidateInvocation): Promise<unknown>;
 }
 
 export type WorkflowV17SemanticRunOutcome<T extends JsonValue = JsonValue> =
@@ -119,6 +161,7 @@ export interface WorkflowV17SemanticEngineOptions {
   signal?: AbortSignal;
   operationAdmissionLimit?: number;
   now?: () => Date;
+  candidate?: WorkflowV17SemanticCandidateRuntime;
   faultInjector?: (
     point: WorkflowV17SemanticEngineFaultPoint,
     operation?: WorkflowOperationV17Record,
@@ -212,6 +255,7 @@ export class WorkflowV17SemanticEngine {
   private readonly now: () => Date;
   private readonly operationAdmissionLimit: number;
   private readonly limiter: SemanticConcurrencyLimiter;
+  private readonly controlContexts = new WeakSet<object>();
   private readonly externalAbort?: () => void;
   private running = false;
   private used = false;
@@ -261,11 +305,17 @@ export class WorkflowV17SemanticEngine {
         signal: this.controller.signal,
         branchLineage: [],
       };
+      this.controlContexts.add(scope);
       try {
         const raw = await this.storage.run(scope, async () => await body(this.flowApi()));
         if (this.fatalFault !== undefined) throw this.fatalFault;
         if (this.controller.signal.aborted) throw this.controller.signal.reason;
         const result = canonical(raw) as T;
+        const pending = this.database.listCandidates().filter(candidate =>
+          candidate.state === "pending" && candidate.changedPaths.length > 0);
+        if (pending.length > 0) {
+          throw new Error(`Workflow completed with ${pending.length} undisposed nonempty candidate${pending.length === 1 ? "" : "s"}`);
+        }
         const terminalKey = scope.previousCallKey;
         await this.completeRootScope(scope, terminalKey);
         await this.transitionRun("completed", undefined, terminalKey);
@@ -317,7 +367,18 @@ export class WorkflowV17SemanticEngine {
         body: (item: JsonValue, index: number) => JsonValue | Promise<JsonValue>,
         options: WorkflowV17MapOptions,
       ): Promise<JsonValue[]> => await this.map(items, body, options),
+      candidate: async (invocation: WorkflowV17CandidateInvocation): Promise<unknown> =>
+        await this.candidate(invocation),
     });
+  }
+
+  currentControlContext(): object {
+    return this.scope();
+  }
+
+  runInControlContext<T>(context: object, body: () => T): T {
+    if (!this.controlContexts.has(context)) throw new TypeError("Unknown workflow v17 semantic control context");
+    return this.storage.run(context as CursorScope, body);
   }
 
   private async effect(kind: WorkflowV17EffectKind, invocation: WorkflowV17EffectInvocation): Promise<unknown> {
@@ -347,7 +408,7 @@ export class WorkflowV17SemanticEngine {
     }), kind);
 
     if (operation.status === "completed" || operation.status === "failed") {
-      return this.restoreCommitted(scope, adapter, invocation.input, semanticInput, operation, identity);
+      return await this.restoreCommitted(scope, adapter, invocation.input, semanticInput, operation, identity);
     }
     if (operation.status !== "running" && operation.status !== "waiting") {
       throw new WorkflowV17SemanticDriftError(
@@ -368,12 +429,13 @@ export class WorkflowV17SemanticEngine {
         semanticKey: identity.semanticKey,
         completionAuthority: identity.completionAuthority,
         replayPolicy: identity.replayPolicy,
+        ...(identity.workspace ? { workspace: identity.workspace } : {}),
         at: this.timestamp(),
       });
       if (decision.kind === "hit") {
         const current = this.database.readOperation(operation.operationId)!;
         await this.fault("after-operation-complete", current);
-        return this.restoreCommitted(scope, adapter, invocation.input, semanticInput, current, identity);
+        return await this.restoreCommitted(scope, adapter, invocation.input, semanticInput, current, identity);
       }
     }
 
@@ -400,7 +462,8 @@ export class WorkflowV17SemanticEngine {
       if (scope.signal.aborted) throw error;
       const failure = failureFromError(error, kind);
       const settled = await this.settle(operation, {
-        ...identity,
+        semanticKey: identity.semanticKey,
+        completionAuthority: identity.completionAuthority,
         replayPolicy: "never",
       }, { outcome: "failure", failure });
       await this.fault("after-effect-settled", operation);
@@ -478,6 +541,140 @@ export class WorkflowV17SemanticEngine {
     );
     if (!Array.isArray(result)) throw new Error("Workflow v17 map produced an invalid result");
     return result;
+  }
+
+  private async candidate(invocation: WorkflowV17CandidateInvocation): Promise<unknown> {
+    const runtime = this.options.candidate;
+    if (!runtime) throw new Error("Workflow v17 candidate runtime is unavailable");
+    if (!invocation || typeof invocation.body !== "function") {
+      throw new TypeError("Workflow v17 candidate body must be a callback");
+    }
+    const parent = this.scope();
+    if (parent.signal.aborted) throw parent.signal.reason;
+    const semanticInput = canonical(await runtime.semanticInput({
+      run: this.database.readRun(), input: invocation.input, signal: parent.signal,
+    }));
+    const cursor = parent.cursor++;
+    const claimed = await this.claim(parent, cursor, "candidate", invocation, stableHash(semanticInput));
+    const operation = claimed.operation;
+    if (claimed.claimed) await this.fault("after-operation-claim", operation);
+    const semanticKey = stableHash({
+      formatVersion: 1,
+      kind: "workflow-v17-candidate-join",
+      semanticInputHash: operation.semanticInputHash,
+      contextIdentityHash: this.database.readRun().contextIdentityHash,
+    });
+    const policyHash = stableHash({
+      formatVersion: 1,
+      kind: "workflow-v17-candidate-policy",
+      semanticInput,
+    });
+    if (operation.status === "completed" || operation.status === "failed") {
+      const restored = this.restoreCandidateStructure(parent, operation, semanticKey, policyHash);
+      if (restored.failure) throw new WorkflowV17RecordedStructuralError(operation.path, restored.failure);
+      return runtime.restore({
+        run: this.database.readRun(), operation, bodyScope: restored.bodyScope,
+        input: invocation.input, signal: parent.signal, result: restored.result!,
+      });
+    }
+    if (operation.status !== "running" && operation.status !== "waiting") {
+      throw new WorkflowV17SemanticDriftError(
+        `Workflow v17 candidate ${operation.path} cannot resume from ${operation.status}`,
+        operation.path,
+      );
+    }
+    const bodyScope = await this.preclaimCandidateBody(parent, operation);
+    const context: WorkflowV17CandidateRuntimeContext = {
+      run: this.database.readRun(), operation, bodyScope, input: invocation.input, signal: parent.signal,
+    };
+    const existing = await runtime.existing(context);
+    if (existing) {
+      const joinKey = await this.completeCandidateJoin(
+        parent, operation, bodyScope, semanticKey, policyHash, existing,
+      );
+      parent.previousCallKey = joinKey;
+      await this.fault("after-structural-join", operation);
+      return existing.value;
+    }
+    if (bodyScope.status !== "active") {
+      throw new WorkflowV17SemanticDriftError(
+        `Workflow v17 candidate body ${bodyScope.path} has no frozen authority`,
+        operation.path,
+      );
+    }
+    const workspace = await runtime.open(context);
+    const bodyContext: CursorScope = {
+      record: bodyScope,
+      cursor: 0,
+      previousCallKey: bodyScope.seedKey,
+      signal: parent.signal,
+      branchLineage: [...parent.branchLineage],
+    };
+    this.controlContexts.add(bodyContext);
+    try {
+      const output = canonical(await this.storage.run(bodyContext, async () =>
+        await invocation.body(workspace)));
+      if (this.fatalFault !== undefined) throw this.fatalFault;
+      if (parent.signal.aborted) throw parent.signal.reason;
+      const frozen = await runtime.freeze({
+        ...context,
+        run: this.database.readRun(),
+        output,
+        bodyTerminalKey: bodyContext.previousCallKey,
+      });
+      await this.fault("after-candidate-frozen", operation);
+      const currentBody = this.database.readScope(bodyScope.scopeId)!;
+      if (currentBody.status !== "completed" || currentBody.terminalKey !== bodyContext.previousCallKey) {
+        throw new WorkflowV17SemanticDriftError("Workflow v17 candidate freeze did not settle its body scope");
+      }
+      const joinKey = await this.completeCandidateJoin(
+        parent, operation, currentBody, semanticKey, policyHash, frozen,
+      );
+      parent.previousCallKey = joinKey;
+      await this.fault("after-structural-join", operation);
+      return frozen.value;
+    } catch (error) {
+      if (isPassthrough(error) || error instanceof WorkflowRunDatabaseV17AdmissionError) throw error;
+      if (this.fatalFault !== undefined) throw this.fatalFault;
+      if (parent.signal.aborted) throw error;
+      const failure = failureFromError(error);
+      let currentBody = this.database.readScope(bodyScope.scopeId)!;
+      if (currentBody.status === "active") {
+        const terminalKey = failedScopeTerminal(bodyContext.previousCallKey, failure);
+        await this.completeScope(currentBody, "failed", terminalKey, failure);
+        currentBody = this.database.readScope(bodyScope.scopeId)!;
+      }
+      await runtime.abandon({ ...context, run: this.database.readRun(), bodyScope: currentBody }, failure);
+      const lanes = [{
+        laneKey: "candidate",
+        scopeId: currentBody.scopeId,
+        terminalKey: currentBody.terminalKey!,
+        outcome: currentBody.status === "cancelled" ? "cancelled" as const : "failure" as const,
+      }];
+      const structural = structuralFailure("candidate", "candidate", failure);
+      const joinKey = workflowV17StructuralJoinKey({
+        previousCallKey: parent.previousCallKey,
+        operation: workflowV17OperationIdentity(operation),
+        semanticKey,
+        policyHash,
+        outputOrder: ["candidate"],
+        lanes,
+        outcome: "failure",
+        failure: structural,
+      });
+      await this.completeFailedStructure(operation, {
+        previousCallKey: parent.previousCallKey,
+        semanticKey,
+        policyHash,
+        outputOrder: ["candidate"],
+        lanes,
+        joinKey,
+        failure: structural,
+      });
+      parent.previousCallKey = joinKey;
+      await this.fault("after-structural-join", operation);
+      throw new WorkflowV17RecordedStructuralError(operation.path, structural);
+    }
   }
 
   private async runStructure(
@@ -609,19 +806,52 @@ export class WorkflowV17SemanticEngine {
     return structuredClone(operation.result);
   }
 
-  private restoreCommitted(
+  private restoreCandidateStructure(
+    parent: CursorScope,
+    operation: WorkflowOperationV17Record,
+    semanticKey: string,
+    policyHash: string,
+  ): { bodyScope: WorkflowScopeV17Record; result?: JsonValue; failure?: JsonObject } {
+    const call = this.database.readScopeCall(operation.operationId);
+    const join = this.database.readStructuralJoin(operation.operationId);
+    const [bodyScope] = this.database.listChildScopes(operation.operationId);
+    if (!call || !join || !bodyScope || join.kind !== "candidate"
+      || call.previousCallKey !== parent.previousCallKey || call.semanticKey !== semanticKey
+      || call.completionAuthority !== "structural-join" || join.policyHash !== policyHash
+      || !equalStrings(join.outputOrder, ["candidate"]) || join.joinKey !== call.callKey
+      || join.lanes.length !== 1 || join.lanes[0]!.scopeId !== bodyScope.scopeId) {
+      throw new WorkflowV17SemanticDriftError(
+        `Workflow v17 same-run candidate changed identity at ${operation.path}`,
+        operation.path,
+      );
+    }
+    parent.previousCallKey = call.callKey;
+    if (call.outcome === "failure") {
+      if (operation.status !== "failed" || call.replayPolicy !== "never" || !operation.failure) {
+        throw new WorkflowV17SemanticDriftError(`Workflow v17 failed candidate is corrupt at ${operation.path}`);
+      }
+      return { bodyScope, failure: operation.failure };
+    }
+    if (operation.status !== "completed" || operation.result === undefined) {
+      throw new WorkflowV17SemanticDriftError(`Workflow v17 completed candidate is corrupt at ${operation.path}`);
+    }
+    return { bodyScope, result: structuredClone(operation.result) };
+  }
+
+  private async restoreCommitted(
     scope: CursorScope,
     adapter: WorkflowV17SemanticEffectAdapter,
     input: unknown,
     semanticInput: JsonValue,
     operation: WorkflowOperationV17Record,
     identity: WorkflowV17EffectIdentity,
-  ): unknown {
+  ): Promise<unknown> {
     const call = this.database.readScopeCall(operation.operationId);
     if (!call || call.previousCallKey !== scope.previousCallKey || call.semanticKey !== identity.semanticKey
       || call.completionAuthority !== identity.completionAuthority
       || (call.outcome === "success" && call.replayPolicy !== identity.replayPolicy)
-      || (call.outcome === "failure" && call.replayPolicy !== "never")) {
+      || (call.outcome === "success" && call.postWorkspaceCheckpointId !== identity.postWorkspaceCheckpointId)
+      || (call.outcome === "failure" && (call.replayPolicy !== "never" || call.postWorkspaceCheckpointId !== undefined))) {
       throw new WorkflowV17SemanticDriftError(
         `Workflow v17 same-run call changed identity at ${operation.path}`,
         operation.path,
@@ -630,7 +860,7 @@ export class WorkflowV17SemanticEngine {
     scope.previousCallKey = call.callKey;
     if (call.outcome === "failure") throw new WorkflowV17RecordedEffectError(operation.path, operation.failure!);
     const result = structuredClone(operation.result!);
-    return adapter.restore?.({
+    return await adapter.restore?.({
       run: this.database.readRun(),
       input,
       semanticInput,
@@ -677,6 +907,61 @@ export class WorkflowV17SemanticEngine {
     throw new Error(`Could not preclaim workflow v17 ${kind} lanes`);
   }
 
+  private async preclaimCandidateBody(
+    parent: CursorScope,
+    operation: WorkflowOperationV17Record,
+  ): Promise<WorkflowScopeV17Record> {
+    const spec = {
+      kind: "candidate-body" as const,
+      seedKey: workflowV17LaneSeed({
+        parentPreviousCallKey: parent.previousCallKey,
+        ownerOperationPath: operation.path,
+        ownerKind: "candidate",
+        childKind: "candidate-body",
+      }),
+    };
+    for (let retry = 0; retry < MAX_REVISION_RETRIES; retry++) {
+      try {
+        const result = this.database.createChildScopes(
+          this.database.readRun().revision,
+          operation.operationId,
+          [spec],
+          this.timestamp(),
+        );
+        if (result.created) await this.fault("after-child-scopes-preclaimed", operation);
+        return result.scopes[0]!;
+      } catch (error) {
+        if (error instanceof WorkflowRunDatabaseV17RevisionConflictError) continue;
+        throw error;
+      }
+    }
+    throw new Error("Could not preclaim workflow v17 candidate body");
+  }
+
+  private async completeCandidateJoin(
+    parent: CursorScope,
+    operation: WorkflowOperationV17Record,
+    bodyScope: WorkflowScopeV17Record,
+    semanticKey: string,
+    policyHash: string,
+    value: WorkflowV17CandidateRuntimeValue,
+  ): Promise<string> {
+    return await this.completeSuccessfulStructure(operation, {
+      previousCallKey: parent.previousCallKey,
+      semanticKey,
+      policyHash,
+      outputOrder: ["candidate"],
+      lanes: [{
+        laneKey: "candidate",
+        scopeId: bodyScope.scopeId,
+        terminalKey: bodyScope.terminalKey!,
+        outcome: "success",
+      }],
+      result: value.result,
+      ...(value.artifacts?.length ? { artifacts: value.artifacts } : {}),
+    });
+  }
+
   private async bindCandidateWorkspaceLanes(
     scope: CursorScope,
     workspaceIds: readonly string[],
@@ -685,7 +970,7 @@ export class WorkflowV17SemanticEngine {
       throw new TypeError("Workflow v17 candidate workspace identities must be unique");
     }
     for (const workspaceId of workspaceIds) {
-      if (typeof workspaceId !== "string" || !/^[a-z][a-z0-9-]{0,127}$/u.test(workspaceId)) {
+      if (typeof workspaceId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:@/+~-]{0,255}$/u.test(workspaceId)) {
         throw new TypeError("Workflow v17 candidate workspace identity is invalid");
       }
       for (const binding of scope.branchLineage) {
@@ -778,6 +1063,7 @@ export class WorkflowV17SemanticEngine {
         { groupOperationId: lane.groupOperationId, laneKey: lane.key },
       ],
     };
+    this.controlContexts.add(scope);
     try {
       const value = canonical(await this.storage.run(scope, async () => await lane.body()));
       if (this.fatalFault !== undefined) throw this.fatalFault;
@@ -869,13 +1155,14 @@ export class WorkflowV17SemanticEngine {
       outputOrder: string[];
       lanes: Array<Omit<WorkflowStructuralJoinLaneV17Record, "ordinal">>;
       result: JsonValue;
+      artifacts?: WorkflowCallArtifactV17Input[];
     },
   ): Promise<string> {
     if (this.options.replay) {
       const completed = this.options.replay.completeStructuralJoin({
         operationId: operation.operationId,
         ...input,
-        kind: operation.kind as "parallel" | "map",
+        kind: operation.kind as "parallel" | "map" | "candidate",
         at: this.timestamp(),
       });
       return completed.joinKey;
@@ -897,12 +1184,13 @@ export class WorkflowV17SemanticEngine {
           previousCallKey: input.previousCallKey,
           semanticKey: input.semanticKey,
           callKey: joinKey,
-          kind: operation.kind as "parallel" | "map",
+          kind: operation.kind as "parallel" | "map" | "candidate",
           policyHash: input.policyHash,
           joinKey,
           outputOrder: input.outputOrder,
           lanes: input.lanes,
           result: input.result,
+          ...(input.artifacts?.length ? { artifacts: input.artifacts } : {}),
           at: this.timestamp(),
         });
         return joinKey;
@@ -936,7 +1224,7 @@ export class WorkflowV17SemanticEngine {
           previousCallKey: input.previousCallKey,
           semanticKey: input.semanticKey,
           callKey: input.joinKey,
-          kind: operation.kind as "parallel" | "map",
+          kind: operation.kind as "parallel" | "map" | "candidate",
           policyHash: input.policyHash,
           joinKey: input.joinKey,
           outputOrder: input.outputOrder,
@@ -974,6 +1262,12 @@ export class WorkflowV17SemanticEngine {
       replayPolicy: settlement.replayPolicy,
       result: terminal,
     });
+    const evidence = settlement.outcome === "success" && adapter.evidence
+      ? await adapter.evidence({
+          run: this.database.readRun(), input, semanticInput, operation,
+          result: settlement.result!, signal: scope.signal,
+        })
+      : undefined;
     let completed: WorkflowOperationV17Record | undefined;
     for (let retry = 0; retry < MAX_REVISION_RETRIES; retry++) {
       try {
@@ -987,6 +1281,10 @@ export class WorkflowV17SemanticEngine {
           completionAuthority: settlement.completionAuthority,
           replayPolicy: settlement.replayPolicy,
           ...(settlement.outcome === "success" ? { result: settlement.result! } : { failure: settlement.failure! }),
+          ...(settlement.postWorkspaceCheckpointId ? {
+            postWorkspaceCheckpointId: settlement.postWorkspaceCheckpointId,
+          } : {}),
+          ...(evidence?.artifacts?.length ? { artifacts: evidence.artifacts } : {}),
           at: this.timestamp(),
         });
         break;
@@ -1006,8 +1304,11 @@ export class WorkflowV17SemanticEngine {
       semanticKey: settlement.semanticKey,
       completionAuthority: settlement.completionAuthority,
       replayPolicy: settlement.outcome === "success" ? settlement.replayPolicy : "never",
+      ...(settlement.outcome === "success" && settlement.postWorkspaceCheckpointId ? {
+        postWorkspaceCheckpointId: settlement.postWorkspaceCheckpointId,
+      } : {}),
     };
-    return this.restoreCommitted(scope, adapter, input, semanticInput, completed, identity);
+    return await this.restoreCommitted(scope, adapter, input, semanticInput, completed, identity);
   }
 
   private async claim(
@@ -1059,6 +1360,9 @@ export class WorkflowV17SemanticEngine {
           completionAuthority: identity.completionAuthority,
           replayPolicy: identity.replayPolicy,
           ...(terminal.outcome === "success" ? { result: terminal.result } : { failure: terminal.failure }),
+          ...(terminal.outcome === "success" && identity.postWorkspaceCheckpointId ? {
+            postWorkspaceCheckpointId: identity.postWorkspaceCheckpointId,
+          } : {}),
           at: this.timestamp(),
         });
       } catch (error) {
@@ -1205,7 +1509,11 @@ function normalizeIdentity(value: WorkflowV17EffectIdentity, kind: WorkflowV17Ef
     throw new TypeError("Workflow v17 apply adapter must use never replay policy");
   }
   if (value.replayPolicy === "workspace") {
-    throw new TypeError(`Workflow v17 ${kind} workspace effects require the later evidence-adapter phase`);
+    if (!value.workspace || !value.postWorkspaceCheckpointId) {
+      throw new TypeError(`Workflow v17 ${kind} workspace effect lacks replay/checkpoint authority`);
+    }
+  } else if (value.workspace || value.postWorkspaceCheckpointId) {
+    throw new TypeError(`Workflow v17 ${kind} non-workspace effect carries workspace authority`);
   }
   return value;
 }
@@ -1219,6 +1527,8 @@ function assertSettlementIdentity(
   if (settlement.semanticKey !== identity.semanticKey
     || settlement.completionAuthority !== identity.completionAuthority
     || (settlement.outcome === "success" && settlement.replayPolicy !== identity.replayPolicy)
+    || (settlement.outcome === "success"
+      && settlement.postWorkspaceCheckpointId !== identity.postWorkspaceCheckpointId)
     || (settlement.outcome === "failure" && settlement.replayPolicy !== "never")
     || (expectedOutcome !== undefined && settlement.outcome !== expectedOutcome)) {
     throw new WorkflowV17SemanticDriftError(
@@ -1382,7 +1692,7 @@ function branchError(failure: JsonObject): JsonObject {
 }
 
 function structuralFailure(
-  kind: "parallel" | "map",
+  kind: "parallel" | "map" | "candidate",
   laneKey: string,
   cause: JsonObject,
 ): JsonObject {

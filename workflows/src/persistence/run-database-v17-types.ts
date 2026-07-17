@@ -52,6 +52,7 @@ export interface WorkflowRunV17Record {
   resourcesHash: string;
   projectSnapshotHash: string;
   routeSnapshotHash: string;
+  staticResourcesHash: string;
   contextIdentityHash: string;
   launch: {
     authority: "model" | "user" | "rpc";
@@ -155,6 +156,7 @@ export interface WorkflowEffectSettlementV17Record {
   replayPolicy: WorkflowScopeCallV17Record["replayPolicy"];
   result?: JsonValue;
   failure?: JsonObject;
+  postWorkspaceCheckpointId?: string;
   settledAt: string;
 }
 
@@ -359,6 +361,7 @@ export interface SettleWorkflowEffectV17Input {
   replayPolicy: WorkflowScopeCallV17Record["replayPolicy"];
   result?: JsonValue;
   failure?: JsonObject;
+  postWorkspaceCheckpointId?: string;
   at: string;
 }
 
