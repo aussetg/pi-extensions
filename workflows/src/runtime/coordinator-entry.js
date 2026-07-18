@@ -21,8 +21,8 @@ registerHooks({
 });
 
 try {
-  const { coordinatorMain } = await import("./run-coordinator.ts");
-  process.exitCode = await coordinatorMain(process.argv.slice(2));
+  const { workflowCoordinatorMain } = await import("./run-coordinator.ts");
+  process.exitCode = await workflowCoordinatorMain(process.argv.slice(2));
 } catch (error) {
   const message = error instanceof Error ? error.stack ?? error.message : String(error);
   process.stderr.write(`${Array.from(message).slice(0, 4_096).join("")}\n`);

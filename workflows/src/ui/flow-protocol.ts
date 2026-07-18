@@ -2,12 +2,11 @@ import type { JsonObject, JsonValue } from "../types.js";
 import { stableJson } from "../utils/stable-json.js";
 import { stableHash } from "../utils/hashes.js";
 import type { WorkflowRunProjection } from "../projection/types.js";
-import type { ArtifactRef } from "../runtime/durable-types.js";
 
 export const FLOW_PROTOCOL_MAX_BYTES = 256 * 1024;
 
 export interface FlowChallengeProjection {
-  kind: "checkpoint-response" | "apply-approval" | "apply-rejection" | "run-deletion";
+  kind: "ask-response" | "apply-approval" | "apply-rejection" | "run-deletion";
   runId: string;
   shortRunId: string;
   revision: number;
@@ -17,7 +16,6 @@ export interface FlowChallengeProjection {
 }
 
 export interface FlowProtocolEnvelope {
-  formatVersion: 1;
   kind: string;
   ok: boolean;
   at: string;
@@ -29,23 +27,19 @@ export interface FlowProtocolEnvelope {
 }
 
 export interface FlowToolResultDetails {
-  formatVersion?: 1;
   runId?: string;
   projection?: WorkflowRunProjection;
   resultPreview?: string;
-  resultArtifactId?: string;
-  resultArtifact?: ArtifactRef;
   handoff?: boolean;
   challenge?: FlowChallengeProjection;
   error?: { name: string; message: string };
 }
 
-export function createFlowEnvelope(input: Omit<FlowProtocolEnvelope, "formatVersion" | "at">): FlowProtocolEnvelope {
-  const envelope: FlowProtocolEnvelope = { formatVersion: 1, at: new Date().toISOString(), ...input };
+export function createFlowEnvelope(input: Omit<FlowProtocolEnvelope, "at">): FlowProtocolEnvelope {
+  const envelope: FlowProtocolEnvelope = { at: new Date().toISOString(), ...input };
   const bytes = Buffer.byteLength(stableJson(envelope));
   if (bytes <= FLOW_PROTOCOL_MAX_BYTES) return Object.freeze(envelope);
   let bounded: FlowProtocolEnvelope = {
-    formatVersion: 1,
     kind: envelope.kind,
     ok: envelope.ok,
     at: envelope.at,
@@ -68,7 +62,6 @@ export function createFlowEnvelope(input: Omit<FlowProtocolEnvelope, "formatVers
   }
   if (Buffer.byteLength(stableJson(bounded)) > FLOW_PROTOCOL_MAX_BYTES) {
     bounded = {
-      formatVersion: 1,
       kind: envelope.kind,
       ok: false,
       at: envelope.at,
@@ -83,26 +76,4 @@ export function flowEnvelopeJson(envelope: FlowProtocolEnvelope): string {
   const text = stableJson(envelope);
   if (Buffer.byteLength(text) > FLOW_PROTOCOL_MAX_BYTES) throw new Error("Flow protocol envelope exceeds its byte bound");
   return text;
-}
-
-export function boundFlowToolResultDetails(details: FlowToolResultDetails): FlowToolResultDetails {
-  if (Buffer.byteLength(stableJson(details)) <= FLOW_PROTOCOL_MAX_BYTES) return details;
-  let bounded: FlowToolResultDetails = { ...details };
-  delete bounded.resultPreview;
-  if (bounded.challenge?.request) {
-    bounded.challenge = {
-      ...bounded.challenge,
-      request: { omitted: true, hash: stableHash(bounded.challenge.request), reason: "challenge request exceeds tool-detail bound" },
-    };
-  }
-  if (Buffer.byteLength(stableJson(bounded)) > FLOW_PROTOCOL_MAX_BYTES) delete bounded.challenge;
-  if (Buffer.byteLength(stableJson(bounded)) > FLOW_PROTOCOL_MAX_BYTES) {
-    bounded = {
-      formatVersion: 1,
-      ...(details.runId ? { runId: details.runId } : {}),
-      ...(details.projection ? { projection: details.projection } : {}),
-      error: { name: "FlowProjectionLimitError", message: "Tool details exceeded their serialized byte bound" },
-    };
-  }
-  return bounded;
 }

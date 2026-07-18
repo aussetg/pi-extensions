@@ -17,14 +17,15 @@ The `workflow` tool accepts only an installed name, JSON arguments, and delivery
 profiles are unavailable until Pi reports project trust.
 
 Static validation derives profile, command, measurement, verification, candidate, network,
-checkpoint, and apply authority before launch. Workflow source has no import, process, filesystem,
-socket, clock, random, code-generation, or workflow-launch primitive. Reviewed control JavaScript
-runs in a separate memory-bounded child with frozen globals, disabled string/Wasm code generation,
-bounded typed messages, and a synchronous-segment watchdog.
+human-interaction, and apply authority before launch. Workflow source has no ambient import, process,
+filesystem, socket, clock, random, code-generation, or workflow-launch primitive. Reviewed control
+JavaScript runs in a separate memory-bounded child with frozen globals, disabled string/Wasm code
+generation, bounded typed messages, and a synchronous-segment watchdog.
 
 Purity and capture analysis follows ordinary local helper bodies and helper-return aliases. Only
-nested parallel, fan-out, and candidate callbacks start a separately checked capture boundary;
-sequential stage and loop callbacks remain inside their enclosing boundary.
+keyed `parallel`, keyed `map`, and candidate callbacks start a separately checked capture boundary.
+Loops, branches, helpers, and error handling are ordinary TypeScript; durable identity comes from
+scope-local encounter cursors rather than authored scheduler nodes or operation IDs.
 
 ## Agent completion and control
 
@@ -99,46 +100,54 @@ and the agent hierarchy pauses rather than repeating an effect with an unknown o
 
 ## SQLite and process ownership
 
-Each run has one schema-version-3 SQLite database configured with WAL, foreign keys, full
-synchronization, and a bounded busy timeout. State transitions use short `BEGIN IMMEDIATE`
-transactions and expected revisions. Unknown schema versions are rejected; there are no migrations.
+Each run has one SQLite database configured with WAL, foreign keys, full synchronization, and a
+bounded busy timeout. State transitions use short `BEGIN IMMEDIATE` transactions and expected
+revisions. Data that does not match the current tables and invariants is rejected as corrupt.
 
 Candidate measurement observations remain pending until the exact measurement-bound `accept` or
 `reject` operation completes. That operation atomically records the disposition and transitions the
 whole cohort. Acceptance advances `current` and the grouped accepted-best reference together;
 rejection preserves the prior accepted reference.
 
-The coordinator is a deterministic systemd user service. Agents, commands, verifications, and
-measurements are separate transient services. The run's stored safety policy supplies `MemoryMax`,
-`TasksMax`, CPU quota/weight, output, and command-duration limits; service classes retain distinct
-I/O weights and bounded stop timeouts. Swap/zswap stay disabled, kill mode is mixed, and inactive
-units are collected. Cancellation sends TERM, waits, then sends KILL. Cgroup CPU, I/O, memory,
-process, and pressure data is read before collection.
+The coordinator is a deterministic systemd user service with fixed host limits. Agents, commands,
+verifications, and measurements are separate transient services. The run's stored safety policy
+supplies their `MemoryMax`, `TasksMax`, CPU quota/weight, output, and command-duration limits; service
+classes retain distinct I/O weights and bounded stop timeouts. Swap/zswap stay disabled, kill mode is
+mixed, and inactive units are collected. Cancellation sends TERM, waits, then sends KILL. Cgroup CPU,
+I/O, memory, process, and pressure data is read before collection.
 
-SQLite is the ordinary control transport. An interrupted `running` row is paused on reopen rather
-than silently continued. Extension shutdown does not stop services.
+SQLite is the ordinary control transport. Reopen re-executes exact snapshotted TypeScript and consumes
+scope-local calls and durable physical-effect settlements; a settled effect is not repeated. Extension
+shutdown drops only presentation polling and does not stop services.
 
-Prepared runs pin the structured-runtime version, API hash, and reviewed definition hash. A
+Prepared runs pin the TypeScript source transform, API hash, reviewed definition,
+registry exposure policy, launch actor, project trust, static authority, and invocation-selected
+resources. A
 coordinator with a different revision refuses to resume the run before workflow control or effects
 execute; the workflow must be started again under the current revision.
 
 ## Verification, replay, and apply
 
 Verification binds candidate tree, lineage, write scope, project snapshot, profile, environment,
-ordered gate evidence, and reviewer finish receipt. Verification commands run against an independent
-candidate materialization. Source contamination or stale binding prevents a passed receipt.
+ordered gate evidence, and reviewer finish receipt. Verification commands are networkless read-only
+sandboxes over the frozen candidate; the adversarial reviewer receives only reviewed read tools.
+Source contamination or stale binding prevents a passed receipt.
 
-Cross-revision replay is explicit and prefix-only. The key includes previous journal key, operation
-identity, semantic prompt, profile and route, tool/finish schemas, input artifact digests, network
-mode, and pre-workspace/context identity. Credentials, executable bytes, cgroup policy, temporary
-paths, and wall time are excluded. Incomplete calls and missing finish receipts never replay.
-Mutating replay must restore the exact post-workspace checkpoint.
+Cross-revision replay is explicit, causal, and prefix-only per sequential scope. Branch and map lanes
+match independently by key and seed; deterministic structural joins bind target order, failure policy,
+lane terminal keys, and outcomes. Effect identity includes semantic input, reviewed resources,
+artifacts, workspace/context authority, and the prior local call key. Credentials, cgroup policy,
+temporary paths, display titles, source locations, and wall time are excluded. Incomplete, failed,
+and explicitly nonreplayable calls never replay. Mutating replay must restore the exact post-workspace
+checkpoint before its imported call commits.
 
-`flow.apply` always enters a human checkpoint. The challenge binds run revision, candidate,
-verification, live-project drift, and exact preimage/postimage plan. A stale or changed challenge is
-rejected. Apply is serialized per repository, repeats drift/preflight checks immediately before
-mutation, touches only the verified delta, and commits a receipt only after exact postimages are
-observed. There is no model approval path and no unattended live-project mutation.
+`flow.apply` always enters an exact human approval interaction. The challenge binds the operation,
+candidate tree, verification binding, changed paths, and observed live-project tree. A stale or
+changed challenge is rejected. Apply is serialized across coordinator processes with a kernel flock
+whose holder dies with its coordinator. Under that lock it repeats tree/drift checks, rejects symlink
+ancestors, touches only the verified delta, fsyncs changed files/directories, and returns a receipt
+only after the complete live tree equals the candidate. Re-entry after a crash is idempotent. There
+is no model approval path and no unattended live-project mutation.
 
 ## Required host
 

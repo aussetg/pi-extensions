@@ -1,43 +1,50 @@
-import type { RunDatabaseReader } from "../persistence/run-database-reader.js";
+import type { WorkflowRunDatabaseReader } from "../persistence/run-database.js";
 import type { JsonObject } from "../types.js";
-import { projectOperationRecords } from "./run-projection.js";
 import {
   WORKFLOW_PROJECTION_LIMITS as LIMITS,
   type WorkflowInspectorPage,
   type WorkflowInspectorPageKind,
-  type WorkflowMeasurementPageEntry,
 } from "./types.js";
 
-export interface WorkflowInspectorPageOptions {
-  cursor?: string;
-  limit?: number;
-}
+export interface WorkflowInspectorPageOptions { cursor?: string; limit?: number }
 
-/** Every branch is one keyset query with LIMIT page-size + 1. */
 export function readWorkflowInspectorPage(
-  reader: RunDatabaseReader,
+  reader: WorkflowRunDatabaseReader,
   kind: WorkflowInspectorPageKind,
   options: WorkflowInspectorPageOptions = {},
 ): WorkflowInspectorPage {
   const limit = pageLimit(options.limit);
   const cursor = decodeCursor(kind, options.cursor);
-  return reader.readSnapshot((snapshot) => {
-    const run = snapshot.readRun();
+  return reader.readSnapshot(database => {
+    const run = database.readRun();
     switch (kind) {
       case "operations": {
-        const after = integerCursor(cursor, -1);
-        const rows = snapshot.listOperations({ afterOrdinal: after, limit: limit + 1 });
-        return page(run.runId, run.revision, kind, projectOperationRecords(rows).map((entry) => boundedEntry(entry)), limit, (entry: any) => entry.ordinal);
+        const rows = database.listOperations({ afterOrdinal: integerCursor(cursor, -1), limit: limit + 1 })
+          .map(operation => boundedEntry({
+            ...operation,
+            scope: database.readScope(operation.scopeId),
+            call: database.readScopeCall(operation.operationId),
+            join: database.readStructuralJoin(operation.operationId),
+            artifacts: database.listOperationArtifacts(operation.operationId),
+          }));
+        return page(run.runId, run.revision, kind, rows, limit, entry => (entry as any).ordinal);
       }
-      case "logs": {
-        const after = integerCursor(cursor, 0);
-        const rows = snapshot.listAgentProgressHistory({ afterSequence: after, limit: limit + 1 })
-          .map((entry) => boundedEntry(entry));
-        return page(run.runId, run.revision, kind, rows, limit, (entry: any) => entry.sequence);
+      case "events": {
+        const rows = database.listEvents({ afterSequence: integerCursor(cursor, 0), limit: limit + 1 })
+          .map(boundedEntry);
+        return page(run.runId, run.revision, kind, rows, limit, entry => (entry as any).sequence);
+      }
+      case "attempts": {
+        const after = pairCursor(cursor, "createdAt", "attemptId");
+        const rows = database.listAttempts({ ...(after ? { after } : {}), limit: limit + 1 }).map(boundedEntry);
+        return page(run.runId, run.revision, kind, rows, limit, entry => ({
+          createdAt: (entry as any).createdAt,
+          attemptId: (entry as any).attemptId,
+        }));
       }
       case "artifacts": {
-        const after = artifactCursor(cursor);
-        const rows = snapshot.listArtifactsPage({ ...(after ? { after } : {}), limit: limit + 1 }).map((record) => boundedEntry({
+        const after = pairCursor(cursor, "createdAt", "digest");
+        const rows = database.listArtifacts({ ...(after ? { after } : {}), limit: limit + 1 }).map(record => boundedEntry({
           digest: record.digest,
           kind: record.kind,
           mediaType: record.mediaType,
@@ -45,30 +52,62 @@ export function readWorkflowInspectorPage(
           metadata: record.metadata,
           createdAt: record.createdAt,
         }));
-        return page(run.runId, run.revision, kind, rows, limit, (entry: any) => ({ createdAt: entry.createdAt, digest: entry.digest }));
+        return page(run.runId, run.revision, kind, rows, limit, entry => ({
+          createdAt: (entry as any).createdAt,
+          digest: (entry as any).digest,
+        }));
       }
       case "measurements": {
-        const after = pairCursor(cursor);
-        const rows = snapshot.listMeasurementsPage({ ...(after ? { after } : {}), limit: limit + 1 }).map((record): WorkflowMeasurementPageEntry => ({
-          measurementId: record.measurementId,
-          operationId: record.operationId,
-          profileId: record.profileId,
-          ...(record.candidateId ? { candidateId: record.candidateId } : {}),
-          environmentHash: record.environmentHash,
-          observationCount: record.delta.observations.length,
-          sampleCount: record.samples.length,
-          startedAt: record.startedAt,
-          endedAt: record.endedAt,
-        }));
-        return page(run.runId, run.revision, kind, rows, limit, (entry) => ({
-          endedAt: entry.endedAt,
-          measurementId: entry.measurementId,
+        const after = pairCursor(cursor, "createdAt", "measurementId");
+        const rows = database.listMeasurementsPage({ ...(after ? { after } : {}), limit: limit + 1 })
+          .map(measurement => boundedEntry({
+            measurementId: measurement.measurementId,
+            operationId: measurement.operationId,
+            metricSetId: measurement.metricSetId,
+            profileId: measurement.profile.id,
+            profileHash: measurement.profileHash,
+            candidateId: measurement.candidateId ?? null,
+            workspaceTreeHash: measurement.workspaceTreeHash,
+            observations: measurement.observations,
+            sampleCount: measurement.samples.length,
+            artifactDigest: measurement.artifactDigest,
+            createdAt: measurement.createdAt,
+          }));
+        return page(run.runId, run.revision, kind, rows, limit, entry => ({
+          createdAt: (entry as any).createdAt,
+          measurementId: (entry as any).measurementId,
         }));
       }
-      case "events": {
-        const after = integerCursor(cursor, 0);
-        const rows = snapshot.listEvents({ afterSequence: after, limit: limit + 1 }).map((entry) => boundedEntry(entry));
-        return page(run.runId, run.revision, kind, rows, limit, (entry: any) => entry.sequence);
+      case "experiments": {
+        const after = pairCursor(cursor, "createdAt", "experimentId");
+        const rows = database.listExperimentsPage({ ...(after ? { after } : {}), limit: limit + 1 })
+          .map(boundedEntry);
+        return page(run.runId, run.revision, kind, rows, limit, entry => ({
+          createdAt: (entry as any).createdAt,
+          experimentId: (entry as any).experimentId,
+        }));
+      }
+      case "candidates": {
+        const after = pairCursor(cursor, "frozenAt", "candidateId");
+        const rows = database.listCandidatesPage({ ...(after ? { after } : {}), limit: limit + 1 })
+          .map(candidate => boundedEntry({
+            ...candidate,
+            verifications: database.listCandidateVerifications(candidate.candidateId),
+            measurement: database.readCandidateMeasurement(candidate.candidateId) ?? null,
+            apply: database.readCandidateApply(candidate.candidateId) ?? null,
+          }));
+        return page(run.runId, run.revision, kind, rows, limit, entry => ({
+          frozenAt: (entry as any).frozenAt,
+          candidateId: (entry as any).candidateId,
+        }));
+      }
+      case "resources": {
+        const after = cursor === undefined ? "" : stringCursor(cursor);
+        const rows = database.listInvocationResources()
+          .filter(resource => resource.inputPath > after)
+          .slice(0, limit + 1)
+          .map(boundedEntry);
+        return page(run.runId, run.revision, kind, rows, limit, entry => (entry as any).inputPath);
       }
     }
   });
@@ -85,76 +124,77 @@ function page<T>(
   const entries: T[] = [];
   let entryBytes = 2;
   for (const entry of source.slice(0, limit)) {
-    const nextBytes = Buffer.byteLength(JSON.stringify(entry), "utf8") + (entries.length ? 1 : 0);
-    if (entryBytes + nextBytes > LIMITS.pageBytes - 4_096) break;
+    const next = Buffer.byteLength(JSON.stringify(entry), "utf8") + (entries.length ? 1 : 0);
+    if (entryBytes + next > LIMITS.pageBytes - 4_096) break;
     entries.push(entry);
-    entryBytes += nextBytes;
+    entryBytes += next;
   }
   const more = source.length > entries.length;
   const result: WorkflowInspectorPage<any> = {
-    formatVersion: 1,
     runId,
     revision,
     kind,
     entries,
-    ...(more && entries.length > 0 ? { nextCursor: encodeCursor(kind, key(entries.at(-1)!)) } : {}),
+    ...(more && entries.length ? { nextCursor: encodeCursor(kind, key(entries.at(-1)!)) } : {}),
     bytes: 0,
   };
   result.bytes = Buffer.byteLength(JSON.stringify(result), "utf8");
-  if (result.bytes > LIMITS.pageBytes) throw new Error("Inspector page exceeds its serialized byte bound");
+  if (result.bytes > LIMITS.pageBytes) throw new Error("Workflow inspector page exceeds its byte bound");
   return result;
 }
 
 function boundedEntry<T>(entry: T): T | JsonObject {
   if (Buffer.byteLength(JSON.stringify(entry), "utf8") <= LIMITS.pageBytes / 2) return entry;
-  const record = entry as Record<string, unknown>;
-  const identity = Object.fromEntries(
-    ["runId", "sequence", "revision", "type", "operationId", "attemptId", "agentSessionId", "at", "digest", "kind", "mediaType", "bytes", "createdAt"]
-      .flatMap((key) => record[key] === undefined ? [] : [[key, record[key]]]),
-  );
-  return { ...identity, detailOmitted: true } as JsonObject;
+  const value = entry as Record<string, unknown>;
+  return Object.fromEntries([
+    "sequence", "revision", "type", "operationId", "attemptId", "candidateId", "measurementId",
+    "experimentId", "resourceId", "digest", "kind", "status", "createdAt", "frozenAt", "at",
+  ].flatMap(key => value[key] === undefined ? [] : [[key, value[key]]]).concat([["detailOmitted", true]])) as JsonObject;
 }
 
 function encodeCursor(kind: WorkflowInspectorPageKind, value: unknown): string {
-  return Buffer.from(JSON.stringify({ v: 1, kind, value }), "utf8").toString("base64url");
+  return Buffer.from(JSON.stringify({ kind, value }), "utf8").toString("base64url");
 }
 
 function decodeCursor(kind: WorkflowInspectorPageKind, cursor: string | undefined): unknown {
   if (!cursor) return undefined;
-  if (cursor.length > 2_048 || !/^[A-Za-z0-9_-]+$/.test(cursor)) throw new TypeError("Invalid inspector cursor");
+  if (cursor.length > 2_048 || !/^[A-Za-z0-9_-]+$/u.test(cursor)) throw new TypeError("Invalid workflow inspector cursor");
   let value: unknown;
-  try { value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")); } catch { throw new TypeError("Invalid inspector cursor"); }
-  if (!plainRecord(value) || value.v !== 1 || value.kind !== kind || !("value" in value)) {
-    throw new TypeError("Inspector cursor belongs to another page");
+  try { value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")); }
+  catch { throw new TypeError("Invalid workflow inspector cursor"); }
+  if (!plainRecord(value) || Object.keys(value).sort().join(",") !== "kind,value"
+    || value.kind !== kind || !("value" in value)) {
+    throw new TypeError("Workflow inspector cursor belongs to another page");
   }
   return value.value;
 }
 
 function integerCursor(value: unknown, fallback: number): number {
   if (value === undefined) return fallback;
-  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new TypeError("Invalid inspector sequence cursor");
+  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new TypeError("Invalid workflow integer cursor");
   return value as number;
 }
 
-function pairCursor(value: unknown): { endedAt: string; measurementId: string } | undefined {
-  if (value === undefined) return undefined;
-  if (!plainRecord(value) || typeof value.endedAt !== "string" || typeof value.measurementId !== "string") {
-    throw new TypeError("Invalid measurement cursor");
-  }
-  return { endedAt: value.endedAt, measurementId: value.measurementId };
+function stringCursor(value: unknown): string {
+  if (typeof value !== "string") throw new TypeError("Invalid workflow string cursor");
+  return value;
 }
 
-function artifactCursor(value: unknown): { createdAt: string; digest: string } | undefined {
+function pairCursor<A extends string, B extends string>(
+  value: unknown,
+  first: A,
+  second: B,
+): Record<A | B, string> | undefined {
   if (value === undefined) return undefined;
-  if (!plainRecord(value) || typeof value.createdAt !== "string" || typeof value.digest !== "string") {
-    throw new TypeError("Invalid artifact cursor");
+  if (!plainRecord(value) || typeof value[first] !== "string" || typeof value[second] !== "string") {
+    throw new TypeError("Invalid workflow pair cursor");
   }
-  return { createdAt: value.createdAt, digest: value.digest };
+  return { [first]: value[first], [second]: value[second] } as Record<A | B, string>;
 }
 
 function pageLimit(value: number | undefined): number {
   const limit = value ?? 32;
-  if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError("Inspector page limit must be a positive integer");
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError("Workflow inspector page limit must be positive");
   return Math.min(limit, LIMITS.pageEntries);
 }
 

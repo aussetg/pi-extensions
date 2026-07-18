@@ -1,4 +1,4 @@
-import type { StructuredWorkflowRegistry } from "../registry/structured-workflows.js";
+import type { WorkflowRegistry } from "../registry/structured-workflows.js";
 import { FLOW_SUBCOMMANDS } from "./flow-command-parser.js";
 
 interface Completion {
@@ -7,7 +7,7 @@ interface Completion {
   description?: string;
 }
 
-export function createFlowArgumentCompletions(registry: StructuredWorkflowRegistry) {
+export function createFlowArgumentCompletions(registry: WorkflowRegistry) {
   return (argumentPrefix: string): Completion[] | null => {
     const { complete, current } = partialTokens(argumentPrefix);
     if (complete.length === 0) return prefixed(FLOW_SUBCOMMANDS, current);

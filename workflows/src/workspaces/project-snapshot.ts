@@ -40,7 +40,6 @@ export type ProjectSnapshotEntry =
  * the changing live source was observed at one global atomic instant.
  */
 export interface ProjectSnapshotManifest {
-  formatVersion: 1;
   sourceRoot: string;
   cwd: string;
   rootMode: number;
@@ -78,7 +77,7 @@ interface NodeResult {
 
 const REFLINK_FLAGS = fs.constants.COPYFILE_EXCL | fs.constants.COPYFILE_FICLONE_FORCE;
 const BTRFS_SUPER_MAGIC = 0x9123683e;
-const WORKFLOW_STATE_DIRS = new Set(["workflow-runs", "workflow-drafts"]);
+const WORKFLOW_STATE_DIRS = new Set(["workflow-runs", "workflow-drafts", "workflow-locks"]);
 const VCS_INTERNAL_NAMES = new Set([".git", ".hg", ".svn", ".jj", ".bzr", "_darcs", "CVS"]);
 
 /**
@@ -120,8 +119,8 @@ export async function captureProjectSnapshot(
     lstatBigInt(destinationParent),
   ]);
   if (
-    filesystemType(sourceFilesystem.type) !== BTRFS_SUPER_MAGIC
-    || filesystemType(destinationFilesystem.type) !== BTRFS_SUPER_MAGIC
+    sourceFilesystem.type !== BTRFS_SUPER_MAGIC
+    || destinationFilesystem.type !== BTRFS_SUPER_MAGIC
     || rootStat.dev !== destinationParentStat.dev
   ) {
     throw new Error("Project snapshots require one shared Btrfs filesystem");
@@ -146,7 +145,6 @@ export async function captureProjectSnapshot(
     state.entries.sort((left, right) => compareBytes(left.path, right.path));
     state.exclusions.sort((left, right) => compareBytes(left.path, right.path));
     const body = {
-      formatVersion: 1 as const,
       sourceRoot,
       cwd: relativePath(sourceRoot, sourceCwd),
       rootMode: modeOf(rootStat),
@@ -162,11 +160,6 @@ export async function captureProjectSnapshot(
     await fs.promises.rm(destinationRoot, { recursive: true, force: true }).catch(() => undefined);
     throw error;
   }
-}
-
-/** Bun reports Linux statfs magic numbers as signed int32; Node reports them unsigned. */
-function filesystemType(value: number | bigint): number {
-  return Number(value) >>> 0;
 }
 
 /** Re-hash a captured tree without consulting the live project. */
@@ -308,7 +301,11 @@ export async function scanProjectSource(sourceRootInput: string): Promise<Projec
 
 /** Validate the bounded record itself without traversing snapshot content. */
 export function assertProjectSnapshotManifest(manifest: ProjectSnapshotManifest): void {
-  if (!manifest || manifest.formatVersion !== 1) throw new Error("Unsupported project snapshot manifest");
+  if (!manifest) throw new Error("Invalid project snapshot manifest");
+  if (Object.keys(manifest).sort().join(",")
+    !== "cwd,entries,exclusions,fileCount,manifestHash,rootMode,sourceRoot,totalBytes,treeHash") {
+    throw new Error("Project snapshot manifest has unexpected fields");
+  }
   const { manifestHash, ...body } = manifest;
   if (stableHash(body) !== manifestHash) throw new Error("Project snapshot manifest hash mismatch");
   if (!isHash(manifest.treeHash)) throw new Error("Project snapshot tree hash is invalid");
@@ -443,7 +440,7 @@ async function cloneFile(state: CaptureState, relative: string, pathStat: BigInt
 
   const source = path.join(state.sourceRoot, relative);
   const destination = path.join(state.destinationRoot, relative);
-  const handle = await fs.promises.open(source, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  const handle = await fs.promises.open(source, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
     const before = await handle.stat({ bigint: true });
     assertUnchanged(pathStat, before, `Project file changed while opening for snapshot capture: ${portablePath(relative)}`);
@@ -487,7 +484,7 @@ async function cloneSymlink(state: CaptureState, relative: string, before: BigIn
 }
 
 async function hashStableFile(filePath: string, expected: BigIntStats, message: string): Promise<string> {
-  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
     const before = await handle.stat({ bigint: true });
     assertUnchanged(expected, before, message);

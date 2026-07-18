@@ -5,8 +5,7 @@ export async function readBoundedTextFile(filePath: string, maxBytes: number): P
   if (!before.isFile() || before.isSymbolicLink()) throw new Error(`unsafe file: ${filePath}`);
   if (before.size > maxBytes) throw new Error(`file exceeds ${maxBytes} bytes: ${filePath}`);
 
-  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
-  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | noFollow);
+  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
     const stat = await handle.stat();
     if (!stat.isFile()) throw new Error(`unsafe file: ${filePath}`);

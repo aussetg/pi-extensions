@@ -11,7 +11,6 @@ export type CandidateTreeEntry =
   | { path: string; type: "symlink"; mode: number; nodeHash: string; target: string };
 
 export interface CandidateTreeManifest {
-  formatVersion: 1;
   rootMode: number;
   entries: CandidateTreeEntry[];
   fileCount: number;
@@ -123,7 +122,6 @@ export async function cloneCandidateTree(
 
 export function projectTreeManifest(project: ProjectSnapshotManifest): CandidateTreeManifest {
   const manifest: CandidateTreeManifest = {
-    formatVersion: 1,
     rootMode: project.rootMode,
     entries: project.entries.map((entry) => ({ ...entry })),
     fileCount: project.fileCount,
@@ -159,7 +157,10 @@ export function diffCandidateTrees(base: CandidateTreeManifest, current: Candida
 }
 
 export function assertCandidateTreeManifest(manifest: CandidateTreeManifest): void {
-  if (!manifest || manifest.formatVersion !== 1 || !Array.isArray(manifest.entries)) throw new Error("Invalid candidate tree manifest");
+  if (!manifest || !Array.isArray(manifest.entries)) throw new Error("Invalid candidate tree manifest");
+  if (Object.keys(manifest).sort().join(",") !== "entries,fileCount,rootMode,totalBytes,treeHash") {
+    throw new Error("Candidate tree manifest has unexpected fields");
+  }
   if (!validMode(manifest.rootMode) || !isHash(manifest.treeHash)) throw new Error("Invalid candidate tree root identity");
   if (!Number.isSafeInteger(manifest.fileCount) || manifest.fileCount < 0 || manifest.fileCount > DEFINITION_LIMITS.candidateFiles) {
     throw new Error("Invalid candidate file count");
@@ -237,7 +238,7 @@ async function walkFile(state: WalkState, relative: string, expected: BigStats):
   let digest: string;
   if (state.destination) {
     const destination = path.join(state.destination, relative);
-    const handle = await fs.promises.open(source, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const handle = await fs.promises.open(source, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     try {
       const opened = await handle.stat({ bigint: true });
       assertUnchanged(expected, opened, `Candidate file changed while opened: ${portable(relative)}`);
@@ -271,7 +272,7 @@ async function walkSymlink(state: WalkState, relative: string, before: BigStats)
 }
 
 async function hashStableFile(filePath: string, expected: BigStats, relative: string): Promise<string> {
-  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
     const before = await handle.stat({ bigint: true });
     assertUnchanged(expected, before, `Candidate file changed while hashing: ${portable(relative)}`);
@@ -293,7 +294,6 @@ async function hashStableFile(filePath: string, expected: BigStats, relative: st
 function finishManifest(state: WalkState, rootMode: number, treeHash: string): CandidateTreeManifest {
   state.entries.sort((left, right) => compareBytes(left.path, right.path));
   const manifest: CandidateTreeManifest = {
-    formatVersion: 1,
     rootMode,
     entries: state.entries,
     fileCount: state.fileCount,

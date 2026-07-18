@@ -9,8 +9,15 @@ import {
   workflowDraftRoot,
 } from "../persistence/paths.js";
 import { readBoundedTextFile } from "../persistence/safe-paths.js";
-import { sha256, sha256Hex } from "../utils/hashes.js";
+import { sha256, sha256Hex, stableHash } from "../utils/hashes.js";
 import { stableJson } from "../utils/stable-json.js";
+import {
+  readWorkflowRegistryPolicy,
+  workflowRegistryPolicyDocument,
+  WORKFLOW_REGISTRY_POLICY_FILE,
+  WORKFLOW_REGISTRY_PROMOTION_FILE,
+  type WorkflowExposure,
+} from "../registry/workflow-policy.js";
 import type {
   WorkflowDraftId,
   WorkflowDraftNamespace,
@@ -19,7 +26,6 @@ import type {
 } from "./types.js";
 
 interface DraftHead {
-  formatVersion: 1;
   id: WorkflowDraftId;
   namespace: WorkflowDraftNamespace;
   name: string;
@@ -27,10 +33,29 @@ interface DraftHead {
   sourceHash: string;
 }
 
+interface WorkflowPromotionMarkerBody {
+  namespace: WorkflowDraftNamespace;
+  name: string;
+  targetPath: string;
+  draftHash: string;
+  installedSourceHash: string | null;
+  previousPolicyHash: string;
+  nextPolicy: { model: string[] };
+  nextPolicyHash: string;
+  exposure: WorkflowExposure;
+  reviewHash: string;
+  challengeHash: string;
+}
+
+interface WorkflowPromotionMarker extends WorkflowPromotionMarkerBody {
+  markerHash: string;
+}
+
 export interface WorkflowDraftStoreOptions {
   root?: string;
   userTargetDir?: string;
   projectTargetDir?: (project: string) => string;
+  promotionFault?: (point: "after-marker" | "after-source" | "after-policy" | "after-commit") => void | Promise<void>;
 }
 
 export interface StageWorkflowDraftInput {
@@ -52,11 +77,13 @@ export class WorkflowDraftStore {
   readonly root: string;
   private readonly userTargetDir?: string;
   private readonly projectTargetDir?: (project: string) => string;
+  private readonly promotionFault?: WorkflowDraftStoreOptions["promotionFault"];
 
   constructor(options: WorkflowDraftStoreOptions = {}) {
     this.root = path.resolve(options.root ?? workflowDraftRoot());
     this.userTargetDir = options.userTargetDir;
     this.projectTargetDir = options.projectTargetDir;
+    this.promotionFault = options.promotionFault;
   }
 
   async create(input: StageWorkflowDraftInput): Promise<WorkflowDraftRevision> {
@@ -131,39 +158,119 @@ export class WorkflowDraftStore {
     });
   }
 
-  /** Atomically replace the installed source after exact draft and preimage checks. */
+  /**
+   * Commit one TypeScript definition and exposure policy as a fail-closed registry transaction.
+   * A durable marker makes the namespace undiscoverable between the two renames and permits exact
+   * retry after a process crash.
+   */
   async installAndConsume(input: {
     namespace: WorkflowDraftNamespace;
     name: string;
     cwd: string;
     expectedDraftHash: string;
     expectedInstalledSourceHash: string | null;
-  }): Promise<{ sourceHash: string; targetPath: string }> {
-    assertHash(input.expectedDraftHash, "expected draft hash");
-    if (input.expectedInstalledSourceHash !== null) assertHash(input.expectedInstalledSourceHash, "installed source hash");
+    expectedPolicyHash: string;
+    exposure: WorkflowExposure;
+    reviewHash: string;
+    challengeHash: string;
+  }): Promise<{ sourceHash: string; targetPath: string; exposure: WorkflowExposure; policyHash: string }> {
+    assertHash(input.expectedDraftHash, "expected workflow draft hash");
+    if (input.expectedInstalledSourceHash !== null) assertHash(input.expectedInstalledSourceHash, "installed workflow source hash");
+    assertHash(input.expectedPolicyHash, "expected workflow policy hash");
+    assertHash(input.reviewHash, "workflow promotion review hash");
+    assertHash(input.challengeHash, "workflow promotion challenge hash");
     const location = await this.location(input.namespace, input.name, input.cwd);
     return await this.withLock(this.lockPath(location), async () => {
       const current = await this.readCurrent(location, true) as WorkflowDraftRevision;
       if (current.sourceHash !== input.expectedDraftHash) throw new Error(`Workflow draft ${current.id} changed before promotion`);
-      const targetLock = `${current.targetPath}.promotion-lock`;
-      return await this.withLock(targetLock, async () => {
-        const installed = await readInstalledHash(current.targetPath);
-        if (installed !== input.expectedInstalledSourceHash) {
-          throw new Error(`Installed workflow ${current.id} changed before promotion`);
+      const targetDirectory = path.dirname(current.targetPath);
+      await fs.promises.mkdir(targetDirectory, { recursive: true, mode: 0o700 });
+      await assertRegularDirectory(targetDirectory, "Workflow registry target");
+      return await this.withLock(path.join(targetDirectory, ".registry-promotion.lock"), async () => {
+        const recovered = await this.recoverPromotion(current, input);
+        if (recovered) {
+          await this.consumeInstalledDraft(location);
+          return recovered;
         }
+        const installed = await readInstalledHash(current.targetPath);
+        if (installed !== input.expectedInstalledSourceHash) throw new Error(`Installed workflow ${current.id} changed before promotion`);
+        const policy = await readWorkflowRegistryPolicy(targetDirectory, input.namespace, { ignorePendingPromotion: true });
+        if (policy.hash !== input.expectedPolicyHash) throw new Error(`Workflow registry policy changed before promoting ${current.id}`);
+        const nextPolicy = workflowRegistryPolicyDocument(policy, current.name, input.exposure);
+        const nextPolicyHash = stableHash({ namespace: input.namespace, model: nextPolicy.model });
+        const markerBody: WorkflowPromotionMarkerBody = {
+          namespace: input.namespace,
+          name: current.name,
+          targetPath: current.targetPath,
+          draftHash: current.sourceHash,
+          installedSourceHash: installed,
+          previousPolicyHash: policy.hash,
+          nextPolicy,
+          nextPolicyHash,
+          exposure: input.exposure,
+          reviewHash: input.reviewHash,
+          challengeHash: input.challengeHash,
+        };
+        const marker: WorkflowPromotionMarker = { ...markerBody, markerHash: stableHash(markerBody) };
+        const markerPath = path.join(targetDirectory, WORKFLOW_REGISTRY_PROMOTION_FILE);
+        await atomicWrite(markerPath, `${stableJson(marker)}\n`, 0o600);
+        await this.promotionFault?.("after-marker");
         await atomicInstall(current.targetPath, current.source);
-        await fs.promises.rm(location.directory, { recursive: true, force: false });
-        await syncDirectory(path.dirname(location.directory));
-        return { sourceHash: current.sourceHash, targetPath: current.targetPath };
+        await this.promotionFault?.("after-source");
+        await atomicWrite(path.join(targetDirectory, WORKFLOW_REGISTRY_POLICY_FILE), `${stableJson(nextPolicy)}\n`, 0o600);
+        await this.promotionFault?.("after-policy");
+        await fs.promises.rm(markerPath);
+        await syncDirectory(targetDirectory);
+        await this.promotionFault?.("after-commit");
+        await this.consumeInstalledDraft(location);
+        return { sourceHash: current.sourceHash, targetPath: current.targetPath, exposure: input.exposure, policyHash: nextPolicyHash };
+      });
+    });
+  }
+
+  /** Resume only the exact already-challenged transaction left by a process crash. */
+  async resumePromotion(input: {
+    namespace: WorkflowDraftNamespace;
+    name: string;
+    cwd: string;
+    challengeHash: string;
+    exposure: WorkflowExposure;
+  }): Promise<{ sourceHash: string; targetPath: string; exposure: WorkflowExposure; policyHash: string; reviewHash: string } | undefined> {
+    assertHash(input.challengeHash, "workflow promotion challenge hash");
+    const location = await this.location(input.namespace, input.name, input.cwd);
+    return await this.withLock(this.lockPath(location), async () => {
+      const current = await this.readCurrent(location, true) as WorkflowDraftRevision;
+      const targetDirectory = path.dirname(current.targetPath);
+      return await this.withLock(path.join(targetDirectory, ".registry-promotion.lock"), async () => {
+        const marker = await readPromotionMarker(path.join(targetDirectory, WORKFLOW_REGISTRY_PROMOTION_FILE));
+        if (!marker) return undefined;
+        if (marker.challengeHash !== input.challengeHash || marker.exposure !== input.exposure
+          || marker.namespace !== input.namespace || marker.name !== input.name
+          || marker.draftHash !== current.sourceHash) {
+          throw new Error("Workflow promotion recovery challenge is stale");
+        }
+        const recovered = await this.recoverPromotion(current, {
+          namespace: marker.namespace,
+          name: marker.name,
+          expectedDraftHash: marker.draftHash,
+          expectedInstalledSourceHash: marker.installedSourceHash,
+          expectedPolicyHash: marker.previousPolicyHash,
+          exposure: marker.exposure,
+          reviewHash: marker.reviewHash,
+          challengeHash: marker.challengeHash,
+        });
+        if (!recovered) throw new Error("Workflow promotion marker disappeared during recovery");
+        await this.consumeInstalledDraft(location);
+        return { ...recovered, reviewHash: marker.reviewHash };
       });
     });
   }
 
   targetPath(namespace: WorkflowDraftNamespace, name: string, cwd: string): string {
     assertName(name);
-    if (namespace === "user") return path.join(this.userTargetDir ?? userWorkflowDir(), `${name}.flow.js`);
+    if (namespace === "user") return path.join(this.userTargetDir ?? userWorkflowDir(), `${name}.flow.ts`);
     const project = projectRoot(cwd);
-    return path.join(this.projectTargetDir?.(project) ?? projectWorkflowDir(project), `${name}.flow.js`);
+    return path.join(this.projectTargetDir?.(project) ?? projectWorkflowDir(project), `${name}.flow.ts`);
   }
 
   /** Exact mutable head path used to join Pi's per-file mutation queue. */
@@ -255,7 +362,6 @@ export class WorkflowDraftStore {
       }
     }
     const head: DraftHead = {
-      formatVersion: 1,
       id: input.id,
       namespace: input.namespace,
       name: input.name,
@@ -263,6 +369,60 @@ export class WorkflowDraftStore {
       sourceHash: input.sourceHash,
     };
     await atomicWrite(input.headPath, `${stableJson(head)}\n`, 0o600);
+  }
+
+  private async recoverPromotion(
+    current: WorkflowDraftRevision,
+    input: {
+      namespace: WorkflowDraftNamespace;
+      name: string;
+      expectedDraftHash: string;
+      expectedInstalledSourceHash: string | null;
+      expectedPolicyHash: string;
+      exposure: WorkflowExposure;
+      reviewHash: string;
+      challengeHash: string;
+    },
+  ): Promise<{ sourceHash: string; targetPath: string; exposure: WorkflowExposure; policyHash: string } | undefined> {
+    const targetDirectory = path.dirname(current.targetPath);
+    const markerPath = path.join(targetDirectory, WORKFLOW_REGISTRY_PROMOTION_FILE);
+    const marker = await readPromotionMarker(markerPath);
+    if (!marker) return undefined;
+    if (marker.namespace !== input.namespace || marker.name !== input.name
+      || marker.targetPath !== current.targetPath || marker.draftHash !== input.expectedDraftHash
+      || marker.installedSourceHash !== input.expectedInstalledSourceHash
+      || marker.previousPolicyHash !== input.expectedPolicyHash || marker.exposure !== input.exposure
+      || marker.reviewHash !== input.reviewHash || marker.challengeHash !== input.challengeHash) {
+      throw new Error("Another incomplete workflow promotion blocks this registry");
+    }
+    const installed = await readInstalledHash(current.targetPath);
+    if (installed === marker.installedSourceHash) await atomicInstall(current.targetPath, current.source);
+    else if (installed !== marker.draftHash) throw new Error("Workflow promotion source changed during recovery");
+    const policy = await readWorkflowRegistryPolicy(targetDirectory, input.namespace, { ignorePendingPromotion: true });
+    if (policy.hash === marker.previousPolicyHash) {
+      await atomicWrite(
+        path.join(targetDirectory, WORKFLOW_REGISTRY_POLICY_FILE),
+        `${stableJson(marker.nextPolicy)}\n`,
+        0o600,
+      );
+    } else if (policy.hash !== marker.nextPolicyHash) {
+      throw new Error("Workflow promotion policy changed during recovery");
+    }
+    const finalPolicy = await readWorkflowRegistryPolicy(targetDirectory, input.namespace, { ignorePendingPromotion: true });
+    if (finalPolicy.hash !== marker.nextPolicyHash) throw new Error("Workflow promotion recovery produced another policy");
+    await fs.promises.rm(markerPath);
+    await syncDirectory(targetDirectory);
+    return {
+      sourceHash: current.sourceHash,
+      targetPath: current.targetPath,
+      exposure: marker.exposure,
+      policyHash: marker.nextPolicyHash,
+    };
+  }
+
+  private async consumeInstalledDraft(location: DraftLocation): Promise<void> {
+    await fs.promises.rm(location.directory, { recursive: true, force: false });
+    await syncDirectory(path.dirname(location.directory));
   }
 
   private async withLock<T>(lockPath: string, body: () => Promise<T>): Promise<T> {
@@ -330,18 +490,65 @@ interface DraftLocation {
   targetPath: string;
 }
 
+function parsePromotionMarker(source: string): WorkflowPromotionMarker {
+  let value: unknown;
+  try { value = JSON.parse(source); }
+  catch { throw new Error("Workflow promotion marker is not JSON"); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Workflow promotion marker is invalid");
+  }
+  const marker = value as unknown as WorkflowPromotionMarker;
+  const expected = [
+    "namespace", "name", "targetPath", "draftHash", "installedSourceHash",
+    "previousPolicyHash", "nextPolicy", "nextPolicyHash", "exposure", "reviewHash", "challengeHash", "markerHash",
+  ].sort();
+  if (Object.keys(value).sort().join("\0") !== expected.join("\0")) {
+    throw new Error("Workflow promotion marker has unexpected fields");
+  }
+  assertNamespace(marker.namespace);
+  assertName(marker.name);
+  if (!path.isAbsolute(marker.targetPath)) throw new Error("Workflow promotion marker target is invalid");
+  assertHash(marker.draftHash, "workflow promotion draft hash");
+  if (marker.installedSourceHash !== null) assertHash(marker.installedSourceHash, "workflow promotion installed hash");
+  assertHash(marker.previousPolicyHash, "workflow promotion previous policy hash");
+  assertHash(marker.nextPolicyHash, "workflow promotion next policy hash");
+  assertHash(marker.markerHash, "workflow promotion marker hash");
+  assertHash(marker.reviewHash, "workflow promotion marker review hash");
+  assertHash(marker.challengeHash, "workflow promotion marker challenge hash");
+  if (marker.exposure !== "human" && marker.exposure !== "model") throw new Error("Workflow promotion marker exposure is invalid");
+  if (!marker.nextPolicy || Object.keys(marker.nextPolicy).join(",") !== "model"
+    || !Array.isArray(marker.nextPolicy.model)
+    || marker.nextPolicy.model.some(name => typeof name !== "string" || !FLOW_NAME_PATTERN.test(name))) {
+    throw new Error("Workflow promotion marker policy is invalid");
+  }
+  const { markerHash, ...body } = marker;
+  if (stableHash(body) !== markerHash
+    || stableHash({ namespace: marker.namespace, model: [...marker.nextPolicy.model].sort() }) !== marker.nextPolicyHash) {
+    throw new Error("Workflow promotion marker hash is corrupt");
+  }
+  return marker;
+}
+
+async function readPromotionMarker(markerPath: string): Promise<WorkflowPromotionMarker | undefined> {
+  try { return parsePromotionMarker(await readBoundedTextFile(markerPath, 128 * 1024)); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
 function parseHead(text: string, location: DraftLocation): DraftHead {
   let value: unknown;
   try { value = JSON.parse(text); }
   catch { throw new Error(`Workflow draft ${location.id} head is not JSON`); }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Workflow draft ${location.id} head is invalid`);
   const record = value as Record<string, unknown>;
-  const expected = new Set(["formatVersion", "id", "namespace", "name", "sourceHash", ...(location.projectRoot ? ["projectRoot"] : [])]);
+  const expected = new Set(["id", "namespace", "name", "sourceHash", ...(location.projectRoot ? ["projectRoot"] : [])]);
   if (Object.keys(record).length !== expected.size || Object.keys(record).some((key) => !expected.has(key))) {
     throw new Error(`Workflow draft ${location.id} head has unexpected fields`);
   }
   if (
-    record.formatVersion !== 1 || record.id !== location.id || record.namespace !== location.namespace ||
+    record.id !== location.id || record.namespace !== location.namespace ||
     record.name !== location.name || record.projectRoot !== location.projectRoot
   ) throw new Error(`Workflow draft ${location.id} head binding is invalid`);
   assertHash(record.sourceHash, "draft source hash");
@@ -354,7 +561,7 @@ async function listRevisionHashes(directory: string): Promise<string[]> {
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
   if (entries.length > DEFINITION_LIMITS.draftRevisions) throw new Error(`Workflow draft exceeds ${DEFINITION_LIMITS.draftRevisions} revisions`);
   return entries.map((entry) => {
-    if (!entry.isFile() || entry.isSymbolicLink() || !/^[a-f0-9]{64}\.flow\.js$/.test(entry.name)) {
+    if (!entry.isFile() || entry.isSymbolicLink() || !/^[a-f0-9]{64}\.flow\.ts$/.test(entry.name)) {
       throw new Error(`Unsafe workflow draft revision entry ${entry.name}`);
     }
     return `sha256:${entry.name.slice(0, 64)}`;
@@ -363,7 +570,7 @@ async function listRevisionHashes(directory: string): Promise<string[]> {
 
 function revisionPath(directory: string, hash: string): string {
   assertHash(hash, "draft revision hash");
-  return path.join(directory, `${hash.slice(7)}.flow.js`);
+  return path.join(directory, `${hash.slice(7)}.flow.ts`);
 }
 
 async function readInstalledHash(filePath: string): Promise<string | null> {
@@ -391,6 +598,11 @@ async function atomicWrite(filePath: string, contents: string, mode: number): Pr
 async function syncDirectory(directory: string): Promise<void> {
   const handle = await fs.promises.open(directory, fs.constants.O_RDONLY);
   try { await handle.sync(); } finally { await handle.close(); }
+}
+
+async function assertRegularDirectory(directory: string, label: string): Promise<void> {
+  const stat = await fs.promises.lstat(directory);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`${label} must be a regular non-symlink directory`);
 }
 
 function assertNamespace(value: unknown): asserts value is WorkflowDraftNamespace {

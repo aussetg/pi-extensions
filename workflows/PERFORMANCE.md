@@ -11,8 +11,9 @@ fallbacks because none exist.
 - Candidate creation and checkpoints are Btrfs reflink clones. Freeze and restore validation are
   intentionally O(candidate paths + semantic bytes); they are safety boundaries.
 - Artifacts are content-addressed. Duplicate digests reuse one immutable body per run.
-- Same-run replay reads indexed operation/journal rows. Explicit cross-revision replay advances in
-  ordinal order and stops at the first mismatch.
+- Same-run reconstruction reads indexed scope/cursor calls and physical-effect settlements.
+  Explicit cross-revision replay advances independently within each causal lane; a mismatch ends
+  only that lane's prefix, while a changed structural join ends later reuse in the parent lane.
 - A mutating replay also restores and verifies its last workspace checkpoint; that filesystem work
   is required authority, not avoidable cache overhead.
 
@@ -24,16 +25,15 @@ JSON state file or rebuilds current state from the full event history.
 
 The shared read model caps an overview at:
 
-- 128 phase operations;
-- 16 active agents;
-- 4 recent progress/log rows per active agent;
-- 24 artifacts, 32 metrics, and 16 checkpoints;
+- 128 operations;
+- 32 candidates and 32 artifacts;
+- 64 measurements and 64 experiments;
+- 32 checkpoints;
 - 256 KiB serialized projection size.
 
 Inspector pages use indexed keyset queries, at most 64 entries, and at most 256 KiB. Operations,
-progress history, artifacts, measurements, and events are independently pageable. Current agent
-state is one row plus bounded metric/path children; active-agent query cost depends on active agents
-and requested recent rows, not transcript length.
+attempts, artifacts, measurements, experiments, candidates, invocation resources, and events are
+independently pageable.
 
 TUI components clone plain projection data and cache rendered output by visible fingerprint and
 width. The inspector polls at 500 ms only while open. Headless/RPC output uses the same bounded DTO
@@ -46,8 +46,8 @@ service. Commands add one Bubblewrap namespace. Streams are consumed incremental
 inline data, hash all observed bytes, and spill overflow to artifact staging.
 
 Cgroup metric reads and full project/candidate scans are deliberately outside semantic cache
-identity. Executable versions and unit identities are diagnostics only. Provider usage remains
-measured but is never admission authority.
+identity. Unit identities are diagnostics/process authority, not workflow semantics. Provider usage
+remains measured but is never admission authority.
 
 ## Measurement
 

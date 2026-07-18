@@ -7,7 +7,6 @@ import type { MeasurementProfileSnapshot } from "./profiles.js";
 
 export interface MeasurementEnvironmentDescriptor {
   id: string;
-  protocolVersion: 1;
 }
 
 export interface MeasurementEnvironmentContext {
@@ -27,8 +26,7 @@ export interface MeasurementEnvironmentProvider {
 }
 
 const HOST_ENVIRONMENT_DESCRIPTOR: MeasurementEnvironmentDescriptor = Object.freeze({
-  id: "linux-host-v1",
-  protocolVersion: 1,
+  id: "linux-host",
 });
 
 /** Stable comparison identity only. Ambient load, PSI, free memory, and time are sample diagnostics. */
@@ -58,7 +56,7 @@ export class StaticMeasurementEnvironmentProvider implements MeasurementEnvironm
   private fingerprint: MeasurementEnvironmentFingerprint;
 
   constructor(data: JsonObject, options: { id?: string } = {}) {
-    this.descriptor = { id: options.id ?? "static-environment", protocolVersion: 1 };
+    this.descriptor = { id: options.id ?? "static-environment" };
     assertMeasurementEnvironmentDescriptor(this.descriptor);
     this.fingerprint = normalizeMeasurementEnvironmentFingerprint({ data, hash: stableHash(data) });
   }
@@ -79,7 +77,7 @@ export class StaticMeasurementEnvironmentProvider implements MeasurementEnvironm
 export function assertMeasurementEnvironmentDescriptor(value: MeasurementEnvironmentDescriptor): void {
   if (
     !value || typeof value !== "object" || !/^[a-z][a-z0-9_-]{0,63}$/.test(value.id) ||
-    value.protocolVersion !== 1 || Object.keys(value).sort().join(",") !== "id,protocolVersion"
+    Object.keys(value).sort().join(",") !== "id"
   ) throw new Error("Measurement environment provider descriptor is invalid");
 }
 

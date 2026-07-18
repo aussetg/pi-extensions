@@ -1,256 +1,302 @@
 import fs from "node:fs";
 import path from "node:path";
-import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { Ajv } from "ajv";
+import { DEFINITION_LIMITS } from "../definition/limits.js";
+import type { WorkflowNamespace } from "../definition/types.js";
+import { parseWorkflow } from "../definition/workflow-frontend.js";
+import {
+  WORKFLOW_RUNTIME_API_HASH,
+  WORKFLOW_SOURCE_EXTENSION,
+} from "../definition/workflow-language.js";
+import type {
+  ParsedWorkflow,
+  WorkflowSourceLocation,
+} from "../definition/workflow-types.js";
+import { WorkflowScriptError } from "../runtime/errors.js";
 import { projectWorkflowDir, userWorkflowDir } from "../persistence/paths.js";
 import { readBoundedTextFile } from "../persistence/safe-paths.js";
-import { sha256, stableHash } from "../utils/hashes.js";
-import { stableJson } from "../utils/stable-json.js";
-import { canonicalJsonObject, deepFreezeJson } from "../definition/canonical-json.js";
-import { DEFINITION_LIMITS } from "../definition/limits.js";
+import { stableHash } from "../utils/hashes.js";
 import {
-  STRUCTURED_RUNTIME_API_DESCRIPTOR,
-  STRUCTURED_RUNTIME_API_HASH,
-  STRUCTURED_RUNTIME_API_VERSION,
-  parseStructuredWorkflow,
-  structuredWorkflowDefinitionHash,
-} from "../definition/workflow-definition.js";
-import { WorkflowScriptError } from "../runtime/errors.js";
-import type {
-  InvalidStructuredWorkflowRef,
-  StructuredWorkflowRef,
-  WorkflowInvocationSnapshot,
-  WorkflowNamespace,
-} from "../definition/types.js";
+  defaultWorkflowRegistryPolicy,
+  readWorkflowRegistryPolicy,
+  WorkflowRegistryPromotionPendingError,
+  WORKFLOW_REGISTRY_PROMOTION_FILE,
+  workflowExposure,
+  type WorkflowExposure,
+  type WorkflowRegistryPolicySnapshot,
+} from "./workflow-policy.js";
 
-export interface StructuredWorkflowRegistryRefreshOptions {
+export type WorkflowId = `${WorkflowNamespace}:${string}`;
+
+export interface WorkflowDefinitionRef {
+  id: WorkflowId;
+  namespace: WorkflowNamespace;
+  name: string;
+  title?: string;
+  description: string;
+  input: import("../types.js").JsonSchema;
+  output: import("../types.js").JsonSchema;
+  concurrency?: number;
+  exposure: WorkflowExposure;
+  policy: WorkflowRegistryPolicySnapshot;
+  path: string;
+  source: string;
+  sourceHash: string;
+  definitionHash: string;
+  parsed: ParsedWorkflow;
+}
+
+export interface InvalidWorkflowDefinitionRef {
+  kind: "definition" | "policy";
+  namespace: WorkflowNamespace;
+  path: string;
+  name: string;
+  error: string;
+  location?: WorkflowSourceLocation;
+}
+
+export interface WorkflowRegistryRefreshOptions {
   includeProject?: boolean;
   builtinDir?: string;
   userDir?: string;
   projectDir?: string;
+  apiPath?: string;
 }
 
-export class StructuredWorkflowRegistry {
-  private refs = new Map<string, StructuredWorkflowRef>();
-  private invalid: InvalidStructuredWorkflowRef[] = [];
+interface RegistryRoot {
+  namespace: WorkflowNamespace;
+  directory: string;
+}
 
-  async refresh(cwd: string, options: StructuredWorkflowRegistryRefreshOptions = {}): Promise<void> {
-    const refs = new Map<string, StructuredWorkflowRef>();
-    const invalid: InvalidStructuredWorkflowRef[] = [];
-    const roots: Array<{ namespace: WorkflowNamespace; dir: string }> = [
-      { namespace: "builtin", dir: options.builtinDir ?? structuredBuiltinsDir() },
-      { namespace: "user", dir: options.userDir ?? userWorkflowDir() },
+/** Filesystem registry for reviewed TypeScript workflow definitions. */
+export class WorkflowRegistry {
+  private refs = new Map<string, WorkflowDefinitionRef>();
+  private invalid: InvalidWorkflowDefinitionRef[] = [];
+
+  async refresh(cwd: string, options: WorkflowRegistryRefreshOptions = {}): Promise<void> {
+    const refs = new Map<string, WorkflowDefinitionRef>();
+    const invalid: InvalidWorkflowDefinitionRef[] = [];
+    const roots: RegistryRoot[] = [
+      { namespace: "builtin", directory: options.builtinDir ?? workflowBuiltinsDir() },
+      { namespace: "user", directory: options.userDir ?? userWorkflowDir() },
     ];
     if (options.includeProject !== false) {
-      roots.push({ namespace: "project", dir: options.projectDir ?? projectWorkflowDir(cwd) });
+      roots.push({ namespace: "project", directory: options.projectDir ?? projectWorkflowDir(cwd) });
     }
 
     for (const root of roots) {
-      const discovered = await discoverDefinitionFiles(root.dir, root.namespace);
-      const names = new Set<string>();
-      for (const entry of discovered) {
-        if (entry.error) {
-          invalid.push(entry.error);
-          continue;
-        }
-        const ref = entry.ref!;
-        if (names.has(ref.name)) {
-          invalid.push({
-            namespace: root.namespace,
-            path: ref.path,
-            name: ref.name,
-            error: `Duplicate ${root.namespace} workflow name: ${ref.name}`,
-          });
-          refs.delete(ref.id);
-          continue;
-        }
-        names.add(ref.name);
-        refs.set(ref.id, ref);
-      }
+      const discovered = await discoverWorkflowRoot(root, options.apiPath);
+      invalid.push(...discovered.invalid);
+      for (const ref of discovered.refs) refs.set(ref.id, ref);
     }
-
     this.refs = refs;
     this.invalid = invalid.sort(compareInvalidRefs);
   }
 
-  list(): StructuredWorkflowRef[] {
+  list(): WorkflowDefinitionRef[] {
     return [...this.refs.values()].sort((left, right) => left.id.localeCompare(right.id));
   }
 
-  listInvalid(): InvalidStructuredWorkflowRef[] {
+  listInvalid(): InvalidWorkflowDefinitionRef[] {
     return [...this.invalid];
   }
 
-  get(id: string): StructuredWorkflowRef | undefined {
+  get(id: string): WorkflowDefinitionRef | undefined {
     if (id.includes(":")) return this.refs.get(id);
     const matches = this.list().filter((ref) => ref.name === id);
     return matches.length === 1 ? matches[0] : undefined;
   }
 
-  resolve(id: string): StructuredWorkflowRef {
+  resolve(id: string): WorkflowDefinitionRef {
     if (id.includes(":")) {
       const ref = this.refs.get(id);
-      if (!ref) throw new Error(`Unknown structured workflow: ${id}`);
+      if (!ref) throw new Error(`Unknown workflow definition: ${id}`);
       return ref;
     }
     const matches = this.list().filter((ref) => ref.name === id);
-    if (matches.length === 0) throw new Error(`Unknown structured workflow: ${id}`);
+    if (matches.length === 0) throw new Error(`Unknown workflow definition: ${id}`);
     if (matches.length > 1) {
-      throw new Error(`Ambiguous structured workflow ${id}; use one of: ${matches.map((ref) => ref.id).join(", ")}`);
+      throw new Error(`Ambiguous workflow definition ${id}; use one of: ${matches.map((ref) => ref.id).join(", ")}`);
     }
     return matches[0]!;
   }
-
-  snapshot(id: string, args: unknown): WorkflowInvocationSnapshot {
-    return createWorkflowInvocationSnapshot(this.resolve(id), args);
-  }
 }
 
-export function createWorkflowInvocationSnapshot(ref: StructuredWorkflowRef, args: unknown): WorkflowInvocationSnapshot {
-  const input = canonicalJsonObject(args, {
-    maxBytes: DEFINITION_LIMITS.invocationBytes,
-    maxDepth: DEFINITION_LIMITS.invocationDepth,
-    maxNodes: DEFINITION_LIMITS.invocationNodes,
-    maxStringScalars: DEFINITION_LIMITS.invocationStringScalars,
+export function workflowDefinitionHash(
+  workflowId: WorkflowId,
+  parsed: ParsedWorkflow,
+): string {
+  return stableHash({
+    workflowId,
+    sourceHash: parsed.sourceHash,
+    runtimeApiHash: WORKFLOW_RUNTIME_API_HASH,
+    metadata: parsed.metadata,
+    descriptors: parsed.descriptors,
+    review: parsed.review,
+    transform: parsed.transform,
   });
-  const ajv = new Ajv({ strict: false, allErrors: true, allowUnionTypes: true });
-  const validate = ajv.compile(ref.inputSchema);
-  if (!validate(input)) throw new Error(`Invalid arguments for ${ref.id}: ${ajv.errorsText(validate.errors)}`);
-
-  const definitionHash = structuredWorkflowDefinitionHash({
-    workflowId: ref.id,
-    metadata: ref,
-    sourceHash: ref.sourceHash,
-    runtimeApiVersion: STRUCTURED_RUNTIME_API_VERSION,
-    runtimeApiHash: STRUCTURED_RUNTIME_API_HASH,
-    review: ref.parsed.review,
-  });
-
-  const snapshot: WorkflowInvocationSnapshot = {
-    formatVersion: 1,
-    workflowId: ref.id,
-    namespace: ref.namespace,
-    name: ref.name,
-    ...(ref.title ? { title: ref.title } : {}),
-    description: ref.description,
-    capabilities: [...ref.capabilities],
-    modelVisible: ref.modelVisible,
-    ...(ref.maxParallelism !== undefined ? { maxParallelism: ref.maxParallelism } : {}),
-    source: ref.source,
-    sourceHash: ref.sourceHash,
-    runtimeApiVersion: STRUCTURED_RUNTIME_API_VERSION,
-    runtimeApiHash: STRUCTURED_RUNTIME_API_HASH,
-    definitionHash,
-    inputSchema: ref.inputSchema,
-    outputSchema: ref.outputSchema,
-    input,
-    inputHash: stableHash(input),
-    review: ref.parsed.review,
-    installedPath: ref.path,
-  };
-  return deepFreezeJson(snapshot as any) as unknown as WorkflowInvocationSnapshot;
 }
 
-export async function writeWorkflowInvocationSnapshot(runDir: string, snapshot: WorkflowInvocationSnapshot): Promise<void> {
-  if (snapshot.runtimeApiVersion !== STRUCTURED_RUNTIME_API_VERSION || snapshot.runtimeApiHash !== STRUCTURED_RUNTIME_API_HASH) {
-    throw new Error("Workflow invocation requires a different definition-language revision");
-  }
-  if (sha256(snapshot.source) !== snapshot.sourceHash) throw new Error("Workflow invocation source hash is corrupt");
-  const parent = path.dirname(runDir);
-  await fs.promises.mkdir(parent, { recursive: true });
-  try {
-    await fs.promises.lstat(runDir);
-    throw fileExistsError(runDir);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  const temporary = path.join(parent, `.${path.basename(runDir)}.snapshot-${process.pid}-${crypto.randomUUID()}`);
-  await fs.promises.mkdir(temporary, { mode: 0o700 });
-  const { source, ...invocation } = snapshot;
-  try {
-    const context = path.join(temporary, "context");
-    await fs.promises.mkdir(context, { mode: 0o700 });
-    await Promise.all([
-      writeExclusive(path.join(temporary, "source.flow.js"), source),
-      writeExclusive(path.join(context, "invocation.json"), `${stableJson(invocation)}\n`),
-      writeExclusive(path.join(context, "runtime-api.json"), `${stableJson({
-        version: STRUCTURED_RUNTIME_API_VERSION,
-        hash: STRUCTURED_RUNTIME_API_HASH,
-        descriptor: STRUCTURED_RUNTIME_API_DESCRIPTOR,
-      })}\n`),
-    ]);
-    await fs.promises.rename(temporary, runDir);
-  } catch (error) {
-    await fs.promises.rm(temporary, { recursive: true, force: true }).catch(() => undefined);
-    if (["EEXIST", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw fileExistsError(runDir);
-    throw error;
-  }
-}
-
-async function discoverDefinitionFiles(
-  dir: string,
-  namespace: WorkflowNamespace,
-): Promise<Array<{ ref?: StructuredWorkflowRef; error?: InvalidStructuredWorkflowRef }>> {
+async function discoverWorkflowRoot(
+  root: RegistryRoot,
+  apiPath: string | undefined,
+): Promise<{ refs: WorkflowDefinitionRef[]; invalid: InvalidWorkflowDefinitionRef[] }> {
+  const directory = path.resolve(root.directory);
   let names: string[];
   try {
-    names = (await fs.promises.readdir(dir)).filter((name) => name.endsWith(".flow.js")).sort();
+    const stat = await fs.promises.lstat(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new Error("Workflow registry root must be a regular non-symlink directory");
+    }
+    names = (await fs.promises.readdir(directory))
+      .filter((name) => name.endsWith(WORKFLOW_SOURCE_EXTENSION))
+      .sort();
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    return [{ error: { namespace, path: dir, name: path.basename(dir), error: (error as Error).message } }];
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { refs: [], invalid: [] };
+    return {
+      refs: [],
+      invalid: [{
+        kind: "definition",
+        namespace: root.namespace,
+        path: directory,
+        name: path.basename(directory),
+        error: errorMessage(error),
+      }],
+    };
   }
   if (names.length > DEFINITION_LIMITS.filesPerNamespace) {
-    return [
-      {
-        error: {
-          namespace,
-          path: dir,
-          name: path.basename(dir),
-          error: `Too many .flow.js files (${names.length}/${DEFINITION_LIMITS.filesPerNamespace})`,
-        },
-      },
-    ];
+    return {
+      refs: [],
+      invalid: [{
+        kind: "definition",
+        namespace: root.namespace,
+        path: directory,
+        name: path.basename(directory),
+        error: `Too many ${WORKFLOW_SOURCE_EXTENSION} files (${names.length}/${DEFINITION_LIMITS.filesPerNamespace})`,
+      }],
+    };
   }
 
-  const result: Array<{ ref?: StructuredWorkflowRef; error?: InvalidStructuredWorkflowRef }> = [];
-  for (const name of names) {
-    const filePath = path.join(dir, name);
-    const stem = name.slice(0, -".flow.js".length);
-    try {
-      const stat = await fs.promises.lstat(filePath);
-      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("definition is not a regular non-symlink file");
-      const source = await readBoundedTextFile(filePath, DEFINITION_LIMITS.sourceBytes);
-      const parsed = parseStructuredWorkflow(source);
-      if (parsed.metadata.name !== stem) {
-        throw new Error(`definition name ${parsed.metadata.name} must match file stem ${stem}`);
-      }
-      const id = `${namespace}:${parsed.metadata.name}` as const;
-      result.push({
-        ref: Object.freeze({
-          ...parsed.metadata,
-          id,
-          namespace,
-          path: filePath,
-          source,
-          sourceHash: parsed.sourceHash,
-          parsed,
-        }),
+  let policy: WorkflowRegistryPolicySnapshot;
+  let fallbackPolicy = false;
+  const invalid: InvalidWorkflowDefinitionRef[] = [];
+  try {
+    policy = await readWorkflowRegistryPolicy(directory, root.namespace);
+  } catch (error) {
+    if (error instanceof WorkflowRegistryPromotionPendingError) {
+      return {
+        refs: [],
+        invalid: [{
+          kind: "policy",
+          namespace: root.namespace,
+          path: error.transactionPath,
+          name: "registry",
+          error: error.message,
+        }],
+      };
+    }
+    fallbackPolicy = true;
+    policy = defaultWorkflowRegistryPolicy(directory, root.namespace);
+    invalid.push({
+      kind: "policy",
+      namespace: root.namespace,
+      path: path.join(directory, "registry.json"),
+      name: "registry",
+      error: errorMessage(error),
+    });
+  }
+
+  const refs: WorkflowDefinitionRef[] = [];
+  const installedNames = new Set(names.map((name) => name.slice(0, -WORKFLOW_SOURCE_EXTENSION.length)));
+  for (const exposed of policy.model) {
+    if (!installedNames.has(exposed)) {
+      invalid.push({
+        kind: "policy",
+        namespace: root.namespace,
+        path: policy.path,
+        name: exposed,
+        error: `Workflow registry policy names missing definition ${exposed}${WORKFLOW_SOURCE_EXTENSION}`,
       });
-    } catch (error) {
-      result.push({ error: invalidDefinition(namespace, filePath, stem, error) });
     }
   }
-  return result;
-}
 
-async function writeExclusive(filePath: string, contents: string): Promise<void> {
-  const handle = await fs.promises.open(filePath, "wx", 0o600);
-  try {
-    await handle.writeFile(contents, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
+  for (const name of names) {
+    const filePath = path.join(directory, name);
+    const installedName = name.slice(0, -WORKFLOW_SOURCE_EXTENSION.length);
+    try {
+      const stat = await fs.promises.lstat(filePath);
+      if (!stat.isFile() || stat.isSymbolicLink()) {
+        throw new Error("Workflow definition must be a regular non-symlink file");
+      }
+      const source = await readBoundedTextFile(filePath, DEFINITION_LIMITS.sourceBytes);
+      const parsed = parseWorkflow(source, {
+        fileName: filePath,
+        ...(apiPath ? { apiPath } : {}),
+      });
+      if (parsed.installedName !== installedName) throw new Error("Workflow frontend returned another installed name");
+      const id = `${root.namespace}:${installedName}` as WorkflowId;
+      const ref: WorkflowDefinitionRef = {
+        id,
+        namespace: root.namespace,
+        name: installedName,
+        ...(parsed.metadata.title ? { title: parsed.metadata.title } : {}),
+        description: parsed.metadata.description,
+        input: parsed.metadata.input,
+        output: parsed.metadata.output,
+        ...(parsed.metadata.concurrency !== undefined ? { concurrency: parsed.metadata.concurrency } : {}),
+        exposure: workflowExposure(policy, installedName),
+        policy,
+        path: filePath,
+        source,
+        sourceHash: parsed.sourceHash,
+        definitionHash: workflowDefinitionHash(id, parsed),
+        parsed,
+      };
+      refs.push(Object.freeze(ref));
+    } catch (error) {
+      invalid.push(invalidDefinition(root.namespace, filePath, installedName, error));
+    }
   }
+  try {
+    if (fallbackPolicy) {
+      try {
+        await fs.promises.lstat(path.join(directory, WORKFLOW_REGISTRY_PROMOTION_FILE));
+        throw new WorkflowRegistryPromotionPendingError(
+          path.join(directory, WORKFLOW_REGISTRY_PROMOTION_FILE),
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      return { refs, invalid };
+    }
+    const finalPolicy = await readWorkflowRegistryPolicy(directory, root.namespace);
+    if (finalPolicy.hash !== policy.hash) {
+      return {
+        refs: [],
+        invalid: [{
+          kind: "policy",
+          namespace: root.namespace,
+          path: finalPolicy.path,
+          name: "registry",
+          error: "Workflow registry policy changed during definition discovery; refresh again",
+        }],
+      };
+    }
+  } catch (error) {
+    return {
+      refs: [],
+      invalid: [{
+        kind: "policy",
+        namespace: root.namespace,
+        path: error instanceof WorkflowRegistryPromotionPendingError
+          ? error.transactionPath
+          : path.join(directory, "registry.json"),
+        name: "registry",
+        error: errorMessage(error),
+      }],
+    };
+  }
+  return { refs, invalid };
 }
 
 function invalidDefinition(
@@ -258,32 +304,36 @@ function invalidDefinition(
   filePath: string,
   name: string,
   error: unknown,
-): InvalidStructuredWorkflowRef {
-  const location = error instanceof WorkflowScriptError &&
-    typeof error.location?.line === "number" &&
-    typeof error.location.column === "number"
+): InvalidWorkflowDefinitionRef {
+  const sourceLocation = error instanceof WorkflowScriptError
+    && typeof error.location?.line === "number"
+    && typeof error.location.column === "number"
     ? { line: error.location.line, column: error.location.column }
     : undefined;
   return {
+    kind: "definition",
     namespace,
     path: filePath,
     name,
-    error: error instanceof Error ? error.message : String(error),
-    ...(location ? { location } : {}),
+    error: errorMessage(error),
+    ...(sourceLocation ? { location: sourceLocation } : {}),
   };
 }
 
-function compareInvalidRefs(left: InvalidStructuredWorkflowRef, right: InvalidStructuredWorkflowRef): number {
-  return left.namespace.localeCompare(right.namespace) || left.path.localeCompare(right.path);
+function compareInvalidRefs(
+  left: InvalidWorkflowDefinitionRef,
+  right: InvalidWorkflowDefinitionRef,
+): number {
+  return left.namespace.localeCompare(right.namespace)
+    || left.path.localeCompare(right.path)
+    || left.name.localeCompare(right.name)
+    || left.error.localeCompare(right.error);
 }
 
-function structuredBuiltinsDir(): string {
+function workflowBuiltinsDir(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "builtins");
 }
 
-function fileExistsError(filePath: string): NodeJS.ErrnoException {
-  const error = new Error(`Invocation snapshot already exists: ${filePath}`) as NodeJS.ErrnoException;
-  error.code = "EEXIST";
-  return error;
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
-

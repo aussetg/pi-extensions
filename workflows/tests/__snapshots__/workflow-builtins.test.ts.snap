@@ -1,0 +1,103 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`workflow builtins > runs and reconstructs research with keyed collected lanes and report revision 1`] = `
+"Research · completed · 7 operations
+launch · model · model exposure · concurrency 4
+operations
+  Map · completed
+    architecture · Research Angle · agent · completed
+    evidence · Research Angle · agent · completed
+    risks · Research Angle · agent · completed
+  Synthesize report · agent · completed
+  Critique Report · agent · completed
+  Revise report · agent · completed
+"
+`;
+
+exports[`workflow builtins > runs execute-plan through durable points, replan, reconstruction, and final apply 1`] = `
+"Execute Plan · completed · 9 operations
+launch · model · model exposure · concurrency 4
+operations
+  Create Plan · agent · completed
+  Candidate · completed
+    Point schema · agent · completed · checkpoint
+    Point storage · agent · completed · checkpoint
+    Replan 2 · agent · completed · checkpoint
+    Point transaction · agent · completed · checkpoint
+  Verify · completed
+  Accept · completed
+  Apply · completed
+candidates
+  1 · applied · 1 paths
+    verification · passed
+    disposition · accepted
+    apply · completed
+"
+`;
+
+exports[`workflow builtins > runs generic optimize against a candidate-sensitive pinned evaluator 1`] = `
+"Optimize · completed · 18 operations
+launch · model · model exposure · concurrency 4
+resource · project:bench · 2 measurement sites · primary:latency, guardrail:rss
+operations
+  Measure · completed
+  Propose Experiment · agent · completed
+  Candidate · completed
+    Implement Experiment · agent · completed · checkpoint
+  Measure · completed
+  Verify · completed
+  Accept · completed
+  Record Experiment · completed
+  Reflect · agent · completed
+  Propose Experiment · agent · completed
+  Candidate · completed
+    Implement Experiment · agent · completed · checkpoint
+  Measure · completed
+  Verify · completed
+  Accept · completed
+  Record Experiment · completed
+  Reflect · agent · completed
+  Apply · completed
+metrics
+  Latency · primary · baseline 100 · current 80 · best 80 · gain 20%
+  Rss · guardrail · baseline 100 · current 104 · best 104 · gain -4%
+experiments
+  1 · accepted · accepted: primary improvement and guardrails passed
+  2 · accepted · accepted: primary improvement and guardrails passed
+candidates
+  1 · accepted · 1 paths
+    verification · passed
+    measurement · accepted
+    disposition · accepted
+  2 · applied · 1 paths · based on accepted candidate
+    verification · passed
+    measurement · accepted
+    disposition · accepted
+    apply · completed
+"
+`;
+
+exports[`workflow builtins > runs goal through a failed verification and a reconstructed corrected candidate 1`] = `
+"Goal · completed · 10 operations
+launch · model · model exposure · concurrency 4
+operations
+  Inspect Goal · agent · completed
+  Candidate · completed
+    Implement Goal · agent · completed · checkpoint
+  Verify · completed
+  Reject · completed
+  Candidate · completed
+    Implement Goal · agent · completed · checkpoint
+  Verify · completed
+  Accept · completed
+  Apply · completed
+candidates
+  1 · rejected · 1 paths
+    verification · failed
+    disposition · rejected
+  2 · applied · 1 paths
+    verification · passed
+    disposition · accepted
+    apply · completed
+"
+`;

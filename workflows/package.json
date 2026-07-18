@@ -3,27 +3,28 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Durable named JavaScript workflows for one systemd/Btrfs Linux host.",
+  "description": "Durable named TypeScript workflows for one systemd/Btrfs Linux host.",
   "main": "index.ts",
   "exports": {
     ".": "./index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "typecheck:interfaces": "tsc --ignoreConfig --allowJs --checkJs --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --strict --skipLibCheck workflow-api.d.ts tests/interfaces/*.ts tests/interfaces/*.flow.js",
-    "typecheck:flows": "tsc --ignoreConfig --allowJs --checkJs --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --strict false --skipLibCheck workflow-api.d.ts src/builtins/*.flow.js",
-    "test:commands": "vitest run tests/command-profiles.test.ts tests/command-executor.test.ts",
+    "typecheck:flows": "tsc -p tsconfig.flows.json",
+    "typecheck:conformance": "tsc -p tests/conformance/typecheck/tsconfig.json",
+    "test:conformance": "node --test tests/conformance/reference/**/*.case.mjs",
+    "test:commands": "vitest run tests/command-executor.test.ts",
     "test:systemd": "vitest run tests/systemd-substrate.test.ts tests/command-executor.test.ts",
-    "test:coordinator": "vitest run tests/run-coordinator.test.ts",
-    "test:semantic-engine": "vitest run tests/semantic-engine.test.ts",
-    "test:sdk-agent": "vitest run tests/sdk-agent-worker.test.ts",
-    "test:extension": "vitest run tests/extension-interface.test.ts",
-    "test": "vitest run --no-file-parallelism",
-    "check": "npm run typecheck && npm run typecheck:interfaces && npm run typecheck:flows && npm test"
+    "test:coordinator": "vitest run tests/workflow-coordinator.test.ts",
+    "test:semantic-engine": "vitest run tests/workflow-semantic-engine.test.ts",
+    "test:unit": "vitest run --no-file-parallelism",
+    "test": "npm run test:unit && npm run test:conformance",
+    "check": "npm run typecheck && npm run typecheck:flows && npm run typecheck:conformance && npm test"
   },
   "dependencies": {
     "acorn": "8.16.0",
-    "ajv": "8.20.0"
+    "ajv": "8.20.0",
+    "typescript": "6.0.3"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "0.80.6",
@@ -33,7 +34,6 @@
     "@earendil-works/pi-coding-agent": "0.80.6",
     "@types/node": "25.9.1",
     "typebox": "1.1.39",
-    "typescript": "6.0.3",
     "vitest": "4.1.7"
   },
   "pi": {

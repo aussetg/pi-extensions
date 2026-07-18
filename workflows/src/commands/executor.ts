@@ -112,7 +112,6 @@ export interface CommandExecutableDiagnostic {
 
 export interface HostCommandExecutorDescriptor {
   id: string;
-  protocolVersion: 1;
   sandbox: "bwrap-systemd" | "fake";
   executables?: {
     bubblewrap: CommandExecutableDiagnostic;
@@ -132,7 +131,7 @@ export function sameCommandExecutorProtocol(
   left: HostCommandExecutorDescriptor,
   right: HostCommandExecutorDescriptor,
 ): boolean {
-  return left.id === right.id && left.protocolVersion === right.protocolVersion && left.sandbox === right.sandbox;
+  return left.id === right.id && left.sandbox === right.sandbox;
 }
 
 /**
@@ -157,7 +156,6 @@ export class SandboxedCommandExecutor implements HostCommandExecutor {
     });
     this.descriptor = Object.freeze({
       id: "sandboxed-command",
-      protocolVersion: 1,
       sandbox: "bwrap-systemd",
       executables: {
         bubblewrap: executableDiagnostic(this.bwrap, ["--version"]),

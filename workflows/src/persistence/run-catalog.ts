@@ -1,45 +1,37 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { RunRecord } from "../runtime/durable-types.js";
-import {
-  RunDatabase,
-  RunDatabaseReader,
-  type CreateRunDatabaseOptions,
-} from "./run-database.js";
-import { runFilesystemPaths, workflowRunRoot, type RunFilesystemPaths } from "./paths.js";
+import { workflowRunRoot } from "./paths.js";
+import { WorkflowRunDatabaseReader } from "./run-database.js";
+import type { WorkflowRunRecord } from "./run-database-types.js";
 
-const RUN_ID = /^flow_[a-f0-9]{32}$/;
-const MAX_RUNS = 10_000;
-const CREATE_ATTEMPTS = 16;
+const RUN_ID = /^flow_[a-f0-9]{32}$/u;
 
-export interface RunCatalogEntry {
+export interface WorkflowRunPaths {
+  root: string;
+  database: string;
+  source: string;
+  context: string;
+  invocation: string;
+  projectSnapshot: string;
+  projectManifest: string;
+  staticResources: string;
+  sessions: string;
+  workspaces: string;
+  artifacts: string;
+  outputs: string;
+}
+
+export interface WorkflowRunCatalogEntry {
   runId: string;
-  paths: RunFilesystemPaths;
-  run?: RunRecord;
+  paths: WorkflowRunPaths;
+  run?: WorkflowRunRecord;
   error?: string;
 }
 
-export interface CreatedRun {
-  entry: RunCatalogEntry & { run: RunRecord };
-  database: RunDatabase;
-}
-
-export interface CreateCatalogRunOptions
-  extends Omit<CreateRunDatabaseOptions, "run" | "artifacts"> {
-  run: Omit<RunRecord, "runId">;
-}
-
-/**
- * Filesystem discovery only: immediate directories are the index and each
- * run.sqlite row is authoritative. There is no project-keyed side catalog.
- */
-export class RunCatalog {
+export class WorkflowRunCatalog {
   readonly root: string;
-
-  constructor(root = workflowRunRoot()) {
-    this.root = path.resolve(root);
-  }
+  constructor(root = workflowRunRoot()) { this.root = path.resolve(root); }
 
   async ensureRoot(): Promise<void> {
     await fs.promises.mkdir(this.root, { recursive: true, mode: 0o700 });
@@ -48,156 +40,95 @@ export class RunCatalog {
     await fs.promises.chmod(this.root, 0o700);
   }
 
-  /** Create the run directory with mkdir's exclusive filesystem operation. */
-  async create(options: CreateCatalogRunOptions): Promise<CreatedRun> {
-    await this.ensureRoot();
-    for (let attempt = 0; attempt < CREATE_ATTEMPTS; attempt++) {
-      const runId = newRunId();
-      const paths = runFilesystemPaths(this.root, runId);
-      try {
-        await fs.promises.mkdir(paths.root, { mode: 0o700 });
-      } catch (error: any) {
-        if (error?.code === "EEXIST") continue;
-        throw error;
-      }
-
-      let database: RunDatabase | undefined;
-      try {
-        await syncDirectory(this.root);
-        await initializeRunLayout(paths);
-        database = RunDatabase.create(paths.database, {
-          ...options,
-          run: { ...options.run, runId },
-        });
-        await syncDirectory(paths.root);
-        const run = database.readRun();
-        return { entry: { runId, paths, run }, database };
-      } catch (error) {
-        database?.close();
-        await fs.promises.rm(paths.root, { recursive: true, force: true }).catch(() => undefined);
-        throw error;
-      }
-    }
-    throw new Error(`Could not allocate a workflow run id after ${CREATE_ATTEMPTS} attempts`);
+  allocate(): { runId: string; paths: WorkflowRunPaths } {
+    const runId = `flow_${crypto.randomBytes(16).toString("hex")}`;
+    return { runId, paths: workflowRunPaths(this.root, runId) };
   }
 
-  async list(): Promise<RunCatalogEntry[]> {
+  async list(): Promise<WorkflowRunCatalogEntry[]> {
+    let root: fs.Stats;
+    try { root = await fs.promises.lstat(this.root); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+    if (!root.isDirectory() || root.isSymbolicLink()) throw new Error("Unsafe workflow run root");
     let entries: fs.Dirent[];
-    try {
-      const root = await fs.promises.lstat(this.root);
-      if (!root.isDirectory() || root.isSymbolicLink()) throw new Error("Unsafe workflow run root");
-      entries = await fs.promises.readdir(this.root, { withFileTypes: true });
-    } catch (error: any) {
-      if (error?.code === "ENOENT") return [];
-      throw error;
-    }
-
-    const runIds = entries
-      .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && RUN_ID.test(entry.name))
-      .map((entry) => entry.name)
-      .sort();
-    if (runIds.length > MAX_RUNS) throw new Error(`Workflow run root exceeds ${MAX_RUNS} runs`);
-
-    const runs = runIds.map((runId): RunCatalogEntry => {
-      const paths = runFilesystemPaths(this.root, runId);
-      let reader: RunDatabaseReader | undefined;
-      try {
-        reader = RunDatabaseReader.open(paths.database);
-        const run = reader.readRun();
-        if (run.runId !== runId) throw new Error("Run directory and database identity differ");
-        return { runId, paths, run };
-      } catch (error) {
-        return { runId, paths, error: boundedError(error) };
-      } finally {
-        reader?.close();
-      }
-    });
-
-    return runs.sort((left, right) => {
-      const byTime = Date.parse(right.run?.createdAt ?? "") - Date.parse(left.run?.createdAt ?? "");
-      return (Number.isFinite(byTime) ? byTime : 0) || right.runId.localeCompare(left.runId);
-    });
+    entries = await fs.promises.readdir(this.root, { withFileTypes: true });
+    const result = entries.filter(entry => entry.isDirectory() && !entry.isSymbolicLink() && RUN_ID.test(entry.name))
+      .map(entry => {
+        const paths = workflowRunPaths(this.root, entry.name);
+        let reader: WorkflowRunDatabaseReader | undefined;
+        try {
+          reader = WorkflowRunDatabaseReader.open(paths.database);
+          const run = reader.readRun();
+          if (run.runId !== entry.name) throw new Error("Run directory and database identity differ");
+          return { runId: entry.name, paths, run };
+        } catch (error) {
+          return { runId: entry.name, paths, error: bounded(error) };
+        } finally { reader?.close(); }
+      });
+    return result.sort((left, right) => Date.parse(right.run?.createdAt ?? "") - Date.parse(left.run?.createdAt ?? "")
+      || right.runId.localeCompare(left.runId));
   }
 
-  async resolve(reference: string): Promise<RunCatalogEntry> {
-    if (typeof reference !== "string" || reference.trim() !== reference || !/^(?:flow_)?[a-f0-9]{4,32}$/.test(reference)) {
-      throw new TypeError("Run reference must be a full or displayed short run id");
-    }
+  async resolve(reference: string): Promise<WorkflowRunCatalogEntry> {
+    if (!/^(?:flow_)?[a-f0-9]{4,32}$/u.test(reference)) throw new TypeError("Invalid workflow run reference");
     const entries = await this.list();
-    const exact = entries.find((entry) => entry.runId === reference);
+    const exact = entries.find(entry => entry.runId === reference);
     if (exact) return exact;
     const body = reference.startsWith("flow_") ? reference.slice(5) : reference;
-    const matches = entries.filter((entry) => entry.runId.slice(5).startsWith(body));
-    if (matches.length === 0) throw new Error(`Unknown workflow run ${reference}`);
-    if (matches.length > 1) throw new Error(`Ambiguous workflow run ${reference}`);
+    const matches = entries.filter(entry => entry.runId.slice(5).startsWith(body));
+    if (matches.length !== 1) throw new Error(matches.length ? `Ambiguous workflow run ${reference}` : `Unknown workflow run ${reference}`);
     return matches[0]!;
   }
 
-  /** Permanently remove one already-authorized run through an atomic quarantine rename. */
   async delete(runId: string): Promise<void> {
     if (!RUN_ID.test(runId)) throw new TypeError("Invalid workflow run id");
-    const paths = runFilesystemPaths(this.root, runId);
-    const root = path.resolve(this.root);
-    const target = path.resolve(paths.root);
-    if (path.dirname(target) !== root) throw new Error("Workflow run path escapes its catalog");
-    const [rootStat, targetStat] = await Promise.all([
-      fs.promises.lstat(root),
-      fs.promises.lstat(target),
-    ]);
-    if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || !targetStat.isDirectory() || targetStat.isSymbolicLink()) {
-      throw new Error("Unsafe workflow run directory");
-    }
-    const quarantine = path.join(root, `.deleting-${runId}-${crypto.randomUUID()}`);
+    const target = workflowRunPaths(this.root, runId).root;
+    const quarantine = path.join(this.root, `.deleting-${runId}-${crypto.randomUUID()}`);
     await fs.promises.rename(target, quarantine);
-    await makeTreeRemovable(quarantine);
+    await makeRemovable(quarantine);
     await fs.promises.rm(quarantine, { recursive: true, force: false });
-    await syncDirectory(root);
   }
 }
 
-async function initializeRunLayout(paths: RunFilesystemPaths): Promise<void> {
-  for (const directory of [paths.context, paths.sessions, paths.workspaces, paths.artifacts, paths.outputs]) {
-    await fs.promises.mkdir(directory, { mode: 0o700 });
-  }
-  for (const name of ["candidates", "checkpoints", "overlays"]) {
-    await fs.promises.mkdir(path.join(paths.workspaces, name), { mode: 0o700 });
-  }
-  await syncDirectory(paths.root);
+export function workflowRunPaths(rootInput: string, runId: string): WorkflowRunPaths {
+  if (!RUN_ID.test(runId)) throw new TypeError("Invalid workflow run id");
+  const root = path.join(path.resolve(rootInput), runId);
+  const context = path.join(root, "context");
+  return {
+    root,
+    database: path.join(root, "run.sqlite"),
+    source: path.join(root, "source.flow.ts"),
+    context,
+    invocation: path.join(context, "invocation.json"),
+    projectSnapshot: path.join(context, "project"),
+    projectManifest: path.join(context, "project-manifest.json"),
+    staticResources: path.join(context, "static-resources.json"),
+    sessions: path.join(root, "sessions"),
+    workspaces: path.join(root, "workspaces"),
+    artifacts: path.join(root, "artifacts"),
+    outputs: path.join(root, "outputs"),
+  };
 }
 
-export function newRunId(): string {
-  return `flow_${crypto.randomBytes(16).toString("hex")}`;
-}
-
-export function shortRunIds(runIds: readonly string[]): ReadonlyMap<string, string> {
+export function workflowShortRunIds(runIds: readonly string[]): ReadonlyMap<string, string> {
   const result = new Map<string, string>();
-  for (const runId of runIds) if (!RUN_ID.test(runId)) throw new TypeError("Invalid workflow run id");
   for (const runId of runIds) {
     const body = runId.slice(5);
     let length = 8;
-    while (length < 32 && runIds.some((other) => other !== runId && other.slice(5, 5 + length) === body.slice(0, length))) {
-      length += 2;
-    }
+    while (length < 32 && runIds.some(other => other !== runId && other.slice(5).startsWith(body.slice(0, length)))) length += 2;
     result.set(runId, body.slice(0, length));
   }
   return result;
 }
 
-async function syncDirectory(directory: string): Promise<void> {
-  const handle = await fs.promises.open(directory, "r");
-  try { await handle.sync(); } finally { await handle.close(); }
+async function makeRemovable(target: string): Promise<void> {
+  const stat = await fs.promises.lstat(target);
+  if (stat.isDirectory() && !stat.isSymbolicLink()) {
+    await fs.promises.chmod(target, 0o700);
+    for (const name of await fs.promises.readdir(target)) await makeRemovable(path.join(target, name));
+  } else if (!stat.isSymbolicLink()) await fs.promises.chmod(target, 0o600).catch(() => undefined);
 }
 
-function boundedError(error: unknown): string {
-  const text = error instanceof Error ? error.message : String(error);
-  return Array.from(text.replace(/[\u0000-\u001f\u007f]/g, " ")).slice(0, 512).join("");
-}
-
-async function makeTreeRemovable(directory: string): Promise<void> {
-  const stat = await fs.promises.lstat(directory);
-  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Unsafe quarantined workflow run");
-  await fs.promises.chmod(directory, (stat.mode & 0o777) | 0o700);
-  for (const entry of await fs.promises.readdir(directory, { withFileTypes: true })) {
-    if (entry.isDirectory() && !entry.isSymbolicLink()) await makeTreeRemovable(path.join(directory, entry.name));
-  }
+function bounded(error: unknown): string {
+  return Array.from((error instanceof Error ? error.message : String(error)).replace(/[\u0000-\u001f\u007f]/gu, " ")).slice(0, 512).join("");
 }

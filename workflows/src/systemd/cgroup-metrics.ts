@@ -155,7 +155,7 @@ function cgroupDirectory(root: string, controlGroup: string): string {
 }
 
 async function boundedRead(filePath: string): Promise<string> {
-  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
     const stat = await handle.stat();
     if (stat.size > 64 * 1024) throw new Error(`${path.basename(filePath)} exceeds 64 KiB`);

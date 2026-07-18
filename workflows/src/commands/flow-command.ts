@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { WorkflowDraftService } from "../drafts/service.js";
-import type { NamedWorkflowClient, WorkflowRunSummary } from "../runtime/named-workflow-types.js";
+import type { WorkflowNamedClient, WorkflowRunSummary } from "../runtime/named-workflow-types.js";
 import type { JsonObject, JsonValue } from "../types.js";
 import {
   createFlowEnvelope,
@@ -9,8 +9,8 @@ import {
   type FlowChallengeProjection,
   type FlowProtocolEnvelope,
 } from "../ui/flow-protocol.js";
-import { boundedProjectionText as sanitizeProjectionText } from "../projection/run-projection.js";
-import { projectDraftPromotion, projectDraftValidation } from "../projection/approval-inspectors.js";
+import { boundedWorkflowProjectionText as sanitizeProjectionText } from "../projection/run-projection.js";
+import { projectWorkflowDraftPromotion, projectWorkflowDraftReview } from "../projection/approval-inspectors.js";
 import { openWorkflowInspector } from "../ui/flow-inspector.js";
 import {
   renderApplyApprovalConfirmation,
@@ -21,7 +21,7 @@ import { createFlowArgumentCompletions } from "./flow-autocomplete.js";
 import { flowHelpText, parseFlowCommand, type FlowCommand } from "./flow-command-parser.js";
 
 export interface FlowCommandDependencies {
-  workflows: NamedWorkflowClient;
+  workflows: WorkflowNamedClient;
   drafts: WorkflowDraftService;
 }
 
@@ -66,8 +66,8 @@ export async function routeFlowCommand(
           title: definition.title ?? definition.name,
           description: definition.description,
           namespace: definition.namespace,
-          modelVisible: definition.modelVisible,
-          capabilities: definition.capabilities,
+          exposure: definition.exposure,
+          capabilities: definition.parsed.review.capabilities,
         }));
       const invalidDefinitions = workflows.registry.listInvalid()
         .filter((definition) => !command.namespace || definition.namespace === command.namespace)
@@ -89,11 +89,11 @@ export async function routeFlowCommand(
         title: definition.title ?? definition.name,
         description: definition.description,
         namespace: definition.namespace,
-        modelVisible: definition.modelVisible,
-        capabilities: definition.capabilities,
-        inputSchema: definition.inputSchema,
-        outputSchema: definition.outputSchema,
-        maxParallelism: definition.maxParallelism ?? null,
+        exposure: definition.exposure,
+        capabilities: definition.parsed.review.capabilities,
+        inputSchema: definition.input,
+        outputSchema: definition.output,
+        concurrency: definition.concurrency ?? null,
         review: definition.parsed.review,
       });
     }
@@ -103,7 +103,7 @@ export async function routeFlowCommand(
         authority(ctx),
         ctx,
       );
-      return runEnvelope("flow-run", result.summary, await workflows.open(result.runId, ctx), result.result, result.resultArtifact);
+      return runEnvelope("flow-run", result.summary, await workflows.open(result.runId, ctx), result.result);
     }
     case "replay":
     case "fresh-run": {
@@ -113,7 +113,7 @@ export async function routeFlowCommand(
         mode: command.mode,
         fresh: command.action === "fresh-run",
       }, authority(ctx), ctx);
-      return runEnvelope(`flow-${command.action}`, result.summary, await workflows.open(result.runId, ctx), result.result, result.resultArtifact);
+      return runEnvelope(`flow-${command.action}`, result.summary, await workflows.open(result.runId, ctx), result.result);
     }
     case "status": {
       if (command.runRef) {
@@ -154,7 +154,7 @@ export async function routeFlowCommand(
     }
     case "validate": {
       const review = await dependencies.drafts.validate(command.draftId, ctx);
-      const projection = projectDraftValidation(review);
+      const projection = projectWorkflowDraftReview(review);
       return createFlowEnvelope({
         kind: "flow-draft-validation",
         ok: review.valid,
@@ -175,41 +175,41 @@ export async function routeFlowCommand(
 
 async function respond(
   command: Extract<FlowCommand, { action: "respond" }>,
-  workflows: NamedWorkflowClient,
+  workflows: WorkflowNamedClient,
   ctx: ExtensionCommandContext,
 ): Promise<FlowProtocolEnvelope> {
-  const prepared = await workflows.checkpointChallenge(command.runRef, command.checkpointId, ctx);
+  const prepared = await workflows.humanChallenge(command.runRef, "ask", ctx);
   let value: JsonValue;
   if (ctx.mode === "tui") {
-    const collected = await collectCheckpointValue(prepared.checkpoint.request, ctx);
-    if (!collected.committed) return envelope("flow-respond-cancelled", "Checkpoint response cancelled", prepared.summary);
+    const collected = await collectAskValue(prepared.request, ctx);
+    if (!collected.committed) return envelope("flow-respond-cancelled", "Ask response cancelled", prepared.summary);
     value = collected.value;
   } else {
     if (!command.challenge) {
-      return challengeEnvelope("flow-checkpoint-challenge", "Checkpoint response requires an exact second submission", {
-        kind: "checkpoint-response",
+      return challengeEnvelope("flow-ask-challenge", "Ask response requires an exact second submission", {
+        kind: "ask-response",
         runId: prepared.summary.runId,
         shortRunId: prepared.summary.shortRunId,
         revision: prepared.summary.revision,
         token: prepared.token,
-        summary: prepared.checkpoint.request.prompt,
-        request: prepared.checkpoint.request as JsonObject,
+        summary: String(prepared.request.prompt ?? "Workflow asks for input"),
+        request: prepared.request,
       });
     }
     if (command.value === undefined) throw new Error("--value is required with --challenge");
-    value = parseCheckpointValue(prepared.checkpoint.request, command.value);
+    value = JSON.parse(command.value) as JsonValue;
   }
   const exactChallenge = ctx.mode === "tui" ? prepared.token : command.challenge!;
-  const summary = await workflows.respond(command.runRef, command.checkpointId, exactChallenge, value, ctx);
-  return projectionEnvelope("flow-respond", `Checkpoint response committed for ${summary.shortRunId}`, await workflows.open(summary.runId, ctx));
+  const summary = await workflows.respond(command.runRef, command.interactionId, exactChallenge, value, ctx);
+  return projectionEnvelope("flow-respond", `Ask response committed for ${summary.shortRunId}`, await workflows.open(summary.runId, ctx));
 }
 
 async function decide(
   command: Extract<FlowCommand, { action: "approve" | "reject" }>,
-  workflows: NamedWorkflowClient,
+  workflows: WorkflowNamedClient,
   ctx: ExtensionCommandContext,
 ): Promise<FlowProtocolEnvelope> {
-  const prepared = await workflows.approvalChallenge(command.runRef, ctx);
+  const prepared = await workflows.humanChallenge(command.runRef, "apply", ctx);
   if (ctx.mode === "tui") {
     const projection = await workflows.open(command.runRef, ctx);
     const confirmed = await ctx.ui.confirm(
@@ -224,11 +224,11 @@ async function decide(
       shortRunId: prepared.summary.shortRunId,
       revision: prepared.summary.revision,
       token: prepared.token,
-      summary: `${command.action} exact apply ${prepared.approvalId}`,
+      summary: `${command.action} exact apply ${prepared.interactionId}`,
       request: {
-        approvalId: prepared.approvalId,
+        interactionId: prepared.interactionId,
         operationId: prepared.operationId,
-        summaryArtifact: prepared.summaryArtifact as unknown as JsonValue,
+        request: prepared.request,
       },
     });
   }
@@ -242,9 +242,9 @@ async function promote(
   dependencies: FlowCommandDependencies,
   ctx: ExtensionCommandContext,
 ): Promise<FlowProtocolEnvelope> {
-  const prepared = await dependencies.drafts.promotionChallenge(command.draftId, ctx);
+  const prepared = await dependencies.drafts.promotionChallenge(command.draftId, command.exposure, ctx);
   if (ctx.mode === "tui") {
-    const projection = projectDraftPromotion(prepared.review, prepared.challenge);
+    const projection = projectWorkflowDraftPromotion(prepared.review, prepared.challenge);
     const confirmed = await ctx.ui.confirm(
       "Promote this exact workflow draft?",
       renderDraftPromotionConfirmation(projection).join("\n"),
@@ -254,11 +254,12 @@ async function promote(
     return envelope(
       "flow-draft-promotion-challenge",
       "Draft promotion requires an exact second submission",
-      projectDraftPromotion(prepared.review, prepared.challenge),
+      projectWorkflowDraftPromotion(prepared.review, prepared.challenge),
     );
   }
   const promoted = await dependencies.drafts.promote(
     command.draftId,
+    command.exposure,
     command.challenge ?? prepared.challenge.challengeHash,
     ctx,
   );
@@ -268,7 +269,7 @@ async function promote(
 
 async function deleteRun(
   command: Extract<FlowCommand, { action: "delete" }>,
-  workflows: NamedWorkflowClient,
+  workflows: WorkflowNamedClient,
   ctx: ExtensionCommandContext,
 ): Promise<FlowProtocolEnvelope> {
   const prepared = await workflows.deletionChallenge(command.runRef, ctx);
@@ -326,12 +327,10 @@ function runEnvelope(
   summary: WorkflowRunSummary,
   projection: import("../projection/types.js").WorkflowRunProjection,
   result?: JsonValue,
-  resultArtifact?: unknown,
 ): FlowProtocolEnvelope {
   return createFlowEnvelope({ kind, ok: true, message: summaryMessage(summary), projection, data: {
     summary,
     ...(result !== undefined ? { result } : {}),
-    ...(resultArtifact ? { resultArtifact } : {}),
   } as unknown as JsonValue });
 }
 
@@ -344,41 +343,15 @@ function projectionMessage(projection: import("../projection/types.js").Workflow
 }
 
 function authority(ctx: ExtensionCommandContext): "user" | "rpc" { return ctx.mode === "rpc" ? "rpc" : "user"; }
-function terminal(status: string): boolean { return status === "completed" || status === "failed" || status === "stopped"; }
+function terminal(status: string): boolean { return status === "completed" || status === "failed" || status === "stopped" || status === "corrupt"; }
 
-async function collectCheckpointValue(
-  request: import("../runtime/durable-types.js").HumanCheckpointRequest,
+async function collectAskValue(
+  request: JsonObject,
   ctx: ExtensionCommandContext,
 ): Promise<{ committed: false } | { committed: true; value: JsonValue }> {
-  if (request.kind === "confirm") {
-    const selected = await ctx.ui.select(request.title ?? "Workflow checkpoint", ["Yes", "No"]);
-    if (selected === undefined) return { committed: false };
-    return { committed: true, value: selected === "Yes" };
-  }
-  if (request.kind === "choice") {
-    const rendered = request.choices.map((choice) => `${choice.id} — ${choice.label}`);
-    const selected = await ctx.ui.select(request.title ?? "Workflow checkpoint", rendered);
-    if (selected === undefined) return { committed: false };
-    return { committed: true, value: selected.slice(0, selected.indexOf(" — ")) };
-  }
-  const edited = await ctx.ui.editor(request.title ?? "Workflow checkpoint", "{}");
+  const edited = await ctx.ui.editor(String(request.prompt ?? "Workflow asks for input"), "null");
   if (edited === undefined) return { committed: false };
   return { committed: true, value: JSON.parse(edited) as JsonValue };
-}
-
-function parseCheckpointValue(
-  request: import("../runtime/durable-types.js").HumanCheckpointRequest,
-  source: string,
-): JsonValue {
-  if (request.kind === "confirm") {
-    if (source !== "true" && source !== "false") throw new Error("Confirmation value must be true or false");
-    return source === "true";
-  }
-  if (request.kind === "choice") {
-    if (!request.choices.some((choice) => choice.id === source)) throw new Error("Checkpoint choice id is not allowed");
-    return source;
-  }
-  return JSON.parse(source) as JsonValue;
 }
 
 function safeError(error: unknown): string {

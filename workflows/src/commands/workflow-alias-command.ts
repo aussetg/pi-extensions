@@ -1,8 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { NamedWorkflowClient } from "../runtime/named-workflow-types.js";
+import type { WorkflowNamedClient } from "../runtime/named-workflow-types.js";
 import type { JsonValue } from "../types.js";
 import { createFlowEnvelope } from "../ui/flow-protocol.js";
-import { boundedProjectionText as sanitizeProjectionText } from "../projection/run-projection.js";
+import { boundedWorkflowProjectionText as sanitizeProjectionText } from "../projection/run-projection.js";
 import { emitFlowEnvelope } from "./flow-command.js";
 
 /** Friendly text parser; launch authority and persistence are exactly `/flow run`. */
@@ -10,7 +10,7 @@ export function registerWorkflowAliasCommand(
   pi: ExtensionAPI,
   commandName: "goal" | "execute-plan",
   workflow: "builtin:goal" | "builtin:execute-plan",
-  workflows: NamedWorkflowClient,
+  workflows: WorkflowNamedClient,
 ): void {
   pi.registerCommand(commandName, {
     description: `Alias for /flow run ${workflow}`,
@@ -30,7 +30,6 @@ export function registerWorkflowAliasCommand(
           data: {
             summary: result.summary,
             ...(result.result !== undefined ? { result: result.result } : {}),
-            ...(result.resultArtifact ? { resultArtifact: result.resultArtifact } : {}),
           } as unknown as JsonValue,
         }));
       } catch (error) {
