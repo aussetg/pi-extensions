@@ -8,6 +8,7 @@ import {
   applyWorkflowCandidateTree,
 } from "../src/runtime/production-effects.js";
 import { withWorkflowApplyLock } from "../src/workspaces/apply-lock.js";
+import { scanProjectSource } from "../src/workspaces/project-snapshot.js";
 import { stableHash } from "../src/utils/hashes.js";
 
 const roots: string[] = [];
@@ -41,6 +42,8 @@ describe("workflow production hardening", () => {
       path.join(live, `.added.txt.pi-workflow-${orphanSuffix}.tmp`),
       "interrupted copy",
     );
+    await fs.promises.mkdir(path.join(live, ".git"));
+    await fs.promises.writeFile(path.join(live, ".git", "HEAD"), "ref: refs/heads/main\n");
     const apply = async () => await applyWorkflowCandidateTree({
       sourceRoot: live,
       launchRoot: launch,
@@ -51,7 +54,8 @@ describe("workflow production hardening", () => {
       signal: new AbortController().signal,
     });
     await apply();
-    expect((await scanCandidateTree(live)).treeHash).toBe(after.treeHash);
+    expect((await scanProjectSource(live)).treeHash).toBe(after.treeHash);
+    expect(await fs.promises.readFile(path.join(live, ".git", "HEAD"), "utf8")).toContain("refs/heads/main");
     await expect(apply()).resolves.toBeUndefined();
   });
 

@@ -122,6 +122,7 @@ describe("systemd + Bubblewrap command execution", () => {
     }), {}, "read-only", {
       safety,
       unitKind: "measurement",
+      executionId: `measurement_${"2".repeat(32)}`,
       onStart: async (_pid, unit) => {
         properties = await unitProperties(unit, [
           "MemoryMax", "TasksMax", "CPUWeight", "CPUQuotaPerSecUSec", "IOWeight", "TimeoutStopUSec",
@@ -258,10 +259,12 @@ async function execute(
     executor?: SandboxedCommandExecutor;
     safety?: SafetyConfiguration;
     unitKind?: HostCommandRequest["unitKind"];
+    executionId?: string;
   } = {},
 ): Promise<HostCommandResult> {
   const controller = options.controller ?? new AbortController();
-  const executionId = `command_${(++executionSequence).toString(16).padStart(32, "0")}`;
+  const executionId = options.executionId
+    ?? `command_${(++executionSequence).toString(16).padStart(32, "0")}`;
   const request: HostCommandRequest = {
     runId: `flow_${"1".repeat(32)}`,
     operationPath: `run/command:${profile.name}`,

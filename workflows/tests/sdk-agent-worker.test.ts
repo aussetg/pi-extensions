@@ -12,6 +12,7 @@ import type {
 } from "../src/agents/executor.js";
 import type { AgentWorkerProtocol } from "../src/agents/sdk-protocol.js";
 import { runSdkAgentWorker } from "../src/agents/sdk-worker.js";
+import { FileAgentSupervisionStore } from "../src/agents/supervisor.js";
 import type { JsonValue } from "../src/types.js";
 import { sha256, stableHash } from "../src/utils/hashes.js";
 
@@ -68,6 +69,23 @@ describe("SDK agent worker", () => {
     expect(captured).not.toHaveProperty("modelRegistry");
     expect(captured?.resourceLoader?.getExtensions().extensions).toEqual([]);
     expect(protocol.events.some(event => event.type === "termination")).toBe(true);
+  });
+
+  it("stores supervision beside the run-relative Pi session", async () => {
+    const parent = await fs.promises.mkdtemp(path.join(os.tmpdir(), "workflow-sdk-supervision-"));
+    roots.push(parent);
+    const runDir = path.join(parent, "run-worker");
+    const sessionDir = path.join(runDir, "sessions", "execution-worker");
+    await fs.promises.mkdir(sessionDir, { recursive: true, mode: 0o700 });
+    const request = workerRequest(runDir);
+    const store = new FileAgentSupervisionStore(request);
+
+    expect(store.statePath).toBe(path.join(sessionDir, "supervision.json"));
+    await store.settleYield(false, "2026-07-18T00:00:00.000Z");
+    expect(JSON.parse(await fs.promises.readFile(store.statePath, "utf8"))).toMatchObject({
+      receiptlessStrikes: 1,
+      status: "running",
+    });
   });
 });
 

@@ -109,7 +109,7 @@ export class WorkflowProductionAgentExecutor implements WorkflowAgentEffectExecu
           instruction: { kind: "initial-task", task: prompt },
           session: {
             agentSessionId: `session_${stableHash({ executionId }).slice(7, 39)}`,
-            piSessionPath: path.join(this.protocol.runDir, "sessions", executionId, "pi-session.jsonl"),
+            piSessionPath: `sessions/${executionId}/session.jsonl`,
             resume: false,
           },
         };
@@ -459,7 +459,7 @@ export async function applyWorkflowCandidateTree(options: {
       ));
     }
   }
-  const live = await scanCandidateTree(options.sourceRoot);
+  const live = await scanProjectSource(options.sourceRoot);
   if (live.treeHash === after.treeHash) return;
   const liveEntries = new Map(live.entries.map(entry => [entry.path, entry]));
   const changed = new Set(options.changedPaths);
@@ -530,7 +530,7 @@ export async function applyWorkflowCandidateTree(options: {
     .sort((left, right) => right.split(path.sep).length - left.split(path.sep).length)) {
     await syncDirectory(directory);
   }
-  if ((await scanCandidateTree(options.sourceRoot)).treeHash !== after.treeHash) {
+  if ((await scanProjectSource(options.sourceRoot)).treeHash !== after.treeHash) {
     throw new Error("Live project differs from candidate after apply");
   }
 }

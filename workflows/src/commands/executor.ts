@@ -193,7 +193,7 @@ export class SandboxedCommandExecutor implements HostCommandExecutor {
     const home = path.join(scratchRoot, "home");
     const temporary = path.join(scratchRoot, "tmp");
     const outputRoot = path.join(request.runDir, "outputs", request.executionId);
-    const unitIdentity = `${unitKind}_${request.executionId.slice("command_".length)}`;
+    const unitIdentity = `${unitKind}_${commandExecutionHash(request.executionId, unitKind)}`;
     const unit = workflowUnitName(unitKind, unitIdentity);
     const stale = await this.launcher.inspect(unit);
     if (["active", "activating", "deactivating", "reloading"].includes(stale.activeState)) {
@@ -488,9 +488,10 @@ class StreamCapture {
 }
 
 function validateRequest(request: HostCommandRequest): void {
+  const unitKind = request.unitKind ?? "command";
   if (
     !/^flow_(?:[a-f0-9]{32}|[0-9a-f-]{36})$/.test(request.runId) ||
-    !/^command_[a-f0-9]{32}$/.test(request.executionId) ||
+    commandExecutionHash(request.executionId, unitKind) === undefined ||
     !Number.isSafeInteger(request.attempt) || request.attempt < 1
   ) throw new Error("Command execution identity is invalid");
   if (!path.isAbsolute(request.runDir) || !path.isAbsolute(request.workspaceRoot) || !path.isAbsolute(request.cwd)) {
@@ -517,6 +518,15 @@ function validateRequest(request: HostCommandRequest): void {
     request.physicalCoreAffinity !== undefined &&
     (!Number.isSafeInteger(request.physicalCoreAffinity) || request.physicalCoreAffinity < 1 || request.physicalCoreAffinity > 4_096)
   ) throw new Error("Command physical-core affinity is invalid");
+}
+
+function commandExecutionHash(
+  executionId: string,
+  unitKind: Extract<WorkflowUnitKind, "command" | "verification" | "measurement">,
+): string | undefined {
+  const match = /^(execution|command|verification|measurement)_([a-f0-9]{32})$/.exec(executionId);
+  if (!match || !["execution", "command", unitKind].includes(match[1]!)) return undefined;
+  return match[2];
 }
 
 async function createExecutionDirectories(home: string, temporary: string, outputRoot: string): Promise<void> {

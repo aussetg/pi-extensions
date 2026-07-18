@@ -191,7 +191,7 @@ export class FileAgentSupervisionStore implements AgentSupervisionStore {
   readonly statePath: string;
 
   constructor(request: AgentExecutionRequest) {
-    this.statePath = path.join(path.dirname(path.resolve(request.session.piSessionPath)), "supervision.json");
+    this.statePath = path.join(path.dirname(hostSessionPath(request)), "supervision.json");
   }
 
   async read(): Promise<Pick<AgentSessionRecord, "receiptlessStrikes" | "status" | "finish">> {
@@ -264,12 +264,22 @@ function resumeRequest(request: AgentExecutionRequest): AgentExecutionRequest {
 
 async function persistedSessionExists(request: AgentExecutionRequest): Promise<boolean> {
   try {
-    const stat = await fs.promises.lstat(path.resolve(request.session.piSessionPath));
+    const stat = await fs.promises.lstat(hostSessionPath(request));
     return stat.isFile() && !stat.isSymbolicLink();
   } catch (error: any) {
     if (error?.code === "ENOENT") return false;
     throw error;
   }
+}
+
+function hostSessionPath(request: AgentExecutionRequest): string {
+  const runDir = path.dirname(path.resolve(request.protocol.socketPath));
+  const sessionPath = path.resolve(runDir, request.session.piSessionPath);
+  const relative = path.relative(runDir, sessionPath);
+  if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error("Agent session path escapes its workflow run");
+  }
+  return sessionPath;
 }
 
 function receiptlessPauseReason(operationId: string): StructuredReason {
