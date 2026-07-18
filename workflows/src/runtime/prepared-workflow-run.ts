@@ -30,13 +30,12 @@ import {
 } from "./production-effects.js";
 
 export interface WorkflowReplayBinding {
-  formatVersion: 1;
   sourceRunId: string;
   sourceRunDir: string;
   fresh: boolean;
 }
 
-/** Reconstruct exact snapshotted authority and execute one prepared schema-4 run. */
+/** Reconstruct exact snapshotted authority and execute one prepared run. */
 export async function executePreparedWorkflowRun(
   runDirInput: string,
   database: WorkflowRunDatabase,
@@ -53,6 +52,9 @@ export async function executePreparedWorkflowRun(
     readOptional<WorkflowReplayBinding>(path.join(runDir, "context", "replay.json")),
   ]);
   assertProjectSnapshotManifest(manifest);
+  if (replayBinding && Object.keys(replayBinding).sort().join(",") !== "fresh,sourceRunDir,sourceRunId") {
+    throw new Error("Prepared workflow replay binding has unexpected fields");
+  }
   const workflow = parseWorkflow(snapshot.source, { fileName: `${snapshot.name}.flow.ts` });
   assertWorkflowStaticEffectResources(workflow, resources);
   const run = database.readRun();
@@ -108,7 +110,7 @@ export async function executePreparedWorkflowRun(
   let replay: WorkflowCausalReplay | undefined;
   try {
     if (replayBinding && !replayBinding.fresh) {
-      if (replayBinding.formatVersion !== 1 || replayBinding.sourceRunId !== path.basename(replayBinding.sourceRunDir)) {
+      if (replayBinding.sourceRunId !== path.basename(replayBinding.sourceRunDir)) {
         throw new Error("Prepared workflow replay binding is invalid");
       }
       replay = await WorkflowCausalReplay.open({

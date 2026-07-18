@@ -6,7 +6,6 @@ import type { WorkflowNamespace } from "../definition/types.js";
 import { parseWorkflow } from "../definition/workflow-frontend.js";
 import {
   WORKFLOW_RUNTIME_API_HASH,
-  WORKFLOW_RUNTIME_API_VERSION,
   WORKFLOW_SOURCE_EXTENSION,
 } from "../definition/workflow-language.js";
 import type {
@@ -30,7 +29,6 @@ import {
 export type WorkflowId = `${WorkflowNamespace}:${string}`;
 
 export interface WorkflowDefinitionRef {
-  formatVersion: 1;
   id: WorkflowId;
   namespace: WorkflowNamespace;
   name: string;
@@ -112,13 +110,13 @@ export class WorkflowRegistry {
   resolve(id: string): WorkflowDefinitionRef {
     if (id.includes(":")) {
       const ref = this.refs.get(id);
-      if (!ref) throw new Error(`Unknown workflow v17 definition: ${id}`);
+      if (!ref) throw new Error(`Unknown workflow definition: ${id}`);
       return ref;
     }
     const matches = this.list().filter((ref) => ref.name === id);
-    if (matches.length === 0) throw new Error(`Unknown workflow v17 definition: ${id}`);
+    if (matches.length === 0) throw new Error(`Unknown workflow definition: ${id}`);
     if (matches.length > 1) {
-      throw new Error(`Ambiguous workflow v17 definition ${id}; use one of: ${matches.map((ref) => ref.id).join(", ")}`);
+      throw new Error(`Ambiguous workflow definition ${id}; use one of: ${matches.map((ref) => ref.id).join(", ")}`);
     }
     return matches[0]!;
   }
@@ -129,10 +127,8 @@ export function workflowDefinitionHash(
   parsed: ParsedWorkflow,
 ): string {
   return stableHash({
-    formatVersion: 1,
     workflowId,
     sourceHash: parsed.sourceHash,
-    runtimeApiVersion: WORKFLOW_RUNTIME_API_VERSION,
     runtimeApiHash: WORKFLOW_RUNTIME_API_HASH,
     metadata: parsed.metadata,
     descriptors: parsed.descriptors,
@@ -240,7 +236,6 @@ async function discoverWorkflowRoot(
       if (parsed.installedName !== installedName) throw new Error("Workflow frontend returned another installed name");
       const id = `${root.namespace}:${installedName}` as WorkflowId;
       const ref: WorkflowDefinitionRef = {
-        formatVersion: 1,
         id,
         namespace: root.namespace,
         name: installedName,

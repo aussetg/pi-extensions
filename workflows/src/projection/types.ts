@@ -198,8 +198,6 @@ export interface WorkflowHumanInteractionProjection {
 }
 
 export interface WorkflowRunProjection {
-  formatVersion: 1;
-  runtimeVersion: 17;
   runId: string;
   shortRunId: string;
   workflowId: string;
@@ -236,7 +234,6 @@ export interface WorkflowRunProjection {
 }
 
 export interface WorkflowDefinitionReviewProjection {
-  formatVersion: 1;
   workflowId: string;
   name: string;
   title?: string;
@@ -297,8 +294,6 @@ export type WorkflowInspectorPageKind =
   | "events";
 
 export interface WorkflowInspectorPage<T = JsonValue> {
-  formatVersion: 1;
-  runtimeVersion: 17;
   runId: string;
   revision: number;
   kind: WorkflowInspectorPageKind;

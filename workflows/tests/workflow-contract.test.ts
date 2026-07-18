@@ -12,17 +12,15 @@ import {
   WORKFLOW_RESOURCE_IDENTITY_SCHEMA,
   WORKFLOW_RUNTIME_API_DESCRIPTOR,
   WORKFLOW_RUNTIME_API_HASH,
-  WORKFLOW_RUNTIME_API_VERSION,
   WORKFLOW_SOURCE_EXTENSION,
 } from "../src/definition/workflow-language.js";
 
-describe("workflow v17 public contract", () => {
+describe("workflow public contract", () => {
   it("pins the exact reviewed language identity", () => {
-    expect(WORKFLOW_RUNTIME_API_VERSION).toBe(17);
     expect(WORKFLOW_MODULE).toBe("pi/workflows");
     expect(WORKFLOW_SOURCE_EXTENSION).toBe(".flow.ts");
     expect(WORKFLOW_RUNTIME_API_HASH).toBe(
-      "sha256:3ea83475c353de4c9479b0f27664cabd3aa6413e956c27ce0ad9a39ce91cd612",
+      "sha256:266734901150f4999a2c07585c1522188ffc2584cc61e65b3008995b07fbcf7c",
     );
   });
 
@@ -51,26 +49,22 @@ describe("workflow v17 public contract", () => {
     const hash = `sha256:${"a".repeat(64)}`;
 
     expect(descriptor({
-      formatVersion: 1,
       kind: "agent-task",
       sourceSite: "descriptor-000001",
       definitionHash: hash,
     })).toBe(true);
     expect(descriptor({
-      formatVersion: 1,
       kind: "inline-task",
       sourceSite: "descriptor-000001",
       definitionHash: hash,
     })).toBe(false);
 
     expect(product({
-      formatVersion: 1,
       kind: "verification",
       authorityId: "product-000001",
       authorityHash: hash,
     })).toBe(true);
     expect(product({
-      formatVersion: 1,
       kind: "verification",
       authorityId: "product-000001",
       authorityHash: hash,
@@ -78,26 +72,22 @@ describe("workflow v17 public contract", () => {
     })).toBe(false);
 
     expect(reference({
-      formatVersion: 1,
       kind: "candidate-workspace",
       authorityId: "workspace-000001",
       authorityHash: hash,
     })).toBe(true);
     expect(reference({
-      formatVersion: 1,
       kind: "candidate",
       authorityId: "workspace-000001",
       authorityHash: hash,
     })).toBe(false);
 
     expect(resource({
-      formatVersion: 1,
       kind: "measurement-profile",
       selector: "project:parser-benchmark",
       snapshotHash: hash,
     })).toBe(true);
     expect(resource({
-      formatVersion: 1,
       kind: "measurement-profile",
       selector: "./arbitrary-command",
       snapshotHash: hash,
@@ -119,15 +109,6 @@ describe("workflow v17 public contract", () => {
       "apply",
     ]);
     expect(descriptor.synchronousOperations).toEqual(["metrics"]);
-    expect(descriptor.removedOperations).toEqual(["stage", "loop", "fanOut", "checkpoint", "metric"]);
-    expect(descriptor.removedAuthorFields).toEqual([
-      "name",
-      "inputSchema",
-      "outputSchema",
-      "capabilities",
-      "modelVisible",
-      "maxParallelism",
-    ]);
   });
 });
 

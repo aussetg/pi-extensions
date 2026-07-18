@@ -21,7 +21,6 @@ import {
   parseWorkflowReferenceIdentity,
   sameWorkflowWireIdentity,
   WORKFLOW_ASYNC_FLOW_METHODS,
-  WORKFLOW_CONTROL_PROTOCOL_VERSION,
   WORKFLOW_SYNC_FLOW_METHODS,
   type WorkflowControlProcessMessage,
   type WorkflowFlowMethod,
@@ -78,7 +77,7 @@ export class WorkflowControlExecutionLimitError extends WorkflowControlExecution
   }
 }
 
-/** Execute one reviewed v17 definition in its memory-bounded control process. */
+/** Execute one reviewed definition in its memory-bounded control process. */
 export async function evaluateWorkflowControl<TContext>(
   options: WorkflowControlOptions<TContext>,
 ): Promise<unknown> {
@@ -90,7 +89,7 @@ export async function evaluateWorkflowControl<TContext>(
 export async function loadWorkflowControlDefinition(workflow: ParsedWorkflow): Promise<void> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(new WorkflowControlExecutionLimitError(
-    "Workflow v17 definition-only load timed out",
+    "Workflow definition-only load timed out",
   )), INITIALIZATION_TIMEOUT_MS);
   timeout.unref?.();
   try {
@@ -106,7 +105,7 @@ export async function loadWorkflowControlDefinition(workflow: ParsedWorkflow): P
       definitionOnly: true,
     });
     if (!plainRecord(result) || result.loaded !== true || result.name !== workflow.installedName) {
-      throw new WorkflowControlExecutionError("Workflow v17 definition-only load returned an invalid binding");
+      throw new WorkflowControlExecutionError("Workflow definition-only load returned an invalid binding");
     }
   } finally {
     clearTimeout(timeout);
@@ -145,13 +144,13 @@ class WorkflowControlProcessBridge<TContext> {
     this.segmentTimeoutMs = boundedSegmentTimeout(options.segmentTimeoutMs);
     for (const descriptor of options.workflow.descriptors) {
       if (this.descriptors.has(descriptor.identity.sourceSite)) {
-        throw new WorkflowControlExecutionError(`Duplicate workflow v17 descriptor ${descriptor.identity.sourceSite}`);
+        throw new WorkflowControlExecutionError(`Duplicate workflow descriptor ${descriptor.identity.sourceSite}`);
       }
       this.descriptors.set(descriptor.identity.sourceSite, descriptor);
     }
     for (const site of options.workflow.operations) {
       if (this.operationSites.has(site.sourceSite)) {
-        throw new WorkflowControlExecutionError(`Duplicate workflow v17 operation site ${site.sourceSite}`);
+        throw new WorkflowControlExecutionError(`Duplicate workflow operation site ${site.sourceSite}`);
       }
       this.operationSites.set(site.sourceSite, site.method);
     }
@@ -174,7 +173,7 @@ class WorkflowControlProcessBridge<TContext> {
     const syncInput = this.child.stdio[4];
     if (!syncInput || typeof (syncInput as Writable).write !== "function") {
       this.child.kill("SIGKILL");
-      throw new WorkflowControlExecutionError("Workflow v17 control process has no synchronous response pipe");
+      throw new WorkflowControlExecutionError("Workflow control process has no synchronous response pipe");
     }
     this.syncInput = syncInput as Writable;
     this.invocationContexts.set("root", options.rootContext);
@@ -194,21 +193,21 @@ class WorkflowControlProcessBridge<TContext> {
     this.child.once("error", error => {
       const limited = /memory limit|heap out of memory|allocation failed/iu.test(error.message);
       this.fail(limited
-        ? new WorkflowControlExecutionLimitError("Workflow v17 control exceeded its memory limit")
-        : new WorkflowControlExecutionError(`Workflow v17 control process failed: ${error.message}`));
+        ? new WorkflowControlExecutionLimitError("Workflow control exceeded its memory limit")
+        : new WorkflowControlExecutionError(`Workflow control process failed: ${error.message}`));
     });
     this.child.once("exit", (code, signal) => {
       if (this.settled || this.closing) return;
       const limited = /heap out of memory|allocation failed|fatal process out of memory/iu.test(this.stderr);
       this.fail(limited
-        ? new WorkflowControlExecutionLimitError("Workflow v17 control exceeded its memory limit")
+        ? new WorkflowControlExecutionLimitError("Workflow control exceeded its memory limit")
         : new WorkflowControlExecutionError(
-          `Workflow v17 control process exited before completion (${signal ?? code ?? "unknown"})`,
+          `Workflow control process exited before completion (${signal ?? code ?? "unknown"})`,
         ));
     });
     const abort = () => this.fail(this.options.signal.reason instanceof Error
       ? this.options.signal.reason
-      : new WorkflowControlExecutionError("Workflow v17 control was aborted"));
+      : new WorkflowControlExecutionError("Workflow control was aborted"));
     this.options.signal.addEventListener("abort", abort, { once: true });
     if (this.options.signal.aborted) abort();
     else {
@@ -227,7 +226,6 @@ class WorkflowControlProcessBridge<TContext> {
     const workflow = this.options.workflow;
     return {
       type: "initialize",
-      protocolVersion: WORKFLOW_CONTROL_PROTOCOL_VERSION,
       runtimeApiHash: WORKFLOW_RUNTIME_API_HASH,
       executableSource: workflow.executableSource,
       workflowName: workflow.installedName,
@@ -249,7 +247,7 @@ class WorkflowControlProcessBridge<TContext> {
     try {
       const message = parseWorkflowControlProcessMessage(raw);
       if (message.type === "initialized") {
-        if (this.phase !== "starting") throw new WorkflowControlExecutionError("Workflow v17 control initialized twice");
+        if (this.phase !== "starting") throw new WorkflowControlExecutionError("Workflow control initialized twice");
         this.phase = "running";
         this.invocationStates.set("root", "runnable");
         this.refreshTimer();
@@ -258,7 +256,7 @@ class WorkflowControlProcessBridge<TContext> {
         }
         return;
       }
-      if (this.phase !== "running") throw new WorkflowControlExecutionError("Workflow v17 message arrived before initialization");
+      if (this.phase !== "running") throw new WorkflowControlExecutionError("Workflow message arrived before initialization");
       if (message.type === "host-call") {
         this.claimRequestId(message.requestId);
         void this.handleHostCall(message);
@@ -285,7 +283,7 @@ class WorkflowControlProcessBridge<TContext> {
     } catch (error) {
       this.fail(error instanceof WorkflowControlExecutionError
         ? error
-        : new WorkflowControlExecutionError(`Malformed workflow v17 control message: ${errorMessage(error)}`));
+        : new WorkflowControlExecutionError(`Malformed workflow control message: ${errorMessage(error)}`));
     }
   }
 
@@ -294,13 +292,13 @@ class WorkflowControlProcessBridge<TContext> {
   ): Promise<void> {
     const { requestId, invocationId, method } = message;
     if (!this.invocationContexts.has(invocationId)) {
-      this.fail(new WorkflowControlExecutionError("Malformed workflow v17 host invocation"));
+      this.fail(new WorkflowControlExecutionError("Malformed workflow host invocation"));
       return;
     }
     const context = this.invocationContexts.get(invocationId)!;
     const callable = this.options.flow[method];
     if (!ASYNC_METHODS.has(method) || typeof callable !== "function") {
-      this.fail(new WorkflowControlExecutionError(`Unavailable workflow v17 method ${method}`));
+      this.fail(new WorkflowControlExecutionError(`Unavailable workflow method ${method}`));
       return;
     }
     this.invocationStates.set(invocationId, "waiting");
@@ -325,7 +323,7 @@ class WorkflowControlProcessBridge<TContext> {
   ): void {
     const { requestId, invocationId, method } = message;
     if (!this.invocationContexts.has(invocationId)) {
-      this.fail(new WorkflowControlExecutionError("Malformed workflow v17 synchronous invocation"));
+      this.fail(new WorkflowControlExecutionError("Malformed workflow synchronous invocation"));
       return;
     }
     const context = this.invocationContexts.get(invocationId)!;
@@ -334,12 +332,12 @@ class WorkflowControlProcessBridge<TContext> {
     try {
       const callable = this.options.flow[method];
       if (!SYNC_METHODS.has(method) || typeof callable !== "function") {
-        throw new WorkflowControlExecutionError(`Unavailable workflow v17 synchronous method ${method}`);
+        throw new WorkflowControlExecutionError(`Unavailable workflow synchronous method ${method}`);
       }
       const { sourceSite, args } = this.decodeInvocation(message.args, method);
       const value = this.options.runInContext(context, () => callable(sourceSite, ...args));
       if (value && typeof (value as PromiseLike<unknown>).then === "function") {
-        throw new WorkflowControlExecutionError(`Workflow v17 flow.${method} must be synchronous`);
+        throw new WorkflowControlExecutionError(`Workflow flow.${method} must be synchronous`);
       }
       this.sendSync({ type: "sync-response", requestId, value: this.encode(value) });
     } catch (error) {
@@ -355,7 +353,7 @@ class WorkflowControlProcessBridge<TContext> {
   ): void {
     const { requestId, invocationId, referenceId, method } = message;
     if (!this.invocationContexts.has(invocationId)) {
-      this.fail(new WorkflowControlExecutionError("Malformed workflow v17 metric invocation"));
+      this.fail(new WorkflowControlExecutionError("Malformed workflow metric invocation"));
       return;
     }
     const context = this.invocationContexts.get(invocationId)!;
@@ -365,16 +363,16 @@ class WorkflowControlProcessBridge<TContext> {
       const metricSet = this.referenceValues.get(referenceId);
       const description = metricSet ? this.options.authority.transport(metricSet) : undefined;
       if (!metricSet || description?.family !== "reference" || description.identity.kind !== "metric-set") {
-        throw new WorkflowControlExecutionError("Unknown workflow v17 metric-set reference");
+        throw new WorkflowControlExecutionError("Unknown workflow metric-set reference");
       }
       if (typeof this.options.metricCall !== "function") {
-        throw new WorkflowControlExecutionError("Workflow v17 metric-set methods are unavailable");
+        throw new WorkflowControlExecutionError("Workflow metric-set methods are unavailable");
       }
       const args = this.decode(message.args);
-      if (!Array.isArray(args)) throw new WorkflowControlExecutionError("Workflow v17 metric-set arguments are invalid");
+      if (!Array.isArray(args)) throw new WorkflowControlExecutionError("Workflow metric-set arguments are invalid");
       const value = this.options.runInContext(context, () => this.options.metricCall!(metricSet, method, args));
       if (value && typeof (value as PromiseLike<unknown>).then === "function") {
-        throw new WorkflowControlExecutionError("Workflow v17 metric-set methods must be synchronous");
+        throw new WorkflowControlExecutionError("Workflow metric-set methods must be synchronous");
       }
       this.sendMetric({ type: "metric-response", requestId, value: this.encode(value) });
     } catch (error) {
@@ -391,15 +389,15 @@ class WorkflowControlProcessBridge<TContext> {
   } {
     const decoded = this.decode(value);
     if (!Array.isArray(decoded) || decoded.length < 1) {
-      throw new WorkflowControlExecutionError(`Workflow v17 flow.${method} arguments are invalid`);
+      throw new WorkflowControlExecutionError(`Workflow flow.${method} arguments are invalid`);
     }
     const [siteValue, ...args] = decoded;
     if (!siteValue || typeof siteValue !== "object") {
-      throw new WorkflowControlExecutionError(`Workflow v17 flow.${method} lacks source-site authority`);
+      throw new WorkflowControlExecutionError(`Workflow flow.${method} lacks source-site authority`);
     }
     const site = this.sourceSiteValues.get(siteValue);
     if (!site || site.method !== method) {
-      throw new WorkflowControlExecutionError(`Workflow v17 flow.${method} source site is invalid`);
+      throw new WorkflowControlExecutionError(`Workflow flow.${method} source site is invalid`);
     }
     return { sourceSite: site.sourceSite, args };
   }
@@ -409,7 +407,7 @@ class WorkflowControlProcessBridge<TContext> {
   ): void {
     const waiter = this.callbackWaiters.get(message.invocationId);
     if (!waiter) {
-      this.fail(new WorkflowControlExecutionError(`Unknown workflow v17 callback invocation ${message.invocationId}`));
+      this.fail(new WorkflowControlExecutionError(`Unknown workflow callback invocation ${message.invocationId}`));
       return;
     }
     this.callbackWaiters.delete(message.invocationId);
@@ -428,7 +426,7 @@ class WorkflowControlProcessBridge<TContext> {
     const existing = this.callbackFunctions.get(callbackId);
     if (existing) return existing;
     const callback = (...args: unknown[]): Promise<unknown> => {
-      if (this.settled) return Promise.reject(new WorkflowControlExecutionError("Workflow v17 control process is unavailable"));
+      if (this.settled) return Promise.reject(new WorkflowControlExecutionError("Workflow control process is unavailable"));
       const invocationId = `callback-${this.nextCallbackInvocation++}`;
       const context = this.options.currentContext();
       this.invocationContexts.set(invocationId, context);
@@ -473,7 +471,7 @@ class WorkflowControlProcessBridge<TContext> {
     const counter = wireCounter();
     const visit = (wire: WorkflowWireValue, depth: number): unknown => {
       if (!wire || typeof wire !== "object" || Array.isArray(wire) || typeof wire.type !== "string") {
-        throw new WorkflowControlExecutionError("Malformed workflow v17 wire value");
+        throw new WorkflowControlExecutionError("Malformed workflow wire value");
       }
       consumeWire(counter, depth, wire.type === "primitive" && typeof wire.value === "string" ? wire.value : undefined);
       if (wire.type === "undefined") {
@@ -484,14 +482,14 @@ class WorkflowControlProcessBridge<TContext> {
         assertExactKeys(wire, ["type", "value"], "primitive wire value");
         if (wire.value !== null && typeof wire.value !== "boolean" && typeof wire.value !== "string"
           && (typeof wire.value !== "number" || !Number.isFinite(wire.value) || Object.is(wire.value, -0))) {
-          throw new WorkflowControlExecutionError("Malformed workflow v17 primitive");
+          throw new WorkflowControlExecutionError("Malformed workflow primitive");
         }
         return wire.value;
       }
       if (wire.type === "source-site") {
         assertExactKeys(wire, ["type", "sourceSite"], "source-site wire value");
         const method = this.operationSites.get(wire.sourceSite);
-        if (!method) throw new WorkflowControlExecutionError(`Unknown workflow v17 operation site ${wire.sourceSite}`);
+        if (!method) throw new WorkflowControlExecutionError(`Unknown workflow operation site ${wire.sourceSite}`);
         const value = Object.freeze(Object.create(null) as object);
         this.sourceSiteValues.set(value, { sourceSite: wire.sourceSite, method });
         return value;
@@ -507,7 +505,7 @@ class WorkflowControlProcessBridge<TContext> {
         }
         const descriptor = this.descriptors.get(identity.sourceSite);
         if (!descriptor || !sameWorkflowWireIdentity(descriptor.identity, identity)) {
-          throw new WorkflowControlExecutionError(`Unknown or changed workflow v17 descriptor ${identity.sourceSite}`);
+          throw new WorkflowControlExecutionError(`Unknown or changed workflow descriptor ${identity.sourceSite}`);
         }
         const value = this.options.authority.descriptor(descriptor);
         this.hostReferences.set(value, id);
@@ -521,7 +519,7 @@ class WorkflowControlProcessBridge<TContext> {
           ? parseWorkflowProductIdentity(wire.identity)
           : parseWorkflowReferenceIdentity(wire.identity);
         const existing = this.referenceValues.get(id);
-        if (!existing) throw new WorkflowControlExecutionError(`Unknown workflow v17 authority reference ${id}`);
+        if (!existing) throw new WorkflowControlExecutionError(`Unknown workflow authority reference ${id}`);
         this.assertReference(existing, wire.type === "product-ref" ? "product" : "reference", identity);
         return existing;
       }
@@ -531,26 +529,26 @@ class WorkflowControlProcessBridge<TContext> {
       }
       if (wire.type === "array") {
         assertExactKeys(wire, ["type", "values"], "array wire value");
-        if (!Array.isArray(wire.values)) throw new WorkflowControlExecutionError("Malformed workflow v17 array");
+        if (!Array.isArray(wire.values)) throw new WorkflowControlExecutionError("Malformed workflow array");
         return wire.values.map(entry => visit(entry, depth + 1));
       }
       if (wire.type === "object") {
         assertExactKeys(wire, ["type", "entries"], "object wire value");
-        if (!Array.isArray(wire.entries)) throw new WorkflowControlExecutionError("Malformed workflow v17 object");
+        if (!Array.isArray(wire.entries)) throw new WorkflowControlExecutionError("Malformed workflow object");
         const result = Object.create(null) as Record<string, unknown>;
         const seen = new Set<string>();
         for (const entry of wire.entries) {
           if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") {
-            throw new WorkflowControlExecutionError("Malformed workflow v17 object entry");
+            throw new WorkflowControlExecutionError("Malformed workflow object entry");
           }
-          if (seen.has(entry[0])) throw new WorkflowControlExecutionError(`Duplicate workflow v17 property ${entry[0]}`);
+          if (seen.has(entry[0])) throw new WorkflowControlExecutionError(`Duplicate workflow property ${entry[0]}`);
           seen.add(entry[0]);
           consumeWire(counter, depth + 1, entry[0]);
           result[entry[0]] = visit(entry[1], depth + 1);
         }
         return result;
       }
-      throw new WorkflowControlExecutionError(`Control process sent unavailable workflow v17 wire type ${wire.type}`);
+      throw new WorkflowControlExecutionError(`Control process sent unavailable workflow wire type ${wire.type}`);
     };
     return visit(value, 0);
   }
@@ -562,7 +560,7 @@ class WorkflowControlProcessBridge<TContext> {
   ): void {
     const description = this.options.authority.transport(value);
     if (!description || description.family !== family || !sameWorkflowWireIdentity(description.identity, identity)) {
-      throw new WorkflowControlExecutionError(`Workflow v17 ${family} authority identity changed`);
+      throw new WorkflowControlExecutionError(`Workflow ${family} authority identity changed`);
     }
   }
 
@@ -591,14 +589,14 @@ class WorkflowControlProcessBridge<TContext> {
     if (this.settled || this.closing) return;
     if (this.phase === "starting") {
       this.timer = setTimeout(() => this.fail(new WorkflowControlExecutionLimitError(
-        "Workflow v17 control initialization timed out",
+        "Workflow control initialization timed out",
       )), INITIALIZATION_TIMEOUT_MS);
       this.timer.unref?.();
       return;
     }
     if (this.phase !== "running" || ![...this.invocationStates.values()].includes("runnable")) return;
     this.timer = setTimeout(() => this.fail(new WorkflowControlExecutionLimitError(
-      `Workflow v17 control exceeded ${this.segmentTimeoutMs}ms without yielding to a host operation`,
+      `Workflow control exceeded ${this.segmentTimeoutMs}ms without yielding to a host operation`,
     )), this.segmentTimeoutMs);
     this.timer.unref?.();
   }
@@ -636,10 +634,10 @@ class WorkflowControlProcessBridge<TContext> {
   }
 
   private send(message: WorkflowHostProcessMessage): void {
-    if (!this.child.connected) throw new WorkflowControlExecutionError("Workflow v17 control process is disconnected");
+    if (!this.child.connected) throw new WorkflowControlExecutionError("Workflow control process is disconnected");
     this.child.send(message, error => {
       if (error && !this.settled && !this.closing) {
-        this.fail(new WorkflowControlExecutionError(`Workflow v17 control IPC failed: ${error.message}`));
+        this.fail(new WorkflowControlExecutionError(`Workflow control IPC failed: ${error.message}`));
       }
     });
   }
@@ -647,7 +645,7 @@ class WorkflowControlProcessBridge<TContext> {
   private sendSync(message: WorkflowSyncResponseMessage): void {
     const line = `${JSON.stringify(message)}\n`;
     if (Buffer.byteLength(line) > WIRE_BYTES) throw new WorkflowControlExecutionLimitError(
-      "Workflow v17 synchronous response exceeds its structural limit",
+      "Workflow synchronous response exceeds its structural limit",
     );
     this.syncInput.write(line);
   }
@@ -655,15 +653,15 @@ class WorkflowControlProcessBridge<TContext> {
   private sendMetric(message: WorkflowMetricResponseMessage): void {
     const line = `${JSON.stringify(message)}\n`;
     if (Buffer.byteLength(line) > WIRE_BYTES) throw new WorkflowControlExecutionLimitError(
-      "Workflow v17 metric response exceeds its structural limit",
+      "Workflow metric response exceeds its structural limit",
     );
     this.syncInput.write(line);
   }
 
   private claimRequestId(requestId: string): void {
-    if (this.requestIds.has(requestId)) throw new WorkflowControlExecutionError(`Duplicate workflow v17 request ${requestId}`);
+    if (this.requestIds.has(requestId)) throw new WorkflowControlExecutionError(`Duplicate workflow request ${requestId}`);
     if (this.requestIds.size >= WIRE_NODES) throw new WorkflowControlExecutionLimitError(
-      "Workflow v17 request count exceeds its structural limit",
+      "Workflow request count exceeds its structural limit",
     );
     this.requestIds.add(requestId);
   }
@@ -688,12 +686,12 @@ function encodeWire(
     }
     if (typeof current === "number") {
       if (!Number.isFinite(current) || Object.is(current, -0)) throw new WorkflowControlExecutionError(
-        "Workflow v17 control values require finite numbers",
+        "Workflow control values require finite numbers",
       );
       return { type: "primitive", value: current };
     }
     if (!current || typeof current !== "object") throw new WorkflowControlExecutionError(
-      `Unsupported workflow v17 control value ${typeof current}`,
+      `Unsupported workflow control value ${typeof current}`,
     );
     const authority = options.authority(current);
     if (authority) {
@@ -723,18 +721,18 @@ function encodeWire(
             fields,
           };
     }
-    if (ancestors.has(current)) throw new WorkflowControlExecutionError("Cyclic workflow v17 control values are unavailable");
+    if (ancestors.has(current)) throw new WorkflowControlExecutionError("Cyclic workflow control values are unavailable");
     ancestors.add(current);
     try {
       if (Array.isArray(current)) return { type: "array", values: current.map(entry => visit(entry, depth + 1)) };
       if (!plainRecord(current)) throw new WorkflowControlExecutionError(
-        "Workflow v17 control objects must be plain data or authority values",
+        "Workflow control objects must be plain data or authority values",
       );
       const entries: Array<[string, WorkflowWireValue]> = [];
       for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(current)).sort(([left], [right]) => left.localeCompare(right))) {
         consumeWire(counter, depth + 1, key);
         if (!descriptor.enumerable || descriptor.get || descriptor.set || !("value" in descriptor)) {
-          throw new WorkflowControlExecutionError(`Workflow v17 property ${key} must be enumerable data`);
+          throw new WorkflowControlExecutionError(`Workflow property ${key} must be enumerable data`);
         }
         entries.push([key, visit(descriptor.value, depth + 1)]);
       }
@@ -767,10 +765,10 @@ function descriptorDefinition(descriptor: WorkflowDescriptor): Record<string, un
 }
 
 function assertReviewedWorkflow(workflow: ParsedWorkflow): void {
-  if (!workflow || workflow.formatVersion !== 1 || !FLOW_NAME_PATTERN.test(workflow.installedName)
+  if (!workflow || !FLOW_NAME_PATTERN.test(workflow.installedName)
     || workflow.transform.runtimeApiHash !== WORKFLOW_RUNTIME_API_HASH
     || workflow.transform.executableSourceHash !== sha256(workflow.executableSource)) {
-    throw new WorkflowControlExecutionError("Workflow v17 control input is not an exact reviewed executable");
+    throw new WorkflowControlExecutionError("Workflow control input is not an exact reviewed executable");
   }
 }
 
@@ -804,7 +802,7 @@ function assertExactKeys(value: object, expected: string[], label: string): void
 
 function requireId(value: unknown, label: string): string {
   if (typeof value !== "string" || !/^[a-z][a-z0-9-]{0,127}$/u.test(value)) {
-    throw new WorkflowControlExecutionError(`Invalid workflow v17 ${label} id`);
+    throw new WorkflowControlExecutionError(`Invalid workflow ${label} id`);
   }
   return value;
 }
@@ -812,7 +810,7 @@ function requireId(value: unknown, label: string): string {
 function boundedSegmentTimeout(value: number | undefined): number {
   if (value === undefined) return SEGMENT_TIMEOUT_MS;
   if (!Number.isSafeInteger(value) || value < 25 || value > 10_000) throw new WorkflowControlExecutionError(
-    "Workflow v17 control segment timeout is invalid",
+    "Workflow control segment timeout is invalid",
   );
   return value;
 }
@@ -831,7 +829,7 @@ function consumeWire(counter: { nodes: number; bytes: number }, depth: number, t
   counter.nodes++;
   if (text !== undefined) counter.bytes += Buffer.byteLength(text);
   if (depth > WIRE_DEPTH || counter.nodes > WIRE_NODES || counter.bytes > WIRE_BYTES) {
-    throw new WorkflowControlExecutionLimitError("Workflow v17 control message exceeds its structural limit");
+    throw new WorkflowControlExecutionLimitError("Workflow control message exceeds its structural limit");
   }
 }
 

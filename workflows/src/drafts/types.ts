@@ -4,7 +4,6 @@ export type WorkflowDraftNamespace = Exclude<WorkflowNamespace, "builtin">;
 export type WorkflowDraftId = `${WorkflowDraftNamespace}:${string}`;
 
 export interface WorkflowDraftRevision {
-  formatVersion: 1;
   id: WorkflowDraftId;
   namespace: WorkflowDraftNamespace;
   name: string;
@@ -15,14 +14,7 @@ export interface WorkflowDraftRevision {
   revisionHashes: string[];
 }
 
-export type WorkflowDraftSummary = Omit<WorkflowDraftRevision, "source"> | {
-  formatVersion: 1;
-  id: WorkflowDraftId;
-  namespace: WorkflowDraftNamespace;
-  name: string;
-  legacy: true;
-  error: string;
-};
+export type WorkflowDraftSummary = Omit<WorkflowDraftRevision, "source">;
 
 export interface WorkflowDraftSourceDiff {
   installedSourceHash: string | null;

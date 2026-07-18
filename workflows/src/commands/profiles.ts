@@ -90,7 +90,6 @@ export interface CommandProfileRegistryRefreshOptions {
 }
 
 export interface ResolvedCommandInvocation {
-  formatVersion: 1;
   profileId: string;
   profileHash: string;
   effect: CommandEffect;
@@ -311,7 +310,6 @@ export function resolveCommandInvocation(
   });
   const argumentsHash = stableHash(args);
   const body = {
-    formatVersion: 1 as const,
     profileId: profile.id,
     profileHash: profile.hash,
     effect,

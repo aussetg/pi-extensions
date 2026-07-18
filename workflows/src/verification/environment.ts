@@ -55,11 +55,11 @@ export function verificationNotApplicableEnvironmentHash(reason: string): string
 }
 
 export function verificationDiffEnvironmentHash(policy: VerificationDiffPolicy): string {
-  return stableHash({ implementation: "deterministic-diff-v1", policy });
+  return stableHash({ implementation: "deterministic-diff", policy });
 }
 
 export function verificationContaminationEnvironmentHash(): string {
-  return stableHash({ implementation: "candidate-contamination-v1" });
+  return stableHash({ implementation: "candidate-contamination" });
 }
 
 export function verificationReviewerEnvironmentHash(
@@ -134,7 +134,6 @@ function reviewEnvironmentHash(
 function commandExecutorProtocol(executor: HostCommandExecutorDescriptor): object {
   return {
     id: executor.id,
-    protocolVersion: executor.protocolVersion,
     sandbox: executor.sandbox,
   };
 }

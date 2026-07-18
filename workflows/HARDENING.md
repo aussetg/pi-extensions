@@ -1,6 +1,6 @@
  # Runtime hardening
 
-This phase hardens runtime 17 before deployment. It deliberately does **not** perform product rollout,
+This phase hardens the runtime before deployment. It deliberately does **not** perform product rollout,
 provider trials, extension replacement, branch merge, or worktree archival.
 
 ## Threat review
@@ -27,10 +27,9 @@ The hardening pass found and corrected these production-path gaps:
 - verification/apply did not independently reject mutation of a supposedly frozen candidate tree;
 - the adversarial-review resource was prepared as a snapshot agent despite executing over a candidate;
 - run-catalog listing followed a symlinked catalog root;
-- security/performance notes still described the deleted structural runtime and schema 3.
 
-The public TypeScript API, pinned API hash, schema version, and independent conformance oracle remain
-unchanged.
+The public TypeScript API and independent conformance oracle remain the reviewed contract. Exact API
+hashes are regenerated whenever that contract changes.
 
 ## Automated hardening gates
 
@@ -44,8 +43,8 @@ unchanged.
   behavior.
 - Frozen-candidate tamper refusal before verification.
 - Cross-project replay refusal and async notification ownership/deduplication.
-- Schema-4 integrity/canonical-JSON corruption, replay-source corruption, artifact tampering, registry
-  symlinks, project trust, and legacy schema refusal.
+- database integrity/canonical-JSON corruption, replay-source corruption, artifact tampering,
+  registry symlinks, and project trust.
 - Dependency audit, strict TypeScript surfaces, complete unit/conformance tests, diagnostics, and diff
   checks.
 

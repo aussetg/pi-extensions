@@ -20,7 +20,6 @@ export interface AgentToolDescriptor {
 
 export interface AgentExecutorDescriptor {
   id: string;
-  protocolVersion: 1;
   capabilities: {
     persistentSessions: boolean;
     candidateWorkspace: boolean;
@@ -243,7 +242,6 @@ export class AgentExecutorConformanceError extends Error {
 export function assertAgentExecutorDescriptor(value: AgentExecutorDescriptor): void {
   if (!value || typeof value !== "object") throw new AgentExecutorConformanceError("Agent executor descriptor is missing");
   if (!/^[a-z][a-z0-9_-]{0,63}$/.test(value.id)) throw new AgentExecutorConformanceError("Agent executor id is invalid");
-  if (value.protocolVersion !== 1) throw new AgentExecutorConformanceError("Unsupported agent executor protocol version");
   if (!value.capabilities || typeof value.capabilities !== "object") {
     throw new AgentExecutorConformanceError("Agent executor capability descriptor is missing");
   }
@@ -292,7 +290,6 @@ export class ScriptedAgentExecutor implements AgentExecutor {
   constructor(private readonly options: ScriptedAgentExecutorOptions) {
     this.descriptor = options.descriptor ?? {
       id: "scripted-agent",
-      protocolVersion: 1,
       capabilities: {
         persistentSessions: true,
         candidateWorkspace: true,

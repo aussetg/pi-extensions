@@ -11,7 +11,7 @@ import {
 } from "../src/definition/workflow-schema.js";
 import { WORKFLOW_RUNTIME_API_HASH } from "../src/definition/workflow-language.js";
 
-const CORPUS = path.resolve("tests/conformance/v17/typecheck/corpus");
+const CORPUS = path.resolve("tests/conformance/typecheck/corpus");
 const FILES = [
   "coding.flow.ts",
   "execute-plan.flow.ts",
@@ -22,7 +22,7 @@ const FILES = [
 ] as const;
 const parsedCorpus = new Map<string, ParsedWorkflow>();
 
-describe("workflow v17 TypeScript frontend", () => {
+describe("workflow TypeScript frontend", () => {
   test.each(FILES)("parses and instruments the strict corpus: %s", (fileName) => {
     const filePath = path.join(CORPUS, fileName);
     const parsed = loadCorpus(fileName);

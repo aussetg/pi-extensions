@@ -41,7 +41,7 @@ export class WorkflowCoordinatorService {
     const reader = WorkflowRunDatabaseReader.open(path.join(runDir, "run.sqlite"));
     let runId: string;
     try { runId = reader.readRun().runId; } finally { reader.close(); }
-    if (path.basename(runDir) !== runId) throw new Error("Coordinator directory differs from schema-4 run identity");
+    if (path.basename(runDir) !== runId) throw new Error("Coordinator directory differs from run identity");
     const unit = coordinatorUnitName(runId);
     const state = await this.launcher.inspect(unit);
     if (active(state.activeState)) throw new WorkflowCoordinatorAlreadyRunningError(runId, unit);

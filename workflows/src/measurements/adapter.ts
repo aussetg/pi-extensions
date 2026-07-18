@@ -75,7 +75,6 @@ interface MeasurementInput {
 }
 
 interface StoredMeasurementResult {
-  formatVersion: 1;
   authorityId: string;
   measurementId: string;
   policyHash: string;
@@ -117,27 +116,26 @@ export class WorkflowMeasurementEffectAdapter implements WorkflowSemanticEffectA
   constructor(private readonly options: WorkflowMeasurementAdapterOptions) {
     this.now = options.now ?? (() => new Date());
     const runtime = options.resources.measurementRuntime;
-    if (!runtime) throw new Error("Workflow v17 measurement runtime authority is unavailable");
+    if (!runtime) throw new Error("Workflow measurement runtime authority is unavailable");
     const executor = canonicalJsonObject(options.executor.describe() as unknown as JsonObject, limits());
     const environment = canonicalJsonObject(options.environment.describe() as unknown as JsonObject, limits());
     assertMeasurementEnvironmentDescriptor(options.environment.describe());
     if (stableHash(executor) !== runtime.executorHash || stableHash(environment) !== runtime.environmentHash
       || stableJson(executor) !== stableJson(runtime.executor)
       || stableJson(environment) !== stableJson(runtime.environment)) {
-      throw new Error("Workflow v17 measurement executor or environment differs from pinned authority");
+      throw new Error("Workflow measurement executor or environment differs from pinned authority");
     }
     const root = path.resolve(options.launchWorkspace.root);
     const cwd = path.resolve(options.launchWorkspace.cwd);
     assertContained(root, cwd, true);
     if (!/^sha256:[a-f0-9]{64}$/u.test(options.launchWorkspace.treeHash)) {
-      throw new TypeError("Workflow v17 launch measurement workspace tree is invalid");
+      throw new TypeError("Workflow launch measurement workspace tree is invalid");
     }
   }
 
   semanticInput(context: Omit<WorkflowEffectAdapterContext, "semanticInput" | "operation">): JsonValue {
     const resolved = this.resolve(context.input);
     return canonicalJsonValue({
-      formatVersion: 1,
       operationSite: resolved.operationSite,
       policyHash: resolved.metricSet.policyHash,
       samplingHash: resolved.metricSet.samplingHash,
@@ -162,7 +160,6 @@ export class WorkflowMeasurementEffectAdapter implements WorkflowSemanticEffectA
     }));
     assertComparableBaseline(resolved.metricSet.states, resolved.profile.hash, fingerprint.hash);
     const bindingHash = stableHash({
-      formatVersion: 1,
       policyHash: resolved.metricSet.policyHash,
       samplingHash: resolved.metricSet.samplingHash,
       profileHash: resolved.profile.hash,
@@ -178,7 +175,6 @@ export class WorkflowMeasurementEffectAdapter implements WorkflowSemanticEffectA
     this.resolved.set(context.operation.operationId, resolved);
     return {
       semanticKey: stableHash({
-        formatVersion: 1,
         kind: "workflow-measurement",
         bindingHash,
         contextIdentityHash: context.run.contextIdentityHash,
@@ -195,7 +191,7 @@ export class WorkflowMeasurementEffectAdapter implements WorkflowSemanticEffectA
     const existing = this.options.database.readMeasurementByOperation(context.operation.operationId);
     if (existing) {
       if (existing.bindingHash !== resolved.bindingHash) {
-        throw new Error("Workflow v17 measurement binding changed after durable execution");
+        throw new Error("Workflow measurement binding changed after durable execution");
       }
       const attempt = await admitAttempt(this.options.database, context.operation, this.now);
       await finishAttempt(this.options.database, attempt, "completed", this.now);
@@ -264,7 +260,6 @@ export class WorkflowMeasurementEffectAdapter implements WorkflowSemanticEffectA
         }
       }
       const measurementId = `measurement_${stableHash({
-        formatVersion: 1,
         runId: context.run.runId,
         operationId: context.operation.operationId,
       }).slice(7, 39)}`;
@@ -322,7 +317,7 @@ export class WorkflowMeasurementEffectAdapter implements WorkflowSemanticEffectA
     return {
       artifacts: unique.map((digest, ordinal) => {
         const artifact = this.options.database.readArtifact(digest);
-        if (!artifact) throw new Error(`Workflow v17 measurement artifact ${digest} is unavailable`);
+        if (!artifact) throw new Error(`Workflow measurement artifact ${digest} is unavailable`);
         return { role: ordinal === 0 ? "output" as const : "evidence" as const, ordinal, artifact };
       }),
     };
@@ -363,7 +358,7 @@ export class WorkflowMeasurementEffectAdapter implements WorkflowSemanticEffectA
     const existing = this.options.database.readMeasurementByOperation(operation.operationId);
     if (existing) {
       if (existing.measurementId !== result.measurementId || existing.bindingHash !== result.bindingHash) {
-        throw new Error("Workflow v17 restored measurement differs from durable evidence");
+        throw new Error("Workflow restored measurement differs from durable evidence");
       }
       return existing;
     }
@@ -374,7 +369,7 @@ export class WorkflowMeasurementEffectAdapter implements WorkflowSemanticEffectA
       || result.candidateId !== resolved.candidate?.candidateId
       || result.environmentHash !== resolved.environment?.hash
       || result.bindingHash !== resolved.bindingHash) {
-      throw new Error("Workflow v17 replayed measurement differs from target authority");
+      throw new Error("Workflow replayed measurement differs from target authority");
     }
     return await revisionRetry(async () => this.options.database.recordMeasurement(
       this.options.database.readRun().revision,
@@ -405,19 +400,19 @@ export class WorkflowMeasurementEffectAdapter implements WorkflowSemanticEffectA
   private requireResolved(operation: WorkflowOperationRecord, input: unknown): ResolvedMeasurement {
     const resolved = this.resolved.get(operation.operationId) ?? this.resolve(input);
     if (!resolved.environment || !resolved.bindingHash) {
-      throw new Error("Workflow v17 measurement environment was not admitted");
+      throw new Error("Workflow measurement environment was not admitted");
     }
     return resolved;
   }
 
   private resolve(value: unknown): ResolvedMeasurement {
-    const input = plainRecord(value, "workflow v17 measurement input") as unknown as MeasurementInput;
-    exactKeys(input as unknown as object, ["operationSite", "profile", "metrics", "candidate"], "workflow v17 measurement input", true);
+    const input = plainRecord(value, "workflow measurement input") as unknown as MeasurementInput;
+    exactKeys(input as unknown as object, ["operationSite", "profile", "metrics", "candidate"], "workflow measurement input", true);
     if (typeof input.operationSite !== "string" || typeof input.profile !== "string") {
-      throw new TypeError("Workflow v17 measurement input is incomplete");
+      throw new TypeError("Workflow measurement input is incomplete");
     }
     const site = this.options.workflow.operations.find(value => value.sourceSite === input.operationSite);
-    if (site?.method !== "measure") throw new TypeError(`Unknown workflow v17 measurement site ${input.operationSite}`);
+    if (site?.method !== "measure") throw new TypeError(`Unknown workflow measurement site ${input.operationSite}`);
     const metricSet = this.options.metrics.metricSet(input.metrics);
     const normalized = this.options.metrics.normalized(metricSet);
     const resource = resolveProfile(
@@ -466,14 +461,13 @@ export class WorkflowMeasurementEffectAdapter implements WorkflowSemanticEffectA
 
   private artifact(digest: string): object {
     const record = this.options.database.readArtifact(digest);
-    if (!record) throw new Error(`Workflow v17 measurement artifact ${digest} is unavailable`);
+    if (!record) throw new Error(`Workflow measurement artifact ${digest} is unavailable`);
     return this.options.products.artifact(record);
   }
 }
 
 interface ExperimentInput { candidate: object; measurement: object; learned: string }
 interface StoredExperiment {
-  formatVersion: 1;
   experimentId: string;
   candidateId: string;
   measurementId: string;
@@ -501,7 +495,6 @@ export class WorkflowExperimentEffectAdapter implements WorkflowSemanticEffectAd
   semanticInput(context: Omit<WorkflowEffectAdapterContext, "semanticInput" | "operation">): JsonValue {
     const value = this.resolve(context.input);
     return canonicalJsonValue({
-      formatVersion: 1,
       candidate: candidateAuthority(value.candidate),
       measurementId: value.measurement.measurementId,
       measurementBindingHash: value.measurement.bindingHash,
@@ -513,7 +506,6 @@ export class WorkflowExperimentEffectAdapter implements WorkflowSemanticEffectAd
   journalIdentity(context: WorkflowEffectAdapterContext & { operation: WorkflowOperationRecord }): WorkflowEffectIdentity {
     return {
       semanticKey: stableHash({
-        formatVersion: 1,
         kind: "workflow-experiment",
         semanticInput: context.semanticInput,
         contextIdentityHash: context.run.contextIdentityHash,
@@ -531,7 +523,6 @@ export class WorkflowExperimentEffectAdapter implements WorkflowSemanticEffectAd
       candidateId: value.candidate.candidateId,
     }).slice(7, 39)}`;
     const bindingHash = stableHash({
-      formatVersion: 1,
       candidateId: value.candidate.candidateId,
       measurementId: value.measurement.measurementId,
       disposition: value.disposition,
@@ -541,7 +532,6 @@ export class WorkflowExperimentEffectAdapter implements WorkflowSemanticEffectAd
     const summary = { experimentId, disposition: value.disposition, learned: value.learned };
     const artifact = await this.options.products.experimentArtifact(summary);
     return {
-      formatVersion: 1,
       ...summary,
       candidateId: value.candidate.candidateId,
       measurementId: value.measurement.measurementId,
@@ -553,7 +543,7 @@ export class WorkflowExperimentEffectAdapter implements WorkflowSemanticEffectAd
   evidence(context: WorkflowEffectAdapterContext & { result: JsonValue }) {
     const result = parseExperiment(context.result);
     const artifact = this.options.database.readArtifact(result.artifactDigest);
-    if (!artifact) throw new Error(`Workflow v17 experiment artifact ${result.artifactDigest} is unavailable`);
+    if (!artifact) throw new Error(`Workflow experiment artifact ${result.artifactDigest} is unavailable`);
     return { artifacts: [{ role: "output" as const, ordinal: 0, artifact }] };
   }
 
@@ -577,8 +567,8 @@ export class WorkflowExperimentEffectAdapter implements WorkflowSemanticEffectAd
   }
 
   private resolve(value: unknown) {
-    const input = plainRecord(value, "workflow v17 experiment input") as unknown as ExperimentInput;
-    exactKeys(input as unknown as object, ["candidate", "measurement", "learned"], "workflow v17 experiment input");
+    const input = plainRecord(value, "workflow experiment input") as unknown as ExperimentInput;
+    exactKeys(input as unknown as object, ["candidate", "measurement", "learned"], "workflow experiment input");
     const candidate = this.options.candidates.candidate(input.candidate);
     if (!candidate.disposition || !["accepted", "rejected"].includes(candidate.disposition.disposition)) {
       throw new Error(`Candidate ${candidate.candidateId} has no optimization disposition`);
@@ -586,7 +576,7 @@ export class WorkflowExperimentEffectAdapter implements WorkflowSemanticEffectAd
     const measurement = this.options.metrics.measurement(input.measurement);
     if (measurement.candidateId !== candidate.candidateId
       || candidate.disposition.measurementId !== measurement.measurementId) {
-      throw new TypeError("Workflow v17 experiment measurement differs from candidate disposition");
+      throw new TypeError("Workflow experiment measurement differs from candidate disposition");
     }
     const learned = boundedText(input.learned, "experiment lesson", 8_000);
     return {
@@ -614,12 +604,12 @@ function resolveProfile(
   }
   if (dynamicAtSite.length) {
     throw new Error(
-      `Workflow v17 measurement site ${operationSite} cannot switch from pinned profile `
+      `Workflow measurement site ${operationSite} cannot switch from pinned profile `
       + dynamicAtSite.map(value => value.resource.identity.selector).sort().join(", "),
     );
   }
   const pinned = resources.measurements[selector];
-  if (!pinned) throw new Error(`Workflow v17 measurement profile ${selector} is not pinned`);
+  if (!pinned) throw new Error(`Workflow measurement profile ${selector} is not pinned`);
   return { profile: structuredClone(pinned.profile), hash: pinned.hash };
 }
 
@@ -636,7 +626,7 @@ function assertDynamicUse(
   if (stableJson(use.policy) !== stableJson(metrics.policy)
     || stableJson(use.sampling ?? { warmups: 0, samples: 1 }) !== stableJson(metrics.sampling)
     || stableJson(Object.fromEntries([...expected].sort())) !== stableJson(Object.fromEntries([...actual].sort()))) {
-    throw new Error(`Workflow v17 invocation-selected profile ${resource.identity.selector} metric policy changed after launch`);
+    throw new Error(`Workflow invocation-selected profile ${resource.identity.selector} metric policy changed after launch`);
   }
 }
 
@@ -647,9 +637,8 @@ function buildDelta(
   values: ReadonlyMap<string, number[]>,
 ): MetricCohortDelta {
   const baseline = resolved.metricSet.states.length === 0;
-  if (baseline && resolved.candidate) throw new Error("Workflow v17 candidate measurement requires a baseline");
+  if (baseline && resolved.candidate) throw new Error("Workflow candidate measurement requires a baseline");
   const delta: MetricCohortDelta = {
-    formatVersion: 1,
     kind: "measurement-cohort",
     measurementId,
     operationPath,
@@ -700,7 +689,6 @@ function storedMeasurement(
   metricSet?: Pick<ReturnType<WorkflowMetricSetRuntime["metricSet"]>, "policyHash" | "samplingHash">,
 ): StoredMeasurementResult {
   return {
-    formatVersion: 1,
     authorityId: authorityId ?? `measurement-${record.measurementId.slice(-32)}`,
     measurementId: record.measurementId,
     policyHash: metricSet?.policyHash ?? "",
@@ -721,22 +709,29 @@ function storedMeasurement(
 }
 
 function parseStoredMeasurement(value: unknown): StoredMeasurementResult {
-  const result = plainRecord(value, "workflow v17 stored measurement") as unknown as StoredMeasurementResult;
-  if (result.formatVersion !== 1 || typeof result.authorityId !== "string"
+  const result = plainRecord(value, "workflow stored measurement") as unknown as StoredMeasurementResult;
+  exactKeys(result, [
+    "authorityId", "measurementId", "policyHash", "samplingHash", "profile", "commandHash", "environment",
+    "environmentHash", "workspaceTreeHash", "candidateId", "bindingHash", "delta", "observations", "artifactDigest",
+    "diagnosticsArtifactDigest", "samples",
+  ], "workflow stored measurement", true);
+  if (typeof result.authorityId !== "string"
     || typeof result.measurementId !== "string" || typeof result.bindingHash !== "string"
     || !result.profile || !Array.isArray(result.samples)) {
-    throw new Error("Workflow v17 stored measurement is invalid");
+    throw new Error("Workflow stored measurement is invalid");
   }
   return structuredClone(result);
 }
 
 function parseExperiment(value: unknown): StoredExperiment {
-  const result = plainRecord(value, "workflow v17 stored experiment") as unknown as StoredExperiment;
-  if (result.formatVersion !== 1 || typeof result.experimentId !== "string"
+  const result = plainRecord(value, "workflow stored experiment") as unknown as StoredExperiment;
+  exactKeys(result, ["experimentId", "candidateId", "measurementId", "disposition", "learned", "bindingHash", "artifactDigest"],
+    "workflow stored experiment");
+  if (typeof result.experimentId !== "string"
     || typeof result.candidateId !== "string" || typeof result.measurementId !== "string"
     || !["accepted", "rejected"].includes(result.disposition) || typeof result.learned !== "string"
     || typeof result.bindingHash !== "string" || typeof result.artifactDigest !== "string") {
-    throw new Error("Workflow v17 stored experiment is invalid");
+    throw new Error("Workflow stored experiment is invalid");
   }
   return structuredClone(result);
 }
@@ -776,7 +771,7 @@ function assertMeasurementCommandResult(
     || result.invocation.profileHash !== profile.hash
     || stableJson(result.invocation.argv) !== stableJson(profile.argv)
     || stableJson(result.invocation.env) !== stableJson(profile.env ?? {})) {
-    throw new Error("Workflow v17 measurement executor ran a different command binding");
+    throw new Error("Workflow measurement executor ran a different command binding");
   }
 }
 
@@ -840,10 +835,10 @@ async function finishAttempt(
   now: () => Date,
 ): Promise<WorkflowAttemptRecord> {
   const current = database.readAttempt(attempt.attemptId);
-  if (!current) throw new Error(`Workflow v17 measurement attempt ${attempt.attemptId} disappeared`);
+  if (!current) throw new Error(`Workflow measurement attempt ${attempt.attemptId} disappeared`);
   if (current.status === status) return current;
   if (current.status !== "running" && current.status !== "waiting") {
-    throw new Error(`Workflow v17 measurement attempt ${attempt.attemptId} is ${current.status}`);
+    throw new Error(`Workflow measurement attempt ${attempt.attemptId} is ${current.status}`);
   }
   return await revisionRetry(async () => database.completeAttempt({
     expectedRevision: database.readRun().revision,
@@ -862,20 +857,20 @@ async function revisionRetry<T>(body: () => T | Promise<T>): Promise<T> {
       throw error;
     }
   }
-  throw new Error("Workflow v17 measurement database revision did not settle");
+  throw new Error("Workflow measurement database revision did not settle");
 }
 
 function boundedText(value: unknown, label: string, maximum: number): string {
   if (typeof value !== "string" || !value.trim() || Array.from(value).length > maximum
     || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)) {
-    throw new TypeError(`Workflow v17 ${label} is invalid`);
+    throw new TypeError(`Workflow ${label} is invalid`);
   }
   return value;
 }
 
 function timestamp(now: () => Date): string {
   const value = now();
-  if (!(value instanceof Date) || !Number.isFinite(value.getTime())) throw new Error("Workflow v17 measurement clock is invalid");
+  if (!(value instanceof Date) || !Number.isFinite(value.getTime())) throw new Error("Workflow measurement clock is invalid");
   return value.toISOString();
 }
 
@@ -896,7 +891,7 @@ function exactKeys(value: object, allowed: readonly string[], label: string, opt
 function assertContained(root: string, target: string, allowEqual = false): void {
   const relative = path.relative(root, target);
   if ((!allowEqual && relative === "") || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-    throw new Error("Workflow v17 measurement workspace escapes its root");
+    throw new Error("Workflow measurement workspace escapes its root");
   }
 }
 

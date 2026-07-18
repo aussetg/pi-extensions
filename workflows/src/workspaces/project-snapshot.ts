@@ -40,7 +40,6 @@ export type ProjectSnapshotEntry =
  * the changing live source was observed at one global atomic instant.
  */
 export interface ProjectSnapshotManifest {
-  formatVersion: 1;
   sourceRoot: string;
   cwd: string;
   rootMode: number;
@@ -146,7 +145,6 @@ export async function captureProjectSnapshot(
     state.entries.sort((left, right) => compareBytes(left.path, right.path));
     state.exclusions.sort((left, right) => compareBytes(left.path, right.path));
     const body = {
-      formatVersion: 1 as const,
       sourceRoot,
       cwd: relativePath(sourceRoot, sourceCwd),
       rootMode: modeOf(rootStat),
@@ -308,7 +306,11 @@ export async function scanProjectSource(sourceRootInput: string): Promise<Projec
 
 /** Validate the bounded record itself without traversing snapshot content. */
 export function assertProjectSnapshotManifest(manifest: ProjectSnapshotManifest): void {
-  if (!manifest || manifest.formatVersion !== 1) throw new Error("Unsupported project snapshot manifest");
+  if (!manifest) throw new Error("Invalid project snapshot manifest");
+  if (Object.keys(manifest).sort().join(",")
+    !== "cwd,entries,exclusions,fileCount,manifestHash,rootMode,sourceRoot,totalBytes,treeHash") {
+    throw new Error("Project snapshot manifest has unexpected fields");
+  }
   const { manifestHash, ...body } = manifest;
   if (stableHash(body) !== manifestHash) throw new Error("Project snapshot manifest hash mismatch");
   if (!isHash(manifest.treeHash)) throw new Error("Project snapshot tree hash is invalid");

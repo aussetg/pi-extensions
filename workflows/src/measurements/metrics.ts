@@ -41,7 +41,6 @@ export interface MetricDeltaObservation extends MetricObservation {
 }
 
 export interface MetricCohortDelta {
-  formatVersion: 1;
   kind: "measurement-cohort";
   measurementId: string;
   operationPath: string;
@@ -250,7 +249,6 @@ export function buildMetricCohortDelta(options: {
     });
   }
   return deepFreezeJson(canonicalJsonObject({
-    formatVersion: 1,
     kind: "measurement-cohort",
     measurementId: options.measurementId,
     operationPath: options.operationPath,
@@ -356,7 +354,7 @@ export function applyMetricDispositionToHandles(
 
 export function normalizeMetricCohortDelta(value: unknown): MetricCohortDelta {
   const canonical = canonicalJsonObject(value, metricDeltaLimits()) as unknown as MetricCohortDelta;
-  if (canonical.formatVersion !== 1 || canonical.kind !== "measurement-cohort") throw new Error("Invalid metric cohort delta version");
+  if (canonical.kind !== "measurement-cohort") throw new Error("Invalid metric cohort delta");
   if (
     !/^measurement_[a-f0-9]{32}$/.test(canonical.measurementId) ||
     typeof canonical.operationPath !== "string" || !canonical.operationPath.startsWith("run/") ||

@@ -190,7 +190,6 @@ export class WorkflowProductionAskExecutor implements WorkflowAskExecutor {
 
   async ask(request: Parameters<WorkflowAskExecutor["ask"]>[0]) {
     const body = {
-      formatVersion: 1,
       kind: "ask",
       operationId: request.operation.operationId,
       prompt: request.prompt,
@@ -255,7 +254,6 @@ export class WorkflowProductionVerificationExecutor implements WorkflowVerificat
         kind: "agent-task",
         binding: "verificationReviewer",
         identity: {
-          formatVersion: 1,
           kind: "agent-task",
           sourceSite: "verification-reviewer",
           definitionHash: stableHash(reviewer),
@@ -280,7 +278,7 @@ export class WorkflowProductionVerificationExecutor implements WorkflowVerificat
           hash: stableHash({ selector: descriptor.profile, authority: reviewer }),
         },
         prompt: "Inspect the exact candidate workspace. Report passed only when it is safe, correct, scoped, and adequately tested.",
-        artifacts: { formatVersion: 1, entries: [], hash: stableHash([]) },
+        artifacts: { entries: [], hash: stableHash([]) },
         inputs: { root: reviewInputs, entries: [], hash: stableHash([]) },
         workspace: request.workspace,
         signal: request.signal,
@@ -343,7 +341,6 @@ export class WorkflowProductionApplyExecutor implements WorkflowApplyExecutor {
     if (!interaction) {
       const live = await scanProjectSource(this.sourceRoot);
       const requestBody = {
-        formatVersion: 1,
         kind: "apply",
         operationId: request.operation.operationId,
         candidateId: request.candidate.candidateId,
@@ -398,7 +395,7 @@ export class WorkflowProductionApplyExecutor implements WorkflowApplyExecutor {
       verificationBindingHash: request.verification.bindingHash,
       changedPaths: [...request.candidate.changedPaths],
     };
-    return { ...result, authorityHash: stableHash({ formatVersion: 1, ...result }) };
+    return { ...result, authorityHash: stableHash({ ...result }) };
   }
 }
 
@@ -546,7 +543,7 @@ export async function applyWorkflowCandidateTree(options: {
 }
 
 function applyTemporaryPath(target: string, candidateTreeHash: string, entryPath: string): string {
-  const suffix = stableHash({ formatVersion: 1, candidateTreeHash, entryPath }).slice(7, 23);
+  const suffix = stableHash({ candidateTreeHash, entryPath }).slice(7, 23);
   return path.join(path.dirname(target), `.${path.basename(target)}.pi-workflow-${suffix}.tmp`);
 }
 

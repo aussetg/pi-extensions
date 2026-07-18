@@ -100,10 +100,9 @@ and the agent hierarchy pauses rather than repeating an effect with an unknown o
 
 ## SQLite and process ownership
 
-Each run has one schema-version-4 SQLite database configured with WAL, foreign keys, full
-synchronization, and a bounded busy timeout. State transitions use short `BEGIN IMMEDIATE`
-transactions and expected revisions. Unknown schema versions are rejected; there are no migrations.
-Schema-3 databases remain immutable legacy evidence and cannot resume or replay.
+Each run has one SQLite database configured with WAL, foreign keys, full synchronization, and a
+bounded busy timeout. State transitions use short `BEGIN IMMEDIATE` transactions and expected
+revisions. Data that does not match the current tables and invariants is rejected as corrupt.
 
 Candidate measurement observations remain pending until the exact measurement-bound `accept` or
 `reject` operation completes. That operation atomically records the disposition and transitions the
@@ -121,7 +120,7 @@ SQLite is the ordinary control transport. Reopen re-executes exact snapshotted T
 scope-local calls and durable physical-effect settlements; a settled effect is not repeated. Extension
 shutdown drops only presentation polling and does not stop services.
 
-Prepared runs pin the TypeScript source transform, runtime version, API hash, reviewed definition,
+Prepared runs pin the TypeScript source transform, API hash, reviewed definition,
 registry exposure policy, launch actor, project trust, static authority, and invocation-selected
 resources. A
 coordinator with a different revision refuses to resume the run before workflow control or effects

@@ -10,7 +10,6 @@ import type { JsonObject, JsonValue } from "../types.js";
 import { stableHash } from "../utils/hashes.js";
 
 export const WORKFLOW_ROOT_SCOPE_SEED = stableHash({
-  formatVersion: 1,
   kind: "workflow-root-scope",
 });
 
@@ -33,16 +32,15 @@ export function workflowLaneSeed(input: {
       ? "map-item"
       : "candidate-body";
   if (input.childKind !== expectedChild) {
-    throw new TypeError(`Workflow v17 ${input.ownerKind} cannot own ${input.childKind}`);
+    throw new TypeError(`Workflow ${input.ownerKind} cannot own ${input.childKind}`);
   }
   if (input.ownerKind === "candidate" && input.laneKey !== undefined) {
-    throw new TypeError("Workflow v17 candidate body does not have an author lane key");
+    throw new TypeError("Workflow candidate body does not have an author lane key");
   }
   if (input.ownerKind !== "candidate" && !input.laneKey) {
-    throw new TypeError(`Workflow v17 ${input.ownerKind} lane requires a key`);
+    throw new TypeError(`Workflow ${input.ownerKind} lane requires a key`);
   }
   return stableHash({
-    formatVersion: 1,
     kind: "workflow-lane-seed",
     parentPreviousCallKey: input.parentPreviousCallKey,
     ownerOperationPath: input.ownerOperationPath,
@@ -66,7 +64,6 @@ export function workflowFreshCallKey(input: {
     throw new TypeError("Structural calls require workflowStructuralJoinKey()");
   }
   return stableHash({
-    formatVersion: 1,
     kind: "workflow-call",
     runId: input.runId,
     previousCallKey: input.previousCallKey,
@@ -93,12 +90,11 @@ export function workflowStructuralJoinKey(input: {
 )): string {
   if (input.operation.kind !== "parallel" && input.operation.kind !== "map"
     && input.operation.kind !== "candidate") {
-    throw new TypeError(`Workflow v17 ${input.operation.kind} is not structural`);
+    throw new TypeError(`Workflow ${input.operation.kind} is not structural`);
   }
   const outcome = input.outcome ?? "success";
   const terminal = outcome === "success" ? input.result : input.failure;
   return stableHash({
-    formatVersion: 1,
     kind: "workflow-structural-join",
     previousCallKey: input.previousCallKey,
     operation: causalOperation(input.operation),

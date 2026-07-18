@@ -6,8 +6,6 @@ import { boundedWorkflowProjectionText } from "./run-projection.js";
 
 export function projectWorkflowDraftReview(review: WorkflowDraftReviewRecord) {
   return {
-    formatVersion: 1 as const,
-    runtimeVersion: 17 as const,
     draftId: review.draftId,
     namespace: review.namespace,
     name: review.name,
@@ -46,7 +44,6 @@ export function projectWorkflowDraftPromotion(
   challenge: WorkflowDraftPromotionChallenge,
 ) {
   if (!review.definition
-    || challenge.runtimeVersion !== 17
     || challenge.draftId !== review.draftId
     || challenge.draftHash !== review.sourceHash
     || challenge.targetNamespace !== review.namespace
@@ -54,11 +51,9 @@ export function projectWorkflowDraftPromotion(
     || challenge.installedSourceHash !== review.installedSourceHash
     || challenge.currentPolicyHash !== review.definition.policyHash
     || challenge.reviewHash !== review.reviewHash) {
-    throw new Error("Workflow v17 promotion challenge does not bind the exact review");
+    throw new Error("Workflow promotion challenge does not bind the exact review");
   }
   return {
-    formatVersion: 1 as const,
-    runtimeVersion: 17 as const,
     validation: projectWorkflowDraftReview(review),
     challenge: structuredClone(challenge),
   };

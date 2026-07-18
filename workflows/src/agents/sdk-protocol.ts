@@ -5,7 +5,6 @@ import type { AgentProtocolToolName } from "../runtime/durable-types.js";
 import type { AgentEvent } from "./executor.js";
 import { stableJson, toStableJsonValue } from "../utils/stable-json.js";
 
-export const AGENT_SDK_PROTOCOL_VERSION = 1 as const;
 export const AGENT_SDK_PROTOCOL_MAX_LINE_BYTES = 1024 * 1024;
 
 export interface AgentProtocolErrorBody {
@@ -17,13 +16,11 @@ export interface AgentProtocolErrorBody {
 export type AgentProtocolClientMessage =
   | {
       type: "authenticate";
-      protocolVersion: 1;
       executionId: string;
       executionToken: string;
     }
   | {
       type: "tool-request";
-      protocolVersion: 1;
       requestId: string;
       toolCallId: string;
       toolName: AgentProtocolToolName;
@@ -31,16 +28,15 @@ export type AgentProtocolClientMessage =
     }
   | {
       type: "agent-event";
-      protocolVersion: 1;
       requestId: string;
       event: JsonValue;
     };
 
 export type AgentProtocolServerMessage =
-  | { type: "authenticated"; protocolVersion: 1; ok: true }
-  | { type: "authenticated"; protocolVersion: 1; ok: false; error: AgentProtocolErrorBody }
-  | { type: "response"; protocolVersion: 1; requestId: string; ok: true; result: JsonValue }
-  | { type: "response"; protocolVersion: 1; requestId: string; ok: false; error: AgentProtocolErrorBody };
+  | { type: "authenticated"; ok: true }
+  | { type: "authenticated"; ok: false; error: AgentProtocolErrorBody }
+  | { type: "response"; requestId: string; ok: true; result: JsonValue }
+  | { type: "response"; requestId: string; ok: false; error: AgentProtocolErrorBody };
 
 export interface AgentWorkerProtocol extends AsyncDisposable {
   request(toolName: AgentProtocolToolName, toolCallId: string, payload: JsonValue): Promise<JsonValue>;
@@ -70,17 +66,16 @@ export function agentProtocolSocketPath(runDirInput: string): string {
 
 export function parseAgentProtocolClientMessage(value: unknown): AgentProtocolClientMessage {
   const message = record(value, "agent protocol message");
-  if (message.protocolVersion !== AGENT_SDK_PROTOCOL_VERSION) throw protocolFailure("protocol-version", "Unsupported agent protocol version");
   if (message.type === "authenticate") {
-    exactKeys(message, ["type", "protocolVersion", "executionId", "executionToken"]);
+    exactKeys(message, ["type", "executionId", "executionToken"]);
     const executionId = executionIdentifier(message.executionId);
     if (typeof message.executionToken !== "string" || !/^[a-f0-9]{64}$/.test(message.executionToken)) {
       throw protocolFailure("authentication", "Invalid agent execution token");
     }
-    return { type: "authenticate", protocolVersion: 1, executionId, executionToken: message.executionToken };
+    return { type: "authenticate", executionId, executionToken: message.executionToken };
   }
   if (message.type === "tool-request") {
-    exactKeys(message, ["type", "protocolVersion", "requestId", "toolCallId", "toolName", "payload"]);
+    exactKeys(message, ["type", "requestId", "toolCallId", "toolName", "payload"]);
     const toolName = message.toolName;
     if (![
       "finish_work", "report_progress", "log_result", "publish_artifact",
@@ -90,7 +85,6 @@ export function parseAgentProtocolClientMessage(value: unknown): AgentProtocolCl
     }
     return {
       type: "tool-request",
-      protocolVersion: 1,
       requestId: wireIdentifier(message.requestId, "request"),
       toolCallId: wireIdentifier(message.toolCallId, "tool call", 256),
       toolName: toolName as AgentProtocolToolName,
@@ -98,10 +92,9 @@ export function parseAgentProtocolClientMessage(value: unknown): AgentProtocolCl
     };
   }
   if (message.type === "agent-event") {
-    exactKeys(message, ["type", "protocolVersion", "requestId", "event"]);
+    exactKeys(message, ["type", "requestId", "event"]);
     return {
       type: "agent-event",
-      protocolVersion: 1,
       requestId: wireIdentifier(message.requestId, "request"),
       event: jsonValue(message.event),
     };
@@ -111,23 +104,22 @@ export function parseAgentProtocolClientMessage(value: unknown): AgentProtocolCl
 
 export function parseAgentProtocolServerMessage(value: unknown): AgentProtocolServerMessage {
   const message = record(value, "agent protocol response");
-  if (message.protocolVersion !== AGENT_SDK_PROTOCOL_VERSION) throw protocolFailure("protocol-version", "Unsupported agent protocol version");
   if (message.type === "authenticated") {
     if (message.ok === true) {
-      exactKeys(message, ["type", "protocolVersion", "ok"]);
-      return { type: "authenticated", protocolVersion: 1, ok: true };
+      exactKeys(message, ["type", "ok"]);
+      return { type: "authenticated", ok: true };
     }
-    exactKeys(message, ["type", "protocolVersion", "ok", "error"]);
-    return { type: "authenticated", protocolVersion: 1, ok: false, error: errorBody(message.error) };
+    exactKeys(message, ["type", "ok", "error"]);
+    return { type: "authenticated", ok: false, error: errorBody(message.error) };
   }
   if (message.type === "response") {
     const requestId = wireIdentifier(message.requestId, "request");
     if (message.ok === true) {
-      exactKeys(message, ["type", "protocolVersion", "requestId", "ok", "result"]);
-      return { type: "response", protocolVersion: 1, requestId, ok: true, result: jsonValue(message.result) };
+      exactKeys(message, ["type", "requestId", "ok", "result"]);
+      return { type: "response", requestId, ok: true, result: jsonValue(message.result) };
     }
-    exactKeys(message, ["type", "protocolVersion", "requestId", "ok", "error"]);
-    return { type: "response", protocolVersion: 1, requestId, ok: false, error: errorBody(message.error) };
+    exactKeys(message, ["type", "requestId", "ok", "error"]);
+    return { type: "response", requestId, ok: false, error: errorBody(message.error) };
   }
   throw protocolFailure("unknown-message", `Unknown agent protocol response ${String(message.type)}`);
 }
@@ -167,7 +159,6 @@ export class AgentProtocolClient implements AgentWorkerProtocol {
     });
     client.write({
       type: "authenticate",
-      protocolVersion: 1,
       executionId: options.executionId,
       executionToken: options.executionToken,
     });
@@ -187,7 +178,6 @@ export class AgentProtocolClient implements AgentWorkerProtocol {
     wireIdentifier(toolCallId, "tool call", 256);
     return await this.roundTrip({
       type: "tool-request",
-      protocolVersion: 1,
       requestId: this.nextRequestId(),
       toolCallId,
       toolName,
@@ -198,7 +188,6 @@ export class AgentProtocolClient implements AgentWorkerProtocol {
   async emit(event: AgentEvent): Promise<void> {
     await this.roundTrip({
       type: "agent-event",
-      protocolVersion: 1,
       requestId: this.nextRequestId(),
       event: jsonValue(event),
     });

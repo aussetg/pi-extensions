@@ -34,8 +34,6 @@ export interface WorkflowDraftOperationAnalysis {
 }
 
 export interface WorkflowDraftReviewBody {
-  formatVersion: 1;
-  runtimeVersion: 17;
   draftId: WorkflowDraftId;
   namespace: WorkflowDraftNamespace;
   name: string;
@@ -85,8 +83,6 @@ export interface WorkflowDraftReviewRecord extends WorkflowDraftReviewBody {
 }
 
 export interface WorkflowDraftPromotionChallenge {
-  formatVersion: 1;
-  runtimeVersion: 17;
   draftId: WorkflowDraftId;
   draftHash: string;
   targetNamespace: WorkflowDraftNamespace;

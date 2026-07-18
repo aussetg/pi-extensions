@@ -80,7 +80,7 @@ export interface WorkflowExecutableRuntimeOptions {
   ) => void | Promise<void>;
 }
 
-/** Connect the reviewed control process to the cursor engine and v17 effect adapters. */
+/** Connect the reviewed control process to the cursor engine and effect adapters. */
 export class WorkflowExecutableRuntime {
   constructor(private readonly options: WorkflowExecutableRuntimeOptions) {
     assertWorkflowStaticEffectResources(options.workflow, options.resources);
@@ -92,11 +92,11 @@ export class WorkflowExecutableRuntime {
       || options.database.readRun().staticResourcesHash !== options.resources.hash
       || options.products.authority !== options.authority
       || options.candidates.authority !== options.authority) {
-      throw new Error("Workflow v17 executable runtime authority differs from its run");
+      throw new Error("Workflow executable runtime authority differs from its run");
     }
     if (options.metrics && (options.metrics.database !== options.database
       || options.metrics.products !== options.products || options.metrics.workflow !== options.workflow)) {
-      throw new Error("Workflow v17 metric runtime authority differs from its executable runtime");
+      throw new Error("Workflow metric runtime authority differs from its executable runtime");
     }
     this.requireExecutors();
   }
@@ -154,10 +154,10 @@ export class WorkflowExecutableRuntime {
       },
       map: async (sourceSite, itemsValue, bodyValue, optionsValue) => {
         if (!Array.isArray(itemsValue) || typeof bodyValue !== "function") {
-          throw new TypeError("Workflow v17 map arguments are invalid");
+          throw new TypeError("Workflow map arguments are invalid");
         }
-        const options = plainRecord(optionsValue, "workflow v17 map options");
-        if (typeof options.key !== "function") throw new TypeError("Workflow v17 map key must be a callback");
+        const options = plainRecord(optionsValue, "workflow map options");
+        if (typeof options.key !== "function") throw new TypeError("Workflow map key must be a callback");
         return await semantic.map(
           itemsValue as JsonValue[],
           async (item, index) => await (bodyValue as (item: JsonValue, index: number) => Promise<unknown>)(item, index),
@@ -170,7 +170,7 @@ export class WorkflowExecutableRuntime {
       },
       agent: async (sourceSite, task, invocationValue) => {
         const descriptor = this.descriptor(task, sourceSite, "agent-task");
-        const invocation = plainRecord(invocationValue, "workflow v17 agent invocation");
+        const invocation = plainRecord(invocationValue, "workflow agent invocation");
         const manifest = workflowArtifactManifest(this.options.products, invocation.artifacts ?? {});
         const workspace = invocation.workspace;
         const workspaceIds = workspace ? [this.options.candidates.workspace(workspace).workspaceId] : [];
@@ -190,7 +190,7 @@ export class WorkflowExecutableRuntime {
       command: async (sourceSite, task, invocationValue) => {
         const descriptor = this.descriptor(task, sourceSite, "command-task");
         const invocation = invocationValue === undefined
-          ? {} : plainRecord(invocationValue, "workflow v17 command invocation");
+          ? {} : plainRecord(invocationValue, "workflow command invocation");
         const workspace = invocation.workspace;
         const workspaceIds = workspace ? [this.options.candidates.workspace(workspace).workspaceId] : [];
         return await semantic.effect("command", {
@@ -206,7 +206,7 @@ export class WorkflowExecutableRuntime {
         });
       },
       ask: async (sourceSite, requestValue) => {
-        const request = plainRecord(requestValue, "workflow v17 ask request");
+        const request = plainRecord(requestValue, "workflow ask request");
         return await semantic.effect("ask", {
           sourceSite,
           ...(typeof request.title === "string" ? { title: request.title } : {}),
@@ -218,12 +218,12 @@ export class WorkflowExecutableRuntime {
         });
       },
       metrics: (sourceSite, policy, sampling) => {
-        if (!this.options.metrics) throw new Error("Workflow v17 metric runtime is unavailable");
+        if (!this.options.metrics) throw new Error("Workflow metric runtime is unavailable");
         return this.options.metrics.create(sourceSite, policy, sampling);
       },
       measure: async (sourceSite, profile, metrics, optionsValue) => {
         const options = optionsValue === undefined
-          ? {} : plainRecord(optionsValue, "workflow v17 measurement options");
+          ? {} : plainRecord(optionsValue, "workflow measurement options");
         return await semantic.effect("measure", {
           sourceSite,
           ...(typeof options.title === "string" ? { title: options.title } : {}),
@@ -236,9 +236,9 @@ export class WorkflowExecutableRuntime {
         });
       },
       candidate: async (sourceSite, bodyValue, optionsValue) => {
-        if (typeof bodyValue !== "function") throw new TypeError("Workflow v17 candidate body must be a callback");
+        if (typeof bodyValue !== "function") throw new TypeError("Workflow candidate body must be a callback");
         const options = optionsValue === undefined
-          ? {} : plainRecord(optionsValue, "workflow v17 candidate options");
+          ? {} : plainRecord(optionsValue, "workflow candidate options");
         return await semantic.candidate({
           sourceSite,
           ...(typeof options.title === "string" ? { title: options.title } : {}),
@@ -251,7 +251,7 @@ export class WorkflowExecutableRuntime {
         input: { candidate, profile },
       }),
       accept: async (sourceSite, candidate, evidenceValue) => {
-        const evidence = plainRecord(evidenceValue, "workflow v17 acceptance evidence");
+        const evidence = plainRecord(evidenceValue, "workflow acceptance evidence");
         return await semantic.effect("accept", {
           sourceSite,
           input: {
@@ -262,7 +262,7 @@ export class WorkflowExecutableRuntime {
         });
       },
       reject: async (sourceSite, candidate, evidenceValue) => {
-        const evidence = plainRecord(evidenceValue, "workflow v17 rejection evidence");
+        const evidence = plainRecord(evidenceValue, "workflow rejection evidence");
         return await semantic.effect("reject", {
           sourceSite,
           input: {
@@ -274,7 +274,7 @@ export class WorkflowExecutableRuntime {
         });
       },
       recordExperiment: async (sourceSite, requestValue) => {
-        const request = plainRecord(requestValue, "workflow v17 experiment request");
+        const request = plainRecord(requestValue, "workflow experiment request");
         return await semantic.effect("record-experiment", {
           sourceSite,
           input: {
@@ -303,14 +303,14 @@ export class WorkflowExecutableRuntime {
       : undefined;
     if (!description || !identity || identity.kind !== kind
       || reviewed?.descriptorSourceSite !== identity.sourceSite) {
-      throw new TypeError(`Workflow v17 flow.${kind === "agent-task" ? "agent" : "command"} descriptor authority is invalid`);
+      throw new TypeError(`Workflow flow.${kind === "agent-task" ? "agent" : "command"} descriptor authority is invalid`);
     }
     const descriptor = this.options.workflow.descriptors.find(
       entry => entry.identity.sourceSite === identity.sourceSite,
     );
     if (!descriptor || descriptor.kind !== kind
       || descriptor.identity.definitionHash !== identity.definitionHash) {
-      throw new TypeError("Workflow v17 descriptor differs from static review");
+      throw new TypeError("Workflow descriptor differs from static review");
     }
     return descriptor as Extract<WorkflowDescriptor, { kind: K }>;
   }
@@ -371,15 +371,15 @@ export class WorkflowExecutableRuntime {
       ["measure", Boolean(this.options.measurement && this.options.metrics)],
       ["recordExperiment", Boolean(this.options.metrics)],
     ] as const) {
-      if (methods.has(method) && !available) throw new Error(`Workflow v17 ${method} executor is unavailable`);
+      if (methods.has(method) && !available) throw new Error(`Workflow ${method} executor is unavailable`);
     }
   }
 }
 
 function callbackRecord(value: unknown, label: string): Record<string, () => Promise<unknown>> {
-  const record = plainRecord(value, `workflow v17 ${label}`);
+  const record = plainRecord(value, `workflow ${label}`);
   for (const [key, entry] of Object.entries(record)) {
-    if (typeof entry !== "function") throw new TypeError(`Workflow v17 ${label} ${key} is not a callback`);
+    if (typeof entry !== "function") throw new TypeError(`Workflow ${label} ${key} is not a callback`);
   }
   return record as Record<string, () => Promise<unknown>>;
 }
@@ -389,17 +389,17 @@ function structuredOptions(value: unknown): {
   errors?: "fail-fast" | "collect";
 } {
   if (value === undefined) return {};
-  const record = plainRecord(value, "workflow v17 structured options");
+  const record = plainRecord(value, "workflow structured options");
   const result: { concurrency?: number; errors?: "fail-fast" | "collect" } = {};
   if (record.concurrency !== undefined) {
     if (!Number.isSafeInteger(record.concurrency) || (record.concurrency as number) < 1) {
-      throw new TypeError("Workflow v17 concurrency must be a positive integer");
+      throw new TypeError("Workflow concurrency must be a positive integer");
     }
     result.concurrency = record.concurrency as number;
   }
   if (record.errors !== undefined) {
     if (record.errors !== "fail-fast" && record.errors !== "collect") {
-      throw new TypeError("Workflow v17 structured errors policy is invalid");
+      throw new TypeError("Workflow structured errors policy is invalid");
     }
     result.errors = record.errors;
   }
@@ -409,7 +409,7 @@ function structuredOptions(value: unknown): {
 function validateSchema(schema: JsonSchema, value: unknown, label: string): void {
   const ajv = new Ajv({ strict: false, allErrors: true, validateFormats: false });
   const validate = ajv.compile(schema);
-  if (!validate(value)) throw new TypeError(`Invalid workflow v17 ${label}: ${ajv.errorsText(validate.errors)}`);
+  if (!validate(value)) throw new TypeError(`Invalid workflow ${label}: ${ajv.errorsText(validate.errors)}`);
 }
 
 function plainRecord(value: unknown, label: string): Record<string, unknown> {

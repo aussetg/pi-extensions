@@ -34,7 +34,6 @@ describe("workflow production hardening", () => {
     ]);
     const [before, after] = await Promise.all([scanCandidateTree(launch), scanCandidateTree(candidate)]);
     const orphanSuffix = stableHash({
-      formatVersion: 1,
       candidateTreeHash: after.treeHash,
       entryPath: "added.txt",
     }).slice(7, 23);

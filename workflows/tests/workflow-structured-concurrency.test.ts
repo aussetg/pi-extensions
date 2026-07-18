@@ -50,9 +50,9 @@ afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
-describe("workflow v17 structured concurrency", () => {
+describe("workflow structured concurrency", () => {
   it("runs fixed parallel lanes with stable keyed scopes and output order", async () => {
-    const fixture = createFixture("flow_v17_parallel");
+    const fixture = createFixture("flow_test_parallel");
     const adapter = new StructuredAdapter();
     const outcome = await new WorkflowSemanticEngine(fixture.database, [adapter], {
       now: clock(),
@@ -77,7 +77,7 @@ describe("workflow v17 structured concurrency", () => {
   it("persists the same keyed structure under both sibling completion permutations", async () => {
     const shapes: JsonValue[] = [];
     for (const [leftDelay, rightDelay] of [[20, 1], [1, 20]] as const) {
-      const fixture = createFixture(`flow_v17_permutation_${leftDelay}`);
+      const fixture = createFixture(`flow_test_permutation_${leftDelay}`);
       const outcome = await new WorkflowSemanticEngine(fixture.database, [new StructuredAdapter()], {
         now: clock(),
       }).run(async flow => await flow.parallel({
@@ -107,7 +107,7 @@ describe("workflow v17 structured concurrency", () => {
   });
 
   it("maps with bounded execution while preserving item output order", async () => {
-    const fixture = createFixture("flow_v17_map");
+    const fixture = createFixture("flow_test_map");
     const adapter = new StructuredAdapter();
     const items = [
       { key: "a", value: 1, delay: 20 },
@@ -141,7 +141,7 @@ describe("workflow v17 structured concurrency", () => {
   });
 
   it("sustains the full 256-item map bound without leaking scheduling into identity", async () => {
-    const fixture = createFixture("flow_v17_map_bound", 8);
+    const fixture = createFixture("flow_test_map_bound", 8);
     const adapter = new StructuredAdapter();
     const items = Array.from({ length: 256 }, (_, index) => ({
       key: `lane${String(index).padStart(3, "0")}`,
@@ -171,7 +171,7 @@ describe("workflow v17 structured concurrency", () => {
   }, 30_000);
 
   it("collects failed lanes as typed results and preserves successful siblings", async () => {
-    const fixture = createFixture("flow_v17_collect");
+    const fixture = createFixture("flow_test_collect");
     const adapter = new StructuredAdapter({ failures: new Set(["bad"]) });
     const outcome = await new WorkflowSemanticEngine(fixture.database, [adapter], {
       now: clock(),
@@ -195,7 +195,7 @@ describe("workflow v17 structured concurrency", () => {
   });
 
   it("durably fails fail-fast structures, cancels siblings, and continues through ordinary catch", async () => {
-    const fixture = createFixture("flow_v17_fail_fast");
+    const fixture = createFixture("flow_test_fail_fast");
     const adapter = new StructuredAdapter({ failures: new Set(["bad"]) });
     const outcome = await new WorkflowSemanticEngine(fixture.database, [adapter], {
       now: clock(),
@@ -219,7 +219,7 @@ describe("workflow v17 structured concurrency", () => {
   });
 
   it("retains a sibling effect settlement that finishes while its lane is being cancelled", async () => {
-    const fixture = createFixture("flow_v17_cancelled_settlement");
+    const fixture = createFixture("flow_test_cancelled_settlement");
     const adapter = new StructuredAdapter({
       failures: new Set(["bad"]),
       ignoreAbort: new Set(["settled"]),
@@ -253,7 +253,7 @@ describe("workflow v17 structured concurrency", () => {
   it("reconstructs successful structures after a crash at every durable boundary", async () => {
     const points: WorkflowSemanticEngineFaultPoint[] = [];
     {
-      const fixture = createFixture("flow_v17_structure_points");
+      const fixture = createFixture("flow_test_structure_points");
       await new WorkflowSemanticEngine(fixture.database, [new StructuredAdapter()], {
         now: clock(),
         faultInjector: (point) => { points.push(point); },
@@ -264,7 +264,7 @@ describe("workflow v17 structured concurrency", () => {
     expect(points).toContain("after-structural-join");
 
     for (let crashIndex = 0; crashIndex < points.length; crashIndex++) {
-      const fixture = createFixture(`flow_v17_structure_crash_${crashIndex}`);
+      const fixture = createFixture(`flow_test_structure_crash_${crashIndex}`);
       const adapter = new StructuredAdapter();
       let transition = 0;
       await expect(new WorkflowSemanticEngine(fixture.database, [adapter], {
@@ -290,7 +290,7 @@ describe("workflow v17 structured concurrency", () => {
       "after-lane-scope-cancelled",
       "after-structural-join",
     ] as const) {
-      const fixture = createFixture(`flow_v17_fail_fast_${target.replaceAll("-", "_")}`);
+      const fixture = createFixture(`flow_test_fail_fast_${target.replaceAll("-", "_")}`);
       const adapter = new StructuredAdapter({ failures: new Set(["bad"]) });
       let crashed = false;
       await expect(new WorkflowSemanticEngine(fixture.database, [adapter], {
@@ -313,12 +313,12 @@ describe("workflow v17 structured concurrency", () => {
   });
 
   it("causally reuses an unchanged sibling while a changed lane and downstream call execute fresh", async () => {
-    const source = createFixture("flow_v17_parallel_replay_source");
+    const source = createFixture("flow_test_parallel_replay_source");
     await new WorkflowSemanticEngine(source.database, [new StructuredAdapter()], {
       now: clock(),
     }).run(flow => replayProgram(flow, 1));
 
-    const target = createFixture("flow_v17_parallel_replay_target");
+    const target = createFixture("flow_test_parallel_replay_target");
     const replay = track(await WorkflowCausalReplay.open({
       sourceRunDir: source.root,
       targetRunDir: target.root,
@@ -341,12 +341,12 @@ describe("workflow v17 structured concurrency", () => {
   });
 
   it("executes failed structural joins fresh and ends downstream replay eligibility", async () => {
-    const source = createFixture("flow_v17_failed_join_source");
+    const source = createFixture("flow_test_failed_join_source");
     await new WorkflowSemanticEngine(source.database, [new StructuredAdapter({
       failures: new Set(["bad"]),
     })], { now: clock() }).run(failFastProgram);
 
-    const target = createFixture("flow_v17_failed_join_target");
+    const target = createFixture("flow_test_failed_join_target");
     const replay = track(await WorkflowCausalReplay.open({
       sourceRunDir: source.root,
       targetRunDir: target.root,
@@ -369,12 +369,12 @@ describe("workflow v17 structured concurrency", () => {
   });
 
   it("reuses keyed map lanes across reorder/removal while recomputing the parent join", async () => {
-    const source = createFixture("flow_v17_map_replay_source");
+    const source = createFixture("flow_test_map_replay_source");
     await new WorkflowSemanticEngine(source.database, [new StructuredAdapter()], {
       now: clock(),
     }).run(flow => mapReplayProgram(flow, ["a", "b", "c"]));
 
-    const target = createFixture("flow_v17_map_replay_target");
+    const target = createFixture("flow_test_map_replay_target");
     const replay = track(await WorkflowCausalReplay.open({
       sourceRunDir: source.root,
       targetRunDir: target.root,
@@ -396,7 +396,7 @@ describe("workflow v17 structured concurrency", () => {
   });
 
   it("supports nested keyed structures without deadlocking the host effect ceiling", async () => {
-    const fixture = createFixture("flow_v17_nested", 2);
+    const fixture = createFixture("flow_test_nested", 2);
     const adapter = new StructuredAdapter();
     const outcome = await new WorkflowSemanticEngine(fixture.database, [adapter], {
       now: clock(),
@@ -421,17 +421,17 @@ describe("workflow v17 structured concurrency", () => {
   });
 
   it("rejects duplicate map keys and same-run structural policy drift before effects execute", async () => {
-    const duplicate = createFixture("flow_v17_duplicate_keys");
+    const duplicate = createFixture("flow_test_duplicate_keys");
     const duplicateAdapter = new StructuredAdapter();
     expect(await new WorkflowSemanticEngine(duplicate.database, [duplicateAdapter], {
       now: clock(),
     }).run(async flow => await flow.map(["a", "a"], async item => item, {
       sourceSite: "site-duplicate-map",
       key: item => item as string,
-    }))).toMatchObject({ status: "failed", failure: { summary: "Duplicate workflow v17 map lane a" } });
+    }))).toMatchObject({ status: "failed", failure: { summary: "Duplicate workflow map lane a" } });
     expect(duplicate.database.listOperations()).toHaveLength(0);
 
-    const drift = createFixture("flow_v17_structure_drift");
+    const drift = createFixture("flow_test_structure_drift");
     const adapter = new StructuredAdapter();
     await expect(new WorkflowSemanticEngine(drift.database, [adapter], {
       now: clock(),
@@ -468,7 +468,7 @@ class StructuredAdapter implements WorkflowSemanticEffectAdapter {
 
   journalIdentity(context: WorkflowEffectAdapterContext): WorkflowEffectIdentity {
     return {
-      semanticKey: stableHash({ formatVersion: 1, kind: "structured-command", input: context.semanticInput }),
+      semanticKey: stableHash({ kind: "structured-command", input: context.semanticInput }),
       completionAuthority: "host-effect",
       replayPolicy: "immutable",
     };
@@ -549,7 +549,6 @@ function createFixture(runId: string, concurrency = 4) {
   roots.push(root);
   const policy = defaultWorkflowRegistryPolicy(root, "user");
   const ref: WorkflowDefinitionRef = {
-    formatVersion: 1,
     id: "user:structured",
     namespace: "user",
     name: "structured",

@@ -40,8 +40,7 @@ import {
 import { DatabaseSync } from "./sqlite.js";
 import {
   WORKFLOW_RUN_DATABASE_BUSY_TIMEOUT_MS,
-  WORKFLOW_RUN_DATABASE_SCHEMA_SQL,
-  WORKFLOW_RUN_DATABASE_SCHEMA_VERSION,
+  WORKFLOW_RUN_DATABASE_SQL,
 } from "./run-database-schema.js";
 import type {
   ClaimWorkflowOperationInput,
@@ -80,7 +79,6 @@ import type {
   WorkflowWorkspaceCheckpointRecord,
 } from "./run-database-types.js";
 
-export { WORKFLOW_RUN_DATABASE_SCHEMA_VERSION } from "./run-database-schema.js";
 export type * from "./run-database-types.js";
 
 export { WORKFLOW_ROOT_SCOPE_SEED } from "../runtime/causal-identity.js";
@@ -177,7 +175,6 @@ export type DisposeCandidateInput = {
 );
 
 export interface WorkflowRunDatabaseConfiguration {
-  schemaVersion: number;
   journalMode: string;
   foreignKeys: boolean;
   synchronous: number;
@@ -191,15 +188,6 @@ export interface CompleteWorkflowAttemptInput {
   usage: JsonObject;
   resources?: JsonObject;
   at: string;
-}
-
-export class WorkflowRunDatabaseVersionError extends Error {
-  constructor(readonly actual: number) {
-    super(actual === 3
-      ? "Legacy workflow run database schema 3 cannot be opened by runtime v17"
-      : `Unsupported workflow run database schema ${actual}; expected ${WORKFLOW_RUN_DATABASE_SCHEMA_VERSION}`);
-    this.name = "WorkflowRunDatabaseVersionError";
-  }
 }
 
 export class WorkflowRunDatabaseRevisionConflictError extends Error {
@@ -234,27 +222,26 @@ export class WorkflowRunDatabaseCorruptionError extends Error {
 }
 
 export function workflowScopeId(runId: string, scopePath: string): string {
-  assertIdentifier(runId, "workflow v17 run id");
+  assertIdentifier(runId, "workflow run id");
   assertScopePath(scopePath);
-  return `scope_${stableHash({ formatVersion: 1, runId, scopePath }).slice(7, 39)}`;
+  return `scope_${stableHash({ runId, scopePath }).slice(7, 39)}`;
 }
 
 export function workflowOperationId(runId: string, operationPath: string): string {
-  assertIdentifier(runId, "workflow v17 run id");
+  assertIdentifier(runId, "workflow run id");
   assertOperationPath(operationPath);
-  return `operation_${stableHash({ formatVersion: 1, runId, operationPath }).slice(7, 39)}`;
+  return `operation_${stableHash({ runId, operationPath }).slice(7, 39)}`;
 }
 
 export function workflowResourceId(inputPath: string, bindingHash: string): string {
-  assertJsonPointer(inputPath, "workflow v17 resource input path");
-  assertHash(bindingHash, "workflow v17 resource binding hash");
-  return `resource_${stableHash({ formatVersion: 1, inputPath, bindingHash }).slice(7, 39)}`;
+  assertJsonPointer(inputPath, "workflow resource input path");
+  assertHash(bindingHash, "workflow resource binding hash");
+  return `resource_${stableHash({ inputPath, bindingHash }).slice(7, 39)}`;
 }
 
 export function workflowInvocationIdentityHash(snapshot: WorkflowInvocationSnapshot): string {
   assertWorkflowInvocationSnapshot(snapshot);
   return stableHash({
-    formatVersion: 1,
     workflowId: snapshot.workflowId,
     definitionHash: snapshot.definitionHash,
     inputHash: snapshot.inputHash,
@@ -298,7 +285,6 @@ export class WorkflowRunDatabaseReader implements Disposable {
   configuration(): WorkflowRunDatabaseConfiguration {
     this.assertOpen();
     return {
-      schemaVersion: pragmaNumber(this.database, "user_version"),
       journalMode: pragmaText(this.database, "journal_mode"),
       foreignKeys: pragmaNumber(this.database, "foreign_keys") === 1,
       synchronous: pragmaNumber(this.database, "synchronous"),
@@ -322,7 +308,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
   readRun(): WorkflowRunRecord {
     this.assertOpen();
     const row = this.database.prepare("SELECT * FROM runs WHERE singleton = 1").get() as SqlRow | undefined;
-    if (!row) throw corrupt("Workflow v17 database has no run row");
+    if (!row) throw corrupt("Workflow database has no run row");
     const runId = requiredString(row, "run_id");
     const capabilities = (this.database.prepare(
       "SELECT capability FROM run_capabilities WHERE run_id = ? ORDER BY ordinal",
@@ -385,7 +371,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
     this.assertOpen();
     const after = options.afterSequence ?? 0;
     const limit = pageLimit(options.limit);
-    assertNonNegativeInteger(after, "workflow v17 event cursor");
+    assertNonNegativeInteger(after, "workflow event cursor");
     return (this.database.prepare(
       "SELECT * FROM events WHERE sequence > ? ORDER BY sequence LIMIT ?",
     ).all(after, limit) as SqlRow[]).map(eventFromRow);
@@ -401,7 +387,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readHumanInteraction(interactionId: string): WorkflowHumanInteractionRecord | undefined {
     this.assertOpen();
-    assertIdentifier(interactionId, "workflow v17 human interaction id");
+    assertIdentifier(interactionId, "workflow human interaction id");
     const row = this.database.prepare(
       "SELECT * FROM human_interactions WHERE interaction_id = ?",
     ).get(interactionId) as SqlRow | undefined;
@@ -410,7 +396,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readHumanInteractionByOperation(operationId: string): WorkflowHumanInteractionRecord | undefined {
     this.assertOpen();
-    assertIdentifier(operationId, "workflow v17 human operation id");
+    assertIdentifier(operationId, "workflow human operation id");
     const row = this.database.prepare(
       "SELECT * FROM human_interactions WHERE operation_id = ?",
     ).get(operationId) as SqlRow | undefined;
@@ -426,7 +412,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readControlRequest(requestId: string): WorkflowControlRequestRecord | undefined {
     this.assertOpen();
-    assertIdentifier(requestId, "workflow v17 control request id");
+    assertIdentifier(requestId, "workflow control request id");
     const row = this.database.prepare(
       "SELECT * FROM control_requests WHERE request_id = ?",
     ).get(requestId) as SqlRow | undefined;
@@ -436,7 +422,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
   listPendingControlRequests(limit = 64): WorkflowControlRequestRecord[] {
     this.assertOpen();
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 256) {
-      throw new TypeError("Workflow v17 control request limit is invalid");
+      throw new TypeError("Workflow control request limit is invalid");
     }
     return (this.database.prepare(
       "SELECT * FROM control_requests WHERE status = 'pending' ORDER BY requested_at, request_id LIMIT ?",
@@ -445,7 +431,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readScope(scopeId: string): WorkflowScopeRecord | undefined {
     this.assertOpen();
-    assertIdentifier(scopeId, "workflow v17 scope id");
+    assertIdentifier(scopeId, "workflow scope id");
     const row = this.database.prepare("SELECT * FROM scopes WHERE scope_id = ?").get(scopeId) as SqlRow | undefined;
     return row ? scopeFromRow(row) : undefined;
   }
@@ -464,7 +450,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   listChildScopes(ownerOperationId: string): WorkflowScopeRecord[] {
     this.assertOpen();
-    assertIdentifier(ownerOperationId, "workflow v17 owner operation id");
+    assertIdentifier(ownerOperationId, "workflow owner operation id");
     return (this.database.prepare(
       "SELECT * FROM scopes WHERE owner_operation_id = ? ORDER BY sibling_ordinal",
     ).all(ownerOperationId) as SqlRow[]).map(scopeFromRow);
@@ -472,15 +458,15 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readOperation(operationId: string): WorkflowOperationRecord | undefined {
     this.assertOpen();
-    assertIdentifier(operationId, "workflow v17 operation id");
+    assertIdentifier(operationId, "workflow operation id");
     const row = this.database.prepare("SELECT * FROM operations WHERE operation_id = ?").get(operationId) as SqlRow | undefined;
     return row ? operationFromRow(row) : undefined;
   }
 
   readOperationAt(scopeId: string, cursor: number): WorkflowOperationRecord | undefined {
     this.assertOpen();
-    assertIdentifier(scopeId, "workflow v17 scope id");
-    assertNonNegativeInteger(cursor, "workflow v17 scope cursor");
+    assertIdentifier(scopeId, "workflow scope id");
+    assertNonNegativeInteger(cursor, "workflow scope cursor");
     const row = this.database.prepare(
       "SELECT * FROM operations WHERE scope_id = ? AND cursor = ?",
     ).get(scopeId, cursor) as SqlRow | undefined;
@@ -491,7 +477,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
     this.assertOpen();
     const after = options.afterOrdinal ?? -1;
     const limit = pageLimit(options.limit);
-    if (!Number.isSafeInteger(after) || after < -1) throw new TypeError("Invalid workflow v17 operation cursor");
+    if (!Number.isSafeInteger(after) || after < -1) throw new TypeError("Invalid workflow operation cursor");
     return (this.database.prepare(
       "SELECT * FROM operations WHERE ordinal > ? ORDER BY ordinal LIMIT ?",
     ).all(after, limit) as SqlRow[]).map(operationFromRow);
@@ -515,14 +501,14 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readScopeCall(operationId: string): WorkflowScopeCallRecord | undefined {
     this.assertOpen();
-    assertIdentifier(operationId, "workflow v17 operation id");
+    assertIdentifier(operationId, "workflow operation id");
     const row = this.database.prepare("SELECT * FROM scope_calls WHERE operation_id = ?").get(operationId) as SqlRow | undefined;
     return row ? scopeCallFromRow(row) : undefined;
   }
 
   readEffectSettlement(operationId: string): WorkflowEffectSettlementRecord | undefined {
     this.assertOpen();
-    assertIdentifier(operationId, "workflow v17 operation id");
+    assertIdentifier(operationId, "workflow operation id");
     const row = this.database.prepare(
       "SELECT * FROM effect_settlements WHERE operation_id = ?",
     ).get(operationId) as SqlRow | undefined;
@@ -531,7 +517,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   listScopeCalls(scopeId: string): WorkflowScopeCallRecord[] {
     this.assertOpen();
-    assertIdentifier(scopeId, "workflow v17 scope id");
+    assertIdentifier(scopeId, "workflow scope id");
     return (this.database.prepare(
       "SELECT * FROM scope_calls WHERE scope_id = ? ORDER BY cursor",
     ).all(scopeId) as SqlRow[]).map(scopeCallFromRow);
@@ -539,7 +525,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readStructuralJoin(operationId: string): WorkflowStructuralJoinRecord | undefined {
     this.assertOpen();
-    assertIdentifier(operationId, "workflow v17 operation id");
+    assertIdentifier(operationId, "workflow operation id");
     const row = this.database.prepare("SELECT * FROM structural_joins WHERE operation_id = ?").get(operationId) as SqlRow | undefined;
     if (!row) return undefined;
     const lanes = (this.database.prepare(
@@ -550,7 +536,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readArtifact(digest: string): WorkflowArtifactRecord | undefined {
     this.assertOpen();
-    assertHash(digest, "workflow v17 artifact digest");
+    assertHash(digest, "workflow artifact digest");
     const row = this.database.prepare("SELECT * FROM artifacts WHERE digest = ?").get(digest) as SqlRow | undefined;
     return row ? artifactFromRow(row) : undefined;
   }
@@ -566,8 +552,8 @@ export class WorkflowRunDatabaseReader implements Disposable {
         "SELECT * FROM artifacts ORDER BY created_at, digest LIMIT ?",
       ).all(limit) as SqlRow[]).map(artifactFromRow);
     }
-    assertIsoDate(options.after.createdAt, "workflow v17 artifact cursor time");
-    assertHash(options.after.digest, "workflow v17 artifact cursor digest");
+    assertIsoDate(options.after.createdAt, "workflow artifact cursor time");
+    assertHash(options.after.digest, "workflow artifact cursor digest");
     return (this.database.prepare(`
       SELECT * FROM artifacts
       WHERE created_at > ? OR (created_at = ? AND digest > ?)
@@ -578,7 +564,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   listOperationArtifacts(operationId: string): WorkflowOperationArtifactRecord[] {
     this.assertOpen();
-    assertIdentifier(operationId, "workflow v17 operation id");
+    assertIdentifier(operationId, "workflow operation id");
     return (this.database.prepare(`
       SELECT link.operation_id, link.role, link.name, link.ordinal, artifact.*
       FROM operation_artifacts link
@@ -596,7 +582,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readWorkspaceCheckpoint(checkpointId: string): WorkflowWorkspaceCheckpointRecord | undefined {
     this.assertOpen();
-    assertIdentifier(checkpointId, "workflow v17 checkpoint id");
+    assertIdentifier(checkpointId, "workflow checkpoint id");
     const row = this.database.prepare(
       "SELECT * FROM workspace_checkpoints WHERE checkpoint_id = ?",
     ).get(checkpointId) as SqlRow | undefined;
@@ -605,7 +591,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readAttempt(attemptId: string): WorkflowAttemptRecord | undefined {
     this.assertOpen();
-    assertIdentifier(attemptId, "workflow v17 attempt id");
+    assertIdentifier(attemptId, "workflow attempt id");
     const row = this.database.prepare("SELECT * FROM attempts WHERE attempt_id = ?").get(attemptId) as SqlRow | undefined;
     return row ? attemptFromRow(row) : undefined;
   }
@@ -621,8 +607,8 @@ export class WorkflowRunDatabaseReader implements Disposable {
         "SELECT * FROM attempts ORDER BY created_at, attempt_id LIMIT ?",
       ).all(limit) as SqlRow[]).map(attemptFromRow);
     }
-    assertIsoDate(options.after.createdAt, "workflow v17 attempt cursor time");
-    assertIdentifier(options.after.attemptId, "workflow v17 attempt cursor id");
+    assertIsoDate(options.after.createdAt, "workflow attempt cursor time");
+    assertIdentifier(options.after.attemptId, "workflow attempt cursor id");
     return (this.database.prepare(`
       SELECT * FROM attempts
       WHERE created_at > ? OR (created_at = ? AND attempt_id > ?)
@@ -642,8 +628,8 @@ export class WorkflowRunDatabaseReader implements Disposable {
         "SELECT * FROM workspace_checkpoints ORDER BY created_at, checkpoint_id LIMIT ?",
       ).all(limit) as SqlRow[]).map(workspaceCheckpointFromRow);
     }
-    assertIsoDate(options.after.createdAt, "workflow v17 checkpoint cursor time");
-    assertIdentifier(options.after.checkpointId, "workflow v17 checkpoint cursor id");
+    assertIsoDate(options.after.createdAt, "workflow checkpoint cursor time");
+    assertIdentifier(options.after.checkpointId, "workflow checkpoint cursor id");
     return (this.database.prepare(`
       SELECT * FROM workspace_checkpoints
       WHERE created_at > ? OR (created_at = ? AND checkpoint_id > ?)
@@ -654,7 +640,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readCandidateWorkspace(workspaceId: string): WorkflowCandidateWorkspaceRecord | undefined {
     this.assertOpen();
-    assertIdentifier(workspaceId, "workflow v17 candidate workspace id");
+    assertIdentifier(workspaceId, "workflow candidate workspace id");
     const row = this.database.prepare(
       "SELECT * FROM candidate_workspaces WHERE workspace_id = ?",
     ).get(workspaceId) as SqlRow | undefined;
@@ -663,7 +649,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readCandidateWorkspaceByOperation(operationId: string): WorkflowCandidateWorkspaceRecord | undefined {
     this.assertOpen();
-    assertIdentifier(operationId, "workflow v17 candidate operation id");
+    assertIdentifier(operationId, "workflow candidate operation id");
     const row = this.database.prepare(
       "SELECT * FROM candidate_workspaces WHERE candidate_operation_id = ?",
     ).get(operationId) as SqlRow | undefined;
@@ -672,14 +658,14 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readCandidate(candidateId: string): WorkflowCandidateRecord | undefined {
     this.assertOpen();
-    assertIdentifier(candidateId, "workflow v17 candidate id");
+    assertIdentifier(candidateId, "workflow candidate id");
     const row = this.database.prepare("SELECT * FROM candidates WHERE candidate_id = ?").get(candidateId) as SqlRow | undefined;
     return row ? this.candidateFromRow(row) : undefined;
   }
 
   readCandidateByOperation(operationId: string): WorkflowCandidateRecord | undefined {
     this.assertOpen();
-    assertIdentifier(operationId, "workflow v17 candidate operation id");
+    assertIdentifier(operationId, "workflow candidate operation id");
     const row = this.database.prepare(
       "SELECT * FROM candidates WHERE operation_id = ?",
     ).get(operationId) as SqlRow | undefined;
@@ -688,7 +674,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readCandidateVerification(verificationId: string): WorkflowCandidateVerificationRecord | undefined {
     this.assertOpen();
-    assertIdentifier(verificationId, "workflow v17 verification id");
+    assertIdentifier(verificationId, "workflow verification id");
     const row = this.database.prepare(
       "SELECT * FROM candidate_verifications WHERE verification_id = ?",
     ).get(verificationId) as SqlRow | undefined;
@@ -697,7 +683,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readCandidateVerificationByOperation(operationId: string): WorkflowCandidateVerificationRecord | undefined {
     this.assertOpen();
-    assertIdentifier(operationId, "workflow v17 verification operation id");
+    assertIdentifier(operationId, "workflow verification operation id");
     const row = this.database.prepare(
       "SELECT * FROM candidate_verifications WHERE operation_id = ?",
     ).get(operationId) as SqlRow | undefined;
@@ -707,7 +693,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
   listCandidateVerifications(candidateId?: string): WorkflowCandidateVerificationRecord[] {
     this.assertOpen();
     if (candidateId !== undefined) {
-      assertIdentifier(candidateId, "workflow v17 verification candidate id");
+      assertIdentifier(candidateId, "workflow verification candidate id");
       return (this.database.prepare(
         "SELECT * FROM candidate_verifications WHERE candidate_id = ? ORDER BY created_at, verification_id",
       ).all(candidateId) as SqlRow[]).map(candidateVerificationFromRow);
@@ -719,7 +705,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readCandidateApply(candidateId: string): WorkflowCandidateApplyRecord | undefined {
     this.assertOpen();
-    assertIdentifier(candidateId, "workflow v17 candidate id");
+    assertIdentifier(candidateId, "workflow candidate id");
     const row = this.database.prepare(
       "SELECT * FROM candidate_applies WHERE candidate_id = ?",
     ).get(candidateId) as SqlRow | undefined;
@@ -743,8 +729,8 @@ export class WorkflowRunDatabaseReader implements Disposable {
         "SELECT * FROM candidates ORDER BY frozen_at, candidate_id LIMIT ?",
       ).all(limit) as SqlRow[]).map(row => this.candidateFromRow(row));
     }
-    assertIsoDate(options.after.frozenAt, "workflow v17 candidate cursor time");
-    assertIdentifier(options.after.candidateId, "workflow v17 candidate cursor id");
+    assertIsoDate(options.after.frozenAt, "workflow candidate cursor time");
+    assertIdentifier(options.after.candidateId, "workflow candidate cursor id");
     return (this.database.prepare(`
       SELECT * FROM candidates
       WHERE frozen_at > ? OR (frozen_at = ? AND candidate_id > ?)
@@ -756,19 +742,19 @@ export class WorkflowRunDatabaseReader implements Disposable {
   validateIntegrity(): void {
     this.assertOpen();
     const quick = this.database.prepare("PRAGMA quick_check").get() as SqlRow | undefined;
-    if (!quick || Object.values(quick)[0] !== "ok") throw corrupt("Workflow v17 SQLite quick_check failed");
+    if (!quick || Object.values(quick)[0] !== "ok") throw corrupt("Workflow SQLite quick_check failed");
     const foreign = this.database.prepare("PRAGMA foreign_key_check").all();
-    if (foreign.length > 0) throw corrupt("Workflow v17 database has broken foreign keys");
+    if (foreign.length > 0) throw corrupt("Workflow database has broken foreign keys");
     const run = this.readRun();
     const scopes = this.listScopes();
     const root = scopes.filter((scope) => scope.kind === "root");
     if (root.length !== 1 || root[0]!.scopeId !== run.rootScopeId || root[0]!.path !== "run"
       || root[0]!.seedKey !== WORKFLOW_ROOT_SCOPE_SEED) {
-      throw corrupt("Workflow v17 database has an invalid root scope");
+      throw corrupt("Workflow database has an invalid root scope");
     }
     const resources = this.listInvocationResources();
     if (stableHash(resources.map((resource) => resource.resource)) !== run.resourcesHash) {
-      throw corrupt("Workflow v17 invocation resources differ from the run identity");
+      throw corrupt("Workflow invocation resources differ from the run identity");
     }
     for (const resource of resources) assertResourceRecord(resource, run.runId);
     for (const scope of scopes) this.assertScopeIntegrity(scope, run.runId);
@@ -783,10 +769,10 @@ export class WorkflowRunDatabaseReader implements Disposable {
       const operation = this.readOperation(interaction.operationId);
       if (interaction.runId !== run.runId || !operation || operation.kind !== interaction.kind
         || interaction.challengeHash !== stableHash(interaction.request)) {
-        throw corrupt(`Workflow v17 human interaction ${interaction.interactionId} is corrupt`);
+        throw corrupt(`Workflow human interaction ${interaction.interactionId} is corrupt`);
       }
       if (interaction.status === "waiting" && (run.status !== "waiting" || operation.status !== "waiting")) {
-        throw corrupt(`Workflow v17 waiting interaction ${interaction.interactionId} differs from run state`);
+        throw corrupt(`Workflow waiting interaction ${interaction.interactionId} differs from run state`);
       }
     }
     const controls = (this.database.prepare(
@@ -794,15 +780,15 @@ export class WorkflowRunDatabaseReader implements Disposable {
     ).all() as SqlRow[]).map(controlRequestFromRow);
     for (const control of controls) {
       assertControlRequestRecord(control);
-      if (control.runId !== run.runId) throw corrupt(`Workflow v17 control request ${control.requestId} belongs to another run`);
+      if (control.runId !== run.runId) throw corrupt(`Workflow control request ${control.requestId} belongs to another run`);
     }
     if (run.status === "completed") {
       const rootScope = this.readScope(run.rootScopeId)!;
       if (rootScope.status !== "completed" || rootScope.terminalKey !== run.rootTerminalKey) {
-        throw corrupt("Completed workflow v17 run differs from its root scope terminal key");
+        throw corrupt("Completed workflow run differs from its root scope terminal key");
       }
       const pending = this.listCandidates().filter((candidate) => candidate.state === "pending");
-      if (pending.length > 0) throw corrupt("Completed workflow v17 run has pending candidates");
+      if (pending.length > 0) throw corrupt("Completed workflow run has pending candidates");
       const interrupted = requiredNumber(this.database.prepare(`
         SELECT
           (SELECT count(*) FROM operations operation
@@ -811,7 +797,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
               OR (operation.status = 'cancelled' AND scope.status <> 'cancelled'))
           + (SELECT count(*) FROM attempts WHERE status IN ('running', 'waiting')) AS value
       `).get() as SqlRow, "value");
-      if (interrupted !== 0) throw corrupt("Completed workflow v17 run has interrupted execution records");
+      if (interrupted !== 0) throw corrupt("Completed workflow run has interrupted execution records");
     } else if (run.status === "failed" || run.status === "stopped") {
       const live = requiredNumber(this.database.prepare(`
         SELECT
@@ -819,12 +805,12 @@ export class WorkflowRunDatabaseReader implements Disposable {
           + (SELECT count(*) FROM attempts WHERE status IN ('running', 'waiting'))
           + (SELECT count(*) FROM scopes WHERE status = 'active') AS value
       `).get() as SqlRow, "value");
-      if (live !== 0) throw corrupt("Terminal workflow v17 run has live execution records");
+      if (live !== 0) throw corrupt("Terminal workflow run has live execution records");
     }
   }
 
   protected assertOpen(): void {
-    if (this.closed) throw new Error("Workflow v17 run database connection is closed");
+    if (this.closed) throw new Error("Workflow run database connection is closed");
   }
 
   protected expectedPreviousCallKey(scope: WorkflowScopeRecord, cursor?: number): string {
@@ -843,20 +829,20 @@ export class WorkflowRunDatabaseReader implements Disposable {
     const run = this.readRun();
     const root = this.readScope(run.rootScopeId);
     if (!root || root.kind !== "root" || root.path !== "run" || root.runId !== run.runId) {
-      throw corrupt("Workflow v17 database root identity is corrupt");
+      throw corrupt("Workflow database root identity is corrupt");
     }
   }
 
   private assertScopeIntegrity(scope: WorkflowScopeRecord, runId: string): void {
     if (scope.runId !== runId || scope.scopeId !== workflowScopeId(runId, scope.path)) {
-      throw corrupt(`Workflow v17 scope ${scope.path} identity is corrupt`);
+      throw corrupt(`Workflow scope ${scope.path} identity is corrupt`);
     }
     if (scope.kind !== "root") {
       const owner = scope.ownerOperationId ? this.readOperation(scope.ownerOperationId) : undefined;
       const parent = scope.parentScopeId ? this.readScope(scope.parentScopeId) : undefined;
       if (!owner || !parent || owner.scopeId !== parent.scopeId
         || (owner.kind !== "parallel" && owner.kind !== "map" && owner.kind !== "candidate")) {
-        throw corrupt(`Workflow v17 scope ${scope.path} owner identity is corrupt`);
+        throw corrupt(`Workflow scope ${scope.path} owner identity is corrupt`);
       }
       const expectedSeed = workflowLaneSeed({
         parentPreviousCallKey: this.expectedPreviousCallKey(parent, owner.cursor),
@@ -866,7 +852,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
         ...(scope.laneKey !== undefined ? { laneKey: scope.laneKey } : {}),
       });
       if (scope.seedKey !== expectedSeed) {
-        throw corrupt(`Workflow v17 scope ${scope.path} causal seed is corrupt`);
+        throw corrupt(`Workflow scope ${scope.path} causal seed is corrupt`);
       }
     }
     const operations = (this.database.prepare(
@@ -877,27 +863,27 @@ export class WorkflowRunDatabaseReader implements Disposable {
       const operation = operations[index]!;
       if (operation.cursor !== index || operation.path !== operationPath(scope.path, index)
         || operation.operationId !== workflowOperationId(runId, operation.path)) {
-        throw corrupt(`Workflow v17 scope ${scope.path} has a cursor or operation identity gap`);
+        throw corrupt(`Workflow scope ${scope.path} has a cursor or operation identity gap`);
       }
-      assertHash(operation.semanticInputHash, `workflow v17 operation ${operation.path} semantic input hash`);
+      assertHash(operation.semanticInputHash, `workflow operation ${operation.path} semantic input hash`);
       assertSourceSite(operation.sourceSite);
       if (operation.descriptorSourceSite) assertSourceSite(operation.descriptorSourceSite);
       const settlement = this.readEffectSettlement(operation.operationId);
       if (settlement) {
         if (settlement.runId !== runId || STRUCTURAL_KINDS.has(operation.kind)) {
-          throw corrupt(`Workflow v17 operation ${operation.path} has an invalid effect settlement`);
+          throw corrupt(`Workflow operation ${operation.path} has an invalid effect settlement`);
         }
-        assertHash(settlement.semanticKey, `workflow v17 operation ${operation.path} settlement semantic key`);
+        assertHash(settlement.semanticKey, `workflow operation ${operation.path} settlement semantic key`);
         const settledTerminal = settlement.outcome === "success" ? settlement.result : settlement.failure;
         if (settledTerminal === undefined || (settlement.outcome === "failure" && settlement.replayPolicy !== "never")) {
-          throw corrupt(`Workflow v17 operation ${operation.path} settlement outcome is corrupt`);
+          throw corrupt(`Workflow operation ${operation.path} settlement outcome is corrupt`);
         }
         const settlementCheckpoint = settlement.postWorkspaceCheckpointId
           ? this.readWorkspaceCheckpoint(settlement.postWorkspaceCheckpointId)
           : undefined;
         if ((settlement.replayPolicy === "workspace") !== Boolean(settlementCheckpoint)
           || (settlementCheckpoint && settlementCheckpoint.operationId !== operation.operationId)) {
-          throw corrupt(`Workflow v17 operation ${operation.path} settlement checkpoint is corrupt`);
+          throw corrupt(`Workflow operation ${operation.path} settlement checkpoint is corrupt`);
         }
       }
       const call = this.readScopeCall(operation.operationId);
@@ -905,28 +891,28 @@ export class WorkflowRunDatabaseReader implements Disposable {
         if (call.scopeId !== scope.scopeId || call.cursor !== index || call.previousCallKey !== previous
           || call.callKey !== operation.callKey
           || (call.outcome === "success") !== (operation.status === "completed")) {
-          throw corrupt(`Workflow v17 scope ${scope.path} call chain is corrupt at cursor ${index}`);
+          throw corrupt(`Workflow scope ${scope.path} call chain is corrupt at cursor ${index}`);
         }
         for (const [label, value] of [
           ["previous", call.previousCallKey], ["semantic", call.semanticKey],
           ["call", call.callKey], ["result", call.resultHash],
-        ] as const) assertHash(value, `workflow v17 ${label} call hash`);
+        ] as const) assertHash(value, `workflow ${label} call hash`);
         const terminal = call.outcome === "success" ? operation.result : operation.failure;
         if (terminal === undefined || stableHash(terminal) !== call.resultHash) {
-          throw corrupt(`Workflow v17 scope ${scope.path} call result hash is corrupt at cursor ${index}`);
+          throw corrupt(`Workflow scope ${scope.path} call result hash is corrupt at cursor ${index}`);
         }
         if (call.replay && (call.replay.sourceRunId === runId
           || call.replay.sourceCallKey !== call.callKey || call.replayPolicy === "never")) {
-          throw corrupt(`Workflow v17 scope ${scope.path} has invalid replay evidence at cursor ${index}`);
+          throw corrupt(`Workflow scope ${scope.path} has invalid replay evidence at cursor ${index}`);
         }
         if ((call.replayPolicy === "workspace") !== Boolean(call.postWorkspaceCheckpointId)) {
-          throw corrupt(`Workflow v17 scope ${scope.path} has invalid workspace replay evidence at cursor ${index}`);
+          throw corrupt(`Workflow scope ${scope.path} has invalid workspace replay evidence at cursor ${index}`);
         }
         if (call.postWorkspaceCheckpointId) {
           const checkpoint = this.readWorkspaceCheckpoint(call.postWorkspaceCheckpointId);
           if (!checkpoint || checkpoint.operationId !== operation.operationId
             || checkpoint.runId !== runId) {
-            throw corrupt(`Workflow v17 scope ${scope.path} checkpoint is corrupt at cursor ${index}`);
+            throw corrupt(`Workflow scope ${scope.path} checkpoint is corrupt at cursor ${index}`);
           }
         }
         if (!call.replay && call.completionAuthority !== "structural-join") {
@@ -941,7 +927,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
             result: terminal,
           });
           if (call.callKey !== expectedCallKey) {
-            throw corrupt(`Workflow v17 scope ${scope.path} causal call key is corrupt at cursor ${index}`);
+            throw corrupt(`Workflow scope ${scope.path} causal call key is corrupt at cursor ${index}`);
           }
         }
         if (settlement && (
@@ -953,22 +939,22 @@ export class WorkflowRunDatabaseReader implements Disposable {
           || stableHash(settlement.outcome === "success" ? settlement.result! : settlement.failure!)
             !== call.resultHash
         )) {
-          throw corrupt(`Workflow v17 scope ${scope.path} call differs from its effect settlement at cursor ${index}`);
+          throw corrupt(`Workflow scope ${scope.path} call differs from its effect settlement at cursor ${index}`);
         }
         for (const link of this.listOperationArtifacts(operation.operationId)) {
           if (link.operationId !== operation.operationId || link.artifact.runId !== runId) {
-            throw corrupt(`Workflow v17 operation ${operation.path} artifact evidence is corrupt`);
+            throw corrupt(`Workflow operation ${operation.path} artifact evidence is corrupt`);
           }
         }
         previous = call.callKey;
       } else if (index !== operations.length - 1 || !["running", "waiting", "stopped", "cancelled"].includes(operation.status)) {
-        throw corrupt(`Workflow v17 scope ${scope.path} has an uncommitted operation before its tail`);
+        throw corrupt(`Workflow scope ${scope.path} has an uncommitted operation before its tail`);
       }
       const join = this.readStructuralJoin(operation.operationId);
       if (join) this.assertJoinIntegrity(join, operation);
     }
     if (scope.status === "completed" && scope.terminalKey !== previous) {
-      throw corrupt(`Workflow v17 scope ${scope.path} terminal key differs from its local call chain`);
+      throw corrupt(`Workflow scope ${scope.path} terminal key differs from its local call chain`);
     }
   }
 
@@ -979,7 +965,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
     const call = this.readScopeCall(operation.operationId);
     if (!call || call.completionAuthority !== "structural-join" || call.callKey !== join.joinKey
       || join.kind !== operation.kind || join.previousCallKey !== call.previousCallKey) {
-      throw corrupt(`Workflow v17 structural join ${operation.path} differs from its scope call`);
+      throw corrupt(`Workflow structural join ${operation.path} differs from its scope call`);
     }
     const expectedJoinKey = workflowStructuralJoinKey({
       previousCallKey: join.previousCallKey,
@@ -993,18 +979,18 @@ export class WorkflowRunDatabaseReader implements Disposable {
         : { outcome: "failure" as const, failure: operation.failure! }),
     });
     if (join.joinKey !== expectedJoinKey) {
-      throw corrupt(`Workflow v17 structural join ${operation.path} causal key is corrupt`);
+      throw corrupt(`Workflow structural join ${operation.path} causal key is corrupt`);
     }
     const children = this.listChildScopes(operation.operationId);
     if (children.length !== join.lanes.length) {
-      throw corrupt(`Workflow v17 structural join ${operation.path} omits child scopes`);
+      throw corrupt(`Workflow structural join ${operation.path} omits child scopes`);
     }
     const childIds = new Set(children.map((child) => child.scopeId));
     for (const lane of join.lanes) {
       const child = this.readScope(lane.scopeId);
       if (!child || !childIds.has(child.scopeId) || child.terminalKey !== lane.terminalKey
         || laneOutcome(child.status) !== lane.outcome) {
-        throw corrupt(`Workflow v17 structural join ${operation.path} has invalid lane ${lane.laneKey}`);
+        throw corrupt(`Workflow structural join ${operation.path} has invalid lane ${lane.laneKey}`);
       }
     }
     if (join.kind === "candidate" && call.outcome === "success") {
@@ -1013,7 +999,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
       ).get(operation.operationId) as SqlRow | undefined;
       if (!row || join.lanes.length !== 1
         || requiredString(row, "body_scope_id") !== join.lanes[0]!.scopeId) {
-        throw corrupt(`Workflow v17 candidate join ${operation.path} lacks exact frozen candidate authority`);
+        throw corrupt(`Workflow candidate join ${operation.path} lacks exact frozen candidate authority`);
       }
     }
   }
@@ -1024,18 +1010,18 @@ export class WorkflowRunDatabaseReader implements Disposable {
       || workspace.candidateOperationId !== candidate.operationId
       || workspace.writeScopeHash !== candidate.writeScopeHash
       || stableHash(candidate.output) !== candidate.outputHash) {
-      throw corrupt(`Workflow v17 candidate ${candidate.candidateId} authority is corrupt`);
+      throw corrupt(`Workflow candidate ${candidate.candidateId} authority is corrupt`);
     }
     const sorted = [...candidate.changedPaths].sort();
     if (sorted.some((entry, index) => entry !== candidate.changedPaths[index])) {
-      throw corrupt(`Workflow v17 candidate ${candidate.candidateId} changed paths are not canonical`);
+      throw corrupt(`Workflow candidate ${candidate.candidateId} changed paths are not canonical`);
     }
     const measurement = this.readCandidateMeasurement(candidate.candidateId);
     if (candidate.state === "pending" && measurement && measurement.status !== "pending") {
-      throw corrupt(`Pending workflow v17 candidate ${candidate.candidateId} has finalized measurement state`);
+      throw corrupt(`Pending workflow candidate ${candidate.candidateId} has finalized measurement state`);
     }
     if (candidate.state !== "pending" && measurement?.status === "pending") {
-      throw corrupt(`Disposed workflow v17 candidate ${candidate.candidateId} has pending measurement state`);
+      throw corrupt(`Disposed workflow candidate ${candidate.candidateId} has pending measurement state`);
     }
     const disposition = candidate.disposition;
     if (disposition) {
@@ -1044,19 +1030,19 @@ export class WorkflowRunDatabaseReader implements Disposable {
         const row = this.database.prepare(
           "SELECT * FROM candidate_verifications WHERE verification_id = ?",
         ).get(disposition.verificationId) as SqlRow | undefined;
-        if (!row) throw corrupt(`Workflow v17 candidate ${candidate.candidateId} is missing disposition verification`);
+        if (!row) throw corrupt(`Workflow candidate ${candidate.candidateId} is missing disposition verification`);
         verification = candidateVerificationFromRow(row);
       }
       if (verification && verification.candidateId !== candidate.candidateId) {
-        throw corrupt(`Workflow v17 candidate ${candidate.candidateId} verification belongs elsewhere`);
+        throw corrupt(`Workflow candidate ${candidate.candidateId} verification belongs elsewhere`);
       }
       if (disposition.disposition === "accepted" && verification?.status !== "passed") {
-        throw corrupt(`Workflow v17 candidate ${candidate.candidateId} acceptance lacks passed verification`);
+        throw corrupt(`Workflow candidate ${candidate.candidateId} acceptance lacks passed verification`);
       }
       if (Boolean(measurement) !== Boolean(disposition.measurementId)
         || (measurement && disposition.measurementId !== measurement.measurementId)
         || (measurement && measurement.status !== (disposition.disposition === "accepted" ? "accepted" : "rejected"))) {
-        throw corrupt(`Workflow v17 candidate ${candidate.candidateId} measurement disposition is inconsistent`);
+        throw corrupt(`Workflow candidate ${candidate.candidateId} measurement disposition is inconsistent`);
       }
       const expectedAuthority = stableHash(candidateDispositionSemantic(
         candidate,
@@ -1066,18 +1052,18 @@ export class WorkflowRunDatabaseReader implements Disposable {
         measurement,
       ));
       if (disposition.authorityHash !== expectedAuthority) {
-        throw corrupt(`Workflow v17 candidate ${candidate.candidateId} disposition authority is corrupt`);
+        throw corrupt(`Workflow candidate ${candidate.candidateId} disposition authority is corrupt`);
       }
       if (candidate.state === "applied" && disposition.disposition !== "accepted") {
-        throw corrupt(`Workflow v17 applied candidate ${candidate.candidateId} was not accepted`);
+        throw corrupt(`Workflow applied candidate ${candidate.candidateId} was not accepted`);
       }
     }
     const apply = this.readCandidateApply(candidate.candidateId);
     if ((candidate.state === "applied") !== Boolean(apply)) {
-      throw corrupt(`Workflow v17 candidate ${candidate.candidateId} apply state is inconsistent`);
+      throw corrupt(`Workflow candidate ${candidate.candidateId} apply state is inconsistent`);
     }
     if (apply && apply.authorityHash !== candidateApplyAuthority(candidate, apply)) {
-      throw corrupt(`Workflow v17 candidate ${candidate.candidateId} apply authority is corrupt`);
+      throw corrupt(`Workflow candidate ${candidate.candidateId} apply authority is corrupt`);
     }
   }
 
@@ -1085,7 +1071,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
     if (metricSet.runId !== runId || stableHash(metricSet.policy) !== metricSet.policyHash
       || stableHash(metricSet.sampling) !== metricSet.samplingHash
       || stableHash(metricSet.states) !== metricSet.stateHash) {
-      throw corrupt(`Workflow v17 metric set ${metricSet.metricSetId} identity is corrupt`);
+      throw corrupt(`Workflow metric set ${metricSet.metricSetId} identity is corrupt`);
     }
     let states: PersistedMetricState[] = [];
     const measurements = this.listMeasurements().filter(value => value.metricSetId === metricSet.metricSetId);
@@ -1094,7 +1080,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
       if (measurement.candidateId) {
         const disposition = this.readCandidateMeasurement(measurement.candidateId);
         if (!disposition || disposition.measurementId !== measurement.measurementId) {
-          throw corrupt(`Workflow v17 candidate measurement ${measurement.measurementId} lacks disposition state`);
+          throw corrupt(`Workflow candidate measurement ${measurement.measurementId} lacks disposition state`);
         }
         if (disposition.status !== "pending") {
           states = applyMetricDispositionToSnapshot(states, measurement.delta, disposition.status);
@@ -1102,35 +1088,35 @@ export class WorkflowRunDatabaseReader implements Disposable {
       }
     }
     if (stableJson(states) !== stableJson(metricSet.states)) {
-      throw corrupt(`Workflow v17 metric set ${metricSet.metricSetId} state is not reconstructable`);
+      throw corrupt(`Workflow metric set ${metricSet.metricSetId} state is not reconstructable`);
     }
   }
 
   private assertMeasurementIntegrity(measurement: WorkflowMeasurementRecord, runId: string): void {
-    if (measurement.runId !== runId) throw corrupt(`Workflow v17 measurement ${measurement.measurementId} belongs elsewhere`);
+    if (measurement.runId !== runId) throw corrupt(`Workflow measurement ${measurement.measurementId} belongs elsewhere`);
     try { assertWorkflowMeasurement(measurement); }
-    catch (error) { throw corrupt(`Workflow v17 measurement ${measurement.measurementId} is corrupt: ${errorMessage(error)}`); }
+    catch (error) { throw corrupt(`Workflow measurement ${measurement.measurementId} is corrupt: ${errorMessage(error)}`); }
     const operation = this.readOperation(measurement.operationId);
     const metricSet = this.readMetricSet(measurement.metricSetId);
     if (!operation || operation.kind !== "measure" || !metricSet
       || !this.readArtifact(measurement.artifactDigest)
       || (measurement.diagnosticsArtifactDigest && !this.readArtifact(measurement.diagnosticsArtifactDigest))) {
-      throw corrupt(`Workflow v17 measurement ${measurement.measurementId} evidence is incomplete`);
+      throw corrupt(`Workflow measurement ${measurement.measurementId} evidence is incomplete`);
     }
     if (measurement.candidateId) {
       const candidate = this.readCandidate(measurement.candidateId);
       const pending = this.readCandidateMeasurement(measurement.candidateId);
       if (!candidate || !pending || pending.measurementId !== measurement.measurementId
         || pending.bindingHash !== measurement.bindingHash) {
-        throw corrupt(`Workflow v17 measurement ${measurement.measurementId} candidate binding is corrupt`);
+        throw corrupt(`Workflow measurement ${measurement.measurementId} candidate binding is corrupt`);
       }
     }
   }
 
   private assertExperimentIntegrity(experiment: WorkflowExperimentRecord, runId: string): void {
-    if (experiment.runId !== runId) throw corrupt(`Workflow v17 experiment ${experiment.experimentId} belongs elsewhere`);
+    if (experiment.runId !== runId) throw corrupt(`Workflow experiment ${experiment.experimentId} belongs elsewhere`);
     try { assertWorkflowExperiment(experiment); }
-    catch (error) { throw corrupt(`Workflow v17 experiment ${experiment.experimentId} is corrupt: ${errorMessage(error)}`); }
+    catch (error) { throw corrupt(`Workflow experiment ${experiment.experimentId} is corrupt: ${errorMessage(error)}`); }
     const candidate = this.readCandidate(experiment.candidateId);
     const measurement = this.readMeasurement(experiment.measurementId);
     const operation = this.readOperation(experiment.operationId);
@@ -1138,7 +1124,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
       || candidate.disposition.disposition !== experiment.disposition
       || candidate.disposition.measurementId !== measurement.measurementId
       || !this.readArtifact(experiment.artifactDigest)) {
-      throw corrupt(`Workflow v17 experiment ${experiment.experimentId} evidence is incomplete`);
+      throw corrupt(`Workflow experiment ${experiment.experimentId} evidence is incomplete`);
     }
   }
 
@@ -1181,7 +1167,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readCandidateMeasurement(candidateId: string): WorkflowCandidateMeasurementRecord | undefined {
     this.assertOpen();
-    assertIdentifier(candidateId, "workflow v17 candidate id");
+    assertIdentifier(candidateId, "workflow candidate id");
     const row = this.database.prepare(
       "SELECT * FROM candidate_measurements WHERE candidate_id = ?",
     ).get(candidateId) as SqlRow | undefined;
@@ -1190,7 +1176,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readMetricSet(metricSetId: string): WorkflowMetricSetRecord | undefined {
     this.assertOpen();
-    assertIdentifier(metricSetId, "workflow v17 metric-set id");
+    assertIdentifier(metricSetId, "workflow metric-set id");
     const row = this.database.prepare("SELECT * FROM metric_sets WHERE metric_set_id = ?")
       .get(metricSetId) as SqlRow | undefined;
     return row ? metricSetFromRow(row) : undefined;
@@ -1199,7 +1185,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
   readMetricSetBySite(sourceSite: string, occurrence: number): WorkflowMetricSetRecord | undefined {
     this.assertOpen();
     assertSourceSite(sourceSite);
-    assertNonNegativeInteger(occurrence, "workflow v17 metric-set occurrence");
+    assertNonNegativeInteger(occurrence, "workflow metric-set occurrence");
     const row = this.database.prepare(
       "SELECT * FROM metric_sets WHERE run_id = ? AND source_site = ? AND occurrence = ?",
     ).get(this.readRun().runId, sourceSite, occurrence) as SqlRow | undefined;
@@ -1215,7 +1201,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readMeasurement(measurementId: string): WorkflowMeasurementRecord | undefined {
     this.assertOpen();
-    assertIdentifier(measurementId, "workflow v17 measurement id");
+    assertIdentifier(measurementId, "workflow measurement id");
     const row = this.database.prepare(
       "SELECT * FROM workflow_measurements WHERE measurement_id = ?",
     ).get(measurementId) as SqlRow | undefined;
@@ -1224,7 +1210,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readMeasurementByOperation(operationId: string): WorkflowMeasurementRecord | undefined {
     this.assertOpen();
-    assertIdentifier(operationId, "workflow v17 measurement operation id");
+    assertIdentifier(operationId, "workflow measurement operation id");
     const row = this.database.prepare(
       "SELECT * FROM workflow_measurements WHERE operation_id = ?",
     ).get(operationId) as SqlRow | undefined;
@@ -1251,8 +1237,8 @@ export class WorkflowRunDatabaseReader implements Disposable {
         "SELECT * FROM workflow_measurements ORDER BY created_at, measurement_id LIMIT ?",
       ).all(limit) as SqlRow[]).map(measurementFromRow);
     }
-    assertIsoDate(options.after.createdAt, "workflow v17 measurement cursor time");
-    assertIdentifier(options.after.measurementId, "workflow v17 measurement cursor id");
+    assertIsoDate(options.after.createdAt, "workflow measurement cursor time");
+    assertIdentifier(options.after.measurementId, "workflow measurement cursor id");
     return (this.database.prepare(`
       SELECT * FROM workflow_measurements
       WHERE created_at > ? OR (created_at = ? AND measurement_id > ?)
@@ -1263,7 +1249,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readExperiment(experimentId: string): WorkflowExperimentRecord | undefined {
     this.assertOpen();
-    assertIdentifier(experimentId, "workflow v17 experiment id");
+    assertIdentifier(experimentId, "workflow experiment id");
     const row = this.database.prepare(
       "SELECT * FROM workflow_experiments WHERE experiment_id = ?",
     ).get(experimentId) as SqlRow | undefined;
@@ -1272,7 +1258,7 @@ export class WorkflowRunDatabaseReader implements Disposable {
 
   readExperimentByOperation(operationId: string): WorkflowExperimentRecord | undefined {
     this.assertOpen();
-    assertIdentifier(operationId, "workflow v17 experiment operation id");
+    assertIdentifier(operationId, "workflow experiment operation id");
     const row = this.database.prepare(
       "SELECT * FROM workflow_experiments WHERE operation_id = ?",
     ).get(operationId) as SqlRow | undefined;
@@ -1299,8 +1285,8 @@ export class WorkflowRunDatabaseReader implements Disposable {
         "SELECT * FROM workflow_experiments ORDER BY created_at, experiment_id LIMIT ?",
       ).all(limit) as SqlRow[]).map(experimentFromRow);
     }
-    assertIsoDate(options.after.createdAt, "workflow v17 experiment cursor time");
-    assertIdentifier(options.after.experimentId, "workflow v17 experiment cursor id");
+    assertIsoDate(options.after.createdAt, "workflow experiment cursor time");
+    assertIdentifier(options.after.experimentId, "workflow experiment cursor id");
     return (this.database.prepare(`
       SELECT * FROM workflow_experiments
       WHERE created_at > ? OR (created_at = ? AND experiment_id > ?)
@@ -1334,7 +1320,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
       configureNewConnection(database);
       database.exec("BEGIN IMMEDIATE");
       try {
-        database.exec(WORKFLOW_RUN_DATABASE_SCHEMA_SQL);
+        database.exec(WORKFLOW_RUN_DATABASE_SQL);
         insertInitialRun(database, options, rootScopeId);
         insertInitialRootScope(database, options, rootScopeId);
         insertInitialResources(database, options);
@@ -1397,18 +1383,18 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
     at: string;
   }): WorkflowHumanInteractionRecord {
     assertPositiveRevision(input.expectedRevision);
-    assertIdentifier(input.interactionId, "workflow v17 human interaction id");
-    assertIdentifier(input.operationId, "workflow v17 human operation id");
-    assertHash(input.challengeHash, "workflow v17 human challenge hash");
+    assertIdentifier(input.interactionId, "workflow human interaction id");
+    assertIdentifier(input.operationId, "workflow human operation id");
+    assertHash(input.challengeHash, "workflow human challenge hash");
     canonicalJsonValue(input.request, jsonLimits());
-    assertIsoDate(input.at, "workflow v17 human interaction time");
+    assertIsoDate(input.at, "workflow human interaction time");
     const existing = this.readHumanInteraction(input.interactionId)
       ?? this.readHumanInteractionByOperation(input.operationId);
     if (existing) {
       if (existing.interactionId !== input.interactionId || existing.operationId !== input.operationId
         || existing.kind !== input.kind || existing.challengeHash !== input.challengeHash
         || stableJson(existing.request) !== stableJson(input.request)) {
-        throw state("Workflow v17 human interaction changed identity");
+        throw state("Workflow human interaction changed identity");
       }
       return existing;
     }
@@ -1418,10 +1404,10 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
       payload: { interactionId: input.interactionId, challengeHash: input.challengeHash },
       at: input.at,
     }, (run, nextRevision) => {
-      if (run.status !== "running") throw state(`Workflow v17 human interaction cannot start while run is ${run.status}`);
+      if (run.status !== "running") throw state(`Workflow human interaction cannot start while run is ${run.status}`);
       const operation = this.requireOperation(input.operationId);
       if (operation.kind !== input.kind || operation.status !== "running") {
-        throw state(`Workflow v17 ${input.kind} operation is not running`);
+        throw state(`Workflow ${input.kind} operation is not running`);
       }
       this.database.prepare(`
         INSERT INTO human_interactions(
@@ -1435,7 +1421,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
       assertOneChange(this.database.prepare(`
         UPDATE operations SET status = 'waiting', updated_at = ?
         WHERE operation_id = ? AND status = 'running'
-      `).run(input.at, operation.operationId), "workflow v17 waiting human operation");
+      `).run(input.at, operation.operationId), "workflow waiting human operation");
       this.database.prepare(`
         UPDATE attempts SET status = 'waiting', updated_at = ?
         WHERE operation_id = ? AND status = 'running'
@@ -1449,7 +1435,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
         summary: input.kind === "ask" ? "Workflow is waiting for a human response" : "Workflow is waiting for apply approval",
         retryable: true,
         interactionId: input.interactionId,
-      }), operation.operationId, nextRevision, input.at, run.revision), "workflow v17 waiting run");
+      }), operation.operationId, nextRevision, input.at, run.revision), "workflow waiting run");
       return { interactionId: input.interactionId };
     });
     return this.readHumanInteraction(input.interactionId)!;
@@ -1460,13 +1446,13 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
     const run = this.readRun();
     if (request.runId !== run.runId || request.status !== "pending" || request.processedAt !== undefined
       || request.reason !== undefined) {
-      throw new TypeError("Workflow v17 control request is not a pending request for this run");
+      throw new TypeError("Workflow control request is not a pending request for this run");
     }
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const existing = this.readControlRequest(request.requestId);
       if (existing) {
-        if (stableJson(existing) !== stableJson(request)) throw state("Workflow v17 control request changed identity");
+        if (stableJson(existing) !== stableJson(request)) throw state("Workflow control request changed identity");
         this.database.exec("COMMIT");
         return existing;
       }
@@ -1489,10 +1475,10 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
   }
 
   processControlRequest(requestId: string, at: string): WorkflowControlRequestRecord {
-    assertIdentifier(requestId, "workflow v17 control request id");
-    assertIsoDate(at, "workflow v17 control processing time");
+    assertIdentifier(requestId, "workflow control request id");
+    assertIsoDate(at, "workflow control processing time");
     const selected = this.readControlRequest(requestId);
-    if (!selected) throw state(`Unknown workflow v17 control request ${requestId}`);
+    if (!selected) throw state(`Unknown workflow control request ${requestId}`);
     if (selected.status !== "pending") return selected;
     this.mutate(this.readRun().revision, {
       type: `control-${selected.kind}`,
@@ -1500,7 +1486,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
       at,
     }, (run, nextRevision) => {
       const request = this.readControlRequest(requestId);
-      if (!request || request.status !== "pending") throw state("Workflow v17 control request is no longer pending");
+      if (!request || request.status !== "pending") throw state("Workflow control request is no longer pending");
       let rejected: JsonObject | undefined;
       try {
         this.applyControlRequest(run, request, nextRevision, at);
@@ -1517,7 +1503,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
         UPDATE control_requests SET status = ?, reason_json = ?, processed_at = ?
         WHERE request_id = ? AND status = 'pending'
       `).run(rejected ? "rejected" : "processed", rejected ? json(rejected) : null, at, requestId),
-      "workflow v17 control request settlement");
+      "workflow control request settlement");
       return rejected ? { rejected } : {} as JsonObject;
     });
     return this.readControlRequest(requestId)!;
@@ -1641,7 +1627,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
       if (operationCount >= maximumOperations) {
         throw new WorkflowRunDatabaseAdmissionError(
           "operations",
-          `Workflow v17 operation admission limit ${maximumOperations} was reached`,
+          `Workflow operation admission limit ${maximumOperations} was reached`,
         );
       }
       if (input.kind === "agent") {
@@ -1651,7 +1637,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
         if (agentCount >= maximumAgentOperations) {
           throw new WorkflowRunDatabaseAdmissionError(
             "agents",
-            `Workflow v17 agent admission limit ${maximumAgentOperations} was reached`,
+            `Workflow agent admission limit ${maximumAgentOperations} was reached`,
           );
         }
       }
@@ -1698,8 +1684,8 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
     at: string,
   ): { scopes: WorkflowScopeRecord[]; created: boolean } {
     assertPositiveRevision(expectedRevision);
-    assertIdentifier(ownerOperationId, "workflow v17 owner operation id");
-    assertIsoDate(at, "workflow v17 child scopes time");
+    assertIdentifier(ownerOperationId, "workflow owner operation id");
+    assertIsoDate(at, "workflow child scopes time");
     assertChildScopeSpecs(specs);
     this.assertOpen();
     this.database.exec("BEGIN IMMEDIATE");
@@ -1785,7 +1771,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
       const existing = this.readEffectSettlement(operation.operationId);
       if (existing) {
         if (!sameEffectSettlement(existing, input)) {
-          throw state(`Workflow v17 effect settlement ${operation.path} changed identity`);
+          throw state(`Workflow effect settlement ${operation.path} changed identity`);
         }
         this.database.exec("COMMIT");
         return existing;
@@ -1841,11 +1827,11 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
 
   completeScope(input: CompleteWorkflowScopeInput): WorkflowScopeRecord {
     assertPositiveRevision(input.expectedRevision);
-    assertIdentifier(input.scopeId, "workflow v17 scope id");
-    assertHash(input.terminalKey, "workflow v17 scope terminal key");
-    assertIsoDate(input.at, "workflow v17 scope completion time");
+    assertIdentifier(input.scopeId, "workflow scope id");
+    assertHash(input.terminalKey, "workflow scope terminal key");
+    assertIsoDate(input.at, "workflow scope completion time");
     if (input.status === "completed" ? input.failure !== undefined : input.failure === undefined) {
-      throw new TypeError("Workflow v17 failed/cancelled scope requires failure and completed scope forbids it");
+      throw new TypeError("Workflow failed/cancelled scope requires failure and completed scope forbids it");
     }
     this.mutate(input.expectedRevision, {
       type: `scope-${input.status}`,
@@ -1869,7 +1855,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
       `).run(
         input.status, input.terminalKey, input.failure ? json(input.failure) : null, input.at, scope.scopeId,
       );
-      assertOneChange(changed, "workflow v17 scope completion");
+      assertOneChange(changed, "workflow scope completion");
       this.setRunRevisionOnly(run.revision, nextRevision, input.at);
       return {};
     });
@@ -1878,9 +1864,9 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
 
   cancelScopeTree(input: CancelWorkflowScopeTreeInput): WorkflowScopeRecord {
     assertPositiveRevision(input.expectedRevision);
-    assertIdentifier(input.scopeId, "workflow v17 cancelled scope id");
+    assertIdentifier(input.scopeId, "workflow cancelled scope id");
     canonicalJsonValue(input.failure, jsonLimits());
-    assertIsoDate(input.at, "workflow v17 scope cancellation time");
+    assertIsoDate(input.at, "workflow scope cancellation time");
     this.assertOpen();
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -1918,7 +1904,6 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
         if (scope.status !== "active") continue;
         const previousCallKey = this.expectedPreviousCallKey(scope);
         const terminalKey = stableHash({
-          formatVersion: 1,
           kind: "workflow-scope-cancellation",
           previousCallKey,
           failure: input.failure,
@@ -1980,7 +1965,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
       payload: { digest: artifact.digest, kind: artifact.kind },
       at: artifact.createdAt,
     }, (run, nextRevision) => {
-      if (artifact.runId !== run.runId) throw new TypeError("Workflow v17 artifact belongs to another run");
+      if (artifact.runId !== run.runId) throw new TypeError("Workflow artifact belongs to another run");
       const existing = this.readArtifact(artifact.digest);
       if (existing) {
         if (stableJson(existing) !== stableJson(artifact)) throw state(`Artifact ${artifact.digest} changed identity`);
@@ -2007,7 +1992,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
       payload: { attemptId: attempt.attemptId, effect: attempt.effect },
       at: attempt.createdAt,
     }, (run, nextRevision) => {
-      if (attempt.runId !== run.runId) throw new TypeError("Workflow v17 attempt belongs to another run");
+      if (attempt.runId !== run.runId) throw new TypeError("Workflow attempt belongs to another run");
       this.requireOperation(attempt.operationId);
       this.database.prepare(`
         INSERT INTO attempts(
@@ -2029,22 +2014,22 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
 
   completeAttempt(input: CompleteWorkflowAttemptInput): WorkflowAttemptRecord {
     assertPositiveRevision(input.expectedRevision);
-    assertIdentifier(input.attemptId, "workflow v17 attempt id");
+    assertIdentifier(input.attemptId, "workflow attempt id");
     if (!new Set(["completed", "failed", "stopped", "cancelled"]).has(input.status)) {
-      throw new TypeError("Invalid workflow v17 attempt completion status");
+      throw new TypeError("Invalid workflow attempt completion status");
     }
     canonicalJsonValue(input.usage, jsonLimits());
     if (input.resources) canonicalJsonValue(input.resources, jsonLimits());
-    assertIsoDate(input.at, "workflow v17 attempt completion time");
+    assertIsoDate(input.at, "workflow attempt completion time");
     this.mutate(input.expectedRevision, {
       type: `attempt-${input.status}`,
       payload: { attemptId: input.attemptId },
       at: input.at,
     }, (run, nextRevision) => {
       const attempt = this.readAttempt(input.attemptId);
-      if (!attempt) throw state(`Missing workflow v17 attempt ${input.attemptId}`);
+      if (!attempt) throw state(`Missing workflow attempt ${input.attemptId}`);
       if (attempt.status !== "running" && attempt.status !== "waiting") {
-        throw state(`Workflow v17 attempt ${input.attemptId} is ${attempt.status}`);
+        throw state(`Workflow attempt ${input.attemptId} is ${attempt.status}`);
       }
       this.database.prepare(`
         UPDATE attempts SET status = ?, usage_json = ?, resources_json = ?, updated_at = ?, ended_at = ?
@@ -2070,7 +2055,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
       payload: { checkpointId: checkpoint.checkpointId, treeHash: checkpoint.treeHash },
       at: checkpoint.createdAt,
     }, (run, nextRevision) => {
-      if (checkpoint.runId !== run.runId) throw new TypeError("Workflow v17 checkpoint belongs to another run");
+      if (checkpoint.runId !== run.runId) throw new TypeError("Workflow checkpoint belongs to another run");
       this.requireOperation(checkpoint.operationId);
       this.database.prepare(`
         INSERT INTO workspace_checkpoints(
@@ -2135,10 +2120,10 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
     input: { workspaceId: string; groupOperationId: string; laneKey: string; at: string },
   ): WorkflowCandidateWorkspaceRecord {
     assertPositiveRevision(expectedRevision);
-    assertIdentifier(input.workspaceId, "workflow v17 candidate workspace id");
-    assertIdentifier(input.groupOperationId, "workflow v17 concurrency group operation id");
+    assertIdentifier(input.workspaceId, "workflow candidate workspace id");
+    assertIdentifier(input.groupOperationId, "workflow concurrency group operation id");
     assertLaneKey(input.laneKey);
-    assertIsoDate(input.at, "workflow v17 workspace lane binding time");
+    assertIsoDate(input.at, "workflow workspace lane binding time");
     this.assertOpen();
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -2189,8 +2174,8 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
     reason: JsonObject,
     at: string,
   ): WorkflowCandidateWorkspaceRecord {
-    assertIdentifier(workspaceId, "workflow v17 candidate workspace id");
-    assertIsoDate(at, "workflow v17 workspace abandonment time");
+    assertIdentifier(workspaceId, "workflow candidate workspace id");
+    assertIsoDate(at, "workflow workspace abandonment time");
     this.mutate(expectedRevision, {
       type: "candidate-workspace-abandoned",
       payload: { workspaceId, reason },
@@ -2236,7 +2221,6 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
       this.requireArtifact(input.diffArtifactDigest);
       const outputHash = stableHash(input.output);
       candidateId = `candidate_${stableHash({
-        formatVersion: 1,
         runId: run.runId,
         operationId: operation.operationId,
         treeHash: input.treeHash,
@@ -2278,11 +2262,11 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
     expectedRevision: number,
     measurement: Omit<WorkflowCandidateMeasurementRecord, "runId" | "status" | "finalizedAt">,
   ): WorkflowCandidateMeasurementRecord {
-    assertIdentifier(measurement.measurementId, "workflow v17 measurement id");
-    assertIdentifier(measurement.candidateId, "workflow v17 candidate id");
-    assertIdentifier(measurement.operationId, "workflow v17 measurement operation id");
-    assertHash(measurement.bindingHash, "workflow v17 measurement binding hash");
-    assertIsoDate(measurement.createdAt, "workflow v17 measurement time");
+    assertIdentifier(measurement.measurementId, "workflow measurement id");
+    assertIdentifier(measurement.candidateId, "workflow candidate id");
+    assertIdentifier(measurement.operationId, "workflow measurement operation id");
+    assertHash(measurement.bindingHash, "workflow measurement binding hash");
+    assertIsoDate(measurement.createdAt, "workflow measurement time");
     const existing = this.readCandidateMeasurement(measurement.candidateId);
     if (existing) {
       if (existing.measurementId !== measurement.measurementId
@@ -2329,16 +2313,16 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
     expectedRevision: number,
     input: Omit<WorkflowMetricSetRecord, "runId" | "states" | "stateHash" | "updatedAt">,
   ): WorkflowMetricSetRecord {
-    assertIdentifier(input.metricSetId, "workflow v17 metric-set id");
-    assertIdentifier(input.authorityId, "workflow v17 metric-set authority id");
+    assertIdentifier(input.metricSetId, "workflow metric-set id");
+    assertIdentifier(input.authorityId, "workflow metric-set authority id");
     assertSourceSite(input.sourceSite);
-    assertNonNegativeInteger(input.occurrence, "workflow v17 metric-set occurrence");
+    assertNonNegativeInteger(input.occurrence, "workflow metric-set occurrence");
     const policy = canonicalJsonValue(input.policy, jsonLimits()) as JsonObject;
     const sampling = canonicalJsonValue(input.sampling, jsonLimits()) as JsonObject;
     if (stableHash(policy) !== input.policyHash || stableHash(sampling) !== input.samplingHash) {
-      throw new TypeError("Workflow v17 metric-set policy or sampling hash is invalid");
+      throw new TypeError("Workflow metric-set policy or sampling hash is invalid");
     }
-    assertIsoDate(input.createdAt, "workflow v17 metric-set time");
+    assertIsoDate(input.createdAt, "workflow metric-set time");
     const existing = this.readMetricSetBySite(input.sourceSite, input.occurrence);
     const proposed = {
       ...input,
@@ -2357,7 +2341,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
         || existing.samplingHash !== proposed.samplingHash
         || stableJson(existing.policy) !== stableJson(proposed.policy)
         || stableJson(existing.sampling) !== stableJson(proposed.sampling)) {
-        throw state(`Workflow v17 metric set ${input.sourceSite}/${input.occurrence} changed identity`);
+        throw state(`Workflow metric set ${input.sourceSite}/${input.occurrence} changed identity`);
       }
       return existing;
     }
@@ -2392,7 +2376,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
     const proposed = { ...input, runId: this.readRun().runId };
     if (existing) {
       if (stableJson(existing) !== stableJson(proposed)) {
-        throw state(`Workflow v17 measurement ${input.operationId} changed identity`);
+        throw state(`Workflow measurement ${input.operationId} changed identity`);
       }
       return existing;
     }
@@ -2405,13 +2389,13 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
     }, (run, nextRevision) => {
       const operation = this.requireOperation(input.operationId);
       if (operation.kind !== "measure" || !["running", "completed"].includes(operation.status)) {
-        throw state("Workflow v17 measurement requires its measure operation");
+        throw state("Workflow measurement requires its measure operation");
       }
       const metricSet = this.readMetricSet(input.metricSetId);
-      if (!metricSet || metricSet.runId !== run.runId) throw state("Workflow v17 measurement metric set is unavailable");
+      if (!metricSet || metricSet.runId !== run.runId) throw state("Workflow measurement metric set is unavailable");
       if (input.candidateId) {
         const candidate = this.requirePendingCandidate(input.candidateId);
-        if (candidate.runId !== run.runId) throw state("Workflow v17 measurement candidate belongs elsewhere");
+        if (candidate.runId !== run.runId) throw state("Workflow measurement candidate belongs elsewhere");
       }
       this.requireArtifact(input.artifactDigest);
       if (input.diagnosticsArtifactDigest) this.requireArtifact(input.diagnosticsArtifactDigest);
@@ -2464,7 +2448,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
     const proposed = { ...input, runId: this.readRun().runId };
     if (existing) {
       if (stableJson(existing) !== stableJson(proposed)) {
-        throw state(`Workflow v17 experiment ${input.operationId} changed identity`);
+        throw state(`Workflow experiment ${input.operationId} changed identity`);
       }
       return existing;
     }
@@ -2477,16 +2461,16 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
     }, (run, nextRevision) => {
       const operation = this.requireOperation(input.operationId);
       if (operation.kind !== "record-experiment" || operation.status !== "completed") {
-        throw state("Workflow v17 experiment requires its completed operation");
+        throw state("Workflow experiment requires its completed operation");
       }
       const candidate = this.readCandidate(input.candidateId);
       const measurement = this.readMeasurement(input.measurementId);
       if (!candidate?.disposition || !measurement || measurement.candidateId !== candidate.candidateId) {
-        throw state("Workflow v17 experiment evidence is incomplete");
+        throw state("Workflow experiment evidence is incomplete");
       }
       if (candidate.disposition.disposition !== input.disposition
         || candidate.disposition.measurementId !== measurement.measurementId) {
-        throw state("Workflow v17 experiment disposition differs from candidate evidence");
+        throw state("Workflow experiment disposition differs from candidate evidence");
       }
       this.requireArtifact(input.artifactDigest);
       this.database.prepare(`
@@ -2961,7 +2945,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
   ): void {
     if (request.kind === "pause") {
       if (run.status !== "queued" && run.status !== "running") {
-        throw state(`Workflow v17 run is ${run.status}, not active`);
+        throw state(`Workflow run is ${run.status}, not active`);
       }
       this.updateControlledRun(run, nextRevision, "paused", {
         category: "control", code: "paused", summary: "Paused by the primary session", retryable: true,
@@ -2969,20 +2953,20 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
       return;
     }
     if (request.kind === "resume") {
-      if (run.status !== "paused") throw state(`Workflow v17 run is ${run.status}, not paused`);
+      if (run.status !== "paused") throw state(`Workflow run is ${run.status}, not paused`);
       if (this.listWaitingHumanInteractions().length) {
-        throw state("Workflow v17 run has an unresolved human interaction");
+        throw state("Workflow run has an unresolved human interaction");
       }
       this.updateControlledRun(run, nextRevision, "queued", undefined, at, run.currentOperationId ?? null);
       return;
     }
     if (request.kind === "stop" || request.kind === "stop-effect") {
-      if (TERMINAL_RUN_STATUSES.has(run.status)) throw state(`Workflow v17 run is already ${run.status}`);
+      if (TERMINAL_RUN_STATUSES.has(run.status)) throw state(`Workflow run is already ${run.status}`);
       if (request.kind === "stop-effect") {
-        if (!request.targetId) throw state("Workflow v17 stop-effect request lacks an operation");
+        if (!request.targetId) throw state("Workflow stop-effect request lacks an operation");
         const operation = this.requireOperation(request.targetId);
         if (!new Set(["running", "waiting"]).has(operation.status)) {
-          throw state(`Workflow v17 operation ${operation.path} is ${operation.status}, not active`);
+          throw state(`Workflow operation ${operation.path} is ${operation.status}, not active`);
         }
       }
       const reason = {
@@ -2998,27 +2982,27 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
       return;
     }
     if (!request.targetId || !request.challengeHash) {
-      throw state(`Workflow v17 ${request.kind} request lacks target authority`);
+      throw state(`Workflow ${request.kind} request lacks target authority`);
     }
     const interaction = this.readHumanInteraction(request.targetId);
     if (!interaction || interaction.status !== "waiting" || interaction.challengeHash !== request.challengeHash) {
-      throw state("Workflow v17 human interaction challenge is stale");
+      throw state("Workflow human interaction challenge is stale");
     }
     const expectedKind = request.kind === "ask-response" ? "ask" : "apply";
-    if (interaction.kind !== expectedKind) throw state("Workflow v17 human interaction kind differs from its control request");
+    if (interaction.kind !== expectedKind) throw state("Workflow human interaction kind differs from its control request");
     if (request.kind === "ask-response" && request.value === undefined) {
-      throw state("Workflow v17 ask response is missing its value");
+      throw state("Workflow ask response is missing its value");
     }
     if (request.kind === "ask-response") {
       const responseSchema = interaction.request.responseSchema;
       if (!responseSchema || typeof responseSchema !== "object" || Array.isArray(responseSchema)) {
-        throw corrupt("Workflow v17 ask interaction lost its response schema");
+        throw corrupt("Workflow ask interaction lost its response schema");
       }
       let validate: ReturnType<Ajv["compile"]>;
       try { validate = new Ajv({ strict: true, allErrors: true }).compile(responseSchema as JsonSchema); }
-      catch { throw corrupt("Workflow v17 ask interaction has an invalid response schema"); }
+      catch { throw corrupt("Workflow ask interaction has an invalid response schema"); }
       if (!validate(request.value)) {
-        throw state(`Workflow v17 ask response does not match its reviewed schema: ${new Ajv().errorsText(validate.errors).slice(0, 1_000)}`);
+        throw state(`Workflow ask response does not match its reviewed schema: ${new Ajv().errorsText(validate.errors).slice(0, 1_000)}`);
       }
     }
     const status = request.kind === "ask-response"
@@ -3031,11 +3015,11 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
       request.kind === "ask-response" ? json(request.value!) : null,
       at,
       interaction.interactionId,
-    ), "workflow v17 human interaction resolution");
+    ), "workflow human interaction resolution");
     assertOneChange(this.database.prepare(`
       UPDATE operations SET status = 'running', updated_at = ?
       WHERE operation_id = ? AND status = 'waiting'
-    `).run(at, interaction.operationId), "workflow v17 resumed human operation");
+    `).run(at, interaction.operationId), "workflow resumed human operation");
     this.database.prepare(`
       UPDATE attempts SET status = 'running', updated_at = ?
       WHERE operation_id = ? AND status = 'waiting'
@@ -3066,7 +3050,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
     `).run(
       status, reason ? json(reason) : null, currentOperationId, nextRevision,
       at, status, at, run.revision,
-    ), "workflow v17 controlled run transition");
+    ), "workflow controlled run transition");
   }
 
   private mutate(
@@ -3075,7 +3059,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
     body: (run: WorkflowRunRecord, nextRevision: number) => JsonObject,
   ): void {
     assertPositiveRevision(expectedRevision);
-    assertIsoDate(event.at, "workflow v17 event time");
+    assertIsoDate(event.at, "workflow event time");
     assertEventType(event.type);
     this.assertOpen();
     this.database.exec("BEGIN IMMEDIATE");
@@ -3116,7 +3100,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
       UPDATE runs SET revision = ?, updated_at = ?, current_operation_id = ?
       WHERE singleton = 1 AND revision = ?
     `).run(next, at, currentOperationId, expected);
-    assertOneChange(changed, "workflow v17 run revision");
+    assertOneChange(changed, "workflow run revision");
   }
 
   private finishSuccessfulCandidates(runId: string, at: string): number {
@@ -3208,7 +3192,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
     const measurement = this.readMeasurement(measurementId);
     if (!measurement) return; // Pre-metric test evidence has no full measurement cohort.
     const metricSet = this.readMetricSet(measurement.metricSetId);
-    if (!metricSet) throw state(`Workflow v17 measurement ${measurementId} lost its metric set`);
+    if (!metricSet) throw state(`Workflow measurement ${measurementId} lost its metric set`);
     const states = applyMetricDispositionToSnapshot(metricSet.states, measurement.delta, disposition);
     this.database.prepare(`
       UPDATE metric_sets SET states_json = ?, state_hash = ?, updated_at = ? WHERE metric_set_id = ?
@@ -3244,7 +3228,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
         summary: `Workflow ${status}`,
         retryable: false,
       };
-      const terminal = stableHash({ formatVersion: 1, kind: "scope-termination", previous, status, failure });
+      const terminal = stableHash({ kind: "scope-termination", previous, status, failure });
       this.database.prepare(`
         UPDATE scopes SET status = 'cancelled', terminal_key = ?, failure_json = ?, ended_at = ?
         WHERE scope_id = ? AND status = 'active'
@@ -3254,31 +3238,31 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
 
   private requireScope(scopeId: string): WorkflowScopeRecord {
     const scope = this.readScope(scopeId);
-    if (!scope) throw state(`Missing workflow v17 scope ${scopeId}`);
+    if (!scope) throw state(`Missing workflow scope ${scopeId}`);
     return scope;
   }
 
   private requireOperation(operationId: string): WorkflowOperationRecord {
     const operation = this.readOperation(operationId);
-    if (!operation) throw state(`Missing workflow v17 operation ${operationId}`);
+    if (!operation) throw state(`Missing workflow operation ${operationId}`);
     return operation;
   }
 
   private requireArtifact(digest: string): WorkflowArtifactRecord {
     const artifact = this.readArtifact(digest);
-    if (!artifact) throw state(`Missing workflow v17 artifact ${digest}`);
+    if (!artifact) throw state(`Missing workflow artifact ${digest}`);
     return artifact;
   }
 
   private requireCandidateWorkspace(workspaceId: string): WorkflowCandidateWorkspaceRecord {
     const workspace = this.readCandidateWorkspace(workspaceId);
-    if (!workspace) throw state(`Missing workflow v17 candidate workspace ${workspaceId}`);
+    if (!workspace) throw state(`Missing workflow candidate workspace ${workspaceId}`);
     return workspace;
   }
 
   private requirePendingCandidate(candidateId: string): WorkflowCandidateRecord {
     const candidate = this.readCandidate(candidateId);
-    if (!candidate) throw state(`Missing workflow v17 candidate ${candidateId}`);
+    if (!candidate) throw state(`Missing workflow candidate ${candidateId}`);
     if (candidate.state !== "pending") throw state(`Candidate ${candidateId} is ${candidate.state}`);
     return candidate;
   }
@@ -3286,7 +3270,7 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
   private assertBasicWritableIdentity(): void {
     const run = this.readRun();
     const root = this.readScope(run.rootScopeId);
-    if (!root || root.kind !== "root" || root.path !== "run") throw corrupt("Workflow v17 database root is corrupt");
+    if (!root || root.kind !== "root" || root.path !== "run") throw corrupt("Workflow database root is corrupt");
   }
 }
 
@@ -3773,7 +3757,6 @@ function candidateDispositionSemantic(
   measurement: WorkflowCandidateMeasurementRecord | undefined,
 ): JsonObject {
   return {
-    formatVersion: 1,
     candidateId: candidate.candidateId,
     candidateTreeHash: candidate.treeHash,
     candidateLineageHash: candidate.lineageHash,
@@ -3796,7 +3779,6 @@ function candidateApplyAuthority(
   apply: WorkflowCandidateApplyRecord,
 ): string {
   return stableHash({
-    formatVersion: 1,
     candidateId: candidate.candidateId,
     approvalId: apply.approvalId,
     receiptId: apply.receiptId,
@@ -3806,35 +3788,35 @@ function candidateApplyAuthority(
 }
 
 function assertCreateOptions(options: CreateWorkflowRunDatabaseOptions): void {
-  assertIdentifier(options.runId, "workflow v17 run id");
+  assertIdentifier(options.runId, "workflow run id");
   assertWorkflowInvocationSnapshot(options.snapshot);
   if (options.snapshot.runtimeApiHash !== WORKFLOW_RUNTIME_API_HASH) {
-    throw new TypeError("Workflow v17 invocation uses another runtime API");
+    throw new TypeError("Workflow invocation uses another runtime API");
   }
-  assertHash(options.projectSnapshotHash, "workflow v17 project snapshot hash");
-  assertHash(options.routeSnapshotHash, "workflow v17 route snapshot hash");
-  assertHash(options.staticResourcesHash, "workflow v17 static resources hash");
-  assertHash(options.contextIdentityHash, "workflow v17 context identity hash");
+  assertHash(options.projectSnapshotHash, "workflow project snapshot hash");
+  assertHash(options.routeSnapshotHash, "workflow route snapshot hash");
+  assertHash(options.staticResourcesHash, "workflow static resources hash");
+  assertHash(options.contextIdentityHash, "workflow context identity hash");
   if (options.launch) {
     if (options.launch.mode !== "await" && options.launch.mode !== "async") {
-      throw new TypeError("Workflow v17 launch mode is invalid");
+      throw new TypeError("Workflow launch mode is invalid");
     }
-    assertText(options.launch.sessionId, "workflow v17 launch session", 256);
+    assertText(options.launch.sessionId, "workflow launch session", 256);
     if (!path.isAbsolute(options.launch.projectRoot)) {
-      throw new TypeError("Workflow v17 launch project root must be absolute");
+      throw new TypeError("Workflow launch project root must be absolute");
     }
   }
   assertSafety(options.safety);
-  assertIsoDate(options.createdAt, "workflow v17 run createdAt");
+  assertIsoDate(options.createdAt, "workflow run createdAt");
 }
 
 function assertRunRecord(run: WorkflowRunRecord): void {
-  assertIdentifier(run.runId, "workflow v17 run id");
+  assertIdentifier(run.runId, "workflow run id");
   assertPositiveRevision(run.revision);
   if (!/^(?:builtin|user|project):[a-z][a-z0-9_-]{0,63}$/u.test(run.workflow.id)) {
-    throw corrupt("Workflow v17 run has invalid workflow id");
+    throw corrupt("Workflow run has invalid workflow id");
   }
-  assertText(run.workflow.name, "workflow v17 workflow name", 64);
+  assertText(run.workflow.name, "workflow workflow name", 64);
   for (const [label, value] of [
     ["source", run.workflow.sourceHash],
     ["definition", run.workflow.definitionHash],
@@ -3847,36 +3829,36 @@ function assertRunRecord(run: WorkflowRunRecord): void {
     ["static resources", run.staticResourcesHash],
     ["context identity", run.contextIdentityHash],
     ["policy", run.launch.policyHash],
-  ] as const) assertHash(value, `workflow v17 ${label} hash`);
+  ] as const) assertHash(value, `workflow ${label} hash`);
   if (run.workflow.runtimeApiHash !== WORKFLOW_RUNTIME_API_HASH) {
-    throw corrupt("Workflow v17 run uses another runtime API hash");
+    throw corrupt("Workflow run uses another runtime API hash");
   }
   if (!new Set(["model", "user", "rpc"]).has(run.launch.authority)
     || !new Set(["human", "model"]).has(run.launch.exposure)
     || (run.launch.authority === "model" && run.launch.exposure !== "model")
     || (run.workflow.id.startsWith("project:") && !run.launch.projectTrusted)) {
-    throw corrupt("Workflow v17 run has invalid launch authority");
+    throw corrupt("Workflow run has invalid launch authority");
   }
   if (!new Set<WorkflowRunStatus>(["queued", "running", "waiting", "paused", "completed", "failed", "stopped"]).has(run.status)) {
-    throw corrupt("Workflow v17 run has invalid status");
+    throw corrupt("Workflow run has invalid status");
   }
   const sortedCapabilities = [...run.capabilities].sort();
   if (new Set(run.capabilities).size !== run.capabilities.length
     || sortedCapabilities.some((value, index) => value !== run.capabilities[index])) {
-    throw corrupt("Workflow v17 run capabilities are not canonical");
+    throw corrupt("Workflow run capabilities are not canonical");
   }
   assertSafety(run.safety);
-  assertIdentifier(run.rootScopeId, "workflow v17 root scope id");
-  if (run.currentOperationId) assertIdentifier(run.currentOperationId, "workflow v17 current operation id");
-  if (run.rootTerminalKey) assertHash(run.rootTerminalKey, "workflow v17 root terminal key");
+  assertIdentifier(run.rootScopeId, "workflow root scope id");
+  if (run.currentOperationId) assertIdentifier(run.currentOperationId, "workflow current operation id");
+  if (run.rootTerminalKey) assertHash(run.rootTerminalKey, "workflow root terminal key");
   if ((run.status === "completed") !== Boolean(run.rootTerminalKey)
     || TERMINAL_RUN_STATUSES.has(run.status) !== Boolean(run.endedAt)) {
-    throw corrupt("Workflow v17 run terminal fields are inconsistent");
+    throw corrupt("Workflow run terminal fields are inconsistent");
   }
-  assertIsoDate(run.createdAt, "workflow v17 run createdAt");
-  if (run.startedAt) assertIsoDate(run.startedAt, "workflow v17 run startedAt");
-  assertIsoDate(run.updatedAt, "workflow v17 run updatedAt");
-  if (run.endedAt) assertIsoDate(run.endedAt, "workflow v17 run endedAt");
+  assertIsoDate(run.createdAt, "workflow run createdAt");
+  if (run.startedAt) assertIsoDate(run.startedAt, "workflow run startedAt");
+  assertIsoDate(run.updatedAt, "workflow run updatedAt");
+  if (run.endedAt) assertIsoDate(run.endedAt, "workflow run endedAt");
 }
 
 function assertResourceRecord(resource: WorkflowInvocationResourceRecord, runId: string): void {
@@ -3887,61 +3869,61 @@ function assertResourceRecord(resource: WorkflowInvocationResourceRecord, runId:
     || resource.resource.identity.selector !== resource.selector
     || resource.resource.identity.snapshotHash !== resource.snapshotHash
     || resource.resource.bindingHash !== resource.bindingHash) {
-    throw corrupt(`Workflow v17 resource ${resource.inputPath} identity is corrupt`);
+    throw corrupt(`Workflow resource ${resource.inputPath} identity is corrupt`);
   }
   const { bindingHash, ...body } = resource.resource;
-  if (stableHash(body) !== bindingHash) throw corrupt(`Workflow v17 resource ${resource.inputPath} binding hash is corrupt`);
+  if (stableHash(body) !== bindingHash) throw corrupt(`Workflow resource ${resource.inputPath} binding hash is corrupt`);
 }
 
 function assertClaimInput(input: ClaimWorkflowOperationInput): void {
   assertPositiveRevision(input.expectedRevision);
-  assertIdentifier(input.scopeId, "workflow v17 operation scope id");
-  assertNonNegativeInteger(input.cursor, "workflow v17 operation cursor");
-  if (input.cursor > 999_999) throw new TypeError("Workflow v17 operation cursor exceeds path bound");
+  assertIdentifier(input.scopeId, "workflow operation scope id");
+  assertNonNegativeInteger(input.cursor, "workflow operation cursor");
+  if (input.cursor > 999_999) throw new TypeError("Workflow operation cursor exceeds path bound");
   if (!new Set<WorkflowOperationKind>([
     "parallel", "map", "agent", "command", "ask", "measure", "candidate",
     "verify", "accept", "reject", "record-experiment", "apply",
-  ]).has(input.kind)) throw new TypeError("Invalid workflow v17 operation kind");
+  ]).has(input.kind)) throw new TypeError("Invalid workflow operation kind");
   assertSourceSite(input.sourceSite);
   if (input.descriptorSourceSite) assertSourceSite(input.descriptorSourceSite);
   if (input.title !== undefined) assertDisplayTitle(input.title);
-  assertHash(input.semanticInputHash, "workflow v17 semantic input hash");
+  assertHash(input.semanticInputHash, "workflow semantic input hash");
   if (input.maximumOperations !== undefined) {
-    assertPositiveInteger(input.maximumOperations, "workflow v17 maximum operations");
+    assertPositiveInteger(input.maximumOperations, "workflow maximum operations");
     if (input.maximumOperations > DEFINITION_LIMITS.semanticOperations) {
-      throw new TypeError(`Workflow v17 maximum operations exceeds ${DEFINITION_LIMITS.semanticOperations}`);
+      throw new TypeError(`Workflow maximum operations exceeds ${DEFINITION_LIMITS.semanticOperations}`);
     }
   }
   if (input.maximumAgentOperations !== undefined) {
-    assertPositiveInteger(input.maximumAgentOperations, "workflow v17 maximum agent operations");
+    assertPositiveInteger(input.maximumAgentOperations, "workflow maximum agent operations");
   }
-  assertIsoDate(input.at, "workflow v17 operation claim time");
+  assertIsoDate(input.at, "workflow operation claim time");
 }
 
 function assertSettleEffectInput(input: SettleWorkflowEffectInput): void {
   assertPositiveRevision(input.expectedRevision);
-  assertIdentifier(input.operationId, "workflow v17 operation id");
-  assertHash(input.semanticKey, "workflow v17 settlement semantic key");
+  assertIdentifier(input.operationId, "workflow operation id");
+  assertHash(input.semanticKey, "workflow settlement semantic key");
   if (!new Set(["success", "failure"]).has(input.outcome)
     || !new Set(["finish-work", "host-effect"]).has(input.completionAuthority)
     || !new Set(["immutable", "workspace", "never"]).has(input.replayPolicy)) {
-    throw new TypeError("Invalid workflow v17 effect settlement policy");
+    throw new TypeError("Invalid workflow effect settlement policy");
   }
   if ((input.outcome === "success") !== Object.prototype.hasOwnProperty.call(input, "result")
     || (input.outcome === "failure") !== Object.prototype.hasOwnProperty.call(input, "failure")) {
-    throw new TypeError("Workflow v17 settlement requires exactly its success result or failure");
+    throw new TypeError("Workflow settlement requires exactly its success result or failure");
   }
   if (input.outcome === "failure" && input.replayPolicy !== "never") {
-    throw new TypeError("Failed workflow v17 settlements must never be replayable");
+    throw new TypeError("Failed workflow settlements must never be replayable");
   }
   if ((input.replayPolicy === "workspace") !== Boolean(input.postWorkspaceCheckpointId)) {
-    throw new TypeError("Workflow v17 workspace settlement requires exactly one post-workspace checkpoint");
+    throw new TypeError("Workflow workspace settlement requires exactly one post-workspace checkpoint");
   }
   if (input.postWorkspaceCheckpointId) {
-    assertIdentifier(input.postWorkspaceCheckpointId, "workflow v17 settlement checkpoint id");
+    assertIdentifier(input.postWorkspaceCheckpointId, "workflow settlement checkpoint id");
   }
   canonicalJsonValue(input.outcome === "success" ? input.result! : input.failure!, jsonLimits());
-  assertIsoDate(input.at, "workflow v17 effect settlement time");
+  assertIsoDate(input.at, "workflow effect settlement time");
 }
 
 function sameEffectSettlement(
@@ -3959,47 +3941,47 @@ function sameEffectSettlement(
 
 function assertCompleteCallInput(input: CompleteWorkflowCallInput): void {
   assertPositiveRevision(input.expectedRevision);
-  assertIdentifier(input.operationId, "workflow v17 operation id");
-  assertHash(input.previousCallKey, "workflow v17 previous call key");
-  assertHash(input.semanticKey, "workflow v17 semantic key");
-  assertHash(input.callKey, "workflow v17 call key");
+  assertIdentifier(input.operationId, "workflow operation id");
+  assertHash(input.previousCallKey, "workflow previous call key");
+  assertHash(input.semanticKey, "workflow semantic key");
+  assertHash(input.callKey, "workflow call key");
   if (!new Set(["success", "failure"]).has(input.outcome)
     || !new Set(["finish-work", "host-effect", "structural-join"]).has(input.completionAuthority)
     || !new Set(["immutable", "workspace", "never"]).has(input.replayPolicy)) {
-    throw new TypeError("Invalid workflow v17 call policy");
+    throw new TypeError("Invalid workflow call policy");
   }
   if ((input.outcome === "success") !== Object.prototype.hasOwnProperty.call(input, "result")
     || (input.outcome === "failure") !== Object.prototype.hasOwnProperty.call(input, "failure")) {
-    throw new TypeError("Workflow v17 call requires exactly its success result or failure");
+    throw new TypeError("Workflow call requires exactly its success result or failure");
   }
-  if (input.postWorkspaceCheckpointId) assertIdentifier(input.postWorkspaceCheckpointId, "workflow v17 checkpoint id");
+  if (input.postWorkspaceCheckpointId) assertIdentifier(input.postWorkspaceCheckpointId, "workflow checkpoint id");
   if (input.replayPolicy === "workspace" && !input.postWorkspaceCheckpointId) {
-    throw new TypeError("Workflow v17 workspace call requires a post-workspace checkpoint");
+    throw new TypeError("Workflow workspace call requires a post-workspace checkpoint");
   }
   if (input.replayPolicy !== "workspace" && input.postWorkspaceCheckpointId) {
-    throw new TypeError("Only workflow v17 workspace calls may bind a post-workspace checkpoint");
+    throw new TypeError("Only workflow workspace calls may bind a post-workspace checkpoint");
   }
   if (input.workspaceCheckpoint) assertWorkspaceCheckpoint(input.workspaceCheckpoint);
   const artifactKeys = new Set<string>();
   for (const link of input.artifacts ?? []) {
     if (!new Set(["input", "output", "evidence", "progress"]).has(link.role)) {
-      throw new TypeError("Invalid workflow v17 operation artifact role");
+      throw new TypeError("Invalid workflow operation artifact role");
     }
-    if (link.name !== undefined) assertText(link.name, "workflow v17 operation artifact name", 256);
-    assertNonNegativeInteger(link.ordinal, "workflow v17 operation artifact ordinal");
+    if (link.name !== undefined) assertText(link.name, "workflow operation artifact name", 256);
+    assertNonNegativeInteger(link.ordinal, "workflow operation artifact ordinal");
     assertArtifactRecord(link.artifact);
     const key = `${link.role}\0${link.ordinal}`;
-    if (artifactKeys.has(key)) throw new TypeError("Duplicate workflow v17 operation artifact ordinal");
+    if (artifactKeys.has(key)) throw new TypeError("Duplicate workflow operation artifact ordinal");
     artifactKeys.add(key);
   }
   if (input.replay) {
-    assertIdentifier(input.replay.sourceRunId, "workflow v17 replay source run id");
-    assertIdentifier(input.replay.sourceOperationId, "workflow v17 replay source operation id");
+    assertIdentifier(input.replay.sourceRunId, "workflow replay source run id");
+    assertIdentifier(input.replay.sourceOperationId, "workflow replay source operation id");
     assertScopePath(input.replay.sourceScopePath);
-    assertNonNegativeInteger(input.replay.sourceCursor, "workflow v17 replay source cursor");
-    assertHash(input.replay.sourceCallKey, "workflow v17 replay source call key");
+    assertNonNegativeInteger(input.replay.sourceCursor, "workflow replay source cursor");
+    assertHash(input.replay.sourceCallKey, "workflow replay source call key");
   }
-  assertIsoDate(input.at, "workflow v17 call completion time");
+  assertIsoDate(input.at, "workflow call completion time");
 }
 
 function assertCompleteStructuralJoinInput(input: CompleteWorkflowStructuralJoinInput): void {
@@ -4009,15 +3991,15 @@ function assertCompleteStructuralJoinInput(input: CompleteWorkflowStructuralJoin
     completionAuthority: "structural-join",
     replayPolicy: "immutable",
   });
-  if (!new Set(["parallel", "map", "candidate"]).has(input.kind)) throw new TypeError("Invalid workflow v17 join kind");
-  assertHash(input.policyHash, "workflow v17 structural policy hash");
-  assertHash(input.joinKey, "workflow v17 structural join key");
-  if (!Array.isArray(input.outputOrder) || !Array.isArray(input.lanes)) throw new TypeError("Invalid workflow v17 structural lanes");
+  if (!new Set(["parallel", "map", "candidate"]).has(input.kind)) throw new TypeError("Invalid workflow join kind");
+  assertHash(input.policyHash, "workflow structural policy hash");
+  assertHash(input.joinKey, "workflow structural join key");
+  if (!Array.isArray(input.outputOrder) || !Array.isArray(input.lanes)) throw new TypeError("Invalid workflow structural lanes");
   for (const key of input.outputOrder) assertLaneOrCandidateKey(key);
   for (const lane of input.lanes) {
     assertLaneOrCandidateKey(lane.laneKey);
-    assertIdentifier(lane.scopeId, "workflow v17 structural lane scope id");
-    assertHash(lane.terminalKey, "workflow v17 structural lane terminal key");
+    assertIdentifier(lane.scopeId, "workflow structural lane scope id");
+    assertHash(lane.terminalKey, "workflow structural lane terminal key");
     if (!new Set(["success", "failure", "cancelled"]).has(lane.outcome)) throw new TypeError("Invalid structural lane outcome");
   }
 }
@@ -4030,18 +4012,18 @@ function assertCompleteStructuralFailureInput(input: CompleteWorkflowStructuralF
     replayPolicy: "never",
   });
   if (!new Set(["parallel", "map", "candidate"]).has(input.kind)) {
-    throw new TypeError("Invalid workflow v17 failed join kind");
+    throw new TypeError("Invalid workflow failed join kind");
   }
-  assertHash(input.policyHash, "workflow v17 failed structural policy hash");
-  assertHash(input.joinKey, "workflow v17 failed structural join key");
+  assertHash(input.policyHash, "workflow failed structural policy hash");
+  assertHash(input.joinKey, "workflow failed structural join key");
   if (!Array.isArray(input.outputOrder) || !Array.isArray(input.lanes)) {
-    throw new TypeError("Invalid workflow v17 failed structural lanes");
+    throw new TypeError("Invalid workflow failed structural lanes");
   }
   for (const key of input.outputOrder) assertLaneOrCandidateKey(key);
   for (const lane of input.lanes) {
     assertLaneOrCandidateKey(lane.laneKey);
-    assertIdentifier(lane.scopeId, "workflow v17 failed structural lane scope id");
-    assertHash(lane.terminalKey, "workflow v17 failed structural lane terminal key");
+    assertIdentifier(lane.scopeId, "workflow failed structural lane scope id");
+    assertHash(lane.terminalKey, "workflow failed structural lane terminal key");
     if (!new Set(["success", "failure", "cancelled"]).has(lane.outcome)) {
       throw new TypeError("Invalid failed structural lane outcome");
     }
@@ -4049,21 +4031,21 @@ function assertCompleteStructuralFailureInput(input: CompleteWorkflowStructuralF
 }
 
 function assertChildScopeSpecs(specs: readonly CreateWorkflowChildScopeSpec[]): void {
-  if (!Array.isArray(specs) || specs.length > 1_024) throw new TypeError("Invalid workflow v17 child scope count");
+  if (!Array.isArray(specs) || specs.length > 1_024) throw new TypeError("Invalid workflow child scope count");
   const keys = new Set<string>();
   for (const spec of specs) {
     if (!new Set(["parallel-branch", "map-item", "candidate-body"]).has(spec.kind)) {
-      throw new TypeError("Invalid workflow v17 child scope kind");
+      throw new TypeError("Invalid workflow child scope kind");
     }
     if (spec.kind === "candidate-body") {
       if (spec.laneKey !== undefined) throw new TypeError("Candidate body scope cannot have a lane key");
     } else {
       if (spec.laneKey === undefined) throw new TypeError("Concurrent child scope requires a lane key");
       assertLaneKey(spec.laneKey);
-      if (keys.has(spec.laneKey)) throw new TypeError(`Duplicate workflow v17 child lane ${spec.laneKey}`);
+      if (keys.has(spec.laneKey)) throw new TypeError(`Duplicate workflow child lane ${spec.laneKey}`);
       keys.add(spec.laneKey);
     }
-    assertHash(spec.seedKey, "workflow v17 child scope seed");
+    assertHash(spec.seedKey, "workflow child scope seed");
   }
 }
 
@@ -4100,87 +4082,87 @@ function assertExistingChildScopes(
 
 function assertCreateCandidateWorkspaceInput(input: CreateCandidateWorkspaceInput): void {
   assertPositiveRevision(input.expectedRevision);
-  assertIdentifier(input.workspaceId, "workflow v17 candidate workspace id");
-  assertIdentifier(input.candidateOperationId, "workflow v17 candidate operation id");
-  assertIdentifier(input.bodyScopeId, "workflow v17 candidate body scope id");
-  if (input.parentCandidateId) assertIdentifier(input.parentCandidateId, "workflow v17 parent candidate id");
-  assertHash(input.initialTreeHash, "workflow v17 candidate initial tree hash");
-  assertHash(input.baseLineageHash, "workflow v17 candidate base lineage hash");
+  assertIdentifier(input.workspaceId, "workflow candidate workspace id");
+  assertIdentifier(input.candidateOperationId, "workflow candidate operation id");
+  assertIdentifier(input.bodyScopeId, "workflow candidate body scope id");
+  if (input.parentCandidateId) assertIdentifier(input.parentCandidateId, "workflow parent candidate id");
+  assertHash(input.initialTreeHash, "workflow candidate initial tree hash");
+  assertHash(input.baseLineageHash, "workflow candidate base lineage hash");
   canonicalJsonValue(input.writeScope, jsonLimits());
-  assertHash(input.writeScopeHash, "workflow v17 candidate write scope hash");
-  assertRelativeStoragePath(input.rootPath, "workflow v17 candidate workspace root path");
-  assertIsoDate(input.at, "workflow v17 candidate workspace time");
+  assertHash(input.writeScopeHash, "workflow candidate write scope hash");
+  assertRelativeStoragePath(input.rootPath, "workflow candidate workspace root path");
+  assertIsoDate(input.at, "workflow candidate workspace time");
 }
 
 function assertFreezeCandidateInput(input: FreezeCandidateInput): void {
   assertPositiveRevision(input.expectedRevision);
-  assertIdentifier(input.workspaceId, "workflow v17 candidate workspace id");
-  assertHash(input.bodyTerminalKey, "workflow v17 candidate body terminal key");
-  assertHash(input.treeHash, "workflow v17 candidate tree hash");
-  assertHash(input.lineageHash, "workflow v17 candidate lineage hash");
+  assertIdentifier(input.workspaceId, "workflow candidate workspace id");
+  assertHash(input.bodyTerminalKey, "workflow candidate body terminal key");
+  assertHash(input.treeHash, "workflow candidate tree hash");
+  assertHash(input.lineageHash, "workflow candidate lineage hash");
   canonicalJsonValue(input.output, jsonLimits());
-  assertHash(input.manifestArtifactDigest, "workflow v17 candidate manifest digest");
-  assertHash(input.diffArtifactDigest, "workflow v17 candidate diff digest");
+  assertHash(input.manifestArtifactDigest, "workflow candidate manifest digest");
+  assertHash(input.diffArtifactDigest, "workflow candidate diff digest");
   if (!Array.isArray(input.changedPaths) || input.changedPaths.length > 10_000) {
-    throw new TypeError("Invalid workflow v17 candidate changed paths");
+    throw new TypeError("Invalid workflow candidate changed paths");
   }
   const sorted = [...input.changedPaths].sort();
   if (new Set(sorted).size !== sorted.length
     || sorted.some((entry, index) => entry !== input.changedPaths[index])) {
-    throw new TypeError("Workflow v17 candidate changed paths must be unique and sorted");
+    throw new TypeError("Workflow candidate changed paths must be unique and sorted");
   }
   for (const changedPath of input.changedPaths) assertSemanticPath(changedPath);
-  assertIsoDate(input.at, "workflow v17 candidate freeze time");
+  assertIsoDate(input.at, "workflow candidate freeze time");
 }
 
 function assertDisposeCandidateInput(input: DisposeCandidateInput): void {
   assertPositiveRevision(input.expectedRevision);
-  assertIdentifier(input.candidateId, "workflow v17 candidate id");
-  if (input.operationId) assertIdentifier(input.operationId, "workflow v17 disposition operation id");
-  if (input.measurementId) assertIdentifier(input.measurementId, "workflow v17 disposition measurement id");
+  assertIdentifier(input.candidateId, "workflow candidate id");
+  if (input.operationId) assertIdentifier(input.operationId, "workflow disposition operation id");
+  if (input.measurementId) assertIdentifier(input.measurementId, "workflow disposition measurement id");
   if ("verificationId" in input && input.verificationId) {
-    assertIdentifier(input.verificationId, "workflow v17 disposition verification id");
+    assertIdentifier(input.verificationId, "workflow disposition verification id");
   }
   if ("reason" in input) canonicalJsonValue(input.reason, jsonLimits());
-  assertIsoDate(input.at, "workflow v17 candidate disposition time");
+  assertIsoDate(input.at, "workflow candidate disposition time");
 }
 
 function assertVerificationRecord(
   verification: Omit<WorkflowCandidateVerificationRecord, "runId">,
 ): void {
-  assertIdentifier(verification.verificationId, "workflow v17 verification id");
-  assertIdentifier(verification.candidateId, "workflow v17 candidate id");
-  assertIdentifier(verification.operationId, "workflow v17 verification operation id");
+  assertIdentifier(verification.verificationId, "workflow verification id");
+  assertIdentifier(verification.candidateId, "workflow candidate id");
+  assertIdentifier(verification.operationId, "workflow verification operation id");
   if (!new Set(["passed", "failed", "blocked"]).has(verification.status)) {
-    throw new TypeError("Invalid workflow v17 verification status");
+    throw new TypeError("Invalid workflow verification status");
   }
-  assertHash(verification.bindingHash, "workflow v17 verification binding hash");
-  assertHash(verification.evidenceHash, "workflow v17 verification evidence hash");
-  assertHash(verification.artifactDigest, "workflow v17 verification artifact digest");
-  assertIsoDate(verification.createdAt, "workflow v17 verification time");
+  assertHash(verification.bindingHash, "workflow verification binding hash");
+  assertHash(verification.evidenceHash, "workflow verification evidence hash");
+  assertHash(verification.artifactDigest, "workflow verification artifact digest");
+  assertIsoDate(verification.createdAt, "workflow verification time");
 }
 
 function assertCandidateApplyRecord(apply: Omit<WorkflowCandidateApplyRecord, "runId">): void {
-  assertIdentifier(apply.receiptId, "workflow v17 apply receipt id");
-  assertIdentifier(apply.candidateId, "workflow v17 apply candidate id");
-  assertIdentifier(apply.operationId, "workflow v17 apply operation id");
-  assertIdentifier(apply.approvalId, "workflow v17 approval id");
-  assertHash(apply.verificationBindingHash, "workflow v17 apply verification binding hash");
-  assertHash(apply.authorityHash, "workflow v17 apply authority hash");
-  assertIsoDate(apply.appliedAt, "workflow v17 apply time");
+  assertIdentifier(apply.receiptId, "workflow apply receipt id");
+  assertIdentifier(apply.candidateId, "workflow apply candidate id");
+  assertIdentifier(apply.operationId, "workflow apply operation id");
+  assertIdentifier(apply.approvalId, "workflow approval id");
+  assertHash(apply.verificationBindingHash, "workflow apply verification binding hash");
+  assertHash(apply.authorityHash, "workflow apply authority hash");
+  assertIsoDate(apply.appliedAt, "workflow apply time");
 }
 
 function assertArtifactRecord(artifact: WorkflowArtifactRecord): void {
-  assertHash(artifact.digest, "workflow v17 artifact digest");
-  assertIdentifier(artifact.runId, "workflow v17 artifact run id");
-  assertText(artifact.kind, "workflow v17 artifact kind", 128);
+  assertHash(artifact.digest, "workflow artifact digest");
+  assertIdentifier(artifact.runId, "workflow artifact run id");
+  assertText(artifact.kind, "workflow artifact kind", 128);
   if (!new Set(["text/plain; charset=utf-8", "application/json", "application/octet-stream"]).has(artifact.mediaType)) {
-    throw new TypeError("Invalid workflow v17 artifact media type");
+    throw new TypeError("Invalid workflow artifact media type");
   }
-  assertNonNegativeInteger(artifact.bytes, "workflow v17 artifact bytes");
-  assertRelativeStoragePath(artifact.bodyPath, "workflow v17 artifact body path");
+  assertNonNegativeInteger(artifact.bytes, "workflow artifact bytes");
+  assertRelativeStoragePath(artifact.bodyPath, "workflow artifact body path");
   canonicalJsonValue(artifact.metadata, jsonLimits());
-  assertIsoDate(artifact.createdAt, "workflow v17 artifact time");
+  assertIsoDate(artifact.createdAt, "workflow artifact time");
 }
 
 function sameArtifactIdentity(
@@ -4197,71 +4179,71 @@ function sameArtifactIdentity(
 }
 
 function assertAttemptRecord(attempt: WorkflowAttemptRecord): void {
-  assertIdentifier(attempt.attemptId, "workflow v17 attempt id");
-  assertIdentifier(attempt.runId, "workflow v17 attempt run id");
-  assertIdentifier(attempt.operationId, "workflow v17 attempt operation id");
-  assertPositiveInteger(attempt.number, "workflow v17 attempt number");
+  assertIdentifier(attempt.attemptId, "workflow attempt id");
+  assertIdentifier(attempt.runId, "workflow attempt run id");
+  assertIdentifier(attempt.operationId, "workflow attempt operation id");
+  assertPositiveInteger(attempt.number, "workflow attempt number");
   if (!new Set(["agent", "command", "measurement", "verification", "apply"]).has(attempt.effect)
     || !new Set(["running", "waiting", "completed", "failed", "stopped", "cancelled"]).has(attempt.status)) {
-    throw new TypeError("Invalid workflow v17 attempt kind or status");
+    throw new TypeError("Invalid workflow attempt kind or status");
   }
-  if (attempt.executionId) assertIdentifier(attempt.executionId, "workflow v17 attempt execution id");
+  if (attempt.executionId) assertIdentifier(attempt.executionId, "workflow attempt execution id");
   canonicalJsonValue(attempt.usage, jsonLimits());
   if (attempt.resources) canonicalJsonValue(attempt.resources, jsonLimits());
-  assertIsoDate(attempt.createdAt, "workflow v17 attempt createdAt");
-  assertIsoDate(attempt.updatedAt, "workflow v17 attempt updatedAt");
-  if (attempt.endedAt) assertIsoDate(attempt.endedAt, "workflow v17 attempt endedAt");
+  assertIsoDate(attempt.createdAt, "workflow attempt createdAt");
+  assertIsoDate(attempt.updatedAt, "workflow attempt updatedAt");
+  if (attempt.endedAt) assertIsoDate(attempt.endedAt, "workflow attempt endedAt");
   if (["running", "waiting"].includes(attempt.status) === Boolean(attempt.endedAt)) {
-    throw new TypeError("Workflow v17 attempt terminal fields are inconsistent");
+    throw new TypeError("Workflow attempt terminal fields are inconsistent");
   }
 }
 
 function assertControlRequestRecord(request: WorkflowControlRequestRecord): void {
-  assertIdentifier(request.requestId, "workflow v17 control request id");
-  assertIdentifier(request.runId, "workflow v17 control request run id");
+  assertIdentifier(request.requestId, "workflow control request id");
+  assertIdentifier(request.runId, "workflow control request run id");
   if (!new Set([
     "pause", "resume", "stop", "stop-effect", "ask-response", "apply-approve", "apply-reject",
-  ]).has(request.kind)) throw new TypeError("Workflow v17 control request kind is invalid");
-  if (request.targetId) assertIdentifier(request.targetId, "workflow v17 control target id");
-  if (request.challengeHash) assertHash(request.challengeHash, "workflow v17 control challenge hash");
+  ]).has(request.kind)) throw new TypeError("Workflow control request kind is invalid");
+  if (request.targetId) assertIdentifier(request.targetId, "workflow control target id");
+  if (request.challengeHash) assertHash(request.challengeHash, "workflow control challenge hash");
   if (request.value !== undefined) canonicalJsonValue(request.value, jsonLimits());
-  assertText(request.actor, "workflow v17 control actor", 512);
+  assertText(request.actor, "workflow control actor", 512);
   if (!new Set(["pending", "processed", "rejected"]).has(request.status)) {
-    throw new TypeError("Workflow v17 control request status is invalid");
+    throw new TypeError("Workflow control request status is invalid");
   }
   if (request.reason) canonicalJsonValue(request.reason, jsonLimits());
-  assertIsoDate(request.requestedAt, "workflow v17 control request time");
-  if (request.processedAt) assertIsoDate(request.processedAt, "workflow v17 control processed time");
+  assertIsoDate(request.requestedAt, "workflow control request time");
+  if (request.processedAt) assertIsoDate(request.processedAt, "workflow control processed time");
 }
 
 function assertWorkspaceCheckpoint(checkpoint: WorkflowWorkspaceCheckpointRecord): void {
-  assertIdentifier(checkpoint.checkpointId, "workflow v17 checkpoint id");
-  assertIdentifier(checkpoint.runId, "workflow v17 checkpoint run id");
-  assertIdentifier(checkpoint.operationId, "workflow v17 checkpoint operation id");
-  assertIdentifier(checkpoint.workspaceId, "workflow v17 checkpoint workspace id");
-  assertHash(checkpoint.treeHash, "workflow v17 checkpoint tree hash");
-  if (checkpoint.lineageHash) assertHash(checkpoint.lineageHash, "workflow v17 checkpoint lineage hash");
-  if (checkpoint.writeScopeHash) assertHash(checkpoint.writeScopeHash, "workflow v17 checkpoint write scope hash");
-  assertRelativeStoragePath(checkpoint.storagePath, "workflow v17 checkpoint storage path");
-  assertIsoDate(checkpoint.createdAt, "workflow v17 checkpoint time");
+  assertIdentifier(checkpoint.checkpointId, "workflow checkpoint id");
+  assertIdentifier(checkpoint.runId, "workflow checkpoint run id");
+  assertIdentifier(checkpoint.operationId, "workflow checkpoint operation id");
+  assertIdentifier(checkpoint.workspaceId, "workflow checkpoint workspace id");
+  assertHash(checkpoint.treeHash, "workflow checkpoint tree hash");
+  if (checkpoint.lineageHash) assertHash(checkpoint.lineageHash, "workflow checkpoint lineage hash");
+  if (checkpoint.writeScopeHash) assertHash(checkpoint.writeScopeHash, "workflow checkpoint write scope hash");
+  assertRelativeStoragePath(checkpoint.storagePath, "workflow checkpoint storage path");
+  assertIsoDate(checkpoint.createdAt, "workflow checkpoint time");
 }
 
 function assertRunTransitionInput(input: TransitionWorkflowRunInput): void {
   if (!new Set<WorkflowRunStatus>(["queued", "running", "waiting", "paused", "completed", "failed", "stopped"]).has(input.status)) {
-    throw new TypeError("Invalid workflow v17 run transition status");
+    throw new TypeError("Invalid workflow run transition status");
   }
   if (input.reason) canonicalJsonValue(input.reason, jsonLimits());
-  if (input.currentOperationId) assertIdentifier(input.currentOperationId, "workflow v17 current operation id");
+  if (input.currentOperationId) assertIdentifier(input.currentOperationId, "workflow current operation id");
   if (input.status === "completed") {
-    if (!input.rootTerminalKey) throw new TypeError("Completed workflow v17 run requires root terminal key");
-    assertHash(input.rootTerminalKey, "workflow v17 root terminal key");
+    if (!input.rootTerminalKey) throw new TypeError("Completed workflow run requires root terminal key");
+    assertHash(input.rootTerminalKey, "workflow root terminal key");
     canonicalJsonValue(input.result ?? null, jsonLimits());
   } else if (input.rootTerminalKey !== undefined) {
-    throw new TypeError("Only completed workflow v17 run accepts root terminal key");
+    throw new TypeError("Only completed workflow run accepts root terminal key");
   } else if (input.result !== undefined) {
-    throw new TypeError("Only completed workflow v17 run accepts a result");
+    throw new TypeError("Only completed workflow run accepts a result");
   }
-  assertIsoDate(input.at, "workflow v17 run transition time");
+  assertIsoDate(input.at, "workflow run transition time");
 }
 
 function assertRunTransition(from: WorkflowRunStatus, to: WorkflowRunStatus): void {
@@ -4274,7 +4256,7 @@ function assertRunTransition(from: WorkflowRunStatus, to: WorkflowRunStatus): vo
     failed: [],
     stopped: [],
   };
-  if (!allowed[from].includes(to)) throw state(`Workflow v17 run cannot transition from ${from} to ${to}`);
+  if (!allowed[from].includes(to)) throw state(`Workflow run cannot transition from ${from} to ${to}`);
 }
 
 function childScopePath(
@@ -4287,14 +4269,14 @@ function childScopePath(
 
 function operationPath(scopePath: string, cursor: number): string {
   assertScopePath(scopePath);
-  assertNonNegativeInteger(cursor, "workflow v17 operation cursor");
-  if (cursor > 999_999) throw new TypeError("Workflow v17 operation cursor exceeds path bound");
+  assertNonNegativeInteger(cursor, "workflow operation cursor");
+  if (cursor > 999_999) throw new TypeError("Workflow operation cursor exceeds path bound");
   return `${scopePath}/${String(cursor).padStart(6, "0")}`;
 }
 
 function assertScopePath(value: string): void {
   if (typeof value !== "string" || value.length < 3 || value.length > 4_096) {
-    throw new TypeError("Invalid workflow v17 scope path");
+    throw new TypeError("Invalid workflow scope path");
   }
   const segments = value.split("/");
   if (segments[0] !== "run" || segments.some((segment, index) => {
@@ -4302,14 +4284,14 @@ function assertScopePath(value: string): void {
     return !/^\d{6}$/u.test(segment)
       && segment !== "candidate"
       && !/^(?:branch|item):[a-z][a-z0-9_-]{0,63}$/u.test(segment);
-  })) throw new TypeError("Invalid workflow v17 scope path");
+  })) throw new TypeError("Invalid workflow scope path");
   const tail = segments.at(-1)!;
-  if (value !== "run" && /^\d{6}$/u.test(tail)) throw new TypeError("Workflow v17 scope path ends in an operation cursor");
+  if (value !== "run" && /^\d{6}$/u.test(tail)) throw new TypeError("Workflow scope path ends in an operation cursor");
 }
 
 function assertOperationPath(value: string): void {
   if (typeof value !== "string" || value.length > 4_096 || !/\/\d{6}$/u.test(value)) {
-    throw new TypeError("Invalid workflow v17 operation path");
+    throw new TypeError("Invalid workflow operation path");
   }
   const scope = value.slice(0, value.lastIndexOf("/"));
   assertScopePath(scope);
@@ -4323,7 +4305,7 @@ function assertJsonPointer(value: string, label: string): void {
 }
 
 function assertLaneKey(value: string): void {
-  if (typeof value !== "string" || !LANE_KEY.test(value)) throw new TypeError("Invalid workflow v17 lane key");
+  if (typeof value !== "string" || !LANE_KEY.test(value)) throw new TypeError("Invalid workflow lane key");
 }
 
 function assertLaneOrCandidateKey(value: string): void {
@@ -4331,36 +4313,36 @@ function assertLaneOrCandidateKey(value: string): void {
 }
 
 function assertSourceSite(value: string): void {
-  if (typeof value !== "string" || !SOURCE_SITE.test(value)) throw new TypeError("Invalid workflow v17 source site");
+  if (typeof value !== "string" || !SOURCE_SITE.test(value)) throw new TypeError("Invalid workflow source site");
 }
 
 function assertWorkflowMeasurement(input: Omit<WorkflowMeasurementRecord, "runId">): void {
-  assertIdentifier(input.measurementId, "workflow v17 measurement id");
-  assertIdentifier(input.operationId, "workflow v17 measurement operation id");
-  assertIdentifier(input.metricSetId, "workflow v17 measurement metric-set id");
-  assertHash(input.profileHash, "workflow v17 measurement profile hash");
-  assertHash(input.commandHash, "workflow v17 measurement command hash");
-  assertHash(input.environmentHash, "workflow v17 measurement environment hash");
-  assertHash(input.workspaceTreeHash, "workflow v17 measurement workspace tree hash");
-  assertHash(input.bindingHash, "workflow v17 measurement binding hash");
-  assertHash(input.artifactDigest, "workflow v17 measurement artifact digest");
+  assertIdentifier(input.measurementId, "workflow measurement id");
+  assertIdentifier(input.operationId, "workflow measurement operation id");
+  assertIdentifier(input.metricSetId, "workflow measurement metric-set id");
+  assertHash(input.profileHash, "workflow measurement profile hash");
+  assertHash(input.commandHash, "workflow measurement command hash");
+  assertHash(input.environmentHash, "workflow measurement environment hash");
+  assertHash(input.workspaceTreeHash, "workflow measurement workspace tree hash");
+  assertHash(input.bindingHash, "workflow measurement binding hash");
+  assertHash(input.artifactDigest, "workflow measurement artifact digest");
   if (input.diagnosticsArtifactDigest) {
-    assertHash(input.diagnosticsArtifactDigest, "workflow v17 measurement diagnostics artifact digest");
+    assertHash(input.diagnosticsArtifactDigest, "workflow measurement diagnostics artifact digest");
   }
-  if (input.candidateId) assertIdentifier(input.candidateId, "workflow v17 measurement candidate id");
+  if (input.candidateId) assertIdentifier(input.candidateId, "workflow measurement candidate id");
   const profile = input.profile;
   if (!profile || profile.id !== `${profile.namespace}:${profile.name}` || profile.hash !== input.profileHash) {
-    throw new TypeError("Workflow v17 measurement profile identity is invalid");
+    throw new TypeError("Workflow measurement profile identity is invalid");
   }
   const { id: _id, namespace, path: _path, hash, ...definition } = profile;
   const normalized = normalizeMeasurementProfile(definition);
   if (stableJson(normalized) !== stableJson(definition)
     || stableHash({ namespace, definition }) !== hash) {
-    throw new TypeError("Workflow v17 measurement profile snapshot is corrupt");
+    throw new TypeError("Workflow measurement profile snapshot is corrupt");
   }
   const environment = canonicalJsonValue(input.environment, jsonLimits()) as JsonObject;
   if (stableHash(environment) !== input.environmentHash) {
-    throw new TypeError("Workflow v17 measurement environment fingerprint is invalid");
+    throw new TypeError("Workflow measurement environment fingerprint is invalid");
   }
   const delta = normalizeMetricCohortDelta(input.delta);
   const observations = canonicalJsonValue(input.observations, jsonLimits()) as JsonObject;
@@ -4372,10 +4354,10 @@ function assertWorkflowMeasurement(input: Omit<WorkflowMeasurementRecord, "runId
     samples: value.samples,
   }]));
   if (stableJson(observations) !== stableJson(expectedObservations)) {
-    throw new TypeError("Workflow v17 measurement observations differ from their cohort");
+    throw new TypeError("Workflow measurement observations differ from their cohort");
   }
   if (!Array.isArray(input.samples) || input.samples.length < 1) {
-    throw new TypeError("Workflow v17 measurement samples are empty");
+    throw new TypeError("Workflow measurement samples are empty");
   }
   for (let ordinal = 0; ordinal < input.samples.length; ordinal++) {
     const sample = input.samples[ordinal]!;
@@ -4384,37 +4366,37 @@ function assertWorkflowMeasurement(input: Omit<WorkflowMeasurementRecord, "runId
       || !["completed", "timed-out", "output-limited", "infrastructure-failure", "cancelled"].includes(sample.status)
       || (sample.exitCode !== null && !Number.isSafeInteger(sample.exitCode))
       || typeof sample.timedOut !== "boolean") {
-      throw new TypeError(`Workflow v17 measurement sample ${ordinal} is invalid`);
+      throw new TypeError(`Workflow measurement sample ${ordinal} is invalid`);
     }
-    assertIdentifier(sample.executionId, `workflow v17 measurement sample ${ordinal} execution id`);
-    assertHash(sample.stdoutArtifactDigest, `workflow v17 measurement sample ${ordinal} stdout artifact`);
-    assertHash(sample.stderrArtifactDigest, `workflow v17 measurement sample ${ordinal} stderr artifact`);
-    assertIsoDate(sample.startedAt, `workflow v17 measurement sample ${ordinal} start`);
-    assertIsoDate(sample.endedAt, `workflow v17 measurement sample ${ordinal} end`);
+    assertIdentifier(sample.executionId, `workflow measurement sample ${ordinal} execution id`);
+    assertHash(sample.stdoutArtifactDigest, `workflow measurement sample ${ordinal} stdout artifact`);
+    assertHash(sample.stderrArtifactDigest, `workflow measurement sample ${ordinal} stderr artifact`);
+    assertIsoDate(sample.startedAt, `workflow measurement sample ${ordinal} start`);
+    assertIsoDate(sample.endedAt, `workflow measurement sample ${ordinal} end`);
     if (sample.resources) canonicalJsonValue(sample.resources, jsonLimits());
   }
-  assertIsoDate(input.createdAt, "workflow v17 measurement time");
+  assertIsoDate(input.createdAt, "workflow measurement time");
 }
 
 function assertWorkflowExperiment(input: Omit<WorkflowExperimentRecord, "runId">): void {
-  assertIdentifier(input.experimentId, "workflow v17 experiment id");
-  assertIdentifier(input.operationId, "workflow v17 experiment operation id");
-  assertIdentifier(input.candidateId, "workflow v17 experiment candidate id");
-  assertIdentifier(input.measurementId, "workflow v17 experiment measurement id");
+  assertIdentifier(input.experimentId, "workflow experiment id");
+  assertIdentifier(input.operationId, "workflow experiment operation id");
+  assertIdentifier(input.candidateId, "workflow experiment candidate id");
+  assertIdentifier(input.measurementId, "workflow experiment measurement id");
   if (input.disposition !== "accepted" && input.disposition !== "rejected") {
-    throw new TypeError("Workflow v17 experiment disposition is invalid");
+    throw new TypeError("Workflow experiment disposition is invalid");
   }
-  assertText(input.learned, "workflow v17 experiment lesson", 8_000);
-  if (!input.learned.trim()) throw new TypeError("Workflow v17 experiment lesson is empty");
-  assertHash(input.bindingHash, "workflow v17 experiment binding hash");
-  assertHash(input.artifactDigest, "workflow v17 experiment artifact digest");
-  assertIsoDate(input.createdAt, "workflow v17 experiment time");
+  assertText(input.learned, "workflow experiment lesson", 8_000);
+  if (!input.learned.trim()) throw new TypeError("Workflow experiment lesson is empty");
+  assertHash(input.bindingHash, "workflow experiment binding hash");
+  assertHash(input.artifactDigest, "workflow experiment artifact digest");
+  assertIsoDate(input.createdAt, "workflow experiment time");
 }
 
 function assertDisplayTitle(value: string): void {
   if (typeof value !== "string" || !value.trim() || Array.from(value).length > 192
     || /[\u0000-\u001f\u007f]/u.test(value)) {
-    throw new TypeError("Invalid workflow v17 operation title");
+    throw new TypeError("Invalid workflow operation title");
   }
 }
 
@@ -4422,7 +4404,7 @@ function assertSemanticPath(value: string): void {
   if (typeof value !== "string" || !value || value.length > 4_096 || path.isAbsolute(value)
     || value.split("/").some((part) => !part || part === "." || part === "..")
     || /[\u0000-\u001f\u007f]/u.test(value)) {
-    throw new TypeError("Invalid workflow v17 semantic project path");
+    throw new TypeError("Invalid workflow semantic project path");
   }
 }
 
@@ -4442,25 +4424,25 @@ function laneOutcome(status: WorkflowScopeRecord["status"]): WorkflowStructuralJ
 }
 
 function assertEvent(event: WorkflowRunEvent): void {
-  assertIdentifier(event.runId, "workflow v17 event run id");
-  assertPositiveInteger(event.sequence, "workflow v17 event sequence");
+  assertIdentifier(event.runId, "workflow event run id");
+  assertPositiveInteger(event.sequence, "workflow event sequence");
   assertPositiveRevision(event.revision);
   assertEventType(event.type);
-  if (event.operationId) assertIdentifier(event.operationId, "workflow v17 event operation id");
-  if (event.scopeId) assertIdentifier(event.scopeId, "workflow v17 event scope id");
-  if (event.candidateId) assertIdentifier(event.candidateId, "workflow v17 event candidate id");
+  if (event.operationId) assertIdentifier(event.operationId, "workflow event operation id");
+  if (event.scopeId) assertIdentifier(event.scopeId, "workflow event scope id");
+  if (event.candidateId) assertIdentifier(event.candidateId, "workflow event candidate id");
   canonicalJsonValue(event.payload, jsonLimits());
-  assertIsoDate(event.at, "workflow v17 event time");
+  assertIsoDate(event.at, "workflow event time");
 }
 
 function assertEventType(value: string): void {
   if (typeof value !== "string" || !/^[a-z][a-z0-9-]{0,127}$/u.test(value)) {
-    throw new TypeError("Invalid workflow v17 event type");
+    throw new TypeError("Invalid workflow event type");
   }
 }
 
 function assertPositiveRevision(value: number): void {
-  assertPositiveInteger(value, "workflow v17 revision");
+  assertPositiveInteger(value, "workflow revision");
 }
 
 function assertExpectedRevision(actual: number, expected: number): void {
@@ -4502,9 +4484,9 @@ function jsonColumnRequired<T extends JsonValue>(row: SqlRow, key: string): T {
 function parseCanonicalJson<T extends JsonValue>(source: string, label: string): T {
   let parsed: unknown;
   try { parsed = JSON.parse(source); }
-  catch { throw corrupt(`Workflow v17 column ${label} contains invalid JSON`); }
+  catch { throw corrupt(`Workflow column ${label} contains invalid JSON`); }
   const canonical = canonicalJsonValue(parsed, jsonLimits());
-  if (stableJson(canonical) !== source) throw corrupt(`Workflow v17 column ${label} is not canonical JSON`);
+  if (stableJson(canonical) !== source) throw corrupt(`Workflow column ${label} is not canonical JSON`);
   return deepFreezeJson(canonical) as T;
 }
 
@@ -4518,7 +4500,7 @@ function jsonLimits() {
 }
 
 function pageLimit(value = 256): number {
-  if (!Number.isSafeInteger(value) || value < 1 || value > 1_024) throw new TypeError("Invalid workflow v17 page limit");
+  if (!Number.isSafeInteger(value) || value < 1 || value > 1_024) throw new TypeError("Invalid workflow page limit");
   return value;
 }
 
@@ -4530,7 +4512,7 @@ function openConnection(
 ): DatabaseSync {
   const busyTimeoutMs = options.busyTimeoutMs ?? WORKFLOW_RUN_DATABASE_BUSY_TIMEOUT_MS;
   if (!Number.isSafeInteger(busyTimeoutMs) || busyTimeoutMs < 1 || busyTimeoutMs > 60_000) {
-    throw new TypeError("Invalid workflow v17 SQLite busy timeout");
+    throw new TypeError("Invalid workflow SQLite busy timeout");
   }
   const database = new DatabaseSync(databasePath, {
     readOnly,
@@ -4540,12 +4522,8 @@ function openConnection(
   try {
     database.exec(`PRAGMA foreign_keys = ON; PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA synchronous = FULL`);
     if (!creating) {
-      const version = pragmaNumber(database, "user_version");
-      if (version !== WORKFLOW_RUN_DATABASE_SCHEMA_VERSION) {
-        throw new WorkflowRunDatabaseVersionError(version);
-      }
       const mode = pragmaText(database, "journal_mode").toLowerCase();
-      if (mode !== "wal") throw corrupt(`Workflow v17 database journal mode is ${mode}, expected WAL`);
+      if (mode !== "wal") throw corrupt(`Workflow database journal mode is ${mode}, expected WAL`);
     }
     return database;
   } catch (error) {
@@ -4557,7 +4535,7 @@ function openConnection(
 function configureNewConnection(database: DatabaseSync): void {
   const row = database.prepare("PRAGMA journal_mode = WAL").get() as SqlRow | undefined;
   if (!row || requiredString(row, "journal_mode").toLowerCase() !== "wal") {
-    throw corrupt("SQLite refused workflow v17 WAL mode");
+    throw corrupt("SQLite refused workflow WAL mode");
   }
   database.exec("PRAGMA foreign_keys = ON; PRAGMA synchronous = FULL");
 }
@@ -4566,14 +4544,14 @@ function pragmaNumber(database: DatabaseSync, name: string): number {
   const row = database.prepare(`PRAGMA ${name}`).get() as SqlRow | undefined;
   const value = row ? Object.values(row)[0] : undefined;
   const number = typeof value === "bigint" ? Number(value) : value;
-  if (typeof number !== "number" || !Number.isFinite(number)) throw corrupt(`Workflow v17 PRAGMA ${name} is invalid`);
+  if (typeof number !== "number" || !Number.isFinite(number)) throw corrupt(`Workflow PRAGMA ${name} is invalid`);
   return number;
 }
 
 function pragmaText(database: DatabaseSync, name: string): string {
   const row = database.prepare(`PRAGMA ${name}`).get() as SqlRow | undefined;
   const value = row ? Object.values(row)[0] : undefined;
-  if (typeof value !== "string") throw corrupt(`Workflow v17 PRAGMA ${name} is invalid`);
+  if (typeof value !== "string") throw corrupt(`Workflow PRAGMA ${name} is invalid`);
   return value;
 }
 
@@ -4590,7 +4568,7 @@ function normalizeConstraint(error: unknown): unknown {
     || error instanceof WorkflowRunDatabaseCorruptionError
     || error instanceof TypeError) return error;
   const message = error instanceof Error ? error.message : String(error);
-  if (/constraint|foreign key|unique/iu.test(message)) return state(`Workflow v17 database rejected state: ${message}`);
+  if (/constraint|foreign key|unique/iu.test(message)) return state(`Workflow database rejected state: ${message}`);
   return error;
 }
 

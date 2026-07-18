@@ -53,7 +53,6 @@ interface ConnectionState {
 }
 
 interface DurableToolReceipt {
-  formatVersion: 1;
   executionId: string;
   toolCallId: string;
   toolName: string;
@@ -62,7 +61,7 @@ interface DurableToolReceipt {
   committedAt: string;
 }
 
-/** Minimal schema-4 agent protocol authority with filesystem-durable tool receipts. */
+/** Minimal agent protocol authority with filesystem-durable tool receipts. */
 export class AgentProtocolServer implements AsyncDisposable {
   readonly runDir: string;
   readonly socketPath: string;
@@ -202,14 +201,14 @@ export class AgentProtocolServer implements AsyncDisposable {
             this.failure(socket, "authentication", new Error("Agent authentication failed")); return;
           }
           state.binding = binding;
-          this.send(socket, { type: "authenticated", protocolVersion: 1, ok: true });
+          this.send(socket, { type: "authenticated", ok: true });
           return;
         }
         if (message.type === "authenticate") { socket.destroy(); return; }
         if (message.type === "agent-event") {
           try {
             await this.options.eventSink?.emit(message.event as unknown as AgentEvent);
-            this.send(socket, { type: "response", protocolVersion: 1, requestId: message.requestId, ok: true, result: null });
+            this.send(socket, { type: "response", requestId: message.requestId, ok: true, result: null });
           } catch (error) { this.responseFailure(socket, message.requestId, error); }
           return;
         }
@@ -220,7 +219,7 @@ export class AgentProtocolServer implements AsyncDisposable {
         await prior;
         try {
           const result = await this.tool(binding, message);
-          this.send(socket, { type: "response", protocolVersion: 1, requestId: message.requestId, ok: true, result });
+          this.send(socket, { type: "response", requestId: message.requestId, ok: true, result });
         } catch (error) { this.responseFailure(socket, message.requestId, error); }
         finally { release(); }
       }).catch(() => { socket.destroy(); });
@@ -231,7 +230,7 @@ export class AgentProtocolServer implements AsyncDisposable {
     authorized: AuthorizedExecution,
     message: Extract<AgentProtocolClientMessage, { type: "tool-request" }>,
   ): Promise<JsonValue> {
-    const requestHash = stableHash({ protocolVersion: 1, toolName: message.toolName, payload: message.payload,
+    const requestHash = stableHash({ toolName: message.toolName, payload: message.payload,
       ...(message.toolName === "finish_work" ? { schemaHash: authorized.finishSchemaHash } : {}) });
     const existing = await this.readReceipt(authorized.binding.executionId, message.toolCallId);
     if (existing) {
@@ -262,7 +261,6 @@ export class AgentProtocolServer implements AsyncDisposable {
       response = await this.mediated(authorized, message.toolName, message.toolCallId, message.payload);
     }
     const receipt: DurableToolReceipt = {
-      formatVersion: 1,
       executionId: authorized.binding.executionId,
       toolCallId: message.toolCallId,
       toolName: message.toolName,
@@ -354,7 +352,8 @@ export class AgentProtocolServer implements AsyncDisposable {
     try {
       const source = await fs.promises.readFile(file, "utf8");
       const value = JSON.parse(source) as DurableToolReceipt;
-      if (source !== `${stableJson(value)}\n` || value.formatVersion !== 1
+      if (source !== `${stableJson(value)}\n`
+        || Object.keys(value).sort().join(",") !== "committedAt,executionId,requestHash,response,toolCallId,toolName"
         || value.executionId !== executionId || value.toolCallId !== toolCallId) {
         throw new Error("Agent tool receipt is corrupt");
       }
@@ -395,11 +394,11 @@ export class AgentProtocolServer implements AsyncDisposable {
     socket.write(`${stableJson(message)}\n`);
   }
   private failure(socket: net.Socket, _requestId: string, error: unknown): void {
-    this.send(socket, { type: "authenticated", protocolVersion: 1, ok: false, error: protocolErrorBody(error) });
+    this.send(socket, { type: "authenticated", ok: false, error: protocolErrorBody(error) });
     socket.end();
   }
   private responseFailure(socket: net.Socket, requestId: string, error: unknown): void {
-    this.send(socket, { type: "response", protocolVersion: 1, requestId, ok: false, error: protocolErrorBody(error) });
+    this.send(socket, { type: "response", requestId, ok: false, error: protocolErrorBody(error) });
   }
   private timestamp(): string {
     const value = (this.options.now ?? (() => new Date()))();

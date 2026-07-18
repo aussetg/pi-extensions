@@ -16,7 +16,7 @@ export interface WorkflowRunCoordinatorOptions {
   execute?: (database: WorkflowRunDatabase, signal: AbortSignal) => Promise<unknown>;
 }
 
-/** Short-lived schema-4 owner. Control requests are durable; systemd owns process lifetime. */
+/** Short-lived owner. Control requests are durable; systemd owns process lifetime. */
 export class WorkflowRunCoordinator {
   readonly runDir: string;
   private readonly pollIntervalMs: number;

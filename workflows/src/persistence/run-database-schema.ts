@@ -1,11 +1,6 @@
-export const WORKFLOW_RUN_DATABASE_SCHEMA_VERSION = 4;
 export const WORKFLOW_RUN_DATABASE_BUSY_TIMEOUT_MS = 5_000;
 
-/**
- * The v17 database is a clean per-run rebuild. It deliberately has no migration path from the
- * completion-ordered schema 3: old files remain immutable legacy evidence.
- */
-export const WORKFLOW_RUN_DATABASE_SCHEMA_SQL = String.raw`
+export const WORKFLOW_RUN_DATABASE_SQL = String.raw`
 CREATE TABLE runs (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   run_id TEXT NOT NULL UNIQUE,
@@ -481,5 +476,4 @@ CREATE TABLE candidate_applies (
   applied_at TEXT NOT NULL
 ) STRICT;
 
-PRAGMA user_version = ${WORKFLOW_RUN_DATABASE_SCHEMA_VERSION};
 `;

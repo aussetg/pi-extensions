@@ -16,7 +16,6 @@ export interface FlowChallengeProjection {
 }
 
 export interface FlowProtocolEnvelope {
-  formatVersion: 1;
   kind: string;
   ok: boolean;
   at: string;
@@ -28,7 +27,6 @@ export interface FlowProtocolEnvelope {
 }
 
 export interface FlowToolResultDetails {
-  formatVersion?: 1;
   runId?: string;
   projection?: WorkflowRunProjection;
   resultPreview?: string;
@@ -37,12 +35,11 @@ export interface FlowToolResultDetails {
   error?: { name: string; message: string };
 }
 
-export function createFlowEnvelope(input: Omit<FlowProtocolEnvelope, "formatVersion" | "at">): FlowProtocolEnvelope {
-  const envelope: FlowProtocolEnvelope = { formatVersion: 1, at: new Date().toISOString(), ...input };
+export function createFlowEnvelope(input: Omit<FlowProtocolEnvelope, "at">): FlowProtocolEnvelope {
+  const envelope: FlowProtocolEnvelope = { at: new Date().toISOString(), ...input };
   const bytes = Buffer.byteLength(stableJson(envelope));
   if (bytes <= FLOW_PROTOCOL_MAX_BYTES) return Object.freeze(envelope);
   let bounded: FlowProtocolEnvelope = {
-    formatVersion: 1,
     kind: envelope.kind,
     ok: envelope.ok,
     at: envelope.at,
@@ -65,7 +62,6 @@ export function createFlowEnvelope(input: Omit<FlowProtocolEnvelope, "formatVers
   }
   if (Buffer.byteLength(stableJson(bounded)) > FLOW_PROTOCOL_MAX_BYTES) {
     bounded = {
-      formatVersion: 1,
       kind: envelope.kind,
       ok: false,
       at: envelope.at,
@@ -95,7 +91,6 @@ export function boundFlowToolResultDetails(details: FlowToolResultDetails): Flow
   if (Buffer.byteLength(stableJson(bounded)) > FLOW_PROTOCOL_MAX_BYTES) delete bounded.challenge;
   if (Buffer.byteLength(stableJson(bounded)) > FLOW_PROTOCOL_MAX_BYTES) {
     bounded = {
-      formatVersion: 1,
       ...(details.runId ? { runId: details.runId } : {}),
       ...(details.projection ? { projection: details.projection } : {}),
       error: { name: "FlowProjectionLimitError", message: "Tool details exceeded their serialized byte bound" },

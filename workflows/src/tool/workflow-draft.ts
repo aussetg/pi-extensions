@@ -37,8 +37,8 @@ export function registerWorkflowDraftTool(pi: ExtensionAPI, drafts: WorkflowDraf
           if (params.source === undefined) throw new Error("workflow_draft create requires TypeScript source");
           if (params.expectedDraftHash !== undefined) throw new Error("workflow_draft create does not accept expectedDraftHash");
           const draft = await drafts.create({ namespace, name: params.name, source: params.source }, ctx);
-          return result(`Created v17 draft ${draft.id} at ${draft.sourceHash}`, {
-            runtimeVersion: 17, action: "create", draftId: draft.id, sourceHash: draft.sourceHash,
+          return result(`Created draft ${draft.id} at ${draft.sourceHash}`, {
+            action: "create", draftId: draft.id, sourceHash: draft.sourceHash,
           });
         }
         if (params.action === "replace") {
@@ -51,8 +51,8 @@ export function registerWorkflowDraftTool(pi: ExtensionAPI, drafts: WorkflowDraf
             source: params.source,
             expectedSourceHash: params.expectedDraftHash,
           }, ctx);
-          return result(`Replaced v17 draft ${draft.id} with ${draft.sourceHash}`, {
-            runtimeVersion: 17, action: "replace", draftId: draft.id, sourceHash: draft.sourceHash,
+          return result(`Replaced draft ${draft.id} with ${draft.sourceHash}`, {
+            action: "replace", draftId: draft.id, sourceHash: draft.sourceHash,
           });
         }
         if (params.source !== undefined || params.expectedDraftHash !== undefined) {
@@ -61,12 +61,12 @@ export function registerWorkflowDraftTool(pi: ExtensionAPI, drafts: WorkflowDraf
         const review = await drafts.validate(selector, ctx);
         const projection = projectWorkflowDraftReview(review);
         const rendered = truncateBytes(
-          `${review.valid ? "Valid" : "Invalid"} v17 draft ${review.draftId} · review ${review.reviewHash}\n${stableJson(projection)}`,
+          `${review.valid ? "Valid" : "Invalid"} draft ${review.draftId} · review ${review.reviewHash}\n${stableJson(projection)}`,
           48 * 1024,
           "\n[… validation truncated; use /flow validate for the bounded review …]",
         );
         return result(rendered, {
-          runtimeVersion: 17, action: "validate", draftId: review.draftId,
+          action: "validate", draftId: review.draftId,
           sourceHash: review.sourceHash, review: projection,
         });
       });

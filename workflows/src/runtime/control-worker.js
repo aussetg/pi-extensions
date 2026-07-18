@@ -3,8 +3,7 @@ import vm from "node:vm";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createWorkflowControlRealm } from "./control-realm.js";
 
-const PROTOCOL_VERSION = 17;
-const RUNTIME_API_HASH = "sha256:3ea83475c353de4c9479b0f27664cabd3aa6413e956c27ce0ad9a39ce91cd612";
+const RUNTIME_API_HASH = "sha256:266734901150f4999a2c07585c1522188ffc2584cc61e65b3008995b07fbcf7c";
 const WIRE_BYTES = 4 * 1024 * 1024;
 const WIRE_DEPTH = 48;
 const WIRE_NODES = 50_000;
@@ -40,14 +39,14 @@ process.on("message", message => {
     if (phase === "awaiting-initialize") {
       configuration = parseInitialize(message);
       phase = "running";
-      send({ type: "initialized", protocolVersion: PROTOCOL_VERSION });
+      send({ type: "initialized" });
       startControl();
       return;
     }
     const parsed = parseRunningMessage(message);
     if (parsed.type === "host-response") {
       const pending = pendingHostCalls.get(parsed.requestId);
-      if (!pending) throw new Error(`Unknown workflow v17 host response ${parsed.requestId}`);
+      if (!pending) throw new Error(`Unknown workflow host response ${parsed.requestId}`);
       pendingHostCalls.delete(parsed.requestId);
       if (parsed.error !== undefined) pending.reject(deserializeError(parsed.error));
       else pending.resolve(decodeWire(parsed.value));
@@ -63,41 +62,40 @@ process.on("uncaughtException", error => finish({ type: "done", error: serialize
 process.on("unhandledRejection", error => finish({ type: "done", error: serializeError(error) }));
 
 function parseInitialize(value) {
-  const message = requireRecord(value, "workflow v17 initialize message");
-  if (message.type !== "initialize") throw new Error(`Expected workflow v17 initialize, received ${String(message.type)}`);
+  const message = requireRecord(value, "workflow initialize message");
+  if (message.type !== "initialize") throw new Error(`Expected workflow initialize, received ${String(message.type)}`);
   const expected = [
-    "type", "protocolVersion", "runtimeApiHash", "executableSource", "workflowName", "metadata",
+    "type", "runtimeApiHash", "executableSource", "workflowName", "metadata",
     "descriptors", "operationSites", "args", "segmentTimeoutMs", "definitionOnly",
   ];
   if (message.snapshot !== undefined) expected.push("snapshot");
-  assertExactKeys(message, expected, "workflow v17 initialize message");
-  if (message.protocolVersion !== PROTOCOL_VERSION) throw new Error("Workflow v17 control protocol version is invalid");
-  if (message.runtimeApiHash !== RUNTIME_API_HASH) throw new Error("Workflow v17 runtime API hash is invalid");
+  assertExactKeys(message, expected, "workflow initialize message");
+  if (message.runtimeApiHash !== RUNTIME_API_HASH) throw new Error("Workflow runtime API hash is invalid");
   if (typeof message.executableSource !== "string" || Buffer.byteLength(message.executableSource) < 1
-    || Buffer.byteLength(message.executableSource) > SOURCE_BYTES) throw new Error("Workflow v17 source exceeds its limit");
+    || Buffer.byteLength(message.executableSource) > SOURCE_BYTES) throw new Error("Workflow source exceeds its limit");
   if (typeof message.workflowName !== "string" || !/^[a-z][a-z0-9_-]{0,63}$/u.test(message.workflowName)) {
-    throw new Error("Workflow v17 installed name is invalid");
+    throw new Error("Workflow installed name is invalid");
   }
   if (!Number.isSafeInteger(message.segmentTimeoutMs) || message.segmentTimeoutMs < 25 || message.segmentTimeoutMs > 10_000) {
-    throw new Error("Workflow v17 control segment timeout is invalid");
+    throw new Error("Workflow control segment timeout is invalid");
   }
-  if (typeof message.definitionOnly !== "boolean") throw new Error("Workflow v17 definition-only flag is invalid");
+  if (typeof message.definitionOnly !== "boolean") throw new Error("Workflow definition-only flag is invalid");
   const metadataWire = requireWire(message.metadata);
   const args = requireWire(message.args);
   const snapshot = message.snapshot === undefined ? undefined : requireWire(message.snapshot);
-  if (!Array.isArray(message.descriptors)) throw new Error("Workflow v17 descriptor configuration is invalid");
+  if (!Array.isArray(message.descriptors)) throw new Error("Workflow descriptor configuration is invalid");
   const descriptors = message.descriptors.map((value, index) => {
-    const descriptor = requireRecord(value, `workflow v17 descriptor ${index}`);
-    assertExactKeys(descriptor, ["identity", "definition"], `workflow v17 descriptor ${index}`);
+    const descriptor = requireRecord(value, `workflow descriptor ${index}`);
+    assertExactKeys(descriptor, ["identity", "definition"], `workflow descriptor ${index}`);
     return { identity: descriptorIdentity(descriptor.identity), definitionWire: requireWire(descriptor.definition) };
   });
-  if (!Array.isArray(message.operationSites)) throw new Error("Workflow v17 operation sites are invalid");
+  if (!Array.isArray(message.operationSites)) throw new Error("Workflow operation sites are invalid");
   const operationSites = message.operationSites.map((value, index) => {
-    const site = requireRecord(value, `workflow v17 operation site ${index}`);
-    assertExactKeys(site, ["sourceSite", "method"], `workflow v17 operation site ${index}`);
+    const site = requireRecord(value, `workflow operation site ${index}`);
+    assertExactKeys(site, ["sourceSite", "method"], `workflow operation site ${index}`);
     if (typeof site.sourceSite !== "string" || !ID.test(site.sourceSite)
       || typeof site.method !== "string" || (!ASYNC_METHODS.includes(site.method) && !SYNC_METHODS.includes(site.method))) {
-      throw new Error(`Workflow v17 operation site ${index} is invalid`);
+      throw new Error(`Workflow operation site ${index} is invalid`);
     }
     return { sourceSite: site.sourceSite, method: site.method };
   });
@@ -115,16 +113,16 @@ function parseInitialize(value) {
 }
 
 function parseRunningMessage(value) {
-  const message = requireRecord(value, "workflow v17 host message");
+  const message = requireRecord(value, "workflow host message");
   if (message.type === "host-response") {
-    assertOutcomeKeys(message, ["type", "requestId"], "workflow v17 host-response");
+    assertOutcomeKeys(message, ["type", "requestId"], "workflow host-response");
     const base = { type: "host-response", requestId: requireId(message.requestId, "host request") };
     return Object.prototype.hasOwnProperty.call(message, "error")
       ? { ...base, error: parseSerializedError(message.error) }
       : { ...base, value: requireWire(message.value) };
   }
   if (message.type === "invoke-callback") {
-    assertExactKeys(message, ["type", "invocationId", "callbackId", "args"], "workflow v17 invoke-callback");
+    assertExactKeys(message, ["type", "invocationId", "callbackId", "args"], "workflow invoke-callback");
     return {
       type: "invoke-callback",
       invocationId: requireId(message.invocationId, "callback invocation"),
@@ -132,7 +130,7 @@ function parseRunningMessage(value) {
       args: requireWire(message.args),
     };
   }
-  throw new Error(`Unknown workflow v17 host message ${String(message.type)}`);
+  throw new Error(`Unknown workflow host message ${String(message.type)}`);
 }
 
 function hardenContext(context) {
@@ -189,7 +187,7 @@ function startControl() {
     operationSites: configuration.operationSites,
   });
   const args = controlRealm.deepFreeze(decodeWire(configuration.args));
-  if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("Workflow v17 arguments must be an object");
+  if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("Workflow arguments must be an object");
   const snapshot = configuration.snapshot === undefined ? undefined : decodeWire(configuration.snapshot);
   const flow = controlRealm.createFlow(snapshot !== undefined, snapshot);
   Object.defineProperties(sandbox, {
@@ -251,7 +249,7 @@ function startControl() {
   const File = undefined;
   const structuredClone = undefined;
   ${configuration.executableSource}
-  if (!__flowDefinition || typeof __flowDefinition.run !== "function") throw new Error("Invalid workflow v17 definition");
+  if (!__flowDefinition || typeof __flowDefinition.run !== "function") throw new Error("Invalid workflow definition");
   if (${configuration.definitionOnly === true ? "true" : "false"}) return { loaded: true, name: ${JSON.stringify(configuration.workflowName)} };
   return await (0, __flowDefinition.run)(__flowHostApi, __flowHostArgs);
 })()
@@ -278,7 +276,7 @@ function callHost(method, args) {
 
 async function bridgeHostCall(method, args) {
   try {
-    if (!ASYNC_METHODS.includes(method) || !Array.isArray(args)) throw new Error("Invalid workflow v17 host call");
+    if (!ASYNC_METHODS.includes(method) || !Array.isArray(args)) throw new Error("Invalid workflow host call");
     return await callHost(method, args);
   } catch (error) {
     throw controlRealm.createError(serializeError(error));
@@ -287,12 +285,12 @@ async function bridgeHostCall(method, args) {
 
 function bridgeHostSyncCall(method, args) {
   try {
-    if (!SYNC_METHODS.includes(method) || !Array.isArray(args)) throw new Error("Invalid workflow v17 synchronous call");
+    if (!SYNC_METHODS.includes(method) || !Array.isArray(args)) throw new Error("Invalid workflow synchronous call");
     const invocationId = currentInvocation();
     const requestId = `request-${nextRequest++}`;
     send({ type: "sync-call", requestId, invocationId, method, args: encodeWire(args) });
     const response = parseSyncResponse(readSyncResponse());
-    if (response.requestId !== requestId) throw new Error("Workflow v17 synchronous response id changed");
+    if (response.requestId !== requestId) throw new Error("Workflow synchronous response id changed");
     if (response.error !== undefined) throw deserializeError(response.error);
     return decodeWire(response.value);
   } catch (error) {
@@ -305,7 +303,7 @@ function bridgeMetricCall(referenceId, method, args) {
     if (typeof referenceId !== "string" || !ID.test(referenceId)
       || !["policy", "summary", "reachedTarget", "evaluate"].includes(method)
       || !Array.isArray(args)) {
-      throw new Error("Invalid workflow v17 metric-set call");
+      throw new Error("Invalid workflow metric-set call");
     }
     const invocationId = currentInvocation();
     const requestId = `request-${nextRequest++}`;
@@ -318,7 +316,7 @@ function bridgeMetricCall(referenceId, method, args) {
       args: encodeWire(args),
     });
     const response = parseMetricResponse(readSyncResponse());
-    if (response.requestId !== requestId) throw new Error("Workflow v17 metric response id changed");
+    if (response.requestId !== requestId) throw new Error("Workflow metric response id changed");
     if (response.error !== undefined) throw deserializeError(response.error);
     return decodeWire(response.value);
   } catch (error) {
@@ -331,13 +329,13 @@ async function invokeCallback(message) {
   if (!callback) {
     send({
       type: "callback-result", invocationId: message.invocationId,
-      error: serializeError(new Error(`Unknown workflow v17 callback ${message.callbackId}`)),
+      error: serializeError(new Error(`Unknown workflow callback ${message.callbackId}`)),
     });
     return;
   }
   try {
     const args = decodeWire(message.args);
-    if (!Array.isArray(args)) throw new Error("Workflow v17 callback arguments are invalid");
+    if (!Array.isArray(args)) throw new Error("Workflow callback arguments are invalid");
     const value = await invocation.run(message.invocationId, () => Promise.resolve(callback(...args)));
     send({ type: "callback-result", invocationId: message.invocationId, value: encodeWire(value) });
   } catch (error) {
@@ -353,7 +351,7 @@ function encodeWire(value) {
     if (current === undefined) return { type: "undefined" };
     if (current === null || typeof current === "boolean" || typeof current === "string") return { type: "primitive", value: current };
     if (typeof current === "number") {
-      if (!Number.isFinite(current) || Object.is(current, -0)) throw new Error("Workflow v17 values require finite numbers");
+      if (!Number.isFinite(current) || Object.is(current, -0)) throw new Error("Workflow values require finite numbers");
       return { type: "primitive", value: current };
     }
     if (typeof current === "function") {
@@ -365,7 +363,7 @@ function encodeWire(value) {
       }
       return { type: "callback", id };
     }
-    if (!current || typeof current !== "object") throw new Error(`Unsupported workflow v17 value ${typeof current}`);
+    if (!current || typeof current !== "object") throw new Error(`Unsupported workflow value ${typeof current}`);
     const sourceSite = controlRealm ? controlRealm.authority(current) : undefined;
     if (sourceSite) {
       if (sourceSite.family === "descriptor") return { type: "descriptor-ref", id: sourceSite.id, identity: sourceSite.identity };
@@ -374,7 +372,7 @@ function encodeWire(value) {
     }
     const siteRecord = controlRealm && current ? sourceSiteRecord(current) : undefined;
     if (siteRecord) return { type: "source-site", sourceSite: siteRecord.sourceSite };
-    if (ancestors.has(current)) throw new Error("Cyclic workflow v17 control values are unavailable");
+    if (ancestors.has(current)) throw new Error("Cyclic workflow control values are unavailable");
     ancestors.add(current);
     try {
       if (Array.isArray(current)) return { type: "array", values: current.map(entry => visit(entry, depth + 1)) };
@@ -383,7 +381,7 @@ function encodeWire(value) {
         const constructor = Object.getOwnPropertyDescriptor(prototype, "constructor");
         if (Object.getPrototypeOf(prototype) !== null || !constructor || !("value" in constructor)
           || typeof constructor.value !== "function" || constructor.value.name !== "Object") {
-          throw new Error("Workflow v17 control objects must be plain data or authority values");
+          throw new Error("Workflow control objects must be plain data or authority values");
         }
       }
       const descriptors = Object.getOwnPropertyDescriptors(current);
@@ -392,7 +390,7 @@ function encodeWire(value) {
         consumeWire(counter, depth + 1, key);
         const property = descriptors[key];
         if (!property.enumerable || property.get || property.set || !("value" in property)) {
-          throw new Error(`Workflow v17 property ${key} must be enumerable data`);
+          throw new Error(`Workflow property ${key} must be enumerable data`);
         }
         entries.push([key, visit(property.value, depth + 1)]);
       }
@@ -413,7 +411,7 @@ function decodeWire(wire) {
   const counter = { nodes: 0, bytes: 0 };
   const visit = (current, depth) => {
     if (!current || typeof current !== "object" || Array.isArray(current) || typeof current.type !== "string") {
-      throw new Error("Malformed workflow v17 control value");
+      throw new Error("Malformed workflow control value");
     }
     consumeWire(counter, depth, current.type === "primitive" && typeof current.value === "string" ? current.value : undefined);
     if (current.type === "undefined") { assertExactKeys(current, ["type"], "undefined wire value"); return undefined; }
@@ -421,13 +419,13 @@ function decodeWire(wire) {
       assertExactKeys(current, ["type", "value"], "primitive wire value");
       if (current.value !== null && typeof current.value !== "boolean" && typeof current.value !== "string"
         && (typeof current.value !== "number" || !Number.isFinite(current.value) || Object.is(current.value, -0))) {
-        throw new Error("Malformed workflow v17 primitive");
+        throw new Error("Malformed workflow primitive");
       }
       return current.value;
     }
     if (current.type === "array") {
       assertExactKeys(current, ["type", "values"], "array wire value");
-      if (!Array.isArray(current.values)) throw new Error("Malformed workflow v17 array");
+      if (!Array.isArray(current.values)) throw new Error("Malformed workflow array");
       return controlRealm.copyArray(current.values.map(entry => visit(entry, depth + 1)));
     }
     if (current.type === "object") {
@@ -441,7 +439,7 @@ function decodeWire(wire) {
       const fields = decodeEntries(current.fields, depth, counter, visit);
       return controlRealm.createRemoteAuthority(current.type, id, identity, fields);
     }
-    throw new Error(`Host sent unavailable workflow v17 wire type ${current.type}`);
+    throw new Error(`Host sent unavailable workflow wire type ${current.type}`);
   };
   return visit(wire, 0);
 }
@@ -452,18 +450,18 @@ function decodeOuterWire(wire) {
     if (current.type === "primitive") return current.value;
     if (current.type === "array") return current.values.map(visit);
     if (current.type === "object") return Object.fromEntries(current.entries.map(entry => [entry[0], visit(entry[1])]));
-    throw new Error("Reviewed workflow v17 configuration must be plain data");
+    throw new Error("Reviewed workflow configuration must be plain data");
   };
   return visit(wire);
 }
 
 function decodeEntries(value, depth, counter, visit) {
-  if (!Array.isArray(value)) throw new Error("Malformed workflow v17 entries");
+  if (!Array.isArray(value)) throw new Error("Malformed workflow entries");
   const result = [];
   const seen = new Set();
   for (const entry of value) {
-    if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") throw new Error("Malformed workflow v17 entry");
-    if (seen.has(entry[0])) throw new Error(`Duplicate workflow v17 property ${entry[0]}`);
+    if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") throw new Error("Malformed workflow entry");
+    if (seen.has(entry[0])) throw new Error(`Duplicate workflow property ${entry[0]}`);
     seen.add(entry[0]);
     consumeWire(counter, depth + 1, entry[0]);
     result.push([entry[0], visit(entry[1], depth + 1)]);
@@ -472,11 +470,11 @@ function decodeEntries(value, depth, counter, visit) {
 }
 
 function descriptorIdentity(value) {
-  const identity = requireRecord(value, "workflow v17 descriptor identity");
-  assertExactKeys(identity, ["formatVersion", "kind", "sourceSite", "definitionHash"], "workflow v17 descriptor identity");
-  if (identity.formatVersion !== 1 || !DESCRIPTOR_KINDS.has(identity.kind) || typeof identity.sourceSite !== "string"
+  const identity = requireRecord(value, "workflow descriptor identity");
+  assertExactKeys(identity, ["kind", "sourceSite", "definitionHash"], "workflow descriptor identity");
+  if (!DESCRIPTOR_KINDS.has(identity.kind) || typeof identity.sourceSite !== "string"
     || !ID.test(identity.sourceSite) || typeof identity.definitionHash !== "string" || !HASH.test(identity.definitionHash)) {
-    throw new Error("Workflow v17 descriptor identity is invalid");
+    throw new Error("Workflow descriptor identity is invalid");
   }
   return identity;
 }
@@ -490,19 +488,19 @@ function referenceIdentity(value) {
 }
 
 function authorityIdentity(value, kinds, label) {
-  const identity = requireRecord(value, `workflow v17 ${label} identity`);
-  assertExactKeys(identity, ["formatVersion", "kind", "authorityId", "authorityHash"], `workflow v17 ${label} identity`);
-  if (identity.formatVersion !== 1 || !kinds.has(identity.kind) || typeof identity.authorityId !== "string"
+  const identity = requireRecord(value, `workflow ${label} identity`);
+  assertExactKeys(identity, ["kind", "authorityId", "authorityHash"], `workflow ${label} identity`);
+  if (!kinds.has(identity.kind) || typeof identity.authorityId !== "string"
     || !ID.test(identity.authorityId) || typeof identity.authorityHash !== "string" || !HASH.test(identity.authorityHash)) {
-    throw new Error(`Workflow v17 ${label} identity is invalid`);
+    throw new Error(`Workflow ${label} identity is invalid`);
   }
   return identity;
 }
 
 function parseSyncResponse(value) {
-  const message = requireRecord(value, "workflow v17 synchronous response");
-  if (message.type !== "sync-response") throw new Error("Workflow v17 synchronous response type is invalid");
-  assertOutcomeKeys(message, ["type", "requestId"], "workflow v17 synchronous response");
+  const message = requireRecord(value, "workflow synchronous response");
+  if (message.type !== "sync-response") throw new Error("Workflow synchronous response type is invalid");
+  assertOutcomeKeys(message, ["type", "requestId"], "workflow synchronous response");
   const base = { type: "sync-response", requestId: requireId(message.requestId, "synchronous request") };
   return Object.prototype.hasOwnProperty.call(message, "error")
     ? { ...base, error: parseSerializedError(message.error) }
@@ -510,9 +508,9 @@ function parseSyncResponse(value) {
 }
 
 function parseMetricResponse(value) {
-  const message = requireRecord(value, "workflow v17 metric response");
-  if (message.type !== "metric-response") throw new Error("Workflow v17 metric response type is invalid");
-  assertOutcomeKeys(message, ["type", "requestId"], "workflow v17 metric response");
+  const message = requireRecord(value, "workflow metric response");
+  if (message.type !== "metric-response") throw new Error("Workflow metric response type is invalid");
+  assertOutcomeKeys(message, ["type", "requestId"], "workflow metric response");
   const base = { type: "metric-response", requestId: requireId(message.requestId, "metric request") };
   return Object.prototype.hasOwnProperty.call(message, "error")
     ? { ...base, error: parseSerializedError(message.error) }
@@ -530,15 +528,15 @@ function readSyncResponse() {
     }
     const buffer = Buffer.allocUnsafe(64 * 1024);
     const bytes = fs.readSync(4, buffer, 0, buffer.length, null);
-    if (bytes === 0) throw new Error("Workflow v17 synchronous response pipe closed");
+    if (bytes === 0) throw new Error("Workflow synchronous response pipe closed");
     syncBuffer += buffer.toString("utf8", 0, bytes);
-    if (Buffer.byteLength(syncBuffer) > WIRE_BYTES) throw new Error("Workflow v17 synchronous response exceeds its limit");
+    if (Buffer.byteLength(syncBuffer) > WIRE_BYTES) throw new Error("Workflow synchronous response exceeds its limit");
   }
 }
 
 function currentInvocation() {
   const id = invocation.getStore();
-  if (typeof id !== "string") throw new Error("Workflow v17 host call escaped its control invocation");
+  if (typeof id !== "string") throw new Error("Workflow host call escaped its control invocation");
   return id;
 }
 
@@ -561,7 +559,7 @@ function serializeError(error) {
 }
 
 function parseSerializedError(value) {
-  const error = requireRecord(value, "workflow v17 host error");
+  const error = requireRecord(value, "workflow host error");
   for (const key of Object.keys(error)) if (!["name", "message", "stack", "hostErrorId", "properties"].includes(key)) throw new Error(`Unknown error field ${key}`);
   return error;
 }
@@ -571,7 +569,7 @@ function deserializeError(serialized) {
 }
 
 function send(message) {
-  if (typeof process.send !== "function") throw new Error("Workflow v17 control IPC is unavailable");
+  if (typeof process.send !== "function") throw new Error("Workflow control IPC is unavailable");
   process.send(message);
 }
 
@@ -601,12 +599,12 @@ function requireRecord(value, label) {
 }
 
 function requireWire(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Workflow v17 wire value is invalid");
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Workflow wire value is invalid");
   return value;
 }
 
 function requireId(value, label) {
-  if (typeof value !== "string" || !ID.test(value)) throw new Error(`Invalid workflow v17 ${label} id`);
+  if (typeof value !== "string" || !ID.test(value)) throw new Error(`Invalid workflow ${label} id`);
   return value;
 }
 
@@ -614,7 +612,7 @@ function consumeWire(counter, depth, text) {
   counter.nodes++;
   if (text !== undefined) counter.bytes += Buffer.byteLength(text);
   if (depth > WIRE_DEPTH || counter.nodes > WIRE_NODES || counter.bytes > WIRE_BYTES) {
-    throw new Error("Workflow v17 control message exceeds its structural limit");
+    throw new Error("Workflow control message exceeds its structural limit");
   }
 }
 

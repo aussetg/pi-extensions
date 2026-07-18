@@ -67,8 +67,8 @@ export async function reviewWorkflowDraft(
       fileName: draft.targetPath,
       ...(options.apiPath ? { apiPath: options.apiPath } : {}),
     });
-    if (parsed.installedName !== draft.name) throw new Error("Workflow v17 draft frontend returned another installed name");
-    info(diagnostics, "typecheck", "Strict TypeScript check passed against pi/workflows v17");
+    if (parsed.installedName !== draft.name) throw new Error("Workflow draft frontend returned another installed name");
+    info(diagnostics, "typecheck", "Strict TypeScript check passed against pi/workflows");
     info(diagnostics, "parse", `Parsed and reviewed ${draft.sourceHash}`);
     info(diagnostics, "schema", "Input and output schemas compiled successfully");
   } catch (error) {
@@ -90,8 +90,6 @@ export async function reviewWorkflowDraft(
   const operations = parsed ? operationAnalysis(parsed) : emptyOperationAnalysis();
   const capabilities = parsed ? [...parsed.review.capabilities] : [];
   const body: WorkflowDraftReviewBody = {
-    formatVersion: 1,
-    runtimeVersion: 17,
     draftId: draft.id,
     namespace: draft.namespace,
     name: draft.name,
@@ -138,7 +136,7 @@ export async function reviewWorkflowDraft(
   };
   const record = { ...body, reviewHash: stableHash(body) };
   if (Buffer.byteLength(stableJson(record), "utf8") > DEFINITION_LIMITS.draftReviewBytes) {
-    throw new Error(`Workflow v17 draft review exceeds ${DEFINITION_LIMITS.draftReviewBytes} bytes`);
+    throw new Error(`Workflow draft review exceeds ${DEFINITION_LIMITS.draftReviewBytes} bytes`);
   }
   return Object.freeze(record);
 }

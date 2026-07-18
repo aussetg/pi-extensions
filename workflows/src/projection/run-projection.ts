@@ -30,7 +30,7 @@ import {
   type WorkflowStructureProjection,
 } from "./types.js";
 
-/** One coherent, detached schema-4 projection. */
+/** One coherent, detached projection. */
 export function readWorkflowRunProjection(
   reader: WorkflowRunDatabaseReader,
   snapshot: WorkflowInvocationSnapshot,
@@ -78,8 +78,6 @@ export function readWorkflowRunProjection(
     const humanInteractions = projectHumanInteractions(database, projectedOperations, candidates);
     const attention = projectAttention(run.reason, projectedOperations, candidates, humanInteractions);
     const projection: WorkflowRunProjection = {
-      formatVersion: 1,
-      runtimeVersion: 17,
       runId: run.runId,
       shortRunId: options.shortRunId ?? shortRunId(run.runId),
       workflowId: run.workflow.id,
@@ -125,12 +123,11 @@ export function projectWorkflowDefinitionReview(
     assertWorkflowInvocationSnapshot(snapshot);
     if (snapshot.workflowId !== ref.id || snapshot.definitionHash !== ref.definitionHash
       || snapshot.sourceHash !== ref.sourceHash) {
-      throw new Error("Workflow v17 launch review does not bind the installed definition");
+      throw new Error("Workflow launch review does not bind the installed definition");
     }
   }
   const review = ref.parsed.review;
   return {
-    formatVersion: 1,
     workflowId: ref.id,
     name: ref.name,
     ...(ref.title ? { title: bounded(ref.title, 192) } : {}),
@@ -180,7 +177,7 @@ function projectOperation(
   descriptors: ReadonlyMap<string, WorkflowDescriptor>,
 ): WorkflowOperationProjection {
   const scope = scopes.get(operation.scopeId);
-  if (!scope) throw new Error(`Workflow v17 projection is missing scope ${operation.scopeId}`);
+  if (!scope) throw new Error(`Workflow projection is missing scope ${operation.scopeId}`);
   const descriptor = operation.descriptorSourceSite
     ? descriptors.get(operation.descriptorSourceSite)
     : undefined;
@@ -441,7 +438,7 @@ function projectArtifact(record: WorkflowArtifactRecord): WorkflowArtifactProjec
 
 function requireArtifact(database: WorkflowRunDatabaseReader, digest: string): WorkflowArtifactRecord {
   const record = database.readArtifact(digest);
-  if (!record) throw new Error(`Workflow v17 projection is missing artifact ${digest}`);
+  if (!record) throw new Error(`Workflow projection is missing artifact ${digest}`);
   return record;
 }
 
@@ -476,7 +473,7 @@ function assertSnapshotRunBinding(
     || run.launch.exposure !== snapshot.exposure
     || run.launch.policyHash !== snapshot.launch.policyHash
     || run.launch.projectTrusted !== snapshot.launch.projectTrusted) {
-    throw new Error("Workflow v17 projection snapshot differs from run identity");
+    throw new Error("Workflow projection snapshot differs from run identity");
   }
 }
 
@@ -493,7 +490,7 @@ function boundProjection(projection: WorkflowRunProjection): void {
   while (bytes(projection) > LIMITS.projectionBytes && projection.metricSets.length > 0) projection.metricSets.pop();
   while (bytes(projection) > LIMITS.projectionBytes && projection.resources.length > 0) projection.resources.pop();
   if (bytes(projection) > LIMITS.projectionBytes) {
-    throw new Error(`Workflow v17 projection exceeds ${LIMITS.projectionBytes} bytes after bounded reduction`);
+    throw new Error(`Workflow projection exceeds ${LIMITS.projectionBytes} bytes after bounded reduction`);
   }
 }
 
@@ -504,7 +501,7 @@ function boundedJson(value: JsonValue, maximumBytes = 16 * 1024): JsonValue {
   const size = Buffer.byteLength(serialized, "utf8");
   return size <= maximumBytes ? copy : { detailOmitted: true, bytes: size };
 }
-function shortRunId(runId: string): string { return runId.replace(/^flow_v17_/u, "").slice(0, 12); }
+function shortRunId(runId: string): string { return runId.replace(/^flow_test_/u, "").slice(0, 12); }
 function plainRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

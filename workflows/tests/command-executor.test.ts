@@ -217,7 +217,7 @@ describe("systemd + Bubblewrap command execution", () => {
     await fs.promises.writeFile(wrapper, "#!/bin/sh\nexec /usr/bin/bwrap \"$@\"\n", { mode: 0o700 });
     const executor = new SandboxedCommandExecutor({ bwrapPath: wrapper });
     const descriptor = executor.describe();
-    expect(Object.keys(descriptor).sort()).toEqual(["executables", "id", "protocolVersion", "sandbox"]);
+    expect(Object.keys(descriptor).sort()).toEqual(["executables", "id", "sandbox"]);
     expect(descriptor.executables).toMatchObject({ bubblewrap: { path: wrapper, version: expect.stringContaining("bubblewrap") } });
     const changedDiagnostics = structuredClone(descriptor);
     changedDiagnostics.executables!.bubblewrap.version = "bubblewrap upgraded after command completion";

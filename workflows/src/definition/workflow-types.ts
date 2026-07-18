@@ -124,7 +124,6 @@ export interface WorkflowReview {
 }
 
 export interface WorkflowSourceTransform {
-  formatVersion: 1;
   sourceHash: string;
   strippedSourceHash: string;
   executableSourceHash: string;
@@ -143,7 +142,6 @@ export interface WorkflowSourceTransform {
 }
 
 export interface ParsedWorkflow {
-  formatVersion: 1;
   fileName: string;
   installedName: string;
   source: string;

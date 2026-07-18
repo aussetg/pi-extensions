@@ -2,11 +2,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DatabaseSync } from "node:sqlite";
 import { createWorkflowExtension } from "../src/extension.js";
 import { parseFlowCommand } from "../src/commands/flow-command-parser.js";
 import { WorkflowNamedService } from "../src/runtime/named-workflow-service.js";
-import { WorkflowRunCatalog } from "../src/persistence/run-catalog.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => fs.promises.rm(root, { recursive: true, force: true }))); });
@@ -44,13 +42,11 @@ describe("workflow extension cutover", () => {
     }
   }, 30_000);
 
-  it("parses explicit promotion exposure and rejects removed control surfaces", () => {
+  it("parses explicit promotion exposure and rejects unknown commands", () => {
     expect(parseFlowCommand("promote user:fixture --exposure model --challenge sha256:" + "a".repeat(64))).toEqual({
       action: "promote", draftId: "user:fixture", exposure: "model", challenge: `sha256:${"a".repeat(64)}`,
     });
-    for (const removed of ["extend abcdef12", "message abcdef12", "next abcdef12", "replan abcdef12", "skip abcdef12"]) {
-      expect(() => parseFlowCommand(removed)).toThrow("Unknown /flow command");
-    }
+    expect(() => parseFlowCommand("unknown abcdef12")).toThrow("Unknown /flow command");
   });
 
   it("refuses launch from a session other than the bound primary session", async () => {
@@ -62,23 +58,6 @@ describe("workflow extension cutover", () => {
       context("subagent", process.cwd()) as any)).rejects.toThrow("primary bound session");
   });
 
-  it("reports schema-3 run evidence as legacy without opening it for execution", async () => {
-    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "workflow-legacy-"));
-    roots.push(root);
-    const runId = `flow_${"a".repeat(32)}`;
-    const runDir = path.join(root, runId);
-    await fs.promises.mkdir(runDir, { recursive: true });
-    const raw = new DatabaseSync(path.join(runDir, "run.sqlite"));
-    raw.exec("PRAGMA user_version = 3");
-    raw.close();
-    const service = new WorkflowNamedService(fakePi([], [], new Map()) as any, {
-      catalog: new WorkflowRunCatalog(root),
-      coordinator: { launcher: {}, launch: vi.fn() } as any,
-    });
-    const runs = await service.list(context("primary", process.cwd()) as any);
-    expect(runs).toEqual([expect.objectContaining({ runId, status: "legacy", workflowId: "legacy:schema-3" })]);
-    expect(runs[0]!.reason?.summary).toContain("schema 3 cannot be opened");
-  });
 });
 
 function context(id: string, cwd: string): any {

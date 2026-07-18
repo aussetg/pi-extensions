@@ -53,11 +53,11 @@ afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
-describe("workflow v17 cursor semantic engine", () => {
+describe("workflow cursor semantic engine", () => {
   it("reconstructs native loop locals after a crash at every durable engine boundary", async () => {
     const observed: WorkflowSemanticEngineFaultPoint[] = [];
     {
-      const fixture = createFixture("flow_v17_boundaries");
+      const fixture = createFixture("flow_test_boundaries");
       const adapter = new CountingAdapter("command");
       const outcome = await new WorkflowSemanticEngine(fixture.database, [adapter], {
         now: clock(),
@@ -76,7 +76,7 @@ describe("workflow v17 cursor semantic engine", () => {
     ]);
 
     for (let crashIndex = 0; crashIndex < observed.length; crashIndex++) {
-      const fixture = createFixture(`flow_v17_crash_${crashIndex}`);
+      const fixture = createFixture(`flow_test_crash_${crashIndex}`);
       const adapter = new CountingAdapter("command");
       let transition = 0;
       let crashed = false;
@@ -105,7 +105,7 @@ describe("workflow v17 cursor semantic engine", () => {
   });
 
   it("restores a durable failed settlement into ordinary catch control", async () => {
-    const fixture = createFixture("flow_v17_caught_failure");
+    const fixture = createFixture("flow_test_caught_failure");
     const adapter = new CountingAdapter("command", { failures: new Set(["bad"]) });
     let crashed = false;
     const program = async (flow: WorkflowSequentialFlow) => {
@@ -153,7 +153,7 @@ describe("workflow v17 cursor semantic engine", () => {
   });
 
   it("reopens SQLite after settlement and does not execute the physical effect twice", async () => {
-    const fixture = createFixture("flow_v17_reopen");
+    const fixture = createFixture("flow_test_reopen");
     const adapter = new CountingAdapter("command");
     const first = new WorkflowSemanticEngine(fixture.database, [adapter], {
       now: clock(),
@@ -175,7 +175,7 @@ describe("workflow v17 cursor semantic engine", () => {
   });
 
   it("commits an uncaught effect failure as the root and run terminal state", async () => {
-    const fixture = createFixture("flow_v17_uncaught_failure");
+    const fixture = createFixture("flow_test_uncaught_failure");
     const adapter = new CountingAdapter("command", { failures: new Set(["fatal"]) });
     const outcome = await new WorkflowSemanticEngine(fixture.database, [adapter], {
       now: clock(),
@@ -204,7 +204,7 @@ describe("workflow v17 cursor semantic engine", () => {
       "after-operation-failure",
       "after-root-scope-failure",
     ] as const) {
-      const fixture = createFixture(`flow_v17_failure_${target.replaceAll("-", "_")}`);
+      const fixture = createFixture(`flow_test_failure_${target.replaceAll("-", "_")}`);
       const adapter = new CountingAdapter("command", { failures: new Set(["fatal"]) });
       let crashed = false;
       const program = async (flow: WorkflowSequentialFlow) => ({
@@ -229,7 +229,7 @@ describe("workflow v17 cursor semantic engine", () => {
   });
 
   it("fails closed when adapter identity validation breaks after claim", async () => {
-    const fixture = createFixture("flow_v17_bad_adapter");
+    const fixture = createFixture("flow_test_bad_adapter");
     const adapter = new CountingAdapter("command");
     adapter.journalIdentity = () => ({
       semanticKey: "not-a-hash",
@@ -241,7 +241,7 @@ describe("workflow v17 cursor semantic engine", () => {
     }).run(async (flow) => ({ total: (await call(flow, "never-executed", 0)).value }));
     expect(outcome).toMatchObject({
       status: "failed",
-      failure: { summary: "Workflow v17 command adapter returned an invalid semantic key" },
+      failure: { summary: "Workflow command adapter returned an invalid semantic key" },
     });
     expect(adapter.executions.size).toBe(0);
     expect(fixture.database.readRun().status).toBe("failed");
@@ -250,7 +250,7 @@ describe("workflow v17 cursor semantic engine", () => {
   });
 
   it("rejects semantic input and effect-identity drift at the first cursor", async () => {
-    const inputFixture = createFixture("flow_v17_input_drift");
+    const inputFixture = createFixture("flow_test_input_drift");
     const original = new CountingAdapter("command");
     await expect(new WorkflowSemanticEngine(inputFixture.database, [original], {
       now: clock(),
@@ -265,7 +265,7 @@ describe("workflow v17 cursor semantic engine", () => {
       .rejects.toBeInstanceOf(WorkflowSemanticDriftError);
     expect(inputFixture.database.readRun().status).toBe("running");
 
-    const keyFixture = createFixture("flow_v17_key_drift");
+    const keyFixture = createFixture("flow_test_key_drift");
     await expect(new WorkflowSemanticEngine(keyFixture.database, [new CountingAdapter("command")], {
       now: clock(),
       faultInjector: (point) => {
@@ -274,13 +274,13 @@ describe("workflow v17 cursor semantic engine", () => {
     }).run(async (flow) => ({ total: (await call(flow, "same", 0)).value })))
       .rejects.toBeInstanceOf(WorkflowSemanticEngineCrashError);
     await expect(new WorkflowSemanticEngine(keyFixture.database, [new CountingAdapter("command", {
-      identityVersion: 2,
+      identitySalt: "changed",
     })], { now: clock(100) }).run(async (flow) => ({ total: (await call(flow, "same", 0)).value })))
       .rejects.toBeInstanceOf(WorkflowSemanticDriftError);
   });
 
   it("treats source sites and display titles as non-semantic during same-run restoration", async () => {
-    const fixture = createFixture("flow_v17_display");
+    const fixture = createFixture("flow_test_display");
     const adapter = new CountingAdapter("command");
     await expect(new WorkflowSemanticEngine(fixture.database, [adapter], {
       now: clock(),
@@ -301,7 +301,7 @@ describe("workflow v17 cursor semantic engine", () => {
   });
 
   it("pauses before admitting operation or agent runaway", async () => {
-    const operations = createFixture("flow_v17_operation_limit");
+    const operations = createFixture("flow_test_operation_limit");
     const command = new CountingAdapter("command");
     const operationOutcome = await new WorkflowSemanticEngine(operations.database, [command], {
       now: clock(), operationAdmissionLimit: 2,
@@ -316,7 +316,7 @@ describe("workflow v17 cursor semantic engine", () => {
     expect(operations.database.listOperations()).toHaveLength(2);
     expect(command.executions.size).toBe(2);
 
-    const agents = createFixture("flow_v17_agent_limit", 1);
+    const agents = createFixture("flow_test_agent_limit", 1);
     const agent = new CountingAdapter("agent");
     const agentOutcome = await new WorkflowSemanticEngine(agents.database, [agent], {
       now: clock(),
@@ -331,13 +331,13 @@ describe("workflow v17 cursor semantic engine", () => {
   });
 
   it("uses the causal importer before fresh execution", async () => {
-    const source = createFixture("flow_v17_replay_source");
+    const source = createFixture("flow_test_replay_source");
     const sourceAdapter = new CountingAdapter("command");
     expect(await new WorkflowSemanticEngine(source.database, [sourceAdapter], {
       now: clock(),
     }).run(loopProgram)).toMatchObject({ status: "completed", result: { total: 6 } });
 
-    const target = createFixture("flow_v17_replay_target");
+    const target = createFixture("flow_test_replay_target");
     const replay = track(await WorkflowCausalReplay.open({
       sourceRunDir: source.root,
       targetRunDir: target.root,
@@ -359,15 +359,15 @@ class CountingAdapter implements WorkflowSemanticEffectAdapter {
   readonly executions = new Map<string, number>();
   readonly kind: "command" | "agent";
   private readonly failures: Set<string>;
-  private readonly identityVersion: number;
+  private readonly identitySalt: string;
 
   constructor(
     kind: "command" | "agent",
-    options: { failures?: Set<string>; identityVersion?: number } = {},
+    options: { failures?: Set<string>; identitySalt?: string } = {},
   ) {
     this.kind = kind;
     this.failures = options.failures ?? new Set();
-    this.identityVersion = options.identityVersion ?? 1;
+    this.identitySalt = options.identitySalt ?? "default";
   }
 
   semanticInput(context: Omit<WorkflowEffectAdapterContext, "semanticInput" | "operation">): JsonValue {
@@ -377,8 +377,8 @@ class CountingAdapter implements WorkflowSemanticEffectAdapter {
   journalIdentity(context: WorkflowEffectAdapterContext & { operation: WorkflowOperationRecord }): WorkflowEffectIdentity {
     return {
       semanticKey: stableHash({
-        formatVersion: this.identityVersion,
         kind: this.kind,
+        identitySalt: this.identitySalt,
         semanticInput: context.semanticInput,
       }),
       completionAuthority: this.kind === "agent" ? "finish-work" : "host-effect",
@@ -419,7 +419,6 @@ function createFixture(runId: string, maximumAgentLaunches = 100) {
   roots.push(root);
   const policy = defaultWorkflowRegistryPolicy(root, "user");
   const ref: WorkflowDefinitionRef = {
-    formatVersion: 1,
     id: "user:sequential",
     namespace: "user",
     name: "sequential",

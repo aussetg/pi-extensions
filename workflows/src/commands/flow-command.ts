@@ -343,7 +343,7 @@ function projectionMessage(projection: import("../projection/types.js").Workflow
 }
 
 function authority(ctx: ExtensionCommandContext): "user" | "rpc" { return ctx.mode === "rpc" ? "rpc" : "user"; }
-function terminal(status: string): boolean { return status === "completed" || status === "failed" || status === "stopped" || status === "legacy"; }
+function terminal(status: string): boolean { return status === "completed" || status === "failed" || status === "stopped" || status === "corrupt"; }
 
 async function collectAskValue(
   request: JsonObject,

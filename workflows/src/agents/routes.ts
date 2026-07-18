@@ -15,7 +15,6 @@ export interface AgentRouteTarget {
 export type AgentRouteMap = Readonly<Record<string, AgentRouteTarget>>;
 
 export interface AgentRouteFile {
-  formatVersion: 1;
   routes: AgentRouteMap;
 }
 
@@ -124,15 +123,14 @@ export function parseAgentRouteFile(source: string, filePath = "<routes>"): Agen
     throw new Error(`Agent route registry ${filePath} is not JSON: ${errorMessage(error)}`);
   }
   if (!plainRecord(value)) throw new Error(`Agent route registry ${filePath} must be an object`);
-  assertOnlyKeys(value, new Set(["formatVersion", "routes"]), `Agent route registry ${filePath}`);
-  if (value.formatVersion !== 1) throw new Error(`Agent route registry ${filePath} has unsupported formatVersion`);
+  assertOnlyKeys(value, new Set(["routes"]), `Agent route registry ${filePath}`);
   if (!plainRecord(value.routes)) throw new Error(`Agent route registry ${filePath} routes must be an object`);
   const routes: Record<string, AgentRouteTarget> = {};
   for (const [profileId, target] of Object.entries(value.routes)) {
     assertProfileId(profileId);
     routes[profileId] = normalizeTarget(target, `route for ${profileId}`);
   }
-  return Object.freeze({ formatVersion: 1, routes: Object.freeze(routes) });
+  return Object.freeze({ routes: Object.freeze(routes) });
 }
 
 export function exactRouteIdentity(route: AgentRouteSnapshot): {

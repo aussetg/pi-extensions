@@ -53,7 +53,6 @@ export interface WorkflowNormalizedMetricSet {
 }
 
 interface MetricSetPrivateAuthority {
-  formatVersion: 1;
   runId: string;
   metricSetId: string;
   policyHash: string;
@@ -77,7 +76,7 @@ export class WorkflowMetricSetRuntime implements WorkflowMeasurementAuthorityRes
     now: () => Date = () => new Date(),
   ) {
     if (products.store.database !== database || products.authority.scopeId.length < 1) {
-      throw new Error("Workflow v17 metric runtime authority differs from its database");
+      throw new Error("Workflow metric runtime authority differs from its database");
     }
     this.now = now;
   }
@@ -91,13 +90,12 @@ export class WorkflowMetricSetRuntime implements WorkflowMeasurementAuthorityRes
 
   create(sourceSite: string, policyValue: unknown, samplingValue?: unknown): object {
     const reviewed = this.workflow.operations.find(site => site.sourceSite === sourceSite);
-    if (reviewed?.method !== "metrics") throw new TypeError(`Unknown workflow v17 metrics site ${sourceSite}`);
+    if (reviewed?.method !== "metrics") throw new TypeError(`Unknown workflow metrics site ${sourceSite}`);
     const occurrence = this.occurrences.get(sourceSite) ?? 0;
     this.occurrences.set(sourceSite, occurrence + 1);
     const normalized = normalizeWorkflowMetricSet(policyValue, samplingValue);
     const run = this.database.readRun();
     const metricSetId = `metric_set_${stableHash({
-      formatVersion: 1,
       runId: run.runId,
       sourceSite,
       occurrence,
@@ -124,13 +122,12 @@ export class WorkflowMetricSetRuntime implements WorkflowMeasurementAuthorityRes
         throw error;
       }
     }
-    if (!record) throw new Error(`Could not register workflow v17 metric set ${sourceSite}`);
+    if (!record) throw new Error(`Could not register workflow metric set ${sourceSite}`);
     this.executionStates.set(record.metricSetId, []);
     const existing = this.references.get(record.metricSetId);
     if (existing) return existing;
     const authorityHash = metricSetAuthorityHash(record);
     const privateAuthority: MetricSetPrivateAuthority = Object.freeze({
-      formatVersion: 1,
       runId: record.runId,
       metricSetId: record.metricSetId,
       policyHash: record.policyHash,
@@ -138,7 +135,6 @@ export class WorkflowMetricSetRuntime implements WorkflowMeasurementAuthorityRes
       authorityHash,
     });
     const value = this.products.authority.reference({
-      formatVersion: 1,
       kind: "metric-set",
       authorityId: record.authorityId,
       authorityHash,
@@ -149,7 +145,7 @@ export class WorkflowMetricSetRuntime implements WorkflowMeasurementAuthorityRes
 
   call(value: unknown, method: string, args: unknown[]): unknown {
     const metricSet = this.metricSet(value);
-    if (!Array.isArray(args)) throw new TypeError("Workflow v17 metric-set method arguments are invalid");
+    if (!Array.isArray(args)) throw new TypeError("Workflow metric-set method arguments are invalid");
     if (method === "policy") {
       noArguments(args, method);
       return structuredClone(metricSet.policy);
@@ -164,10 +160,10 @@ export class WorkflowMetricSetRuntime implements WorkflowMeasurementAuthorityRes
       return reachesTarget(primary).result;
     }
     if (method === "evaluate") {
-      if (args.length !== 1) throw new TypeError("Workflow v17 metric-set evaluate requires one measurement");
+      if (args.length !== 1) throw new TypeError("Workflow metric-set evaluate requires one measurement");
       const measurement = this.measurement(args[0]);
       if (measurement.metricSetId !== metricSet.metricSetId) {
-        throw new TypeError("Workflow v17 measurement belongs to another metric set");
+        throw new TypeError("Workflow measurement belongs to another metric set");
       }
       const evaluated = evaluateMeasurementPolicy(metricSet.states, measurement.observations);
       const violations = [...evaluated.violations];
@@ -179,7 +175,7 @@ export class WorkflowMetricSetRuntime implements WorkflowMeasurementAuthorityRes
         violations,
       }, limits()));
     }
-    throw new TypeError(`Unknown workflow v17 metric-set method ${method}`);
+    throw new TypeError(`Unknown workflow metric-set method ${method}`);
   }
 
   metricSet(value: unknown): WorkflowMetricSetRecord {
@@ -187,9 +183,9 @@ export class WorkflowMetricSetRuntime implements WorkflowMeasurementAuthorityRes
     const identity = description?.family === "reference" ? description.identity : undefined;
     const privateAuthority = description?.privateAuthority;
     if (!description || identity?.kind !== "metric-set" || !plainRecord(privateAuthority)
-      || privateAuthority.formatVersion !== 1 || privateAuthority.runId !== this.database.readRun().runId
+      || privateAuthority.runId !== this.database.readRun().runId
       || typeof privateAuthority.metricSetId !== "string") {
-      throw new TypeError("Value has no workflow v17 metric-set authority");
+      throw new TypeError("Value has no workflow metric-set authority");
     }
     const record = this.database.readMetricSet(privateAuthority.metricSetId);
     if (!record || record.authorityId !== identity.authorityId
@@ -197,7 +193,7 @@ export class WorkflowMetricSetRuntime implements WorkflowMeasurementAuthorityRes
       || record.samplingHash !== privateAuthority.samplingHash
       || metricSetAuthorityHash(record) !== identity.authorityHash
       || privateAuthority.authorityHash !== identity.authorityHash) {
-      throw new TypeError("Workflow v17 metric-set authority is stale or corrupt");
+      throw new TypeError("Workflow metric-set authority is stale or corrupt");
     }
     return {
       ...record,
@@ -208,7 +204,7 @@ export class WorkflowMetricSetRuntime implements WorkflowMeasurementAuthorityRes
   observeMeasurement(record: WorkflowMeasurementRecord): void {
     if (this.observedMeasurements.has(record.measurementId)) return;
     const states = this.executionStates.get(record.metricSetId);
-    if (!states) throw new Error(`Workflow v17 metric set ${record.metricSetId} is not active in this execution`);
+    if (!states) throw new Error(`Workflow metric set ${record.metricSetId} is not active in this execution`);
     this.executionStates.set(
       record.metricSetId,
       applyMetricCohortDeltaToSnapshot(states, record.delta),
@@ -222,9 +218,9 @@ export class WorkflowMetricSetRuntime implements WorkflowMeasurementAuthorityRes
     const key = `${candidate.candidateId}:${disposition}`;
     if (this.observedDispositions.has(key)) return;
     const measurement = this.database.readMeasurement(binding.measurementId);
-    if (!measurement) throw new Error(`Workflow v17 candidate measurement ${binding.measurementId} is unavailable`);
+    if (!measurement) throw new Error(`Workflow candidate measurement ${binding.measurementId} is unavailable`);
     const states = this.executionStates.get(measurement.metricSetId);
-    if (!states) throw new Error(`Workflow v17 metric set ${measurement.metricSetId} is not active in this execution`);
+    if (!states) throw new Error(`Workflow metric set ${measurement.metricSetId} is not active in this execution`);
     this.executionStates.set(
       measurement.metricSetId,
       applyMetricDispositionToSnapshot(states, measurement.delta, disposition),
@@ -237,14 +233,14 @@ export class WorkflowMetricSetRuntime implements WorkflowMeasurementAuthorityRes
     const description = this.products.authority.describe(value);
     if (attached.productKind !== "measurement" || description?.family !== "product"
       || description.identity.kind !== "measurement") {
-      throw new TypeError("Value has no workflow v17 measurement authority");
+      throw new TypeError("Value has no workflow measurement authority");
     }
     const measurementId = description.fields.measurementId;
-    if (typeof measurementId !== "string") throw new TypeError("Workflow v17 measurement identity is unavailable");
+    if (typeof measurementId !== "string") throw new TypeError("Workflow measurement identity is unavailable");
     const record = this.database.readMeasurement(measurementId);
     if (!record || record.artifactDigest !== attached.artifact.digest
       || stableJson(record.observations) !== stableJson(description.fields.observations)) {
-      throw new TypeError("Workflow v17 measurement authority differs from durable evidence");
+      throw new TypeError("Workflow measurement authority differs from durable evidence");
     }
     return record;
   }
@@ -252,12 +248,12 @@ export class WorkflowMetricSetRuntime implements WorkflowMeasurementAuthorityRes
   resolve(value: unknown, candidate: WorkflowCandidateRecord): WorkflowCandidateMeasurementRecord {
     const measurement = this.measurement(value);
     if (measurement.candidateId !== candidate.candidateId) {
-      throw new TypeError("Workflow v17 measurement belongs to another candidate");
+      throw new TypeError("Workflow measurement belongs to another candidate");
     }
     const record = this.database.readCandidateMeasurement(candidate.candidateId);
     if (!record || record.measurementId !== measurement.measurementId
       || record.bindingHash !== measurement.bindingHash) {
-      throw new TypeError("Workflow v17 candidate measurement is not registered");
+      throw new TypeError("Workflow candidate measurement is not registered");
     }
     return record;
   }
@@ -265,14 +261,14 @@ export class WorkflowMetricSetRuntime implements WorkflowMeasurementAuthorityRes
   normalized(record: WorkflowMetricSetRecord): WorkflowNormalizedMetricSet {
     const normalized = normalizeWorkflowMetricSet(record.policy, record.sampling);
     if (normalized.policyHash !== record.policyHash || normalized.samplingHash !== record.samplingHash) {
-      throw new Error(`Workflow v17 metric set ${record.metricSetId} is not canonical`);
+      throw new Error(`Workflow metric set ${record.metricSetId} is not canonical`);
     }
     return normalized;
   }
 
   private timestamp(): string {
     const value = this.now();
-    if (!(value instanceof Date) || !Number.isFinite(value.getTime())) throw new Error("Workflow v17 metric clock is invalid");
+    if (!(value instanceof Date) || !Number.isFinite(value.getTime())) throw new Error("Workflow metric clock is invalid");
     return value.toISOString();
   }
 }
@@ -390,7 +386,7 @@ function metricSetSummary(states: readonly PersistedMetricState[]): JsonObject {
 
 function requirePrimary(states: readonly PersistedMetricState[]): PersistedMetricState {
   const primary = states.filter(state => state.role === "primary");
-  if (primary.length !== 1) throw new Error("Workflow v17 metric set has no unique primary state");
+  if (primary.length !== 1) throw new Error("Workflow metric set has no unique primary state");
   return primary[0]!;
 }
 
@@ -399,7 +395,6 @@ function metricSetAuthorityHash(record: Pick<
   "runId" | "metricSetId" | "authorityId" | "policyHash" | "samplingHash"
 >): string {
   return stableHash({
-    formatVersion: 1,
     kind: "workflow-metric-set-authority",
     runId: record.runId,
     metricSetId: record.metricSetId,
@@ -410,7 +405,7 @@ function metricSetAuthorityHash(record: Pick<
 }
 
 function noArguments(args: unknown[], method: string): void {
-  if (args.length !== 0) throw new TypeError(`Workflow v17 metric-set ${method} accepts no arguments`);
+  if (args.length !== 0) throw new TypeError(`Workflow metric-set ${method} accepts no arguments`);
 }
 
 function metricRecord(value: unknown, label: string): Record<string, unknown> {

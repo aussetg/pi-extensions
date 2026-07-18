@@ -68,11 +68,13 @@ export async function prepareWorkflowResources(
     throw new Error("Workflow agent resources require one exact available default model");
   }
   const routes = new AgentRouteRegistry();
-  await routes.refresh({
-    defaults: Object.fromEntries([...snapshots.keys()].map(id => [id, {
-      model: options.defaultModel!, thinking: options.thinking,
-    }])),
-  });
+  if (snapshots.size) {
+    await routes.refresh({
+      defaults: Object.fromEntries([...snapshots.keys()].map(id => [id, {
+        model: options.defaultModel!, thinking: options.thinking,
+      }])),
+    });
+  }
   const routeSnapshot = routes.snapshot([...snapshots.keys()], options.availableModels);
   const routesByProfile = new Map(routeSnapshot.routes.map(route => [route.profileId, route]));
 
@@ -176,7 +178,6 @@ export async function prepareWorkflowResources(
     measurementProfiles: measurements,
     routeSnapshotHash: routeSnapshot.hash,
     contextIdentityHash: stableHash({
-      formatVersion: 1,
       definitionHash: options.definitionHash,
       staticResourcesHash: resources.hash,
       routeSnapshotHash: routeSnapshot.hash,

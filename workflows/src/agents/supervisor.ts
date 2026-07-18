@@ -180,7 +180,6 @@ export class AgentSessionSupervisor implements AgentExecutionHandle {
 }
 
 interface FileSupervisionState {
-  formatVersion: 1;
   receiptlessStrikes: number;
   status: "running" | "paused";
   infrastructureRetries: number;
@@ -223,7 +222,8 @@ export class FileAgentSupervisionStore implements AgentSupervisionStore {
   private async readState(): Promise<FileSupervisionState> {
     try {
       const value = JSON.parse(await fs.promises.readFile(this.statePath, "utf8")) as FileSupervisionState;
-      if (value.formatVersion !== 1 || !Number.isSafeInteger(value.receiptlessStrikes)
+      if (Object.keys(value).sort().join(",") !== "infrastructureRetries,receiptlessStrikes,status,updatedAt"
+        || !Number.isSafeInteger(value.receiptlessStrikes)
         || value.receiptlessStrikes < 0 || !Number.isSafeInteger(value.infrastructureRetries)
         || value.infrastructureRetries < 0 || (value.status !== "running" && value.status !== "paused")) {
         throw new Error("Agent supervision state is invalid");
@@ -231,7 +231,7 @@ export class FileAgentSupervisionStore implements AgentSupervisionStore {
       return value;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      return { formatVersion: 1, receiptlessStrikes: 0, status: "running", infrastructureRetries: 0,
+      return { receiptlessStrikes: 0, status: "running", infrastructureRetries: 0,
         updatedAt: new Date(0).toISOString() };
     }
   }

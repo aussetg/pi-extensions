@@ -141,7 +141,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
-describe("workflow v17 metric sets and invocation-selected evaluators", () => {
+describe("workflow metric sets and invocation-selected evaluators", () => {
   it("accepts a primary improvement within guardrails and commits one experiment", async () => {
     const fixture = createFixture("metric-accept", [protocol(100, 100), protocol(80, 103)]);
     const outcome = await fixture.runtime().run();
@@ -271,7 +271,7 @@ describe("workflow v17 metric sets and invocation-selected evaluators", () => {
   it("binds profile revisions and metric policy into measurement semantic identity", async () => {
     const first = createFixture("metric-identity-a", [protocol(100, 100), protocol(80, 103)]);
     const second = createFixture("metric-identity-b", [protocol(100, 100), protocol(80, 103)], {
-      argv: ["/usr/bin/bench", "--revision-2"],
+      argv: ["/usr/bin/bench", "--changed-profile"],
     });
     await first.runtime().run();
     await second.runtime().run();
@@ -282,9 +282,9 @@ describe("workflow v17 metric sets and invocation-selected evaluators", () => {
   });
 
   it("materializes a replayed baseline into the target metric set without running its evaluator", async () => {
-    const source = createFixture("metric-replay", [protocol(100, 100), protocol(80, 103)], {}, "flow_v17_metric_replay_source");
+    const source = createFixture("metric-replay", [protocol(100, 100), protocol(80, 103)], {}, "flow_test_metric_replay_source");
     await source.runtime().run();
-    const target = createFixture("metric-replay", [protocol(80, 103)], {}, "flow_v17_metric_replay_target");
+    const target = createFixture("metric-replay", [protocol(80, 103)], {}, "flow_test_metric_replay_target");
     const replay = await WorkflowCausalReplay.open({
       targetRunDir: target.root,
       target: target.database,
@@ -296,7 +296,7 @@ describe("workflow v17 metric sets and invocation-selected evaluators", () => {
       expect(target.executor.requests).toHaveLength(1);
       const baseline = target.database.listOperations().find(value => value.kind === "measure")!;
       expect(target.database.readScopeCall(baseline.operationId)?.replay).toMatchObject({
-        sourceRunId: "flow_v17_metric_replay_source",
+        sourceRunId: "flow_test_metric_replay_source",
       });
       expect(metricValues(target.database)).toEqual(metricValues(source.database));
       target.database.validateIntegrity();
@@ -310,7 +310,7 @@ function createFixture(
   name: string,
   outputs: string[],
   profileChange: Partial<MeasurementProfileDefinition> = {},
-  runId = `flow_v17_${name.replace(/-/gu, "_")}`,
+  runId = `flow_test_${name.replace(/-/gu, "_")}`,
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `workflow-${name}-`));
   roots.push(root);
@@ -320,7 +320,6 @@ function createFixture(
   const parsed = parseWorkflow(SOURCE, { fileName: `${name}.flow.ts` });
   const policy = defaultWorkflowRegistryPolicy(root, "user");
   const ref: WorkflowDefinitionRef = {
-    formatVersion: 1,
     id: `user:${name}`,
     namespace: "user",
     name,
@@ -492,7 +491,7 @@ class ScriptedMeasurementExecutor implements HostCommandExecutor {
 
   constructor(private readonly outputs: string[]) {}
 
-  describe() { return { id: "workflow-measurement-test", protocolVersion: 1 as const, sandbox: "fake" as const }; }
+  describe() { return { id: "workflow-measurement-test" as const, sandbox: "fake" as const }; }
 
   async execute(request: HostCommandRequest): Promise<HostCommandResult> {
     const output = this.outputs[this.requests.length];

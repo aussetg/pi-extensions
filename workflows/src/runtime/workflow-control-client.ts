@@ -92,7 +92,7 @@ export class WorkflowControlClient {
     try {
       const summary = await this.summaryFrom(database);
       if (!new Set(["completed", "failed", "stopped"]).has(summary.status)) throw new Error("Workflow run is not terminal");
-      return { summary, token: stableHash({ formatVersion: 1, kind: "run-deletion", runId: summary.runId, revision: summary.revision }) };
+      return { summary, token: stableHash({ kind: "run-deletion", runId: summary.runId, revision: summary.revision }) };
     } finally { database.close(); }
   }
 

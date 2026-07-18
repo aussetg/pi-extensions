@@ -1,4 +1,4 @@
-/** Public authoring contract for workflow runtime v17 `.flow.ts` modules. */
+/** Public authoring contract for workflow runtime `.flow.ts` modules. */
 declare module "pi/workflows" {
   export type JsonPrimitive = null | boolean | number | string;
   export type JsonValue = JsonPrimitive | readonly JsonValue[] | { readonly [key: string]: JsonValue };

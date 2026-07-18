@@ -44,7 +44,7 @@ export class WorkflowControlAuthorityRegistry {
 
   constructor(scopeId: string) {
     if (typeof scopeId !== "string" || scopeId.length < 1 || scopeId.length > 256 || /[\u0000-\u001f\u007f]/u.test(scopeId)) {
-      throw new TypeError("Workflow v17 authority scope id is invalid");
+      throw new TypeError("Workflow authority scope id is invalid");
     }
     this.scopeId = scopeId;
   }
@@ -52,13 +52,13 @@ export class WorkflowControlAuthorityRegistry {
   descriptor(descriptor: WorkflowDescriptor): object {
     assertDescriptorIdentity(descriptor.identity);
     if (descriptor.kind !== descriptor.identity.kind) {
-      throw new TypeError("Workflow v17 descriptor kind differs from its authority identity");
+      throw new TypeError("Workflow descriptor kind differs from its authority identity");
     }
     const key = authorityKey("descriptor", descriptor.identity);
     const existing = this.#records.get(key);
     if (existing) {
       if (!existing.active || stableHash(existing.privateAuthority) !== stableHash(descriptor)) {
-        throw new TypeError(`Workflow v17 descriptor authority ${descriptor.identity.sourceSite} changed`);
+        throw new TypeError(`Workflow descriptor authority ${descriptor.identity.sourceSite} changed`);
       }
       return existing.value;
     }
@@ -100,9 +100,9 @@ export class WorkflowControlAuthorityRegistry {
   }
 
   revoke(value: unknown): void {
-    if (!value || typeof value !== "object") throw new TypeError("Workflow v17 authority value is invalid");
+    if (!value || typeof value !== "object") throw new TypeError("Workflow authority value is invalid");
     const record = AUTHORITY_VALUES.get(value);
-    if (!record) throw new TypeError("Workflow v17 value has no authority");
+    if (!record) throw new TypeError("Workflow value has no authority");
     this.#assertOwned(record);
     record.active = false;
   }
@@ -114,7 +114,7 @@ export class WorkflowControlAuthorityRegistry {
     privateAuthority?: unknown,
   ): object {
     const key = authorityKey(family, identity);
-    if (this.#records.has(key)) throw new TypeError(`Duplicate workflow v17 ${family} authority ${key}`);
+    if (this.#records.has(key)) throw new TypeError(`Duplicate workflow ${family} authority ${key}`);
     const fields = copyFields(fieldsValue);
     const value = Object.create(null) as Record<string, unknown>;
     for (const [name, field] of Object.entries(fields)) {
@@ -144,10 +144,10 @@ export class WorkflowControlAuthorityRegistry {
   #assertOwned(record: AuthorityRecord): void {
     if (record.owner !== this.#owner) {
       throw new WorkflowAuthorityScopeError(
-        `Workflow v17 authority belongs to another scope, not ${this.scopeId}`,
+        `Workflow authority belongs to another scope, not ${this.scopeId}`,
       );
     }
-    if (!record.active) throw new WorkflowStaleAuthorityError("Workflow v17 authority has been revoked");
+    if (!record.active) throw new WorkflowStaleAuthorityError("Workflow authority has been revoked");
   }
 }
 
@@ -170,32 +170,29 @@ export function isWorkflowControlAuthority(value: unknown): value is object {
 }
 
 export function assertDescriptorIdentity(value: WorkflowDescriptorIdentity): void {
-  if (!plainRecord(value) || value.formatVersion !== 1
-    || !WORKFLOW_DESCRIPTOR_KINDS.includes(value.kind as never)
+  if (!plainRecord(value) || !WORKFLOW_DESCRIPTOR_KINDS.includes(value.kind as never)
     || typeof value.sourceSite !== "string" || !SOURCE_SITE.test(value.sourceSite)
     || typeof value.definitionHash !== "string" || !HASH.test(value.definitionHash)
-    || !exactKeys(value, ["formatVersion", "kind", "sourceSite", "definitionHash"])) {
-    throw new TypeError("Workflow v17 descriptor identity is invalid");
+    || !exactKeys(value, ["kind", "sourceSite", "definitionHash"])) {
+    throw new TypeError("Workflow descriptor identity is invalid");
   }
 }
 
 export function assertProductIdentity(value: WorkflowProductIdentity): void {
-  if (!plainRecord(value) || value.formatVersion !== 1
-    || !WORKFLOW_PRODUCT_KINDS.includes(value.kind as never)
+  if (!plainRecord(value) || !WORKFLOW_PRODUCT_KINDS.includes(value.kind as never)
     || typeof value.authorityId !== "string" || !AUTHORITY_ID.test(value.authorityId)
     || typeof value.authorityHash !== "string" || !HASH.test(value.authorityHash)
-    || !exactKeys(value, ["formatVersion", "kind", "authorityId", "authorityHash"])) {
-    throw new TypeError("Workflow v17 product identity is invalid");
+    || !exactKeys(value, ["kind", "authorityId", "authorityHash"])) {
+    throw new TypeError("Workflow product identity is invalid");
   }
 }
 
 export function assertReferenceIdentity(value: WorkflowReferenceIdentity): void {
-  if (!plainRecord(value) || value.formatVersion !== 1
-    || !WORKFLOW_REFERENCE_KINDS.includes(value.kind as never)
+  if (!plainRecord(value) || !WORKFLOW_REFERENCE_KINDS.includes(value.kind as never)
     || typeof value.authorityId !== "string" || !AUTHORITY_ID.test(value.authorityId)
     || typeof value.authorityHash !== "string" || !HASH.test(value.authorityHash)
-    || !exactKeys(value, ["formatVersion", "kind", "authorityId", "authorityHash"])) {
-    throw new TypeError("Workflow v17 reference identity is invalid");
+    || !exactKeys(value, ["kind", "authorityId", "authorityHash"])) {
+    throw new TypeError("Workflow reference identity is invalid");
   }
 }
 
@@ -219,25 +216,25 @@ function authorityKey(
 }
 
 function copyFields(value: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
-  if (!plainRecord(value)) throw new TypeError("Workflow v17 authority fields must be a plain object");
+  if (!plainRecord(value)) throw new TypeError("Workflow authority fields must be a plain object");
   const seen = new Set<object>();
   const copy = (current: unknown): unknown => {
     if (current === undefined || current === null || typeof current === "boolean" || typeof current === "string") return current;
     if (typeof current === "number") {
-      if (!Number.isFinite(current) || Object.is(current, -0)) throw new TypeError("Workflow v17 authority fields require finite numbers");
+      if (!Number.isFinite(current) || Object.is(current, -0)) throw new TypeError("Workflow authority fields require finite numbers");
       return current;
     }
-    if (!current || typeof current !== "object") throw new TypeError(`Unsupported workflow v17 authority field ${typeof current}`);
+    if (!current || typeof current !== "object") throw new TypeError(`Unsupported workflow authority field ${typeof current}`);
     if (AUTHORITY_VALUES.has(current)) return current;
-    if (seen.has(current)) throw new TypeError("Workflow v17 authority fields may not be cyclic");
+    if (seen.has(current)) throw new TypeError("Workflow authority fields may not be cyclic");
     seen.add(current);
     try {
       if (Array.isArray(current)) return Object.freeze(current.map(copy));
-      if (!plainRecord(current)) throw new TypeError("Workflow v17 authority fields must contain plain data or authority values");
+      if (!plainRecord(current)) throw new TypeError("Workflow authority fields must contain plain data or authority values");
       const result = Object.create(null) as Record<string, unknown>;
       for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(current))) {
         if (FORBIDDEN_KEYS.has(key) || !descriptor.enumerable || descriptor.get || descriptor.set || !("value" in descriptor)) {
-          throw new TypeError(`Workflow v17 authority field ${key} is unavailable`);
+          throw new TypeError(`Workflow authority field ${key} is unavailable`);
         }
         result[key] = copy(descriptor.value);
       }

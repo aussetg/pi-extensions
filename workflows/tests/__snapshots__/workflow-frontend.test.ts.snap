@@ -1,6 +1,6 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`workflow v17 TypeScript frontend > derives the exact review surface for all six workflows 1`] = `
+exports[`workflow TypeScript frontend > derives the exact review surface for all six workflows 1`] = `
 {
   "coding.flow.ts": {
     "descriptors": [
@@ -8,7 +8,6 @@ exports[`workflow v17 TypeScript frontend > derives the exact review surface for
         "binding": "inspect",
         "identity": {
           "definitionHash": "sha256:b2c72d44663cebe4ebb562e1eca891b4b47bca07dfd498c262f9ea91cb44d695",
-          "formatVersion": 1,
           "kind": "agent-task",
           "sourceSite": "descriptor-000000",
         },
@@ -26,7 +25,6 @@ exports[`workflow v17 TypeScript frontend > derives the exact review surface for
         "binding": "implement",
         "identity": {
           "definitionHash": "sha256:15db53ad52815536da88cae5a6e2c9a801e421edde3a071eb86dfe37dec237e0",
-          "formatVersion": 1,
           "kind": "agent-task",
           "sourceSite": "descriptor-000001",
         },
@@ -225,7 +223,6 @@ exports[`workflow v17 TypeScript frontend > derives the exact review surface for
         "binding": "createPlan",
         "identity": {
           "definitionHash": "sha256:fdf72d80f6f74fc458a12c2ea6388058bc68c6eff74e3a92704ef8fcbecc2feb",
-          "formatVersion": 1,
           "kind": "agent-task",
           "sourceSite": "descriptor-000000",
         },
@@ -243,7 +240,6 @@ exports[`workflow v17 TypeScript frontend > derives the exact review surface for
         "binding": "executePoint",
         "identity": {
           "definitionHash": "sha256:d459e3cd10099b994fe23ae8e899d27025a9863fe5571ffadb45ebbdbd5fe7ae",
-          "formatVersion": 1,
           "kind": "agent-task",
           "sourceSite": "descriptor-000001",
         },
@@ -261,7 +257,6 @@ exports[`workflow v17 TypeScript frontend > derives the exact review surface for
         "binding": "revisePlan",
         "identity": {
           "definitionHash": "sha256:a889317feeb69b5eba039feb806a66c5ca7744b6e11946de24e03ffd3a9b9f80",
-          "formatVersion": 1,
           "kind": "agent-task",
           "sourceSite": "descriptor-000002",
         },
@@ -499,7 +494,6 @@ exports[`workflow v17 TypeScript frontend > derives the exact review surface for
         "binding": "inspectGoal",
         "identity": {
           "definitionHash": "sha256:d1b301b63f857ec509e18b0f6f2af7cefca1def0ea0567113dc7e50110ecd174",
-          "formatVersion": 1,
           "kind": "agent-task",
           "sourceSite": "descriptor-000000",
         },
@@ -517,7 +511,6 @@ exports[`workflow v17 TypeScript frontend > derives the exact review surface for
         "binding": "implementGoal",
         "identity": {
           "definitionHash": "sha256:9ee01a564c6a754ec336ce056a9e5c4c17009cda2f1b7fc076d9104ef75432fa",
-          "formatVersion": 1,
           "kind": "agent-task",
           "sourceSite": "descriptor-000001",
         },
@@ -749,7 +742,6 @@ exports[`workflow v17 TypeScript frontend > derives the exact review surface for
         "binding": "proposeExperiment",
         "identity": {
           "definitionHash": "sha256:4d5642c341cf7229adbdc5e7b35c559994a9a6bd3395c569891dd760a84769c1",
-          "formatVersion": 1,
           "kind": "agent-task",
           "sourceSite": "descriptor-000000",
         },
@@ -767,7 +759,6 @@ exports[`workflow v17 TypeScript frontend > derives the exact review surface for
         "binding": "implementExperiment",
         "identity": {
           "definitionHash": "sha256:b5587ab8f1d468b9f0ae9d9473915e4af5d9e6c454b8b97d3fc8e2b7cc8bd49f",
-          "formatVersion": 1,
           "kind": "agent-task",
           "sourceSite": "descriptor-000001",
         },
@@ -785,7 +776,6 @@ exports[`workflow v17 TypeScript frontend > derives the exact review surface for
         "binding": "reflect",
         "identity": {
           "definitionHash": "sha256:aa4a3fdbf1dd0dcb713ff79070ef9738ee18ac7136c387722f3ee877a45dc75e",
-          "formatVersion": 1,
           "kind": "agent-task",
           "sourceSite": "descriptor-000002",
         },
@@ -1041,7 +1031,6 @@ exports[`workflow v17 TypeScript frontend > derives the exact review surface for
         "effect": "read-only",
         "identity": {
           "definitionHash": "sha256:29969c0e5c73bfe5ab9680f8d49cdb58920444047c75e363d85982c986599e08",
-          "formatVersion": 1,
           "kind": "command-task",
           "sourceSite": "descriptor-000000",
         },
@@ -1057,7 +1046,6 @@ exports[`workflow v17 TypeScript frontend > derives the exact review surface for
         "binding": "inventoryPackage",
         "identity": {
           "definitionHash": "sha256:ea678a73270986e618d603c772c43652dcb492e96658af11248988ea3305c771",
-          "formatVersion": 1,
           "kind": "agent-task",
           "sourceSite": "descriptor-000001",
         },
@@ -1075,7 +1063,6 @@ exports[`workflow v17 TypeScript frontend > derives the exact review surface for
         "binding": "analyzeRisks",
         "identity": {
           "definitionHash": "sha256:9abdcefe70f21d6ba231a69b052446a5c9742b28561b264ae10006382e009e06",
-          "formatVersion": 1,
           "kind": "agent-task",
           "sourceSite": "descriptor-000002",
         },
@@ -1093,7 +1080,6 @@ exports[`workflow v17 TypeScript frontend > derives the exact review surface for
         "binding": "proposeTests",
         "identity": {
           "definitionHash": "sha256:6a40cad70cc58e29235ca44d672a20fdfb2b8567e480d272ce821b555a19fd75",
-          "formatVersion": 1,
           "kind": "agent-task",
           "sourceSite": "descriptor-000003",
         },
@@ -1111,7 +1097,6 @@ exports[`workflow v17 TypeScript frontend > derives the exact review surface for
         "binding": "synthesizePortfolio",
         "identity": {
           "definitionHash": "sha256:90864aa2531032790561367d83e39f6fafade543f05704f16bb059e91d5c2f53",
-          "formatVersion": 1,
           "kind": "agent-task",
           "sourceSite": "descriptor-000004",
         },
@@ -1265,7 +1250,6 @@ exports[`workflow v17 TypeScript frontend > derives the exact review surface for
         "binding": "researchAngle",
         "identity": {
           "definitionHash": "sha256:420287246aeab7b7c8c3caa6b3f06b87d9743ce58613769598af7ef4e8ce60ff",
-          "formatVersion": 1,
           "kind": "agent-task",
           "sourceSite": "descriptor-000000",
         },
@@ -1283,7 +1267,6 @@ exports[`workflow v17 TypeScript frontend > derives the exact review surface for
         "binding": "writeReport",
         "identity": {
           "definitionHash": "sha256:f18c6768320e4ce5a7c67792f92b1d52c5a00410f0db94180c6414a058eed70c",
-          "formatVersion": 1,
           "kind": "agent-task",
           "sourceSite": "descriptor-000001",
         },
@@ -1301,7 +1284,6 @@ exports[`workflow v17 TypeScript frontend > derives the exact review surface for
         "binding": "critiqueReport",
         "identity": {
           "definitionHash": "sha256:54e6f86d1e62a18e0c7a724a523e8c5eb01ecd9e0121227cd47dc7883478f5f3",
-          "formatVersion": 1,
           "kind": "agent-task",
           "sourceSite": "descriptor-000002",
         },

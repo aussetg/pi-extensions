@@ -4,8 +4,8 @@ This extension runs reviewed `.flow.ts` definitions as durable, systemd-owned wo
 Linux/Btrfs machine. Workflow source uses ordinary strict TypeScript control flow. Effects remain
 explicit through the `pi/workflows` API.
 
-Runtime 17 is the only executable runtime. Its SQLite format is schema 4. Schema-3 databases are
-immutable legacy evidence: they may be reported by discovery, but cannot resume or replay.
+This runtime owns one source language and one SQLite layout. Run and draft storage is disposable;
+rebuilding it is the recovery path.
 
 The current boundaries are documented in [`SECURITY.md`](SECURITY.md), performance limits in
 [`PERFORMANCE.md`](PERFORMANCE.md), and the pre-rollout verification split in
@@ -179,12 +179,12 @@ measurements, experiments, human interactions, controls, and the final result.
 ```sh
 npm run typecheck
 npm run typecheck:flows
-npm run typecheck:conformance:v17
+npm run typecheck:conformance
 npm run test:unit
-npm run test:conformance:v17
+npm run test:conformance
 npm run check
 ```
 
-The independent oracle remains under `tests/conformance/v17/`. Production tests use real SQLite,
+The independent oracle remains under `tests/conformance/`. Production tests use real SQLite,
 strict source compilation, crash/replay injection, scheduler permutations, malformed authority and
 wire values, candidate/apply lifecycle checks, and an end-to-end prepared coordinator.

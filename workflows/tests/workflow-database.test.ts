@@ -11,7 +11,6 @@ import {
   WorkflowRunDatabaseCorruptionError,
   WorkflowRunDatabaseReader,
   WorkflowRunDatabaseRevisionConflictError,
-  WorkflowRunDatabaseVersionError,
 } from "../src/persistence/run-database.js";
 import {
   workflowDefinitionHash,
@@ -56,7 +55,7 @@ const SIMPLE_PARSED = parseWorkflow(SIMPLE_SOURCE, {
 });
 
 const OPTIMIZE_SOURCE = fs.readFileSync(
-  path.resolve("tests/conformance/v17/typecheck/corpus/optimize.flow.ts"),
+  path.resolve("tests/conformance/typecheck/corpus/optimize.flow.ts"),
   "utf8",
 );
 const OPTIMIZE_PARSED = parseWorkflow(OPTIMIZE_SOURCE, {
@@ -70,18 +69,17 @@ afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
-describe("workflow v17 run database", () => {
-  it("creates and reopens one immutable-identity schema-4 WAL run", () => {
+describe("workflow run database", () => {
+  it("creates and reopens one immutable-identity WAL run", () => {
     const fixture = createDatabase();
     expect(fixture.database.configuration()).toEqual({
-      schemaVersion: 4,
       journalMode: "wal",
       foreignKeys: true,
       synchronous: 2,
       busyTimeoutMs: 5_000,
     });
     expect(fixture.database.readRun()).toMatchObject({
-      runId: "flow_v17_test",
+      runId: "flow_test_test",
       revision: 1,
       workflow: {
         id: "user:simple",
@@ -114,21 +112,6 @@ describe("workflow v17 run database", () => {
     const reader = track(WorkflowRunDatabaseReader.open(fixture.databasePath));
     expect(reader.readRun().workflow.snapshotHash).toBe(fixture.snapshot.snapshotHash);
     reader.validateIntegrity();
-  });
-
-  it("rejects v16 and unknown schemas without modifying them", () => {
-    const root = temporaryRoot();
-    for (const version of [0, 1, 2, 3, 99]) {
-      const databasePath = path.join(root, `version-${version}.sqlite`);
-      const raw = new NativeDatabaseSync(databasePath);
-      raw.exec(`PRAGMA user_version = ${version}`);
-      raw.close();
-      expect(() => WorkflowRunDatabase.open(databasePath)).toThrow(WorkflowRunDatabaseVersionError);
-      const check = new NativeDatabaseSync(databasePath, { readOnly: true });
-      expect((check.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(version);
-      check.close();
-    }
-
   });
 
   it("serializes revisions across independent WAL connections", () => {
@@ -447,7 +430,6 @@ describe("workflow v17 run database", () => {
     const profile = measurementProfile(root);
     const policy = defaultWorkflowRegistryPolicy(root, "user");
     const ref: WorkflowDefinitionRef = {
-      formatVersion: 1,
       id: "user:optimize",
       namespace: "user",
       name: "optimize",
@@ -484,7 +466,7 @@ describe("workflow v17 run database", () => {
     });
     const databasePath = path.join(root, "resource-run.sqlite");
     const database = track(WorkflowRunDatabase.create(databasePath, {
-      runId: "flow_v17_resource",
+      runId: "flow_test_resource",
       snapshot,
       projectSnapshotHash: hash("resource-project"),
       routeSnapshotHash: hash("resource-routes"),
@@ -631,7 +613,6 @@ describe("workflow v17 run database", () => {
       approvalId: "approval_candidate",
       verificationBindingHash: hash("verification-binding"),
       authorityHash: stableHash({
-        formatVersion: 1,
         candidateId: candidate.candidateId,
         approvalId: "approval_candidate",
         receiptId: "apply_receipt_candidate",
@@ -925,7 +906,7 @@ describe("workflow v17 run database", () => {
       semanticInputHash: hash("exact-apply-input"),
       at: later(database.readRun().revision + 1),
     }).operation;
-    const request = { formatVersion: 1, kind: "apply", candidateId: "candidate_exact" } as const;
+    const request = { kind: "apply", candidateId: "candidate_exact" } as const;
     const challengeHash = stableHash(request);
     const interaction = database.requestHumanInteraction({
       expectedRevision: database.readRun().revision,
@@ -1108,7 +1089,6 @@ function createDatabase() {
   const root = temporaryRoot();
   const policy = defaultWorkflowRegistryPolicy(root, "user");
   const ref: WorkflowDefinitionRef = {
-    formatVersion: 1,
     id: "user:simple",
     namespace: "user",
     name: "simple",
@@ -1129,7 +1109,7 @@ function createDatabase() {
   });
   const databasePath = path.join(root, "run.sqlite");
   const database = track(WorkflowRunDatabase.create(databasePath, {
-    runId: "flow_v17_test",
+    runId: "flow_test_test",
     snapshot,
     projectSnapshotHash: hash("project"),
     routeSnapshotHash: hash("routes"),

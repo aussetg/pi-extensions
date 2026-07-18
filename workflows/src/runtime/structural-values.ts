@@ -18,7 +18,6 @@ type EncodedNode =
     };
 
 interface EncodedTree {
-  formatVersion: 1;
   kind: typeof FORMAT;
   root: EncodedNode;
 }
@@ -30,14 +29,14 @@ export class WorkflowStructuralValueCodec {
     private readonly products: WorkflowEffectProductFactory,
   ) {
     if (products.authority !== authority) {
-      throw new TypeError("Workflow v17 structural value authority differs from its product factory");
+      throw new TypeError("Workflow structural value authority differs from its product factory");
     }
   }
 
   encode(value: unknown): JsonValue {
     const state = { nodes: 0, ancestors: new Set<object>() };
     const root = this.encodeNode(value, 0, state);
-    return { formatVersion: 1, kind: FORMAT, root } as unknown as JsonValue;
+    return { kind: FORMAT, root } as unknown as JsonValue;
   }
 
   decode(value: JsonValue): unknown {
@@ -57,17 +56,17 @@ export class WorkflowStructuralValueCodec {
     }
     if (typeof value === "number") {
       if (!Number.isFinite(value) || Object.is(value, -0)) {
-        throw new TypeError("Workflow v17 structural values require finite JSON numbers");
+        throw new TypeError("Workflow structural values require finite JSON numbers");
       }
       return { type: "json", value };
     }
     if (!value || typeof value !== "object") {
-      throw new TypeError(`Workflow v17 structural value contains unsupported ${typeof value}`);
+      throw new TypeError(`Workflow structural value contains unsupported ${typeof value}`);
     }
     const description = this.authority.describe(value);
     if (description) {
       if (description.family !== "product") {
-        throw new TypeError(`Workflow v17 structural values cannot retain ${description.family} authority`);
+        throw new TypeError(`Workflow structural values cannot retain ${description.family} authority`);
       }
       const identity = description.identity as WorkflowProductIdentity;
       if (identity.kind === "artifact") {
@@ -84,18 +83,18 @@ export class WorkflowStructuralValueCodec {
         ]),
       };
     }
-    if (state.ancestors.has(value)) throw new TypeError("Workflow v17 structural values may not be cyclic");
+    if (state.ancestors.has(value)) throw new TypeError("Workflow structural values may not be cyclic");
     state.ancestors.add(value);
     try {
       if (Array.isArray(value)) {
         return { type: "array", values: value.map(entry => this.encodeNode(entry, depth + 1, state)) };
       }
-      if (!plainRecord(value)) throw new TypeError("Workflow v17 structural values must be plain data or products");
+      if (!plainRecord(value)) throw new TypeError("Workflow structural values must be plain data or products");
       const entries: Array<[string, EncodedNode]> = [];
       for (const key of Object.keys(value).sort()) {
         const descriptor = Object.getOwnPropertyDescriptor(value, key);
         if (!descriptor?.enumerable || descriptor.get || descriptor.set || !("value" in descriptor)) {
-          throw new TypeError(`Workflow v17 structural property ${key} is unavailable`);
+          throw new TypeError(`Workflow structural property ${key} is unavailable`);
         }
         entries.push([key, this.encodeNode(descriptor.value, depth + 1, state)]);
       }
@@ -110,7 +109,7 @@ export class WorkflowStructuralValueCodec {
     if (node.type === "json") return node.value;
     if (node.type === "artifact") {
       const record = this.products.store.database.readArtifact(node.digest);
-      if (!record) throw new Error(`Workflow v17 structural artifact ${node.digest} is unavailable`);
+      if (!record) throw new Error(`Workflow structural artifact ${node.digest} is unavailable`);
       return this.products.artifact(record);
     }
     if (node.type === "array") return node.values.map(value => this.decodeNode(value, depth + 1, state));
@@ -130,13 +129,13 @@ export class WorkflowStructuralValueCodec {
   private consume(depth: number, nodes: number): void {
     if (depth > DEFINITION_LIMITS.structuralValueDepth
       || nodes > DEFINITION_LIMITS.structuralValueNodes) {
-      throw new TypeError("Workflow v17 structural value exceeds its structural limit");
+      throw new TypeError("Workflow structural value exceeds its structural limit");
     }
   }
 }
 
 function isTree(value: JsonValue): value is JsonValue & EncodedTree {
-  if (!plainRecord(value) || value.formatVersion !== 1 || value.kind !== FORMAT) return false;
+  if (!plainRecord(value) || value.kind !== FORMAT) return false;
   validateNode(value.root, 0, { nodes: 0 });
   return true;
 }
@@ -144,53 +143,53 @@ function isTree(value: JsonValue): value is JsonValue & EncodedTree {
 function validateNode(value: unknown, depth: number, state: { nodes: number }): asserts value is EncodedNode {
   if (++state.nodes > DEFINITION_LIMITS.structuralValueNodes
     || depth > DEFINITION_LIMITS.structuralValueDepth || !plainRecord(value)) {
-    throw new TypeError("Workflow v17 encoded structural value is invalid");
+    throw new TypeError("Workflow encoded structural value is invalid");
   }
   if (value.type === "json") {
     if (!exactKeys(value, ["type", "value"]) || (value.value !== null
       && typeof value.value !== "boolean" && typeof value.value !== "string"
       && (typeof value.value !== "number" || !Number.isFinite(value.value) || Object.is(value.value, -0)))) {
-      throw new TypeError("Workflow v17 encoded structural primitive is invalid");
+      throw new TypeError("Workflow encoded structural primitive is invalid");
     }
     return;
   }
   if (value.type === "artifact") {
     if (!exactKeys(value, ["type", "digest"])
       || typeof value.digest !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(value.digest)) {
-      throw new TypeError("Workflow v17 encoded structural artifact is invalid");
+      throw new TypeError("Workflow encoded structural artifact is invalid");
     }
     return;
   }
   if (value.type === "array") {
     if (!exactKeys(value, ["type", "values"]) || !Array.isArray(value.values)) {
-      throw new TypeError("Workflow v17 encoded structural array is invalid");
+      throw new TypeError("Workflow encoded structural array is invalid");
     }
     for (const entry of value.values) validateNode(entry, depth + 1, state);
     return;
   }
   if (value.type === "object") {
-    if (!exactKeys(value, ["type", "entries"])) throw new TypeError("Workflow v17 encoded structural object is invalid");
+    if (!exactKeys(value, ["type", "entries"])) throw new TypeError("Workflow encoded structural object is invalid");
     validateEntries(value.entries, depth, state);
     return;
   }
   if (value.type === "product") {
     if (!exactKeys(value, ["type", "identity", "fields"]) || !plainRecord(value.identity)
-      || value.identity.formatVersion !== 1 || typeof value.identity.kind !== "string"
+      || typeof value.identity.kind !== "string"
       || typeof value.identity.authorityId !== "string" || typeof value.identity.authorityHash !== "string") {
-      throw new TypeError("Workflow v17 encoded structural product is invalid");
+      throw new TypeError("Workflow encoded structural product is invalid");
     }
     validateEntries(value.fields, depth, state);
     return;
   }
-  throw new TypeError("Workflow v17 encoded structural node kind is invalid");
+  throw new TypeError("Workflow encoded structural node kind is invalid");
 }
 
 function validateEntries(value: unknown, depth: number, state: { nodes: number }): void {
-  if (!Array.isArray(value)) throw new TypeError("Workflow v17 encoded structural entries are invalid");
+  if (!Array.isArray(value)) throw new TypeError("Workflow encoded structural entries are invalid");
   let previous = "";
   for (const entry of value) {
     if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string" || entry[0] <= previous) {
-      throw new TypeError("Workflow v17 encoded structural entry order is invalid");
+      throw new TypeError("Workflow encoded structural entry order is invalid");
     }
     previous = entry[0];
     validateNode(entry[1], depth + 1, state);

@@ -2,7 +2,7 @@ import vm from "node:vm";
 
 const SAFE_PATH_PATTERN = "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*\\\\)[^\\u0000-\\u001f\\u007f]+$";
 
-/** Build every v17 author-visible value from control-realm intrinsics. */
+/** Build every author-visible value from control-realm intrinsics. */
 export function createWorkflowControlRealm(context, options) {
   const bootstrap = new vm.Script(`
     ((hostCall, hostSyncCall, metricCall, configuration) => {

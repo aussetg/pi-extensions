@@ -48,8 +48,8 @@ afterEach(() => {
   }
 });
 
-describe("workflow v17 artifacts and products", () => {
-  it("stores canonical content-addressed artifacts compatible with schema-4 replay", async () => {
+describe("workflow artifacts and products", () => {
+  it("stores canonical content-addressed artifacts compatible with replay", async () => {
     const fixture = createFixture();
     const first = await fixture.store.putJson({
       kind: "agent-output",
@@ -57,7 +57,7 @@ describe("workflow v17 artifacts and products", () => {
     });
     expect(fs.readFileSync(first.bodyPath, "utf8")).toBe('{"answer":42,"nested":[true,"yes"]}');
     expect(first.record).toMatchObject({
-      runId: "flow_v17_artifacts",
+      runId: "flow_test_artifacts",
       kind: "agent-output",
       mediaType: "application/json",
       bodyPath: `artifacts/${first.record.digest.slice(7)}/body`,
@@ -69,7 +69,7 @@ describe("workflow v17 artifacts and products", () => {
       first.record.digest.slice(7),
       "metadata.json",
     ), "utf8");
-    expect(JSON.parse(metadata)).toEqual({ formatVersion: 1, ...first.record });
+    expect(JSON.parse(metadata)).toEqual({ ...first.record });
 
     const duplicate = await fixture.store.putJson({
       kind: "agent-output",
@@ -242,7 +242,7 @@ describe("workflow v17 artifacts and products", () => {
     ]));
     expect(workflowArtifactManifest(fixture.products, allowed).entries).toHaveLength(64);
     expect(() => workflowArtifactManifest(fixture.products, { ...allowed, overflow: artifact }))
-      .toThrow("Workflow v17 artifact bundle exceeds 64 leaves");
+      .toThrow("Workflow artifact bundle exceeds 64 leaves");
   });
 
   it("rejects plain leaves, lookalikes, unsafe segments, cycles, and nonattachable authority", async () => {
@@ -258,9 +258,9 @@ describe("workflow v17 artifacts and products", () => {
       fake: { output: { answer: 1 }, artifact: Object.freeze(Object.create(null)) },
     })).toThrow(/artifact input fake\//u);
     expect(() => workflowArtifactManifest(fixture.products, { "../../escape": finding }))
-      .toThrow("Invalid workflow v17 artifact segment ../../escape");
+      .toThrow("Invalid workflow artifact segment ../../escape");
     expect(() => workflowArtifactManifest(fixture.products, { safe: { "not a segment": finding } }))
-      .toThrow("Invalid workflow v17 artifact segment safe/not a segment");
+      .toThrow("Invalid workflow artifact segment safe/not a segment");
     const cyclic: unknown[] = [];
     cyclic.push(cyclic);
     expect(() => workflowArtifactManifest(fixture.products, { cyclic })).toThrow("artifact input cyclic/000000 is cyclic");
@@ -299,7 +299,6 @@ describe("workflow v17 artifacts and products", () => {
     });
     const codec = new WorkflowStructuralValueCodec(fixture.authority, fixture.products);
     const plain = {
-      formatVersion: 1,
       kind: "workflow-authority-tree",
       root: { type: "json", value: "ordinary workflow data" },
     };
@@ -412,7 +411,6 @@ function createFixture() {
   const parsed = parseWorkflow(SOURCE, { fileName: "artifacts.flow.ts" });
   const policy = defaultWorkflowRegistryPolicy(root, "user");
   const ref: WorkflowDefinitionRef = {
-    formatVersion: 1,
     id: "user:artifacts",
     namespace: "user",
     name: "artifacts",
@@ -432,7 +430,7 @@ function createFixture() {
     projectTrusted: false,
   });
   const database = track(WorkflowRunDatabase.create(path.join(root, "run.sqlite"), {
-    runId: "flow_v17_artifacts",
+    runId: "flow_test_artifacts",
     snapshot,
     projectSnapshotHash: sha256("project"),
     routeSnapshotHash: sha256("routes"),
@@ -460,7 +458,7 @@ function productIdentity(
   kind: WorkflowProductIdentity["kind"],
   authorityId: string,
 ): WorkflowProductIdentity {
-  return { formatVersion: 1, kind, authorityId, authorityHash: stableHash({ kind, authorityId }) };
+  return { kind, authorityId, authorityHash: stableHash({ kind, authorityId }) };
 }
 
 function clock(): () => Date {

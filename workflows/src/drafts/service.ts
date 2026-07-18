@@ -32,7 +32,7 @@ export function parseDraftSelector(selector: string): { namespace: WorkflowDraft
   return { namespace: match[1] as WorkflowDraftNamespace, name: match[2]!, id: selector as WorkflowDraftId };
 }
 
-/** Staged v17 authoring service; it installs only inert .flow.ts definitions. */
+/** Staged authoring service; it installs only inert .flow.ts definitions. */
 export class WorkflowDraftService {
   readonly store: WorkflowDraftStore;
   private readonly executorDescriptor?: AgentExecutorDescriptor;
@@ -94,10 +94,8 @@ export class WorkflowDraftService {
     ctx: ExtensionContext,
   ): Promise<{ challenge: WorkflowDraftPromotionChallenge; review: WorkflowDraftReviewRecord }> {
     const review = await this.validate(selector, ctx);
-    if (!review.valid || !review.definition) throw new Error(`Workflow v17 draft ${review.draftId} is invalid and cannot be promoted`);
+    if (!review.valid || !review.definition) throw new Error(`Workflow draft ${review.draftId} is invalid and cannot be promoted`);
     const body = {
-      formatVersion: 1 as const,
-      runtimeVersion: 17 as const,
       draftId: review.draftId,
       draftHash: review.sourceHash,
       targetNamespace: review.namespace,
@@ -134,7 +132,7 @@ export class WorkflowDraftService {
       reviewHash: resumed.reviewHash,
     };
     const { challenge, review } = await this.promotionChallenge(selector, targetExposure, ctx);
-    if (challenge.challengeHash !== challengeHash) throw new Error("Workflow v17 draft promotion challenge is stale");
+    if (challenge.challengeHash !== challengeHash) throw new Error("Workflow draft promotion challenge is stale");
     const installed = await this.store.installAndConsume({
       namespace: review.namespace,
       name: review.name,
@@ -186,7 +184,7 @@ export class WorkflowDraftService {
 
   private assertNamespaceAllowed(namespace: WorkflowDraftNamespace, ctx: ExtensionContext): void {
     if (namespace === "project" && !ctx.isProjectTrusted()) {
-      throw new Error("Project workflow v17 drafts require a trusted project");
+      throw new Error("Project workflow drafts require a trusted project");
     }
   }
 }

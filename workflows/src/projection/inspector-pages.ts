@@ -131,8 +131,6 @@ function page<T>(
   }
   const more = source.length > entries.length;
   const result: WorkflowInspectorPage<any> = {
-    formatVersion: 1,
-    runtimeVersion: 17,
     runId,
     revision,
     kind,
@@ -141,7 +139,7 @@ function page<T>(
     bytes: 0,
   };
   result.bytes = Buffer.byteLength(JSON.stringify(result), "utf8");
-  if (result.bytes > LIMITS.pageBytes) throw new Error("Workflow v17 inspector page exceeds its byte bound");
+  if (result.bytes > LIMITS.pageBytes) throw new Error("Workflow inspector page exceeds its byte bound");
   return result;
 }
 
@@ -155,29 +153,30 @@ function boundedEntry<T>(entry: T): T | JsonObject {
 }
 
 function encodeCursor(kind: WorkflowInspectorPageKind, value: unknown): string {
-  return Buffer.from(JSON.stringify({ v: 1, runtime: 17, kind, value }), "utf8").toString("base64url");
+  return Buffer.from(JSON.stringify({ kind, value }), "utf8").toString("base64url");
 }
 
 function decodeCursor(kind: WorkflowInspectorPageKind, cursor: string | undefined): unknown {
   if (!cursor) return undefined;
-  if (cursor.length > 2_048 || !/^[A-Za-z0-9_-]+$/u.test(cursor)) throw new TypeError("Invalid workflow v17 inspector cursor");
+  if (cursor.length > 2_048 || !/^[A-Za-z0-9_-]+$/u.test(cursor)) throw new TypeError("Invalid workflow inspector cursor");
   let value: unknown;
   try { value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")); }
-  catch { throw new TypeError("Invalid workflow v17 inspector cursor"); }
-  if (!plainRecord(value) || value.v !== 1 || value.runtime !== 17 || value.kind !== kind || !("value" in value)) {
-    throw new TypeError("Workflow v17 inspector cursor belongs to another page");
+  catch { throw new TypeError("Invalid workflow inspector cursor"); }
+  if (!plainRecord(value) || Object.keys(value).sort().join(",") !== "kind,value"
+    || value.kind !== kind || !("value" in value)) {
+    throw new TypeError("Workflow inspector cursor belongs to another page");
   }
   return value.value;
 }
 
 function integerCursor(value: unknown, fallback: number): number {
   if (value === undefined) return fallback;
-  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new TypeError("Invalid workflow v17 integer cursor");
+  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new TypeError("Invalid workflow integer cursor");
   return value as number;
 }
 
 function stringCursor(value: unknown): string {
-  if (typeof value !== "string") throw new TypeError("Invalid workflow v17 string cursor");
+  if (typeof value !== "string") throw new TypeError("Invalid workflow string cursor");
   return value;
 }
 
@@ -188,14 +187,14 @@ function pairCursor<A extends string, B extends string>(
 ): Record<A | B, string> | undefined {
   if (value === undefined) return undefined;
   if (!plainRecord(value) || typeof value[first] !== "string" || typeof value[second] !== "string") {
-    throw new TypeError("Invalid workflow v17 pair cursor");
+    throw new TypeError("Invalid workflow pair cursor");
   }
   return { [first]: value[first], [second]: value[second] } as Record<A | B, string>;
 }
 
 function pageLimit(value: number | undefined): number {
   const limit = value ?? 32;
-  if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError("Workflow v17 inspector page limit must be positive");
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError("Workflow inspector page limit must be positive");
   return Math.min(limit, LIMITS.pageEntries);
 }
 

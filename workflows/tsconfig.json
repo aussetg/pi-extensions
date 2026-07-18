@@ -12,5 +12,5 @@
     "types": ["node", "vitest"]
   },
   "include": ["index.ts", "workflow-api.d.ts", "src/**/*.ts", "tests/**/*.ts"],
-  "exclude": ["tests/conformance/v17/typecheck"]
+  "exclude": ["tests/conformance/typecheck"]
 }

@@ -2,7 +2,6 @@ import type { JsonSchema, JsonValue } from "../types.js";
 import { stableHash } from "../utils/hashes.js";
 import { deepFreezeJson } from "./canonical-json.js";
 
-export const WORKFLOW_RUNTIME_API_VERSION = 17 as const;
 export const WORKFLOW_MODULE = "pi/workflows" as const;
 export const WORKFLOW_SOURCE_EXTENSION = ".flow.ts" as const;
 
@@ -37,28 +36,24 @@ export type WorkflowReferenceKind = (typeof WORKFLOW_REFERENCE_KINDS)[number];
 export type WorkflowResourceKind = (typeof WORKFLOW_RESOURCE_KINDS)[number];
 
 export interface WorkflowDescriptorIdentity {
-  formatVersion: 1;
   kind: WorkflowDescriptorKind;
   sourceSite: string;
   definitionHash: string;
 }
 
 export interface WorkflowProductIdentity {
-  formatVersion: 1;
   kind: WorkflowProductKind;
   authorityId: string;
   authorityHash: string;
 }
 
 export interface WorkflowResourceIdentity {
-  formatVersion: 1;
   kind: WorkflowResourceKind;
   selector: string;
   snapshotHash: string;
 }
 
 export interface WorkflowReferenceIdentity {
-  formatVersion: 1;
   kind: WorkflowReferenceKind;
   authorityId: string;
   authorityHash: string;
@@ -70,9 +65,8 @@ const ID_PATTERN = "^[a-z][a-z0-9-]{0,127}$";
 export const WORKFLOW_DESCRIPTOR_IDENTITY_SCHEMA = deepFreezeJson({
   type: "object",
   additionalProperties: false,
-  required: ["formatVersion", "kind", "sourceSite", "definitionHash"],
+  required: ["kind", "sourceSite", "definitionHash"],
   properties: {
-    formatVersion: { const: 1 },
     kind: { enum: [...WORKFLOW_DESCRIPTOR_KINDS] },
     sourceSite: { type: "string", pattern: ID_PATTERN },
     definitionHash: { type: "string", pattern: HASH_PATTERN },
@@ -82,9 +76,8 @@ export const WORKFLOW_DESCRIPTOR_IDENTITY_SCHEMA = deepFreezeJson({
 export const WORKFLOW_PRODUCT_IDENTITY_SCHEMA = deepFreezeJson({
   type: "object",
   additionalProperties: false,
-  required: ["formatVersion", "kind", "authorityId", "authorityHash"],
+  required: ["kind", "authorityId", "authorityHash"],
   properties: {
-    formatVersion: { const: 1 },
     kind: { enum: [...WORKFLOW_PRODUCT_KINDS] },
     authorityId: { type: "string", pattern: ID_PATTERN },
     authorityHash: { type: "string", pattern: HASH_PATTERN },
@@ -94,9 +87,8 @@ export const WORKFLOW_PRODUCT_IDENTITY_SCHEMA = deepFreezeJson({
 export const WORKFLOW_REFERENCE_IDENTITY_SCHEMA = deepFreezeJson({
   type: "object",
   additionalProperties: false,
-  required: ["formatVersion", "kind", "authorityId", "authorityHash"],
+  required: ["kind", "authorityId", "authorityHash"],
   properties: {
-    formatVersion: { const: 1 },
     kind: { enum: [...WORKFLOW_REFERENCE_KINDS] },
     authorityId: { type: "string", pattern: ID_PATTERN },
     authorityHash: { type: "string", pattern: HASH_PATTERN },
@@ -106,9 +98,8 @@ export const WORKFLOW_REFERENCE_IDENTITY_SCHEMA = deepFreezeJson({
 export const WORKFLOW_RESOURCE_IDENTITY_SCHEMA = deepFreezeJson({
   type: "object",
   additionalProperties: false,
-  required: ["formatVersion", "kind", "selector", "snapshotHash"],
+  required: ["kind", "selector", "snapshotHash"],
   properties: {
-    formatVersion: { const: 1 },
     kind: { enum: [...WORKFLOW_RESOURCE_KINDS] },
     selector: {
       type: "string",
@@ -122,8 +113,6 @@ export const WORKFLOW_RESOURCE_IDENTITY_SCHEMA = deepFreezeJson({
  * Normative public-language identity pinned by snapshots, control protocol, and semantic engine.
  */
 export const WORKFLOW_RUNTIME_API_DESCRIPTOR = deepFreezeJson({
-  formatVersion: 1,
-  runtimeApiVersion: WORKFLOW_RUNTIME_API_VERSION,
   source: {
     extension: WORKFLOW_SOURCE_EXTENSION,
     module: WORKFLOW_MODULE,
@@ -204,22 +193,6 @@ export const WORKFLOW_RUNTIME_API_DESCRIPTOR = deepFreezeJson({
     applyRequiresAcceptedCandidate: true,
     successfulRunAllowsPendingNonemptyCandidate: false,
   },
-  removedOperations: [
-    "stage",
-    "loop",
-    "fanOut",
-    "checkpoint",
-    "metric",
-  ],
-  removedAuthorFields: [
-    "name",
-    "inputSchema",
-    "outputSchema",
-    "capabilities",
-    "modelVisible",
-    "maxParallelism",
-  ],
-  removedInvocationFields: ["operationId", "resultMode", "argv", "model", "thinking"],
 } as unknown as JsonValue);
 
 export const WORKFLOW_RUNTIME_API_HASH = stableHash(WORKFLOW_RUNTIME_API_DESCRIPTOR);

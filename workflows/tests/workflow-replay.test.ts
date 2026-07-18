@@ -57,7 +57,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
-describe("workflow v17 causal replay", () => {
+describe("workflow causal replay", () => {
   it("imports exact successful calls while ignoring display/source-site changes", async () => {
     const pair = createPair(
       "user:simple",
@@ -607,8 +607,8 @@ describe("workflow v17 causal replay", () => {
 
     const unrelatedRoot = testRoot();
     const unrelated = {
-      source: createRun(path.join(unrelatedRoot, "source"), "flow_v17_source", "user:simple"),
-      target: createRun(path.join(unrelatedRoot, "target"), "flow_v17_target", "user:other"),
+      source: createRun(path.join(unrelatedRoot, "source"), "flow_test_source", "user:simple"),
+      target: createRun(path.join(unrelatedRoot, "target"), "flow_test_target", "user:other"),
     };
     await expect(openReplay(unrelated)).rejects.toThrow(WorkflowCausalReplayError);
 
@@ -636,8 +636,8 @@ describe("workflow v17 causal replay", () => {
 function createPair(workflowId = "user:simple", targetSource = SIMPLE_SOURCE) {
   const root = testRoot();
   return {
-    source: createRun(path.join(root, "source"), "flow_v17_source", workflowId),
-    target: createRun(path.join(root, "target"), "flow_v17_target", workflowId, targetSource),
+    source: createRun(path.join(root, "source"), "flow_test_source", workflowId),
+    target: createRun(path.join(root, "target"), "flow_test_target", workflowId, targetSource),
   };
 }
 
@@ -658,7 +658,6 @@ function createRun(runDir: string, runId: string, workflowId: string, source = S
   const name = workflowId.slice(workflowId.indexOf(":") + 1);
   const policy = defaultWorkflowRegistryPolicy(runDir, namespace);
   const ref: WorkflowDefinitionRef = {
-    formatVersion: 1,
     id: workflowId as WorkflowDefinitionRef["id"],
     namespace,
     name,
@@ -880,7 +879,7 @@ function writeArtifact(
   const directory = path.dirname(path.join(runDir, bodyPath));
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(runDir, bodyPath), body, { mode: 0o400 });
-  fs.writeFileSync(path.join(directory, "metadata.json"), stableJson({ formatVersion: 1, ...record }), { mode: 0o400 });
+  fs.writeFileSync(path.join(directory, "metadata.json"), stableJson({ ...record }), { mode: 0o400 });
   return record;
 }
 

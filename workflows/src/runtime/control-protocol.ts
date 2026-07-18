@@ -9,8 +9,6 @@ import {
   assertReferenceIdentity,
 } from "./control-authority.js";
 
-export const WORKFLOW_CONTROL_PROTOCOL_VERSION = 17 as const;
-
 export const WORKFLOW_ASYNC_FLOW_METHODS = Object.freeze([
   "parallel",
   "map",
@@ -81,7 +79,7 @@ type MessageOutcome =
   | { value?: never; error: WorkflowSerializedError };
 
 export type WorkflowControlProcessMessage =
-  | { type: "initialized"; protocolVersion: 17 }
+  | { type: "initialized" }
   | {
       type: "host-call";
       requestId: string;
@@ -110,7 +108,6 @@ export type WorkflowControlProcessMessage =
 export type WorkflowHostProcessMessage =
   | {
       type: "initialize";
-      protocolVersion: 17;
       runtimeApiHash: string;
       executableSource: string;
       workflowName: string;
@@ -148,18 +145,15 @@ export class WorkflowControlProtocolError extends Error {
 }
 
 export function parseWorkflowControlProcessMessage(value: unknown): WorkflowControlProcessMessage {
-  const message = requireRecord(value, "workflow v17 control message");
+  const message = requireRecord(value, "workflow control message");
   if (message.type === "initialized") {
-    assertKeys(message, ["type", "protocolVersion"], "initialized message");
-    if (message.protocolVersion !== WORKFLOW_CONTROL_PROTOCOL_VERSION) {
-      throw new WorkflowControlProtocolError("Workflow v17 control protocol version is invalid");
-    }
-    return { type: "initialized", protocolVersion: WORKFLOW_CONTROL_PROTOCOL_VERSION };
+    assertKeys(message, ["type"], "initialized message");
+    return { type: "initialized" };
   }
   if (message.type === "host-call") {
     assertKeys(message, ["type", "requestId", "invocationId", "method", "args"], "host-call message");
     if (typeof message.method !== "string" || !ASYNC_METHODS.has(message.method)) {
-      throw new WorkflowControlProtocolError(`Unknown workflow v17 async method ${String(message.method)}`);
+      throw new WorkflowControlProtocolError(`Unknown workflow async method ${String(message.method)}`);
     }
     return {
       type: "host-call",
@@ -172,7 +166,7 @@ export function parseWorkflowControlProcessMessage(value: unknown): WorkflowCont
   if (message.type === "sync-call") {
     assertKeys(message, ["type", "requestId", "invocationId", "method", "args"], "sync-call message");
     if (typeof message.method !== "string" || !SYNC_METHODS.has(message.method)) {
-      throw new WorkflowControlProtocolError(`Unknown workflow v17 synchronous method ${String(message.method)}`);
+      throw new WorkflowControlProtocolError(`Unknown workflow synchronous method ${String(message.method)}`);
     }
     return {
       type: "sync-call",
@@ -190,7 +184,7 @@ export function parseWorkflowControlProcessMessage(value: unknown): WorkflowCont
     );
     if (typeof message.method !== "string"
       || !["policy", "summary", "reachedTarget", "evaluate"].includes(message.method)) {
-      throw new WorkflowControlProtocolError(`Unknown workflow v17 metric-set method ${String(message.method)}`);
+      throw new WorkflowControlProtocolError(`Unknown workflow metric-set method ${String(message.method)}`);
     }
     return {
       type: "metric-call",
@@ -217,7 +211,7 @@ export function parseWorkflowControlProcessMessage(value: unknown): WorkflowCont
       ? { type: "done", error: parseSerializedError(message.error) }
       : { type: "done", value: requireWire(message.value) };
   }
-  throw new WorkflowControlProtocolError(`Unknown workflow v17 control message ${String(message.type)}`);
+  throw new WorkflowControlProtocolError(`Unknown workflow control message ${String(message.type)}`);
 }
 
 export function parseWorkflowDescriptorIdentity(value: unknown): WorkflowDescriptorIdentity {
@@ -225,7 +219,7 @@ export function parseWorkflowDescriptorIdentity(value: unknown): WorkflowDescrip
     assertDescriptorIdentity(value as WorkflowDescriptorIdentity);
     return structuredClone(value) as WorkflowDescriptorIdentity;
   } catch {
-    throw new WorkflowControlProtocolError("Workflow v17 descriptor wire identity is invalid");
+    throw new WorkflowControlProtocolError("Workflow descriptor wire identity is invalid");
   }
 }
 
@@ -234,7 +228,7 @@ export function parseWorkflowProductIdentity(value: unknown): WorkflowProductIde
     assertProductIdentity(value as WorkflowProductIdentity);
     return structuredClone(value) as WorkflowProductIdentity;
   } catch {
-    throw new WorkflowControlProtocolError("Workflow v17 product wire identity is invalid");
+    throw new WorkflowControlProtocolError("Workflow product wire identity is invalid");
   }
 }
 
@@ -243,7 +237,7 @@ export function parseWorkflowReferenceIdentity(value: unknown): WorkflowReferenc
     assertReferenceIdentity(value as WorkflowReferenceIdentity);
     return structuredClone(value) as WorkflowReferenceIdentity;
   } catch {
-    throw new WorkflowControlProtocolError("Workflow v17 reference wire identity is invalid");
+    throw new WorkflowControlProtocolError("Workflow reference wire identity is invalid");
   }
 }
 
@@ -256,10 +250,10 @@ export function sameWorkflowWireIdentity(left: unknown, right: unknown): boolean
 }
 
 function parseSerializedError(value: unknown): WorkflowSerializedError {
-  const error = requireRecord(value, "workflow v17 control error");
+  const error = requireRecord(value, "workflow control error");
   const allowed = new Set(["name", "message", "stack", "hostErrorId", "properties"]);
   for (const key of Object.keys(error)) {
-    if (!allowed.has(key)) throw new WorkflowControlProtocolError(`Workflow v17 control error has unknown field ${key}`);
+    if (!allowed.has(key)) throw new WorkflowControlProtocolError(`Workflow control error has unknown field ${key}`);
   }
   const name = boundedString(error.name, "control error name", 256);
   const message = boundedString(error.message, "control error message", 16_000, true);
@@ -267,15 +261,15 @@ function parseSerializedError(value: unknown): WorkflowSerializedError {
   const hostErrorId = error.hostErrorId === undefined ? undefined : requireId(error.hostErrorId, "host error");
   let properties: WorkflowSerializedError["properties"];
   if (error.properties !== undefined) {
-    const raw = requireRecord(error.properties, "workflow v17 control error properties");
+    const raw = requireRecord(error.properties, "workflow control error properties");
     properties = {};
     for (const [key, property] of Object.entries(raw)) {
       if (!["status", "operationPath", "expected", "actual", "attentionKind", "branchFailureKind", "point", "classification"].includes(key)) {
-        throw new WorkflowControlProtocolError(`Workflow v17 control error property ${key} is unavailable`);
+        throw new WorkflowControlProtocolError(`Workflow control error property ${key} is unavailable`);
       }
       if (property !== null && typeof property !== "boolean" && typeof property !== "string"
         && (typeof property !== "number" || !Number.isFinite(property) || Object.is(property, -0))) {
-        throw new WorkflowControlProtocolError(`Workflow v17 control error property ${key} is invalid`);
+        throw new WorkflowControlProtocolError(`Workflow control error property ${key} is invalid`);
       }
       properties[key] = typeof property === "string"
         ? boundedString(property, `control error property ${key}`, 16_000, true)
@@ -315,21 +309,21 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
 
 function requireWire(value: unknown): WorkflowWireValue {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new WorkflowControlProtocolError("Workflow v17 wire value is invalid");
+    throw new WorkflowControlProtocolError("Workflow wire value is invalid");
   }
   return value as WorkflowWireValue;
 }
 
 function requireId(value: unknown, label: string): string {
   if (typeof value !== "string" || value.length < 1 || value.length > 128 || !/^[a-z][a-z0-9-]{0,127}$/u.test(value)) {
-    throw new WorkflowControlProtocolError(`Invalid workflow v17 ${label} id`);
+    throw new WorkflowControlProtocolError(`Invalid workflow ${label} id`);
   }
   return value;
 }
 
 function boundedString(value: unknown, label: string, maximum: number, empty = false): string {
   if (typeof value !== "string" || (!empty && value.length === 0) || Buffer.byteLength(value) > maximum) {
-    throw new WorkflowControlProtocolError(`Workflow v17 ${label} is invalid`);
+    throw new WorkflowControlProtocolError(`Workflow ${label} is invalid`);
   }
   return value;
 }

@@ -6,7 +6,7 @@ export interface FlowUiContextLike {
   ui?: any;
 }
 
-/** Presentation-only aggregate status for active schema-4 runs. */
+/** Presentation-only aggregate status for active runs. */
 export class FlowUiController {
   private context?: FlowUiContextLike;
   private readonly active = new Map<string, WorkflowRunProjection>();

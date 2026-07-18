@@ -58,7 +58,6 @@ export interface WorkflowStaticEffectBinding {
 }
 
 export interface WorkflowStaticEffectResources {
-  formatVersion: 1;
   definitionHash: string;
   agents: Record<string, WorkflowStaticEffectBinding>;
   commands: Record<string, WorkflowStaticEffectBinding>;
@@ -88,7 +87,7 @@ export function workflowStaticEffectResources(input: {
   measurementRuntime?: { executor: JsonObject; environment: JsonObject };
 }): WorkflowStaticEffectResources {
   if (!/^sha256:[a-f0-9]{64}$/u.test(input.definitionHash)) {
-    throw new TypeError("Workflow v17 static resource definition hash is invalid");
+    throw new TypeError("Workflow static resource definition hash is invalid");
   }
   const agents = bindings(input.agents ?? {});
   const commands = bindings(input.commands ?? {});
@@ -113,41 +112,40 @@ export function workflowStaticEffectResources(input: {
     const table = descriptor.kind === "agent-task" ? agents : commands;
     const binding = table[descriptor.identity.sourceSite];
     if (!binding || binding.selector !== descriptor.profile) {
-      throw new Error(`Workflow v17 descriptor ${descriptor.identity.sourceSite} lacks exact pinned ${descriptor.profile} authority`);
+      throw new Error(`Workflow descriptor ${descriptor.identity.sourceSite} lacks exact pinned ${descriptor.profile} authority`);
     }
     const required = descriptor.kind === "agent-task"
       ? ["profileHash", "routeHash"]
       : ["profileHash", "executorHash"];
     if (required.some(key => typeof binding.authority[key] !== "string"
       || !/^sha256:[a-f0-9]{64}$/u.test(binding.authority[key] as string))) {
-      throw new Error(`Workflow v17 descriptor ${descriptor.identity.sourceSite} has invalid pinned hashes`);
+      throw new Error(`Workflow descriptor ${descriptor.identity.sourceSite} has invalid pinned hashes`);
     }
   }
   for (const site of Object.keys(agents)) requireDescriptor(input.workflow, site, "agent-task");
   for (const site of Object.keys(commands)) requireDescriptor(input.workflow, site, "command-task");
   for (const profile of input.workflow.review.verificationProfiles) {
     if (!verifications[profile] || verifications[profile]!.selector !== profile) {
-      throw new Error(`Workflow v17 verification profile ${profile} lacks pinned authority`);
+      throw new Error(`Workflow verification profile ${profile} lacks pinned authority`);
     }
     const authority = verifications[profile]!.authority;
     if (typeof authority.profileHash !== "string" || typeof authority.environmentHash !== "string"
       || !/^sha256:[a-f0-9]{64}$/u.test(authority.profileHash)
       || !/^sha256:[a-f0-9]{64}$/u.test(authority.environmentHash)) {
-      throw new Error(`Workflow v17 verification profile ${profile} has invalid pinned hashes`);
+      throw new Error(`Workflow verification profile ${profile} has invalid pinned hashes`);
     }
   }
   const expectedMeasurements = [...input.workflow.review.measurementProfiles].sort();
   if (Object.keys(measurements).sort().join("\0") !== expectedMeasurements.join("\0")) {
-    throw new Error("Workflow v17 static measurement profile surface differs from review");
+    throw new Error("Workflow static measurement profile surface differs from review");
   }
   const usesMeasurements = input.workflow.operations.some(site => site.method === "measure");
   if (usesMeasurements !== Boolean(measurementRuntime)) {
     throw new Error(usesMeasurements
-      ? "Workflow v17 measurement runtime authority is required"
-      : "Workflow v17 measurement runtime authority is unused");
+      ? "Workflow measurement runtime authority is required"
+      : "Workflow measurement runtime authority is unused");
   }
   const body = {
-    formatVersion: 1 as const,
     definitionHash: input.definitionHash,
     agents,
     commands,
@@ -162,11 +160,18 @@ export function assertWorkflowStaticEffectResources(
   workflow: ParsedWorkflow,
   resources: WorkflowStaticEffectResources,
 ): void {
-  if (!resources || resources.formatVersion !== 1 || typeof resources.hash !== "string") {
-    throw new TypeError("Workflow v17 static effect resources are invalid");
+  if (!resources || typeof resources.hash !== "string") {
+    throw new TypeError("Workflow static effect resources are invalid");
+  }
+  const expectedFields = [
+    "agents", "commands", "definitionHash", "hash", "measurements", "verifications",
+    ...(resources.measurementRuntime ? ["measurementRuntime"] : []),
+  ].sort();
+  if (Object.keys(resources).sort().join(",") !== expectedFields.join(",")) {
+    throw new TypeError("Workflow static effect resources have unexpected fields");
   }
   const { hash, ...body } = resources;
-  if (stableHash(body) !== hash) throw new TypeError("Workflow v17 static effect resource hash is corrupt");
+  if (stableHash(body) !== hash) throw new TypeError("Workflow static effect resource hash is corrupt");
   const expectedAgents = workflow.descriptors.filter(value => value.kind === "agent-task")
     .map(value => value.identity.sourceSite).sort();
   const expectedCommands = workflow.descriptors.filter(value => value.kind === "command-task")
@@ -177,7 +182,7 @@ export function assertWorkflowStaticEffectResources(
     || Object.keys(resources.verifications).sort().join("\0") !== expectedVerifications.join("\0")
     || Object.keys(resources.measurements ?? {}).sort().join("\0")
       !== [...workflow.review.measurementProfiles].sort().join("\0")) {
-    throw new TypeError("Workflow v17 static effect resource surface differs from review");
+    throw new TypeError("Workflow static effect resource surface differs from review");
   }
   for (const descriptor of workflow.descriptors) {
     const binding = (descriptor.kind === "agent-task" ? resources.agents : resources.commands)[
@@ -185,14 +190,14 @@ export function assertWorkflowStaticEffectResources(
     ];
     if (!binding || binding.selector !== descriptor.profile
       || binding.hash !== stableHash({ selector: binding.selector, authority: binding.authority })) {
-      throw new TypeError(`Workflow v17 descriptor ${descriptor.identity.sourceSite} has invalid pinned authority`);
+      throw new TypeError(`Workflow descriptor ${descriptor.identity.sourceSite} has invalid pinned authority`);
     }
     const required = descriptor.kind === "agent-task"
       ? ["profileHash", "routeHash"]
       : ["profileHash", "executorHash"];
     if (required.some(key => typeof binding.authority[key] !== "string"
       || !/^sha256:[a-f0-9]{64}$/u.test(binding.authority[key] as string))) {
-      throw new TypeError(`Workflow v17 descriptor ${descriptor.identity.sourceSite} has invalid pinned hashes`);
+      throw new TypeError(`Workflow descriptor ${descriptor.identity.sourceSite} has invalid pinned hashes`);
     }
   }
   for (const selector of workflow.review.verificationProfiles) {
@@ -203,20 +208,20 @@ export function assertWorkflowStaticEffectResources(
       || typeof binding.authority.environmentHash !== "string"
       || !/^sha256:[a-f0-9]{64}$/u.test(binding.authority.profileHash)
       || !/^sha256:[a-f0-9]{64}$/u.test(binding.authority.environmentHash)) {
-      throw new TypeError(`Workflow v17 verification ${selector} has invalid pinned authority`);
+      throw new TypeError(`Workflow verification ${selector} has invalid pinned authority`);
     }
   }
   for (const selector of workflow.review.measurementProfiles) {
     const binding = resources.measurements[selector];
     if (!binding || binding.selector !== selector || binding.profile.id !== selector
       || binding.hash !== stableHash({ selector, profile: binding.profile })) {
-      throw new TypeError(`Workflow v17 measurement ${selector} has invalid pinned authority`);
+      throw new TypeError(`Workflow measurement ${selector} has invalid pinned authority`);
     }
     assertPinnedMeasurementProfile(binding.profile, selector);
   }
   const usesMeasurements = workflow.operations.some(site => site.method === "measure");
   if (usesMeasurements !== Boolean(resources.measurementRuntime)) {
-    throw new TypeError("Workflow v17 measurement runtime authority differs from review");
+    throw new TypeError("Workflow measurement runtime authority differs from review");
   }
   if (resources.measurementRuntime) {
     const runtime = resources.measurementRuntime;
@@ -228,7 +233,7 @@ export function assertWorkflowStaticEffectResources(
         environment: runtime.environment,
         environmentHash: runtime.environmentHash,
       }) !== runtime.hash) {
-      throw new TypeError("Workflow v17 measurement runtime authority is corrupt");
+      throw new TypeError("Workflow measurement runtime authority is corrupt");
     }
   }
 }
@@ -236,13 +241,13 @@ export function assertWorkflowStaticEffectResources(
 function assertPinnedMeasurementProfile(profile: MeasurementProfileSnapshot, selector: string): void {
   if (!profile || profile.id !== selector || profile.id !== `${profile.namespace}:${profile.name}`
     || typeof profile.path !== "string" || typeof profile.hash !== "string") {
-    throw new TypeError(`Workflow v17 measurement profile ${selector} identity is invalid`);
+    throw new TypeError(`Workflow measurement profile ${selector} identity is invalid`);
   }
   const { id: _id, namespace, path: profilePath, hash, ...definition } = profile;
   const normalized = normalizeMeasurementProfile(definition, profilePath);
   if (stableJson(normalized) !== stableJson(definition)
     || stableHash({ namespace, definition }) !== hash) {
-    throw new TypeError(`Workflow v17 measurement profile ${selector} snapshot is corrupt`);
+    throw new TypeError(`Workflow measurement profile ${selector} snapshot is corrupt`);
   }
 }
 
@@ -371,7 +376,6 @@ interface AgentInput {
 }
 
 interface StoredAgentResult {
-  formatVersion: 1;
   authorityId: string;
   finishReceiptId: string;
   output: JsonObject;
@@ -434,7 +438,7 @@ export class WorkflowAgentEffectAdapter implements WorkflowSemanticEffectAdapter
         signal: context.signal,
       });
       if (executed.finish?.outputSchemaHash !== stableHash(resolved.descriptor.output)) {
-        throw new Error("Workflow v17 agent completion lacks its exact finish receipt");
+        throw new Error("Workflow agent completion lacks its exact finish receipt");
       }
       boundedText(executed.finish.receiptId, "agent finish receipt", 512);
       validateSchema(resolved.descriptor.output, executed.finish.output, "agent output");
@@ -445,7 +449,6 @@ export class WorkflowAgentEffectAdapter implements WorkflowSemanticEffectAdapter
         checkpointArtifact = this.options.products.artifact((await this.options.products.store.putJson({
           kind: "workspace-checkpoint",
           value: {
-            formatVersion: 1,
             checkpointId: checkpoint.checkpointId,
             workspaceId: checkpoint.workspaceId,
             treeHash: checkpoint.treeHash,
@@ -462,7 +465,6 @@ export class WorkflowAgentEffectAdapter implements WorkflowSemanticEffectAdapter
         ...(checkpointArtifact ? { checkpoint: checkpointArtifact } : {}),
       }) as { artifact: object };
       const result: StoredAgentResult = {
-        formatVersion: 1,
         authorityId,
         finishReceiptId: executed.finish.receiptId,
         output: canonicalJsonObject(executed.finish.output, limits()),
@@ -512,20 +514,20 @@ export class WorkflowAgentEffectAdapter implements WorkflowSemanticEffectAdapter
 
   private artifact(digest: string): object {
     const record = this.options.database.readArtifact(digest);
-    if (!record) throw new Error(`Workflow v17 agent result artifact ${digest} is unavailable`);
+    if (!record) throw new Error(`Workflow agent result artifact ${digest} is unavailable`);
     return this.options.products.artifact(record);
   }
 
   private resolve(value: unknown) {
-    const input = plainRecord(value, "workflow v17 agent input") as unknown as AgentInput;
-    exactKeys(input as unknown as object, ["descriptorSourceSite", "prompt", "artifacts", "workspace"], "workflow v17 agent input", true);
+    const input = plainRecord(value, "workflow agent input") as unknown as AgentInput;
+    exactKeys(input as unknown as object, ["descriptorSourceSite", "prompt", "artifacts", "workspace"], "workflow agent input", true);
     const descriptor = requireDescriptor(this.options.workflow, input.descriptorSourceSite, "agent-task");
     const binding = this.options.resources.agents[input.descriptorSourceSite];
-    if (!binding || binding.selector !== descriptor.profile) throw new Error("Workflow v17 agent binding is unavailable");
+    if (!binding || binding.selector !== descriptor.profile) throw new Error("Workflow agent binding is unavailable");
     const prompt = boundedText(input.prompt, "agent prompt", 128 * 1024);
     assertManifest(input.artifacts);
     if ((descriptor.workspace === "candidate") !== Boolean(input.workspace)) {
-      throw new TypeError(`Workflow v17 ${descriptor.binding} workspace class differs from its invocation`);
+      throw new TypeError(`Workflow ${descriptor.binding} workspace class differs from its invocation`);
     }
     const workspace = input.workspace;
     const workspaceSemantic = workspace ? workspaceAuthority(this.options.candidates, workspace) : undefined;
@@ -536,7 +538,6 @@ export class WorkflowAgentEffectAdapter implements WorkflowSemanticEffectAdapter
       artifacts: input.artifacts,
       ...(workspace ? { workspace } : {}),
       semanticInput: canonicalJsonValue({
-        formatVersion: 1,
         descriptorSourceSite: descriptor.identity.sourceSite,
         descriptorHash: descriptor.identity.definitionHash,
         bindingHash: binding.hash,
@@ -555,7 +556,6 @@ interface CommandInput {
 }
 
 interface StoredCommandResult {
-  formatVersion: 1;
   authorityId: string;
   ok: boolean;
   exitCode: number;
@@ -608,7 +608,7 @@ export class WorkflowCommandEffectAdapter implements WorkflowSemanticEffectAdapt
         ...(workspace ? { workspace } : {}), signal: context.signal,
       });
       if (!executed.ok && !resolved.descriptor.allowFailure) {
-        throw new Error(`Workflow v17 command ${resolved.descriptor.profile} exited ${executed.exitCode}`);
+        throw new Error(`Workflow command ${resolved.descriptor.profile} exited ${executed.exitCode}`);
       }
       const output = commandOutput(resolved.descriptor, executed);
       let checkpointId: string | undefined;
@@ -618,7 +618,6 @@ export class WorkflowCommandEffectAdapter implements WorkflowSemanticEffectAdapt
       const authorityId = `command-${context.operation.operationId.slice(-40).replace(/[^a-z0-9-]/gu, "-")}`;
       const product = await this.options.products.commandResult({ authorityId, ...executed, output }) as { artifact: object };
       const result: StoredCommandResult = {
-        formatVersion: 1,
         authorityId,
         ok: executed.ok,
         exitCode: executed.exitCode,
@@ -646,14 +645,14 @@ export class WorkflowCommandEffectAdapter implements WorkflowSemanticEffectAdapt
   }
 
   private resolve(value: unknown) {
-    const input = plainRecord(value, "workflow v17 command input") as unknown as CommandInput;
-    exactKeys(input as unknown as object, ["descriptorSourceSite", "args", "workspace"], "workflow v17 command input", true);
+    const input = plainRecord(value, "workflow command input") as unknown as CommandInput;
+    exactKeys(input as unknown as object, ["descriptorSourceSite", "args", "workspace"], "workflow command input", true);
     const descriptor = requireDescriptor(this.options.workflow, input.descriptorSourceSite, "command-task");
     const binding = this.options.resources.commands[input.descriptorSourceSite];
-    if (!binding || binding.selector !== descriptor.profile) throw new Error("Workflow v17 command binding is unavailable");
+    if (!binding || binding.selector !== descriptor.profile) throw new Error("Workflow command binding is unavailable");
     const args = scalarArguments(input.args);
     if ((descriptor.effect === "candidate") !== Boolean(input.workspace)) {
-      throw new TypeError(`Workflow v17 ${descriptor.binding} workspace class differs from its invocation`);
+      throw new TypeError(`Workflow ${descriptor.binding} workspace class differs from its invocation`);
     }
     const workspaceSemantic = input.workspace ? workspaceAuthority(this.options.candidates, input.workspace) : undefined;
     return {
@@ -662,7 +661,6 @@ export class WorkflowCommandEffectAdapter implements WorkflowSemanticEffectAdapt
       args,
       ...(input.workspace ? { workspace: input.workspace } : {}),
       semanticInput: canonicalJsonValue({
-        formatVersion: 1,
         descriptorSourceSite: descriptor.identity.sourceSite,
         descriptorHash: descriptor.identity.definitionHash,
         bindingHash: binding.hash,
@@ -696,19 +694,18 @@ export class WorkflowAskEffectAdapter implements WorkflowSemanticEffectAdapter {
     });
     boundedText(answered.approvalId, "ask approval id", 512);
     validateSchema(input.responseSchema, answered.response, "ask response");
-    return { formatVersion: 1, approvalId: answered.approvalId, response: answered.response };
+    return { approvalId: answered.approvalId, response: answered.response };
   }
 
   restore(context: WorkflowEffectRestoreContext): unknown {
-    const value = plainRecord(context.result, "workflow v17 ask result");
-    exactKeys(value, ["formatVersion", "approvalId", "response"], "workflow v17 ask result");
+    const value = plainRecord(context.result, "workflow ask result");
+    exactKeys(value, ["approvalId", "response"], "workflow ask result");
     return structuredClone(value.response);
   }
 }
 
 interface VerificationInput { candidate: object; profile: string }
 interface StoredVerification {
-  formatVersion: 1;
   authorityId: string;
   verificationId: string;
   candidateId: string;
@@ -747,14 +744,13 @@ export class WorkflowVerificationEffectAdapter implements WorkflowSemanticEffect
         signal: context.signal,
       });
       if (executed.environmentHash !== resolved.binding.authority.environmentHash) {
-        throw new Error("Workflow v17 verification environment differs from its pinned authority");
+        throw new Error("Workflow verification environment differs from its pinned authority");
       }
       if (!new Set(["passed", "failed", "blocked"]).has(executed.status)) {
-        throw new TypeError("Workflow v17 verification status is invalid");
+        throw new TypeError("Workflow verification status is invalid");
       }
       const evidenceHash = stableHash(executed.evidence);
       const bindingHash = stableHash({
-        formatVersion: 1,
         candidateId: resolved.candidate.candidateId,
         treeHash: resolved.candidate.treeHash,
         lineageHash: resolved.candidate.lineageHash,
@@ -777,7 +773,6 @@ export class WorkflowVerificationEffectAdapter implements WorkflowSemanticEffect
         evidence: executed.evidence,
       }) as { artifact: object };
       const result: StoredVerification = {
-        formatVersion: 1,
         authorityId,
         verificationId,
         candidateId: resolved.candidate.candidateId,
@@ -820,10 +815,10 @@ export class WorkflowVerificationEffectAdapter implements WorkflowSemanticEffect
   }
 
   private resolve(value: unknown) {
-    const input = plainRecord(value, "workflow v17 verification input") as unknown as VerificationInput;
-    exactKeys(input as unknown as object, ["candidate", "profile"], "workflow v17 verification input");
+    const input = plainRecord(value, "workflow verification input") as unknown as VerificationInput;
+    exactKeys(input as unknown as object, ["candidate", "profile"], "workflow verification input");
     if (typeof input.profile !== "string" || !PROFILE.test(input.profile)) {
-      throw new TypeError("Workflow v17 verification profile is invalid");
+      throw new TypeError("Workflow verification profile is invalid");
     }
     const binding = this.options.resources.verifications[input.profile];
     if (!binding || binding.selector !== input.profile) throw new Error(`Verification profile ${input.profile} is not pinned`);
@@ -832,7 +827,6 @@ export class WorkflowVerificationEffectAdapter implements WorkflowSemanticEffect
       candidate,
       binding,
       semanticInput: canonicalJsonValue({
-        formatVersion: 1,
         candidate: candidateAuthority(candidate),
         profile: input.profile,
         bindingHash: binding.hash,
@@ -861,7 +855,6 @@ export class WorkflowAcceptEffectAdapter implements WorkflowSemanticEffectAdapte
     const value = this.resolve(context.input);
     if (value.candidate.state !== "pending") throw new Error(`Candidate ${value.candidate.candidateId} is ${value.candidate.state}`);
     return {
-      formatVersion: 1,
       candidateId: value.candidate.candidateId,
       verificationId: value.verification.verificationId,
       ...(value.measurement ? { measurementId: value.measurement.measurementId } : {}),
@@ -887,11 +880,11 @@ export class WorkflowAcceptEffectAdapter implements WorkflowSemanticEffectAdapte
     const verification = verificationAuthority(this.options, input.verification, candidate, true);
     const measurement = input.measurement && this.options.measurements
       ? this.options.measurements.resolve(input.measurement, candidate) : undefined;
-    if (input.measurement && !measurement) throw new TypeError("Workflow v17 measurement authority is unavailable");
+    if (input.measurement && !measurement) throw new TypeError("Workflow measurement authority is unavailable");
     return {
       candidate, verification, ...(measurement ? { measurement } : {}),
       semanticInput: canonicalJsonValue({
-        formatVersion: 1, candidate: candidateAuthority(candidate),
+        candidate: candidateAuthority(candidate),
         verification: verificationAuthoritySemantic(verification),
         ...(measurement ? { measurement: measurementSemantic(measurement) } : {}),
       }, limits()),
@@ -912,7 +905,6 @@ export class WorkflowRejectEffectAdapter implements WorkflowSemanticEffectAdapte
     const value = this.resolve(context.input);
     if (value.candidate.state !== "pending") throw new Error(`Candidate ${value.candidate.candidateId} is ${value.candidate.state}`);
     return {
-      formatVersion: 1,
       receiptId: `rejection_${stableHash({ operationId: context.operation.operationId, semanticInput: value.semanticInput }).slice(7, 39)}`,
       candidateId: value.candidate.candidateId,
       changedPaths: value.candidate.changedPaths,
@@ -923,7 +915,7 @@ export class WorkflowRejectEffectAdapter implements WorkflowSemanticEffectAdapte
   }
   async restore(context: WorkflowEffectRestoreContext): Promise<unknown> {
     const value = this.resolve(context.input);
-    const result = plainRecord(context.result, "workflow v17 rejection result");
+    const result = plainRecord(context.result, "workflow rejection result");
     const candidate = await revisionRetry(async () => this.options.database.disposeCandidate({
       expectedRevision: this.options.database.readRun().revision,
       candidateId: value.candidate.candidateId,
@@ -948,13 +940,13 @@ export class WorkflowRejectEffectAdapter implements WorkflowSemanticEffectAdapte
       ? verificationAuthority(this.options, input.verification, candidate, false) : undefined;
     const measurement = input.measurement && this.options.measurements
       ? this.options.measurements.resolve(input.measurement, candidate) : undefined;
-    if (input.measurement && !measurement) throw new TypeError("Workflow v17 measurement authority is unavailable");
+    if (input.measurement && !measurement) throw new TypeError("Workflow measurement authority is unavailable");
     const rejectionReason = boundedText(input.reason, "candidate rejection reason", 8_000);
     return {
       candidate, reason: rejectionReason,
       ...(verification ? { verification } : {}), ...(measurement ? { measurement } : {}),
       semanticInput: canonicalJsonValue({
-        formatVersion: 1, candidate: candidateAuthority(candidate), reason: rejectionReason,
+        candidate: candidateAuthority(candidate), reason: rejectionReason,
         ...(verification ? { verification: verificationAuthoritySemantic(verification) } : {}),
         ...(measurement ? { measurement: measurementSemantic(measurement) } : {}),
       }, limits()),
@@ -964,7 +956,6 @@ export class WorkflowRejectEffectAdapter implements WorkflowSemanticEffectAdapte
 
 interface ApplyInput { candidate: object }
 interface StoredApply {
-  formatVersion: 1;
   receiptId: string;
   approvalId: string;
   candidateId: string;
@@ -996,23 +987,22 @@ export class WorkflowApplyEffectAdapter implements WorkflowSemanticEffectAdapter
         verification: resolved.verification,
         signal: context.signal,
       });
-      assertIdentifier(applied.receiptId, "workflow v17 apply receipt id");
-      assertIdentifier(applied.approvalId, "workflow v17 apply approval id");
+      assertIdentifier(applied.receiptId, "workflow apply receipt id");
+      assertIdentifier(applied.approvalId, "workflow apply approval id");
       if (applied.candidateId !== resolved.candidate.candidateId
         || applied.verificationBindingHash !== resolved.verification.bindingHash
         || stableJson(applied.changedPaths) !== stableJson(resolved.candidate.changedPaths)
         || applied.authorityHash !== stableHash({
-          formatVersion: 1,
           candidateId: applied.candidateId,
           approvalId: applied.approvalId,
           receiptId: applied.receiptId,
           verificationBindingHash: applied.verificationBindingHash,
           changedPaths: applied.changedPaths,
         })) {
-        throw new Error("Workflow v17 apply executor returned stale or foreign authority");
+        throw new Error("Workflow apply executor returned stale or foreign authority");
       }
       await finishAttempt(this.options.database, attempt, "completed", applied.usage, applied.resources, this.now);
-      return { formatVersion: 1, ...applied } as unknown as JsonValue;
+      return { ...applied } as unknown as JsonValue;
     } catch (error) {
       if (error instanceof WorkflowHumanSuspension) throw error;
       await finishAttempt(this.options.database, attempt, "failed", undefined, undefined, this.now).catch(() => undefined);
@@ -1041,8 +1031,8 @@ export class WorkflowApplyEffectAdapter implements WorkflowSemanticEffectAdapter
     } as unknown as JsonValue);
   }
   private resolve(value: unknown) {
-    const input = plainRecord(value, "workflow v17 apply input") as unknown as ApplyInput;
-    exactKeys(input as unknown as object, ["candidate"], "workflow v17 apply input");
+    const input = plainRecord(value, "workflow apply input") as unknown as ApplyInput;
+    exactKeys(input as unknown as object, ["candidate"], "workflow apply input");
     const candidate = this.options.candidates.accepted(input.candidate);
     const verificationId = candidate.disposition!.verificationId!;
     const verification = this.options.database.readCandidateVerification(verificationId);
@@ -1052,7 +1042,7 @@ export class WorkflowApplyEffectAdapter implements WorkflowSemanticEffectAdapter
     return {
       candidate, verification,
       semanticInput: canonicalJsonValue({
-        formatVersion: 1, candidate: candidateAuthority(candidate),
+        candidate: candidateAuthority(candidate),
         acceptanceAuthorityHash: candidate.disposition!.authorityHash,
         verification: verificationAuthoritySemantic(verification),
       }, limits()),
@@ -1066,7 +1056,7 @@ export function workflowVerificationRecord(
 ): WorkflowCandidateVerificationRecord {
   const description = options.products.authority.describe(value);
   if (!description || description.family !== "product" || description.identity.kind !== "verification") {
-    throw new TypeError("Value has no workflow v17 verification authority");
+    throw new TypeError("Value has no workflow verification authority");
   }
   const receiptId = description.fields.receiptId;
   const artifact = description.fields.artifact;
@@ -1103,7 +1093,6 @@ function identity(
 ): WorkflowEffectIdentity {
   return {
     semanticKey: stableHash({
-      formatVersion: 1,
       kind: `workflow-${kind}`,
       semanticInput,
       contextIdentityHash: run.contextIdentityHash,
@@ -1116,7 +1105,7 @@ function identity(
 function bindings(value: Record<string, { selector: string; authority: JsonObject }>): Record<string, WorkflowStaticEffectBinding> {
   const result: Record<string, WorkflowStaticEffectBinding> = {};
   for (const [site, binding] of Object.entries(value).sort(([left], [right]) => left.localeCompare(right))) {
-    if (!PROFILE.test(binding.selector)) throw new TypeError(`Invalid workflow v17 pinned selector ${binding.selector}`);
+    if (!PROFILE.test(binding.selector)) throw new TypeError(`Invalid workflow pinned selector ${binding.selector}`);
     const authority = canonicalJsonObject(binding.authority, limits());
     result[site] = { selector: binding.selector, authority, hash: stableHash({ selector: binding.selector, authority }) };
   }
@@ -1129,7 +1118,7 @@ function requireDescriptor<K extends WorkflowDescriptor["kind"]>(
   kind: K,
 ): Extract<WorkflowDescriptor, { kind: K }> {
   const descriptor = workflow.descriptors.find(value => value.identity.sourceSite === sourceSite);
-  if (!descriptor || descriptor.kind !== kind) throw new TypeError(`Unknown workflow v17 ${kind} ${sourceSite}`);
+  if (!descriptor || descriptor.kind !== kind) throw new TypeError(`Unknown workflow ${kind} ${sourceSite}`);
   return descriptor as Extract<WorkflowDescriptor, { kind: K }>;
 }
 
@@ -1169,23 +1158,23 @@ function measurementSemantic(value: WorkflowCandidateMeasurementRecord): JsonObj
 }
 
 function dispositionInput(value: unknown, requireReason: boolean): DispositionInput {
-  const input = plainRecord(value, "workflow v17 candidate disposition input") as unknown as DispositionInput;
+  const input = plainRecord(value, "workflow candidate disposition input") as unknown as DispositionInput;
   exactKeys(
     input as unknown as object,
     ["candidate", "verification", "measurement", ...(requireReason ? ["reason"] : [])],
-    "workflow v17 candidate disposition input",
+    "workflow candidate disposition input",
     true,
   );
   if (!input.candidate || (requireReason && typeof input.reason !== "string")) {
-    throw new TypeError("Workflow v17 candidate disposition input is incomplete");
+    throw new TypeError("Workflow candidate disposition input is incomplete");
   }
-  if (!requireReason && !input.verification) throw new TypeError("Workflow v17 acceptance requires verification");
+  if (!requireReason && !input.verification) throw new TypeError("Workflow acceptance requires verification");
   return input;
 }
 
 function askInput(value: unknown): AskInput & { semanticInput: JsonValue } {
-  const input = plainRecord(value, "workflow v17 ask input");
-  exactKeys(input, ["prompt", "responseSchema", "title"], "workflow v17 ask input", true);
+  const input = plainRecord(value, "workflow ask input");
+  exactKeys(input, ["prompt", "responseSchema", "title"], "workflow ask input", true);
   const prompt = boundedText(input.prompt, "ask prompt", 32_000);
   const title = input.title === undefined ? undefined : boundedText(input.title, "ask title", 512);
   const responseSchema = canonicalJsonObject(input.responseSchema, limits()) as JsonSchema;
@@ -1194,19 +1183,19 @@ function askInput(value: unknown): AskInput & { semanticInput: JsonValue } {
     prompt,
     responseSchema,
     ...(title ? { title } : {}),
-    semanticInput: canonicalJsonValue({ formatVersion: 1, prompt, responseSchema }, limits()),
+    semanticInput: canonicalJsonValue({ prompt, responseSchema }, limits()),
   };
 }
 
 function scalarArguments(value: unknown): Record<string, string | number | boolean> {
   if (value === undefined) return {};
-  const input = plainRecord(value, "workflow v17 command arguments");
+  const input = plainRecord(value, "workflow command arguments");
   const result: Record<string, string | number | boolean> = {};
   for (const key of Object.keys(input).sort()) {
     const entry = input[key];
     if (typeof entry !== "string" && typeof entry !== "boolean"
       && (typeof entry !== "number" || !Number.isFinite(entry) || Object.is(entry, -0))) {
-      throw new TypeError(`Workflow v17 command argument ${key} is not scalar`);
+      throw new TypeError(`Workflow command argument ${key} is not scalar`);
     }
     result[key] = entry as string | number | boolean;
   }
@@ -1220,13 +1209,13 @@ function commandOutput(
   if (typeof result.ok !== "boolean" || !Number.isSafeInteger(result.exitCode)
     || !Number.isFinite(result.durationMs) || result.durationMs < 0
     || (result.stderrPreview !== undefined && typeof result.stderrPreview !== "string")) {
-    throw new TypeError("Workflow v17 command result is invalid");
+    throw new TypeError("Workflow command result is invalid");
   }
   if (descriptor.output === "summary") {
     return { ok: result.ok, exitCode: result.exitCode, durationMs: result.durationMs };
   }
   if (descriptor.output === "text" && typeof result.output !== "string") {
-    throw new TypeError("Workflow v17 text command returned non-text output");
+    throw new TypeError("Workflow text command returned non-text output");
   }
   return canonicalJsonValue(result.output, limits());
 }
@@ -1263,10 +1252,10 @@ async function finishAttempt(
   now: () => Date,
 ): Promise<WorkflowAttemptRecord> {
   const current = database.readAttempt(attempt.attemptId);
-  if (!current) throw new Error(`Workflow v17 attempt ${attempt.attemptId} disappeared`);
+  if (!current) throw new Error(`Workflow attempt ${attempt.attemptId} disappeared`);
   if (current.status === status) return current;
   if (current.status !== "running" && current.status !== "waiting") {
-    throw new Error(`Workflow v17 attempt ${attempt.attemptId} is ${current.status}`);
+    throw new Error(`Workflow attempt ${attempt.attemptId} is ${current.status}`);
   }
   return await revisionRetry(async () => database.completeAttempt({
     expectedRevision: database.readRun().revision,
@@ -1288,48 +1277,57 @@ async function registerVerification(
 function artifactLinks(database: WorkflowRunDatabase, digests: readonly string[]) {
   return digests.map((digest, ordinal) => {
     const artifact = database.readArtifact(digest);
-    if (!artifact) throw new Error(`Workflow v17 operation artifact ${digest} is unavailable`);
+    if (!artifact) throw new Error(`Workflow operation artifact ${digest} is unavailable`);
     return { role: ordinal === 0 ? "output" as const : "evidence" as const, ordinal, artifact };
   });
 }
 
 function assertManifest(value: WorkflowArtifactManifest): void {
-  if (!value || value.formatVersion !== 1 || !Array.isArray(value.entries)
+  if (!value || !Array.isArray(value.entries)
+    || Object.keys(value).sort().join(",") !== "entries,hash"
     || value.hash !== workflowArtifactManifestHash(value.entries)) {
-    throw new TypeError("Workflow v17 agent artifact manifest is invalid");
+    throw new TypeError("Workflow agent artifact manifest is invalid");
   }
 }
 
 function storedAgent(value: JsonValue): StoredAgentResult {
-  const result = plainRecord(value, "workflow v17 stored agent result") as unknown as StoredAgentResult;
-  if (result.formatVersion !== 1 || typeof result.authorityId !== "string"
+  const result = plainRecord(value, "workflow stored agent result") as unknown as StoredAgentResult;
+  exactKeys(result, ["authorityId", "finishReceiptId", "output", "artifactDigest", "publishedDigests", "checkpointArtifactDigest"],
+    "workflow stored agent result", true);
+  if (typeof result.authorityId !== "string"
     || typeof result.finishReceiptId !== "string" || typeof result.artifactDigest !== "string"
     || !Array.isArray(result.publishedDigests) || !result.output || typeof result.output !== "object") {
-    throw new Error("Workflow v17 stored agent result is invalid");
+    throw new Error("Workflow stored agent result is invalid");
   }
   return result;
 }
 
 function storedCommand(value: JsonValue): StoredCommandResult {
-  const result = plainRecord(value, "workflow v17 stored command result") as unknown as StoredCommandResult;
-  if (result.formatVersion !== 1 || typeof result.authorityId !== "string" || typeof result.artifactDigest !== "string") {
-    throw new Error("Workflow v17 stored command result is invalid");
+  const result = plainRecord(value, "workflow stored command result") as unknown as StoredCommandResult;
+  exactKeys(result, ["authorityId", "ok", "exitCode", "durationMs", "output", "stderrPreview", "artifactDigest", "checkpointId"],
+    "workflow stored command result", true);
+  if (typeof result.authorityId !== "string" || typeof result.artifactDigest !== "string") {
+    throw new Error("Workflow stored command result is invalid");
   }
   return result;
 }
 
 function storedVerification(value: JsonValue): StoredVerification {
-  const result = plainRecord(value, "workflow v17 stored verification") as unknown as StoredVerification;
-  if (result.formatVersion !== 1 || typeof result.verificationId !== "string" || typeof result.artifactDigest !== "string") {
-    throw new Error("Workflow v17 stored verification is invalid");
+  const result = plainRecord(value, "workflow stored verification") as unknown as StoredVerification;
+  exactKeys(result, ["authorityId", "verificationId", "candidateId", "status", "bindingHash", "evidenceHash", "evidence", "artifactDigest"],
+    "workflow stored verification");
+  if (typeof result.verificationId !== "string" || typeof result.artifactDigest !== "string") {
+    throw new Error("Workflow stored verification is invalid");
   }
   return result;
 }
 
 function storedApply(value: JsonValue): StoredApply {
-  const result = plainRecord(value, "workflow v17 stored apply") as unknown as StoredApply;
-  if (result.formatVersion !== 1 || typeof result.receiptId !== "string" || !Array.isArray(result.changedPaths)) {
-    throw new Error("Workflow v17 stored apply result is invalid");
+  const result = plainRecord(value, "workflow stored apply") as unknown as StoredApply;
+  exactKeys(result, ["receiptId", "approvalId", "candidateId", "verificationBindingHash", "authorityHash", "changedPaths"],
+    "workflow stored apply");
+  if (typeof result.receiptId !== "string" || !Array.isArray(result.changedPaths)) {
+    throw new Error("Workflow stored apply result is invalid");
   }
   return result;
 }
@@ -1337,13 +1335,13 @@ function storedApply(value: JsonValue): StoredApply {
 function validateSchema(schema: JsonSchema, value: unknown, label: string): void {
   const ajv = new Ajv({ strict: false, allErrors: true, validateFormats: false });
   const validate = ajv.compile(schema);
-  if (!validate(value)) throw new TypeError(`Invalid workflow v17 ${label}: ${ajv.errorsText(validate.errors)}`);
+  if (!validate(value)) throw new TypeError(`Invalid workflow ${label}: ${ajv.errorsText(validate.errors)}`);
 }
 
 function boundedText(value: unknown, label: string, maximum: number): string {
   if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value) > maximum
     || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)) {
-    throw new TypeError(`Workflow v17 ${label} is invalid`);
+    throw new TypeError(`Workflow ${label} is invalid`);
   }
   return value;
 }
@@ -1372,7 +1370,7 @@ function reason(code: string, summary: string): JsonObject {
 
 function timestamp(now: () => Date): string {
   const value = now();
-  if (!(value instanceof Date) || !Number.isFinite(value.getTime())) throw new TypeError("Workflow v17 effect clock is invalid");
+  if (!(value instanceof Date) || !Number.isFinite(value.getTime())) throw new TypeError("Workflow effect clock is invalid");
   return value.toISOString();
 }
 
@@ -1384,7 +1382,7 @@ async function revisionRetry<T>(body: () => T | Promise<T>): Promise<T> {
       throw error;
     }
   }
-  throw new Error("Workflow v17 effect lifecycle exceeded revision retries");
+  throw new Error("Workflow effect lifecycle exceeded revision retries");
 }
 
 function limits() {

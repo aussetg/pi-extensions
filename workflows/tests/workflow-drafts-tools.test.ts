@@ -24,13 +24,13 @@ import { registerWorkflowDraftTool } from "../src/tool/workflow-draft.js";
 const roots: string[] = [];
 const API = path.resolve("workflow-api.d.ts");
 const BUILTINS = path.resolve("src/builtins");
-const CORPUS = path.resolve("tests/conformance/v17/typecheck/corpus");
+const CORPUS = path.resolve("tests/conformance/typecheck/corpus");
 
 afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
-describe("workflow v17 draft authoring", () => {
+describe("workflow draft authoring", () => {
   it("strictly reviews inert .flow.ts drafts and exposes derived authority", async () => {
     const fixture = setup();
     const ctx = context(fixture.project, true);
@@ -49,7 +49,6 @@ describe("workflow v17 draft authoring", () => {
     await fixture.service.create({ namespace: "project", name: "optimize", source }, ctx as any);
     const review = await fixture.service.validate("project:optimize", ctx as any);
     expect(review).toMatchObject({
-      runtimeVersion: 17,
       valid: true,
       definitionControlLoad: "passed",
       capabilities: expect.arrayContaining(["candidate-write", "host-command", "human-input"]),
@@ -68,7 +67,6 @@ describe("workflow v17 draft authoring", () => {
       "builtin:implementer", "builtin:researcher", "builtin:reviewer", "builtin:synthesizer",
     ]);
     expect(projectWorkflowDraftReview(review)).toMatchObject({
-      runtimeVersion: 17,
       valid: true,
       definition: { currentExposure: "human" },
       dynamicResources: [expect.objectContaining({ inputPath: "/evaluator" }), expect.any(Object)],
@@ -79,11 +77,11 @@ describe("workflow v17 draft authoring", () => {
     const fixture = setup();
     const ctx = context(fixture.project, true);
     const first = await fixture.service.create({
-      namespace: "user", name: "promote", source: simpleSource("version one"),
+      namespace: "user", name: "promote", source: simpleSource("initial source"),
     }, ctx as any);
     const stale = await fixture.service.promotionChallenge("user:promote", "model", ctx as any);
     const second = await fixture.service.replace({
-      namespace: "user", name: "promote", source: simpleSource("version two"), expectedSourceHash: first.sourceHash,
+      namespace: "user", name: "promote", source: simpleSource("updated source"), expectedSourceHash: first.sourceHash,
     }, ctx as any);
     await expect(fixture.service.promote(
       "user:promote", "model", stale.challenge.challengeHash, ctx as any,
@@ -119,7 +117,7 @@ describe("workflow v17 draft authoring", () => {
     await expect(fixture.service.inspect("user:promote", ctx as any)).rejects.toThrow();
 
     await fixture.service.create({
-      namespace: "user", name: "promote", source: simpleSource("version three"),
+      namespace: "user", name: "promote", source: simpleSource("final source"),
     }, ctx as any);
     const human = await fixture.service.promotionChallenge("user:promote", "human", ctx as any);
     await fixture.service.promote("user:promote", "human", human.challenge.challengeHash, ctx as any);
@@ -175,7 +173,7 @@ describe("workflow v17 draft authoring", () => {
   }, 30_000);
 });
 
-describe("workflow v17 model tool presentation", () => {
+describe("workflow model tool presentation", () => {
   it("emits exact workflow branches and trust-filtered measurement-profile enums", async () => {
     const root = temporaryRoot();
     const registry = new WorkflowRegistry();
@@ -207,7 +205,7 @@ describe("workflow v17 model tool presentation", () => {
     expect(JSON.stringify(presented)).not.toContain("x-pi-workflow-resource");
   });
 
-  it("stages only inert TypeScript source through the v17 draft tool", async () => {
+  it("stages only inert TypeScript source through the draft tool", async () => {
     const fixture = setup();
     const ctx = context(fixture.project, true);
     let registered: any;
@@ -220,14 +218,13 @@ describe("workflow v17 model tool presentation", () => {
     const created = await registered.execute("call-1", {
       action: "create", namespace: "user", name: "tool-draft", source: simpleSource("tool draft"),
     }, undefined, undefined, ctx);
-    expect(created.details).toMatchObject({ runtimeVersion: 17, action: "create", draftId: "user:tool-draft" });
+    expect(created.details).toMatchObject({ action: "create", draftId: "user:tool-draft" });
     const validated = await registered.execute("call-2", {
       action: "validate", namespace: "user", name: "tool-draft",
     }, undefined, undefined, ctx);
     expect(validated.details).toMatchObject({
-      runtimeVersion: 17,
       action: "validate",
-      review: { runtimeVersion: 17, valid: true },
+      review: { valid: true },
     });
     expect(fs.existsSync(path.join(fixture.userTarget, "tool-draft.flow.ts"))).toBe(false);
   }, 20_000);
@@ -287,7 +284,6 @@ function executorDescriptor() {
   });
   return {
     id: "workflow-draft-review",
-    protocolVersion: 1 as const,
     capabilities: {
       persistentSessions: true, candidateWorkspace: true, mediatedNetwork: true,
       liveProgress: true, artifactPublication: true,

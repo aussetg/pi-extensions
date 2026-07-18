@@ -22,7 +22,6 @@ const JSON_LIMITS = {
 } as const;
 
 interface ArtifactMetadata extends WorkflowArtifactRecord {
-  formatVersion: 1;
 }
 
 export class WorkflowReplayArtifactError extends Error {
@@ -110,7 +109,7 @@ export class WorkflowReplayArtifactImporter {
       await validateBody(targetBody, record.digest, record.bytes);
       return record;
     }
-    const metadata: ArtifactMetadata = { formatVersion: 1, ...proposed };
+    const metadata: ArtifactMetadata = { ...proposed };
     const text = stableJson(metadata);
     if (Buffer.byteLength(text) > METADATA_BYTES) {
       throw new WorkflowReplayArtifactError(`Artifact ${sourceRecord.digest} metadata is too large`);
@@ -149,7 +148,7 @@ export class WorkflowReplayArtifactImporter {
     await ensureRealDirectory(directory);
     await validateBody(path.join(directory, "body"), record.digest, record.bytes);
     const metadata = await readMetadata(path.join(directory, "metadata.json"));
-    if (stableJson(metadata) !== stableJson({ formatVersion: 1, ...record })) {
+    if (stableJson(metadata) !== stableJson({ ...record })) {
       throw new WorkflowReplayArtifactError(`Source artifact ${record.digest} metadata differs from SQLite`);
     }
   }
@@ -162,7 +161,7 @@ export class WorkflowReplayArtifactImporter {
     await ensureRealDirectory(directory);
     await validateBody(path.join(directory, "body"), record.digest, record.bytes);
     const metadata = await readMetadata(path.join(directory, "metadata.json"));
-    if (stableJson(metadata) !== stableJson({ formatVersion: 1, ...record })) {
+    if (stableJson(metadata) !== stableJson({ ...record })) {
       throw new WorkflowReplayArtifactError(`Target artifact ${record.digest} metadata differs from SQLite`);
     }
   }
@@ -237,9 +236,11 @@ async function readMetadata(filePath: string): Promise<ArtifactMetadata> {
   try { parsed = JSON.parse(text); }
   catch { throw new WorkflowReplayArtifactError("Artifact metadata is invalid JSON"); }
   const canonical = canonicalJsonValue(parsed, JSON_LIMITS);
-  if (stableJson(canonical) !== text || !canonical || typeof canonical !== "object"
-    || Array.isArray(canonical) || (canonical as { formatVersion?: unknown }).formatVersion !== 1) {
-    throw new WorkflowReplayArtifactError("Artifact metadata is not canonical v17 metadata");
+  if (stableJson(canonical) !== text || !canonical || typeof canonical !== "object" || Array.isArray(canonical)) {
+    throw new WorkflowReplayArtifactError("Artifact metadata is not canonical metadata");
+  }
+  if (Object.keys(canonical).sort().join(",") !== "bodyPath,bytes,createdAt,digest,kind,mediaType,metadata,runId") {
+    throw new WorkflowReplayArtifactError("Artifact metadata has unexpected fields");
   }
   return canonical as unknown as ArtifactMetadata;
 }
@@ -262,13 +263,12 @@ function assertSameArtifactContent(
 }
 
 function stripFormat(metadata: ArtifactMetadata): WorkflowArtifactRecord {
-  const { formatVersion: _formatVersion, ...record } = metadata;
-  return record;
+  return metadata;
 }
 
 function digestHex(digest: string): string {
   const match = /^sha256:([a-f0-9]{64})$/u.exec(digest);
-  if (!match) throw new TypeError("Invalid workflow v17 artifact digest");
+  if (!match) throw new TypeError("Invalid workflow artifact digest");
   return match[1]!;
 }
 

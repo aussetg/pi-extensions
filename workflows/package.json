@@ -11,15 +11,15 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "typecheck:flows": "tsc -p tsconfig.flows.json",
-    "typecheck:conformance:v17": "tsc -p tests/conformance/v17/typecheck/tsconfig.json",
-    "test:conformance:v17": "node --test tests/conformance/v17/reference/**/*.case.mjs",
+    "typecheck:conformance": "tsc -p tests/conformance/typecheck/tsconfig.json",
+    "test:conformance": "node --test tests/conformance/reference/**/*.case.mjs",
     "test:commands": "vitest run tests/command-executor.test.ts",
     "test:systemd": "vitest run tests/systemd-substrate.test.ts tests/command-executor.test.ts",
     "test:coordinator": "vitest run tests/workflow-coordinator.test.ts",
     "test:semantic-engine": "vitest run tests/workflow-semantic-engine.test.ts",
     "test:unit": "vitest run --no-file-parallelism",
-    "test": "npm run test:unit && npm run test:conformance:v17",
-    "check": "npm run typecheck && npm run typecheck:flows && npm run typecheck:conformance:v17 && npm test"
+    "test": "npm run test:unit && npm run test:conformance",
+    "check": "npm run typecheck && npm run typecheck:flows && npm run typecheck:conformance && npm test"
   },
   "dependencies": {
     "acorn": "8.16.0",

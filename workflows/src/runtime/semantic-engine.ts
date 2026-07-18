@@ -210,7 +210,7 @@ export class WorkflowSemanticEngineCrashError extends Error {
     readonly point: WorkflowSemanticEngineFaultPoint,
     readonly operationPath?: string,
   ) {
-    super(`Workflow v17 simulated crash at ${point}${operationPath ? ` ${operationPath}` : ""}`);
+    super(`Workflow simulated crash at ${point}${operationPath ? ` ${operationPath}` : ""}`);
     this.name = "WorkflowSemanticEngineCrashError";
   }
 }
@@ -256,12 +256,12 @@ export class WorkflowHumanSuspension extends Error {
 
 class WorkflowSiblingCancellation extends Error {
   constructor(readonly laneKey: string) {
-    super(`Workflow v17 sibling lane cancelled after ${laneKey} failed`);
+    super(`Workflow sibling lane cancelled after ${laneKey} failed`);
     this.name = "WorkflowSiblingCancellation";
   }
 }
 
-/** Cursor-owned v17 execution with keyed structured child scopes. */
+/** Cursor-owned execution with keyed structured child scopes. */
 export class WorkflowSemanticEngine {
   private readonly storage = new AsyncLocalStorage<CursorScope>();
   private readonly adapters = new Map<WorkflowEffectKind, WorkflowSemanticEffectAdapter>();
@@ -289,8 +289,8 @@ export class WorkflowSemanticEngine {
       DEFINITION_LIMITS.concurrency,
     ));
     for (const adapter of adapters) {
-      if (!EFFECT_KINDS.has(adapter.kind)) throw new TypeError(`Workflow v17 ${adapter.kind} is not a sequential effect`);
-      if (this.adapters.has(adapter.kind)) throw new TypeError(`Duplicate workflow v17 effect adapter ${adapter.kind}`);
+      if (!EFFECT_KINDS.has(adapter.kind)) throw new TypeError(`Workflow ${adapter.kind} is not a sequential effect`);
+      if (this.adapters.has(adapter.kind)) throw new TypeError(`Duplicate workflow effect adapter ${adapter.kind}`);
       this.adapters.set(adapter.kind, adapter);
     }
     if (options.signal) {
@@ -305,13 +305,13 @@ export class WorkflowSemanticEngine {
   async run<T extends JsonValue>(
     body: (flow: WorkflowSequentialFlow) => T | Promise<T>,
   ): Promise<WorkflowSemanticRunOutcome<T>> {
-    if (this.running || this.used) throw new Error("Workflow v17 semantic engine instances execute exactly once");
+    if (this.running || this.used) throw new Error("Workflow semantic engine instances execute exactly once");
     this.running = true;
     this.used = true;
     try {
       await this.startRun();
       const root = this.database.readScope(this.database.readRun().rootScopeId);
-      if (!root) throw new Error("Workflow v17 root scope is missing");
+      if (!root) throw new Error("Workflow root scope is missing");
       const scope: CursorScope = {
         record: root,
         cursor: 0,
@@ -339,7 +339,7 @@ export class WorkflowSemanticEngine {
         if (error instanceof WorkflowHumanSuspension) {
           const current = this.database.readRun();
           if (current.status !== "waiting") {
-            throw new WorkflowSemanticDriftError("Workflow v17 human suspension lacks a waiting run");
+            throw new WorkflowSemanticDriftError("Workflow human suspension lacks a waiting run");
           }
           return { status: "waiting", failure: structuredClone(error.failure) };
         }
@@ -401,7 +401,7 @@ export class WorkflowSemanticEngine {
   }
 
   runInControlContext<T>(context: object, body: () => T): T {
-    if (!this.controlContexts.has(context)) throw new TypeError("Unknown workflow v17 semantic control context");
+    if (!this.controlContexts.has(context)) throw new TypeError("Unknown workflow semantic control context");
     return this.storage.run(context as CursorScope, body);
   }
 
@@ -409,9 +409,9 @@ export class WorkflowSemanticEngine {
     if (this.fatalFault !== undefined) throw this.fatalFault;
     const scope = this.scope();
     if (scope.signal.aborted) throw scope.signal.reason;
-    if (!EFFECT_KINDS.has(kind)) throw new TypeError(`Workflow v17 ${kind} is not a sequential effect`);
+    if (!EFFECT_KINDS.has(kind)) throw new TypeError(`Workflow ${kind} is not a sequential effect`);
     const adapter = this.adapters.get(kind);
-    if (!adapter) throw new Error(`No workflow v17 adapter for ${kind}`);
+    if (!adapter) throw new Error(`No workflow adapter for ${kind}`);
     const run = this.database.readRun();
     await this.bindCandidateWorkspaceLanes(scope, invocation.candidateWorkspaceIds ?? []);
     const semanticInput = canonical(await adapter.semanticInput({
@@ -436,7 +436,7 @@ export class WorkflowSemanticEngine {
     }
     if (operation.status !== "running" && operation.status !== "waiting") {
       throw new WorkflowSemanticDriftError(
-        `Workflow v17 operation ${operation.path} cannot resume from ${operation.status}`,
+        `Workflow operation ${operation.path} cannot resume from ${operation.status}`,
         operation.path,
       );
     }
@@ -504,27 +504,27 @@ export class WorkflowSemanticEngine {
   ): Promise<{ [K in keyof B]: Awaited<ReturnType<B[K]>> }> {
     const options = normalizeStructuredOptions(optionsValue, "parallel", this.limiter.limit);
     if (!branches || typeof branches !== "object" || Array.isArray(branches)) {
-      throw new TypeError("Workflow v17 parallel branches must be an object");
+      throw new TypeError("Workflow parallel branches must be an object");
     }
     const keys = Object.keys(branches);
     if (keys.length < 1 || keys.length > DEFINITION_LIMITS.parallelBranches) {
-      throw new TypeError(`Workflow v17 parallel requires 1–${DEFINITION_LIMITS.parallelBranches} branches`);
+      throw new TypeError(`Workflow parallel requires 1–${DEFINITION_LIMITS.parallelBranches} branches`);
     }
     const seen = new Set<string>();
     for (const key of keys) {
       assertLaneKey(key);
-      if (seen.has(key)) throw new TypeError(`Duplicate workflow v17 parallel lane ${key}`);
+      if (seen.has(key)) throw new TypeError(`Duplicate workflow parallel lane ${key}`);
       seen.add(key);
-      if (typeof branches[key] !== "function") throw new TypeError(`Workflow v17 parallel lane ${key} is not a callback`);
+      if (typeof branches[key] !== "function") throw new TypeError(`Workflow parallel lane ${key} is not a callback`);
     }
     const values = await this.runStructure(
       "parallel",
       keys.map((key) => ({ key, body: branches[key]! })),
-      canonical({ formatVersion: 1, kind: "parallel", keys, errors: options.errors }),
+      canonical({ kind: "parallel", keys, errors: options.errors }),
       options,
     );
     if (!values || typeof values !== "object" || Array.isArray(values)) {
-      throw new Error("Workflow v17 parallel produced an invalid result");
+      throw new Error("Workflow parallel produced an invalid result");
     }
     return values as { [K in keyof B]: Awaited<ReturnType<B[K]>> };
   }
@@ -536,16 +536,16 @@ export class WorkflowSemanticEngine {
   ): Promise<T[]> {
     const options = normalizeMapOptions(optionsValue, this.limiter.limit);
     if (!Array.isArray(itemsValue) || itemsValue.length > DEFINITION_LIMITS.mapItems) {
-      throw new TypeError(`Workflow v17 map accepts at most ${DEFINITION_LIMITS.mapItems} items`);
+      throw new TypeError(`Workflow map accepts at most ${DEFINITION_LIMITS.mapItems} items`);
     }
-    if (typeof body !== "function") throw new TypeError("Workflow v17 map body must be a callback");
+    if (typeof body !== "function") throw new TypeError("Workflow map body must be a callback");
     const items = canonical(itemsValue) as JsonValue[];
     const keys: string[] = [];
     const seen = new Set<string>();
     for (let index = 0; index < items.length; index++) {
       const key = await Promise.resolve(options.key(structuredClone(items[index]!), index));
       assertLaneKey(key);
-      if (seen.has(key)) throw new TypeError(`Duplicate workflow v17 map lane ${key}`);
+      if (seen.has(key)) throw new TypeError(`Duplicate workflow map lane ${key}`);
       seen.add(key);
       keys.push(key);
     }
@@ -556,22 +556,21 @@ export class WorkflowSemanticEngine {
         body: () => body(structuredClone(item), index),
       })),
       canonical({
-        formatVersion: 1,
         kind: "map",
         errors: options.errors,
         entries: items.map((item, index) => ({ key: keys[index]!, item })),
       }),
       options,
     );
-    if (!Array.isArray(result)) throw new Error("Workflow v17 map produced an invalid result");
+    if (!Array.isArray(result)) throw new Error("Workflow map produced an invalid result");
     return result as T[];
   }
 
   private async candidate(invocation: WorkflowCandidateInvocation): Promise<unknown> {
     const runtime = this.options.candidate;
-    if (!runtime) throw new Error("Workflow v17 candidate runtime is unavailable");
+    if (!runtime) throw new Error("Workflow candidate runtime is unavailable");
     if (!invocation || typeof invocation.body !== "function") {
-      throw new TypeError("Workflow v17 candidate body must be a callback");
+      throw new TypeError("Workflow candidate body must be a callback");
     }
     const parent = this.scope();
     if (parent.signal.aborted) throw parent.signal.reason;
@@ -583,13 +582,11 @@ export class WorkflowSemanticEngine {
     const operation = claimed.operation;
     if (claimed.claimed) await this.fault("after-operation-claim", operation);
     const semanticKey = stableHash({
-      formatVersion: 1,
       kind: "workflow-candidate-join",
       semanticInputHash: operation.semanticInputHash,
       contextIdentityHash: this.database.readRun().contextIdentityHash,
     });
     const policyHash = stableHash({
-      formatVersion: 1,
       kind: "workflow-candidate-policy",
       semanticInput,
     });
@@ -603,7 +600,7 @@ export class WorkflowSemanticEngine {
     }
     if (operation.status !== "running" && operation.status !== "waiting") {
       throw new WorkflowSemanticDriftError(
-        `Workflow v17 candidate ${operation.path} cannot resume from ${operation.status}`,
+        `Workflow candidate ${operation.path} cannot resume from ${operation.status}`,
         operation.path,
       );
     }
@@ -622,7 +619,7 @@ export class WorkflowSemanticEngine {
     }
     if (bodyScope.status !== "active") {
       throw new WorkflowSemanticDriftError(
-        `Workflow v17 candidate body ${bodyScope.path} has no frozen authority`,
+        `Workflow candidate body ${bodyScope.path} has no frozen authority`,
         operation.path,
       );
     }
@@ -649,7 +646,7 @@ export class WorkflowSemanticEngine {
       await this.fault("after-candidate-frozen", operation);
       const currentBody = this.database.readScope(bodyScope.scopeId)!;
       if (currentBody.status !== "completed" || currentBody.terminalKey !== bodyContext.previousCallKey) {
-        throw new WorkflowSemanticDriftError("Workflow v17 candidate freeze did not settle its body scope");
+        throw new WorkflowSemanticDriftError("Workflow candidate freeze did not settle its body scope");
       }
       const joinKey = await this.completeCandidateJoin(
         parent, operation, currentBody, semanticKey, policyHash, frozen,
@@ -722,12 +719,10 @@ export class WorkflowSemanticEngine {
     if (claimed.claimed) await this.fault("after-operation-claim", operation);
     const outputOrder = laneBodies.map((lane) => lane.key);
     const semanticKey = stableHash({
-      formatVersion: 1,
       kind: `workflow-${kind}-join`,
       semanticInputHash: operation.semanticInputHash,
     });
     const policyHash = stableHash({
-      formatVersion: 1,
       kind: `workflow-${kind}-policy`,
       errors: options.errors,
     });
@@ -736,7 +731,7 @@ export class WorkflowSemanticEngine {
     }
     if (operation.status !== "running" && operation.status !== "waiting") {
       throw new WorkflowSemanticDriftError(
-        `Workflow v17 structure ${operation.path} cannot resume from ${operation.status}`,
+        `Workflow structure ${operation.path} cannot resume from ${operation.status}`,
         operation.path,
       );
     }
@@ -814,19 +809,19 @@ export class WorkflowSemanticEngine {
       || join.policyHash !== policyHash || !equalStrings(join.outputOrder, outputOrder)
       || join.joinKey !== call.callKey) {
       throw new WorkflowSemanticDriftError(
-        `Workflow v17 same-run structure changed identity at ${operation.path}`,
+        `Workflow same-run structure changed identity at ${operation.path}`,
         operation.path,
       );
     }
     parent.previousCallKey = call.callKey;
     if (call.outcome === "failure") {
       if (operation.status !== "failed" || call.replayPolicy !== "never" || !operation.failure) {
-        throw new WorkflowSemanticDriftError(`Workflow v17 failed structure is corrupt at ${operation.path}`);
+        throw new WorkflowSemanticDriftError(`Workflow failed structure is corrupt at ${operation.path}`);
       }
       throw new WorkflowRecordedStructuralError(operation.path, operation.failure);
     }
     if (operation.status !== "completed" || operation.result === undefined) {
-      throw new WorkflowSemanticDriftError(`Workflow v17 completed structure is corrupt at ${operation.path}`);
+      throw new WorkflowSemanticDriftError(`Workflow completed structure is corrupt at ${operation.path}`);
     }
     return this.decodeStructuralValue(operation.result);
   }
@@ -846,19 +841,19 @@ export class WorkflowSemanticEngine {
       || !equalStrings(join.outputOrder, ["candidate"]) || join.joinKey !== call.callKey
       || join.lanes.length !== 1 || join.lanes[0]!.scopeId !== bodyScope.scopeId) {
       throw new WorkflowSemanticDriftError(
-        `Workflow v17 same-run candidate changed identity at ${operation.path}`,
+        `Workflow same-run candidate changed identity at ${operation.path}`,
         operation.path,
       );
     }
     parent.previousCallKey = call.callKey;
     if (call.outcome === "failure") {
       if (operation.status !== "failed" || call.replayPolicy !== "never" || !operation.failure) {
-        throw new WorkflowSemanticDriftError(`Workflow v17 failed candidate is corrupt at ${operation.path}`);
+        throw new WorkflowSemanticDriftError(`Workflow failed candidate is corrupt at ${operation.path}`);
       }
       return { bodyScope, failure: operation.failure };
     }
     if (operation.status !== "completed" || operation.result === undefined) {
-      throw new WorkflowSemanticDriftError(`Workflow v17 completed candidate is corrupt at ${operation.path}`);
+      throw new WorkflowSemanticDriftError(`Workflow completed candidate is corrupt at ${operation.path}`);
     }
     return { bodyScope, result: structuredClone(operation.result) };
   }
@@ -878,7 +873,7 @@ export class WorkflowSemanticEngine {
       || (call.outcome === "success" && call.postWorkspaceCheckpointId !== identity.postWorkspaceCheckpointId)
       || (call.outcome === "failure" && (call.replayPolicy !== "never" || call.postWorkspaceCheckpointId !== undefined))) {
       throw new WorkflowSemanticDriftError(
-        `Workflow v17 same-run call changed identity at ${operation.path}`,
+        `Workflow same-run call changed identity at ${operation.path}`,
         operation.path,
       );
     }
@@ -929,7 +924,7 @@ export class WorkflowSemanticEngine {
         throw error;
       }
     }
-    throw new Error(`Could not preclaim workflow v17 ${kind} lanes`);
+    throw new Error(`Could not preclaim workflow ${kind} lanes`);
   }
 
   private async preclaimCandidateBody(
@@ -960,7 +955,7 @@ export class WorkflowSemanticEngine {
         throw error;
       }
     }
-    throw new Error("Could not preclaim workflow v17 candidate body");
+    throw new Error("Could not preclaim workflow candidate body");
   }
 
   private async completeCandidateJoin(
@@ -992,11 +987,11 @@ export class WorkflowSemanticEngine {
     workspaceIds: readonly string[],
   ): Promise<void> {
     if (!Array.isArray(workspaceIds) || new Set(workspaceIds).size !== workspaceIds.length) {
-      throw new TypeError("Workflow v17 candidate workspace identities must be unique");
+      throw new TypeError("Workflow candidate workspace identities must be unique");
     }
     for (const workspaceId of workspaceIds) {
       if (typeof workspaceId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:@/+~-]{0,255}$/u.test(workspaceId)) {
-        throw new TypeError("Workflow v17 candidate workspace identity is invalid");
+        throw new TypeError("Workflow candidate workspace identity is invalid");
       }
       for (const binding of scope.branchLineage) {
         let bound = false;
@@ -1015,7 +1010,7 @@ export class WorkflowSemanticEngine {
             throw error;
           }
         }
-        if (!bound) throw new Error(`Could not bind workflow v17 candidate workspace ${workspaceId}`);
+        if (!bound) throw new Error(`Could not bind workflow candidate workspace ${workspaceId}`);
       }
     }
   }
@@ -1065,7 +1060,7 @@ export class WorkflowSemanticEngine {
         }
       }
       if (outcomes.some((outcome) => outcome === undefined)) {
-        throw new Error("Workflow v17 structured scheduler left an unsettled lane");
+        throw new Error("Workflow structured scheduler left an unsettled lane");
       }
       return outcomes as StructuredLaneOutcome[];
     } finally {
@@ -1075,7 +1070,7 @@ export class WorkflowSemanticEngine {
 
   private async runLane(lane: StructuredLane, signal: AbortSignal): Promise<StructuredLaneOutcome> {
     let current = this.database.readScope(lane.scope.scopeId);
-    if (!current) throw new Error(`Workflow v17 lane ${lane.scope.path} disappeared`);
+    if (!current) throw new Error(`Workflow lane ${lane.scope.path} disappeared`);
     if (current.status === "failed") return laneFromTerminal(current);
     if (current.status === "cancelled") return laneFromTerminal(current);
     const scope: CursorScope = {
@@ -1097,7 +1092,7 @@ export class WorkflowSemanticEngine {
       if (current.status === "completed") {
         if (current.terminalKey !== scope.previousCallKey) {
           throw new WorkflowSemanticDriftError(
-            `Workflow v17 lane ${current.path} terminal changed after restart`,
+            `Workflow lane ${current.path} terminal changed after restart`,
           );
         }
       } else if (current.status === "active") {
@@ -1105,7 +1100,7 @@ export class WorkflowSemanticEngine {
         await this.fault("after-lane-scope-complete");
         current = this.database.readScope(current.scopeId)!;
       } else {
-        throw new WorkflowSemanticDriftError(`Workflow v17 successful lane ${current.path} is ${current.status}`);
+        throw new WorkflowSemanticDriftError(`Workflow successful lane ${current.path} is ${current.status}`);
       }
       return {
         key: lane.key,
@@ -1126,7 +1121,7 @@ export class WorkflowSemanticEngine {
       current = this.database.readScope(lane.scope.scopeId)!;
       if (current.status === "failed") {
         if (stableHash(current.failure) !== stableHash(failure)) {
-          throw new WorkflowSemanticDriftError(`Workflow v17 lane ${current.path} failure changed after restart`);
+          throw new WorkflowSemanticDriftError(`Workflow lane ${current.path} failure changed after restart`);
         }
       } else if (current.status === "active") {
         const terminalKey = failedScopeTerminal(scope.previousCallKey, failure);
@@ -1134,7 +1129,7 @@ export class WorkflowSemanticEngine {
         await this.fault("after-lane-scope-failure");
         current = this.database.readScope(current.scopeId)!;
       } else {
-        throw new WorkflowSemanticDriftError(`Workflow v17 failed lane ${current.path} is ${current.status}`);
+        throw new WorkflowSemanticDriftError(`Workflow failed lane ${current.path} is ${current.status}`);
       }
       return {
         key: lane.key,
@@ -1152,7 +1147,7 @@ export class WorkflowSemanticEngine {
   ): Promise<StructuredLaneOutcome> {
     for (let retry = 0; retry < MAX_REVISION_RETRIES; retry++) {
       const current = this.database.readScope(lane.scope.scopeId);
-      if (!current) throw new Error(`Workflow v17 lane ${lane.scope.path} disappeared`);
+      if (!current) throw new Error(`Workflow lane ${lane.scope.path} disappeared`);
       if (current.status !== "active") return laneFromTerminal(current);
       try {
         const cancelled = this.database.cancelScopeTree({
@@ -1168,7 +1163,7 @@ export class WorkflowSemanticEngine {
         throw error;
       }
     }
-    throw new Error(`Could not cancel workflow v17 lane ${lane.scope.path}`);
+    throw new Error(`Could not cancel workflow lane ${lane.scope.path}`);
   }
 
   private async completeSuccessfulStructure(
@@ -1226,7 +1221,7 @@ export class WorkflowSemanticEngine {
         throw error;
       }
     }
-    throw new Error(`Could not complete workflow v17 ${operation.kind} join`);
+    throw new Error(`Could not complete workflow ${operation.kind} join`);
   }
 
   private encodeStructuralValue(value: unknown): JsonValue {
@@ -1277,7 +1272,7 @@ export class WorkflowSemanticEngine {
         throw error;
       }
     }
-    throw new Error(`Could not complete failed workflow v17 ${operation.kind} join`);
+    throw new Error(`Could not complete failed workflow ${operation.kind} join`);
   }
 
   private async completeSettlement(
@@ -1335,7 +1330,7 @@ export class WorkflowSemanticEngine {
         throw error;
       }
     }
-    if (!completed) throw new Error("Could not complete workflow v17 effect after repeated revision races");
+    if (!completed) throw new Error("Could not complete workflow effect after repeated revision races");
     await this.fault(settlement.outcome === "success" ? "after-operation-complete" : "after-operation-failure", completed);
     const identity: WorkflowEffectIdentity = {
       semanticKey: settlement.semanticKey,
@@ -1379,7 +1374,7 @@ export class WorkflowSemanticEngine {
         throw error;
       }
     }
-    throw new Error("Could not claim workflow v17 operation after repeated revision races");
+    throw new Error("Could not claim workflow operation after repeated revision races");
   }
 
   private async settle(
@@ -1412,14 +1407,14 @@ export class WorkflowSemanticEngine {
         throw error;
       }
     }
-    throw new Error("Could not settle workflow v17 effect after repeated revision races");
+    throw new Error("Could not settle workflow effect after repeated revision races");
   }
 
   private async startRun(): Promise<void> {
     const run = this.database.readRun();
     if (run.status === "running") return;
     if (run.status !== "queued" && run.status !== "paused") {
-      throw new Error(`Workflow v17 run is already ${run.status}`);
+      throw new Error(`Workflow run is already ${run.status}`);
     }
     await this.transitionRun("running");
     await this.fault("after-run-start");
@@ -1429,12 +1424,12 @@ export class WorkflowSemanticEngine {
     const current = this.database.readScope(scope.record.scopeId)!;
     if (current.status === "completed") {
       if (current.terminalKey !== terminalKey) {
-        throw new WorkflowSemanticDriftError("Workflow v17 root terminal key changed after restart");
+        throw new WorkflowSemanticDriftError("Workflow root terminal key changed after restart");
       }
       return;
     }
     if (current.status !== "active") {
-      throw new WorkflowSemanticDriftError(`Workflow v17 root scope is already ${current.status}`);
+      throw new WorkflowSemanticDriftError(`Workflow root scope is already ${current.status}`);
     }
     await this.completeScope(current, "completed", terminalKey);
     await this.fault("after-root-scope-complete");
@@ -1442,7 +1437,6 @@ export class WorkflowSemanticEngine {
 
   private async failRootScope(scope: CursorScope, failure: JsonObject): Promise<void> {
     const terminalKey = stableHash({
-      formatVersion: 1,
       kind: "workflow-scope-failure",
       previousCallKey: scope.previousCallKey,
       failure,
@@ -1450,12 +1444,12 @@ export class WorkflowSemanticEngine {
     const current = this.database.readScope(scope.record.scopeId)!;
     if (current.status === "failed") {
       if (current.terminalKey !== terminalKey || stableHash(current.failure) !== stableHash(failure)) {
-        throw new WorkflowSemanticDriftError("Workflow v17 root failure changed after restart");
+        throw new WorkflowSemanticDriftError("Workflow root failure changed after restart");
       }
       return;
     }
     if (current.status !== "active") {
-      throw new WorkflowSemanticDriftError(`Workflow v17 root scope is already ${current.status}`);
+      throw new WorkflowSemanticDriftError(`Workflow root scope is already ${current.status}`);
     }
     await this.completeScope(current, "failed", terminalKey, failure);
     await this.fault("after-root-scope-failure");
@@ -1483,7 +1477,7 @@ export class WorkflowSemanticEngine {
         throw error;
       }
     }
-    throw new Error("Could not complete workflow v17 scope after repeated revision races");
+    throw new Error("Could not complete workflow scope after repeated revision races");
   }
 
   private async transitionRun(
@@ -1509,18 +1503,18 @@ export class WorkflowSemanticEngine {
         throw error;
       }
     }
-    throw new Error(`Could not transition workflow v17 run to ${status}`);
+    throw new Error(`Could not transition workflow run to ${status}`);
   }
 
   private scope(): CursorScope {
     const scope = this.storage.getStore();
-    if (!scope) throw new Error("Workflow v17 effect escaped its semantic scope");
+    if (!scope) throw new Error("Workflow effect escaped its semantic scope");
     return scope;
   }
 
   private timestamp(): string {
     const value = this.now();
-    if (!(value instanceof Date) || !Number.isFinite(value.getTime())) throw new TypeError("Workflow v17 engine clock is invalid");
+    if (!(value instanceof Date) || !Number.isFinite(value.getTime())) throw new TypeError("Workflow engine clock is invalid");
     return value.toISOString();
   }
 
@@ -1536,23 +1530,23 @@ export class WorkflowSemanticEngine {
 
 function normalizeIdentity(value: WorkflowEffectIdentity, kind: WorkflowEffectKind): WorkflowEffectIdentity {
   if (!value || typeof value !== "object" || !HASH.test(value.semanticKey)) {
-    throw new TypeError(`Workflow v17 ${kind} adapter returned an invalid semantic key`);
+    throw new TypeError(`Workflow ${kind} adapter returned an invalid semantic key`);
   }
   if (value.completionAuthority !== "finish-work" && value.completionAuthority !== "host-effect") {
-    throw new TypeError(`Workflow v17 ${kind} adapter returned an invalid completion authority`);
+    throw new TypeError(`Workflow ${kind} adapter returned an invalid completion authority`);
   }
   if (!new Set(["immutable", "workspace", "never"]).has(value.replayPolicy)) {
-    throw new TypeError(`Workflow v17 ${kind} adapter returned an invalid replay policy`);
+    throw new TypeError(`Workflow ${kind} adapter returned an invalid replay policy`);
   }
   if (kind === "apply" && value.replayPolicy !== "never") {
-    throw new TypeError("Workflow v17 apply adapter must use never replay policy");
+    throw new TypeError("Workflow apply adapter must use never replay policy");
   }
   if (value.replayPolicy === "workspace") {
     if (!value.workspace || !value.postWorkspaceCheckpointId) {
-      throw new TypeError(`Workflow v17 ${kind} workspace effect lacks replay/checkpoint authority`);
+      throw new TypeError(`Workflow ${kind} workspace effect lacks replay/checkpoint authority`);
     }
   } else if (value.workspace || value.postWorkspaceCheckpointId) {
-    throw new TypeError(`Workflow v17 ${kind} non-workspace effect carries workspace authority`);
+    throw new TypeError(`Workflow ${kind} non-workspace effect carries workspace authority`);
   }
   return value;
 }
@@ -1571,7 +1565,7 @@ function assertSettlementIdentity(
     || (settlement.outcome === "failure" && settlement.replayPolicy !== "never")
     || (expectedOutcome !== undefined && settlement.outcome !== expectedOutcome)) {
     throw new WorkflowSemanticDriftError(
-      `Workflow v17 effect settlement changed identity at ${operation.path}`,
+      `Workflow effect settlement changed identity at ${operation.path}`,
       operation.path,
     );
   }
@@ -1624,7 +1618,7 @@ function boundedText(value: string, maximum: number): string {
 
 function boundedOperationAdmissionLimit(value: number): number {
   if (!Number.isSafeInteger(value) || value < 1 || value > DEFINITION_LIMITS.semanticOperations) {
-    throw new TypeError(`Workflow v17 operation admission limit must be 1–${DEFINITION_LIMITS.semanticOperations}`);
+    throw new TypeError(`Workflow operation admission limit must be 1–${DEFINITION_LIMITS.semanticOperations}`);
   }
   return value;
 }
@@ -1634,22 +1628,22 @@ function normalizeStructuredOptions(
   label: "parallel" | "map",
   hostConcurrency: number,
 ): NormalizedStructuredOptions {
-  if (!value || typeof value !== "object") throw new TypeError(`Workflow v17 ${label} options must be an object`);
+  if (!value || typeof value !== "object") throw new TypeError(`Workflow ${label} options must be an object`);
   if (typeof value.sourceSite !== "string" || !/^[a-z][a-z0-9-]{0,127}$/u.test(value.sourceSite)) {
-    throw new TypeError(`Workflow v17 ${label} source site is invalid`);
+    throw new TypeError(`Workflow ${label} source site is invalid`);
   }
   const concurrency = value.concurrency ?? hostConcurrency;
   if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > hostConcurrency
     || concurrency > DEFINITION_LIMITS.concurrency) {
-    throw new TypeError(`Workflow v17 ${label} concurrency must be 1–${Math.min(hostConcurrency, DEFINITION_LIMITS.concurrency)}`);
+    throw new TypeError(`Workflow ${label} concurrency must be 1–${Math.min(hostConcurrency, DEFINITION_LIMITS.concurrency)}`);
   }
   const errors = value.errors ?? "fail-fast";
   if (errors !== "fail-fast" && errors !== "collect") {
-    throw new TypeError(`Workflow v17 ${label} errors must be fail-fast or collect`);
+    throw new TypeError(`Workflow ${label} errors must be fail-fast or collect`);
   }
   if (value.title !== undefined && (typeof value.title !== "string" || !value.title.trim()
     || Array.from(value.title).length > DEFINITION_LIMITS.titleScalars)) {
-    throw new TypeError(`Workflow v17 ${label} title is invalid`);
+    throw new TypeError(`Workflow ${label} title is invalid`);
   }
   return {
     sourceSite: value.sourceSite,
@@ -1664,19 +1658,18 @@ function normalizeMapOptions(
   hostConcurrency: number,
 ): NormalizedStructuredOptions & Pick<WorkflowMapOptions, "key"> {
   const normalized = normalizeStructuredOptions(value, "map", hostConcurrency);
-  if (typeof value.key !== "function") throw new TypeError("Workflow v17 map requires a key callback");
+  if (typeof value.key !== "function") throw new TypeError("Workflow map requires a key callback");
   return { ...normalized, key: value.key };
 }
 
 function assertLaneKey(value: unknown): asserts value is string {
   if (typeof value !== "string" || !/^[a-z][a-z0-9_-]{0,63}$/u.test(value)) {
-    throw new TypeError("Workflow v17 lane key must match ^[a-z][a-z0-9_-]{0,63}$");
+    throw new TypeError("Workflow lane key must match ^[a-z][a-z0-9_-]{0,63}$");
   }
 }
 
 function failedScopeTerminal(previousCallKey: string, failure: JsonObject): string {
   return stableHash({
-    formatVersion: 1,
     kind: "workflow-scope-failure",
     previousCallKey,
     failure,
@@ -1685,10 +1678,10 @@ function failedScopeTerminal(previousCallKey: string, failure: JsonObject): stri
 
 function laneFromTerminal(scope: WorkflowScopeRecord): StructuredLaneOutcome {
   if (scope.status !== "failed" && scope.status !== "cancelled") {
-    throw new WorkflowSemanticDriftError(`Workflow v17 lane ${scope.path} is not failed or cancelled`);
+    throw new WorkflowSemanticDriftError(`Workflow lane ${scope.path} is not failed or cancelled`);
   }
   if (!scope.laneKey || !scope.terminalKey || !scope.failure) {
-    throw new WorkflowSemanticDriftError(`Workflow v17 terminal lane ${scope.path} is incomplete`);
+    throw new WorkflowSemanticDriftError(`Workflow terminal lane ${scope.path} is incomplete`);
   }
   return {
     key: scope.laneKey,
@@ -1709,7 +1702,7 @@ function laneResult(
       : { ok: false, error: branchError(lane.failure!) };
   }
   if (lane.outcome !== "success") {
-    throw new Error(`Workflow v17 fail-fast lane ${lane.key} has no successful value`);
+    throw new Error(`Workflow fail-fast lane ${lane.key} has no successful value`);
   }
   return lane.value!;
 }

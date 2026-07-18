@@ -13,7 +13,6 @@ export const WORKFLOW_REGISTRY_PROMOTION_FILE = ".registry-promotion.json";
 export type WorkflowExposure = "human" | "model";
 
 export interface WorkflowRegistryPolicySnapshot {
-  formatVersion: 1;
   namespace: WorkflowNamespace;
   path: string;
   source: "default" | "file";
@@ -23,13 +22,13 @@ export interface WorkflowRegistryPolicySnapshot {
 
 export class WorkflowRegistryPromotionPendingError extends Error {
   constructor(readonly transactionPath: string) {
-    super(`Workflow v17 registry has an incomplete promotion transaction ${transactionPath}`);
+    super(`Workflow registry has an incomplete promotion transaction ${transactionPath}`);
     this.name = "WorkflowRegistryPromotionPendingError";
   }
 }
 
 const POLICY_BYTES = 64 * 1024;
-const POLICY_FIELDS = new Set(["formatVersion", "model"]);
+const POLICY_FIELDS = new Set(["model"]);
 
 /**
  * Read one namespace-local exposure policy. Absence is deliberately the safe, human-only policy.
@@ -47,7 +46,7 @@ export async function readWorkflowRegistryPolicy(
     try {
       const transaction = await fs.promises.lstat(transactionPath);
       if (!transaction.isFile() || transaction.isSymbolicLink()) {
-        throw new Error("Workflow v17 registry promotion marker is unsafe");
+        throw new Error("Workflow registry promotion marker is unsafe");
       }
       throw new WorkflowRegistryPromotionPendingError(transactionPath);
     } catch (error) {
@@ -72,7 +71,6 @@ export async function readWorkflowRegistryPolicy(
   try { parsed = JSON.parse(source); }
   catch (error) { throw new Error(`Workflow registry policy is not JSON: ${errorMessage(error)}`); }
   const record = strictRecord(parsed, POLICY_FIELDS, "workflow registry policy");
-  if (record.formatVersion !== 1) throw new Error("Workflow registry policy formatVersion must be 1");
   if (!Array.isArray(record.model)) throw new Error("Workflow registry policy model must be an array");
   if (record.model.length > DEFINITION_LIMITS.filesPerNamespace) {
     throw new Error(`Workflow registry policy exceeds ${DEFINITION_LIMITS.filesPerNamespace} model entries`);
@@ -112,13 +110,13 @@ export function workflowRegistryPolicyDocument(
   policy: WorkflowRegistryPolicySnapshot,
   name: string,
   exposure: WorkflowExposure,
-): { formatVersion: 1; model: string[] } {
-  if (!FLOW_NAME_PATTERN.test(name)) throw new TypeError("Workflow v17 policy update name is invalid");
-  if (exposure !== "human" && exposure !== "model") throw new TypeError("Workflow v17 policy exposure is invalid");
+): { model: string[] } {
+  if (!FLOW_NAME_PATTERN.test(name)) throw new TypeError("Workflow policy update name is invalid");
+  if (exposure !== "human" && exposure !== "model") throw new TypeError("Workflow policy exposure is invalid");
   const model = new Set(policy.model);
   if (exposure === "model") model.add(name);
   else model.delete(name);
-  return { formatVersion: 1, model: [...model].sort() };
+  return { model: [...model].sort() };
 }
 
 function policySnapshot(
@@ -127,7 +125,7 @@ function policySnapshot(
   source: "default" | "file",
   model: string[],
 ): WorkflowRegistryPolicySnapshot {
-  const semantic = { formatVersion: 1 as const, namespace, model: [...model].sort() };
+  const semantic = { namespace, model: [...model].sort() };
   const snapshot = {
     ...semantic,
     path: path.resolve(policyPath),

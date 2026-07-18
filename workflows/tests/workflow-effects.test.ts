@@ -138,7 +138,7 @@ afterEach(() => {
   }
 });
 
-describe("workflow v17 effect APIs and candidate lifecycle", () => {
+describe("workflow effect APIs and candidate lifecycle", () => {
   it("routes reviewed descriptors through canonical products and applies exact accepted authority", async () => {
     const fixture = createFixture(ACCEPT_SOURCE, "effects-accept");
     const backends = scriptedBackends(fixture);
@@ -299,7 +299,7 @@ describe("workflow v17 effect APIs and candidate lifecycle", () => {
       status: "passed",
       passed: true,
       artifact: {},
-    })).toThrow("no workflow v17 verification authority");
+    })).toThrow("no workflow verification authority");
   });
 
   it("abandons a failed candidate callback and restores its structural failure into catch", async () => {
@@ -322,7 +322,6 @@ function createFixture(source: string, name: string) {
   const parsed = parseWorkflow(source, { fileName: `${name}.flow.ts` });
   const policy = defaultWorkflowRegistryPolicy(root, "user");
   const ref: WorkflowDefinitionRef = {
-    formatVersion: 1,
     id: `user:${name}`,
     namespace: "user",
     name,
@@ -360,7 +359,7 @@ function createFixture(source: string, name: string) {
     verifications,
   });
   const database = WorkflowRunDatabase.create(path.join(root, "run.sqlite"), {
-    runId: `flow_v17_${name.replace(/-/gu, "_")}`,
+    runId: `flow_test_${name.replace(/-/gu, "_")}`,
     snapshot,
     projectSnapshotHash: sha256(`project:${name}`),
     routeSnapshotHash: sha256(`routes:${name}`),
@@ -475,7 +474,6 @@ function scriptedBackends(
         verificationBindingHash,
         changedPaths,
         authorityHash: stableHash({
-          formatVersion: 1,
           candidateId: request.candidate.candidateId,
           approvalId,
           receiptId,
@@ -537,11 +535,11 @@ class FakeCandidateDriver implements WorkflowCandidateWorkspaceDriver {
     const treeHash = this.changed ? sha256(`changed:${input.workspace.workspaceId}`) : input.workspace.initialTreeHash;
     const manifest = await this.store.putJson({
       kind: "candidate-manifest",
-      value: { formatVersion: 1, treeHash, changedPaths },
+      value: { treeHash, changedPaths },
     });
     const diff = await this.store.putJson({
       kind: "candidate-diff",
-      value: { formatVersion: 1, changedPaths },
+      value: { changedPaths },
     });
     return {
       treeHash,
@@ -559,7 +557,6 @@ class FakeCandidateDriver implements WorkflowCandidateWorkspaceDriver {
   }): Promise<WorkflowWorkspaceCheckpointRecord> {
     return {
       checkpointId: `checkpoint_${stableHash({
-        formatVersion: 1,
         kind: "workflow-workspace-checkpoint",
         runId: input.run.runId,
         operationId: input.operation.operationId,

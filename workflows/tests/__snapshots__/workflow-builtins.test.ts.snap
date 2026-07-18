@@ -1,6 +1,6 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`workflow v17 builtins > runs and reconstructs research with keyed collected lanes and report revision 1`] = `
+exports[`workflow builtins > runs and reconstructs research with keyed collected lanes and report revision 1`] = `
 "Research · completed · 7 operations
 launch · model · model exposure · concurrency 4
 operations
@@ -14,7 +14,7 @@ operations
 "
 `;
 
-exports[`workflow v17 builtins > runs execute-plan through durable points, replan, reconstruction, and final apply 1`] = `
+exports[`workflow builtins > runs execute-plan through durable points, replan, reconstruction, and final apply 1`] = `
 "Execute Plan · completed · 9 operations
 launch · model · model exposure · concurrency 4
 operations
@@ -35,7 +35,7 @@ candidates
 "
 `;
 
-exports[`workflow v17 builtins > runs generic optimize against a candidate-sensitive pinned evaluator 1`] = `
+exports[`workflow builtins > runs generic optimize against a candidate-sensitive pinned evaluator 1`] = `
 "Optimize · completed · 18 operations
 launch · model · model exposure · concurrency 4
 resource · project:bench · 2 measurement sites · primary:latency, guardrail:rss
@@ -77,7 +77,7 @@ candidates
 "
 `;
 
-exports[`workflow v17 builtins > runs goal through a failed verification and a reconstructed corrected candidate 1`] = `
+exports[`workflow builtins > runs goal through a failed verification and a reconstructed corrected candidate 1`] = `
 "Goal · completed · 10 operations
 launch · model · model exposure · concurrency 4
 operations

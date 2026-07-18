@@ -101,7 +101,6 @@ export class WorkflowReplayWorkspaceImporter {
     }
 
     const checkpointId = `checkpoint_${stableHash({
-      formatVersion: 1,
       runId: targetRun.runId,
       operationId: operation.operationId,
       workspaceId: workspace.workspaceId,

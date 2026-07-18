@@ -20,16 +20,16 @@ import {
 } from "../src/runtime/control-worker-host.js";
 import { parseWorkflowControlProcessMessage } from "../src/runtime/control-protocol.js";
 
-describe("workflow v17 control process", () => {
+describe("workflow control process", () => {
   it("loads all six reviewed definitions with realm-owned language constructors", async () => {
-    const root = path.join(process.cwd(), "tests", "conformance", "v17", "typecheck", "corpus");
+    const root = path.join(process.cwd(), "tests", "conformance", "typecheck", "corpus");
     for (const name of fs.readdirSync(root).filter(name => name.endsWith(".flow.ts")).sort()) {
       const parsed = parseWorkflow(fs.readFileSync(path.join(root, name), "utf8"), { fileName: name });
       await expect(loadWorkflowControlDefinition(parsed), name).resolves.toBeUndefined();
     }
   }, 30_000);
 
-  it("executes exact reviewed source with frozen arguments and only the v17 flow surface", async () => {
+  it("executes exact reviewed source with frozen arguments and only the flow surface", async () => {
     const workflow = parse("surface", `
       import { schema as s, workflow } from "pi/workflows";
       export default workflow({
@@ -453,7 +453,7 @@ describe("workflow v17 control process", () => {
       });
     `);
     const controller = new AbortController();
-    const reason = new Error("cancelled by v17 test");
+    const reason = new Error("cancelled by test");
     const execution = evaluateWorkflowControl({
       workflow,
       flow: { agent: async () => await new Promise(() => {}) },
@@ -505,9 +505,9 @@ describe("workflow v17 control process", () => {
       type: "host-call",
       requestId: "request-1",
       invocationId: "root",
-      method: "stage",
+      method: "unknown-method",
       args: { type: "array", values: [] },
-    })).toThrow(/Unknown workflow v17 async method stage/u);
+    })).toThrow(/Unknown workflow async method unknown-method/u);
   });
 });
 
@@ -541,7 +541,6 @@ async function execute(
 
 function productIdentity(kind: WorkflowProductIdentity["kind"], authorityId: string): WorkflowProductIdentity {
   return {
-    formatVersion: 1,
     kind,
     authorityId,
     authorityHash: stableHash({ kind, authorityId }),
@@ -550,7 +549,6 @@ function productIdentity(kind: WorkflowProductIdentity["kind"], authorityId: str
 
 function referenceIdentity(kind: WorkflowReferenceIdentity["kind"], authorityId: string): WorkflowReferenceIdentity {
   return {
-    formatVersion: 1,
     kind,
     authorityId,
     authorityHash: stableHash({ kind, authorityId }),

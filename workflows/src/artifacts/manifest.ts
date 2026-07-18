@@ -13,7 +13,6 @@ export interface WorkflowArtifactManifestEntry {
 }
 
 export interface WorkflowArtifactManifest {
-  formatVersion: 1;
   entries: readonly WorkflowArtifactManifestEntry[];
   hash: string;
 }
@@ -26,7 +25,7 @@ export function workflowArtifactManifest(
   products: WorkflowEffectProductFactory,
   bundle: unknown,
 ): WorkflowArtifactManifest {
-  if (!plainRecord(bundle)) throw new TypeError("Workflow v17 artifact bundle must be a named object");
+  if (!plainRecord(bundle)) throw new TypeError("Workflow artifact bundle must be a named object");
   const entries: WorkflowArtifactManifestEntry[] = [];
   const ancestors = new Set<object>();
   let nodes = 0;
@@ -36,7 +35,7 @@ export function workflowArtifactManifest(
     if (depth > DEFINITION_LIMITS.structuralValueDepth
       || nodes > DEFINITION_LIMITS.structuralValueNodes) {
       throw new WorkflowArtifactManifestError(
-        `Workflow v17 artifact input ${currentPath} exceeds its structural limit`,
+        `Workflow artifact input ${currentPath} exceeds its structural limit`,
       );
     }
     if (value && typeof value === "object") {
@@ -46,7 +45,7 @@ export function workflowArtifactManifest(
       } catch (error) {
         if (products.authority.describe(value)) {
           throw new WorkflowArtifactManifestError(
-            `Workflow v17 artifact input ${currentPath} is not attachable`,
+            `Workflow artifact input ${currentPath} is not attachable`,
             { cause: error },
           );
         }
@@ -59,7 +58,7 @@ export function workflowArtifactManifest(
         }));
         if (entries.length > DEFINITION_LIMITS.agentInputs) {
           throw new WorkflowArtifactManifestError(
-            `Workflow v17 artifact bundle exceeds ${DEFINITION_LIMITS.agentInputs} leaves`,
+            `Workflow artifact bundle exceeds ${DEFINITION_LIMITS.agentInputs} leaves`,
           );
         }
         return;
@@ -67,7 +66,7 @@ export function workflowArtifactManifest(
     }
 
     if (Array.isArray(value)) {
-      if (ancestors.has(value)) throw new WorkflowArtifactManifestError(`Workflow v17 artifact input ${currentPath} is cyclic`);
+      if (ancestors.has(value)) throw new WorkflowArtifactManifestError(`Workflow artifact input ${currentPath} is cyclic`);
       ancestors.add(value);
       try {
         for (let index = 0; index < value.length; index++) {
@@ -79,7 +78,7 @@ export function workflowArtifactManifest(
       return;
     }
     if (plainRecord(value)) {
-      if (ancestors.has(value)) throw new WorkflowArtifactManifestError(`Workflow v17 artifact input ${currentPath} is cyclic`);
+      if (ancestors.has(value)) throw new WorkflowArtifactManifestError(`Workflow artifact input ${currentPath} is cyclic`);
       ancestors.add(value);
       try {
         for (const key of Object.keys(value).sort()) {
@@ -92,7 +91,7 @@ export function workflowArtifactManifest(
       return;
     }
     throw new WorkflowArtifactManifestError(
-      `Workflow v17 artifact input ${currentPath} is plain ${value === null ? "null" : typeof value}`,
+      `Workflow artifact input ${currentPath} is plain ${value === null ? "null" : typeof value}`,
     );
   };
 
@@ -102,14 +101,13 @@ export function workflowArtifactManifest(
   }
   const frozenEntries = Object.freeze(entries);
   const hash = workflowArtifactManifestHash(entries);
-  return Object.freeze({ formatVersion: 1, entries: frozenEntries, hash });
+  return Object.freeze({ entries: frozenEntries, hash });
 }
 
 export function workflowArtifactManifestHash(
   entries: readonly WorkflowArtifactManifestEntry[],
 ): string {
   return stableHash({
-    formatVersion: 1,
     entries: entries.map(entry => ({
       path: entry.path,
       productKind: entry.productKind,
@@ -130,7 +128,7 @@ export class WorkflowArtifactManifestError extends Error {
 
 function assertSegment(value: string, displayPath: string): void {
   if (!WORKFLOW_ARTIFACT_SEGMENT_PATTERN.test(value)) {
-    throw new WorkflowArtifactManifestError(`Invalid workflow v17 artifact segment ${displayPath}`);
+    throw new WorkflowArtifactManifestError(`Invalid workflow artifact segment ${displayPath}`);
   }
 }
 

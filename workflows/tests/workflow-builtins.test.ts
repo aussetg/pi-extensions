@@ -63,7 +63,7 @@ import { readWorkflowInspectorPage } from "../src/projection/inspector-pages.js"
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
 const BUILTINS = path.join(ROOT, "src", "builtins");
-const CORPUS = path.join(ROOT, "tests", "conformance", "v17", "typecheck", "corpus");
+const CORPUS = path.join(ROOT, "tests", "conformance", "typecheck", "corpus");
 const BUILTIN_NAMES = ["coding", "execute-plan", "goal", "optimize", "package-audit", "research"] as const;
 const BASE_TIME = Date.parse("2026-10-01T12:00:00.000Z");
 const roots: string[] = [];
@@ -90,7 +90,7 @@ afterEach(() => {
   }
 });
 
-describe("workflow v17 builtins", () => {
+describe("workflow builtins", () => {
   it("installs the exact six reviewed corpus definitions with explicit model exposure", async () => {
     const root = temporaryRoot("registry");
     const registry = await builtinRegistry(root);
@@ -360,7 +360,7 @@ async function createFixture(
   const measurement = options.profile ? new CandidateSensitiveMeasurementExecutor() : undefined;
   const resources = staticResources(ref, snapshot.definitionHash, measurement, environment);
   const database = WorkflowRunDatabase.create(path.join(root, "run.sqlite"), {
-    runId: `flow_v17_builtin_${name.replaceAll("-", "_")}_${stableHash(root).slice(7, 15)}`,
+    runId: `flow_test_builtin_${name.replaceAll("-", "_")}_${stableHash(root).slice(7, 15)}`,
     snapshot,
     projectSnapshotHash: treeHash(project),
     routeSnapshotHash: sha256(`routes:${name}`),
@@ -497,7 +497,6 @@ class BuiltinBackends {
         verificationBindingHash: request.verification.bindingHash,
         changedPaths,
         authorityHash: stableHash({
-          formatVersion: 1,
           candidateId: request.candidate.candidateId,
           approvalId,
           receiptId,
@@ -568,11 +567,11 @@ class BuiltinCandidateDriver implements WorkflowCandidateWorkspaceDriver {
     const hash = treeHash(root);
     const manifest = await this.store.putJson({
       kind: "candidate-manifest",
-      value: { formatVersion: 1, treeHash: hash, changedPaths },
+      value: { treeHash: hash, changedPaths },
     });
     const diff = await this.store.putJson({
       kind: "candidate-diff",
-      value: { formatVersion: 1, changedPaths },
+      value: { changedPaths },
     });
     return {
       treeHash: hash,
@@ -617,7 +616,7 @@ class CandidateSensitiveMeasurementExecutor implements HostCommandExecutor {
   readonly observed: Array<{ latency: number; rss: number }> = [];
 
   describe() {
-    return { id: "workflow-builtin-benchmark", protocolVersion: 1 as const, sandbox: "fake" as const };
+    return { id: "workflow-builtin-benchmark" as const, sandbox: "fake" as const };
   }
 
   async execute(request: HostCommandRequest): Promise<HostCommandResult> {
@@ -759,7 +758,7 @@ function codingScript(): BuiltinScript {
         summary: "cache invalidation implemented",
         changedPaths: ["src/index.ts"],
         checks: ["unit tests"],
-      }, change: { path: "src/index.ts", contents: "export const cacheVersion = 2;\n" } }
+      }, change: { path: "src/index.ts", contents: "export const cacheEpoch = 2;\n" } }
     : { output: { summary: "inspection complete", findings: ["one relevant boundary"] } },
   };
 }

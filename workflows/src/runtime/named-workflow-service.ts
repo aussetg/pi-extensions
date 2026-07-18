@@ -129,7 +129,7 @@ export class WorkflowNamedService implements WorkflowNamedClient {
   async list(_ctx: ExtensionContext): Promise<WorkflowRunSummary[]> {
     const entries = await this.catalog.list();
     const short = workflowShortRunIds(entries.map(entry => entry.runId));
-    return entries.map(entry => entry.run ? summary(entry.run, short.get(entry.runId)) : legacySummary(entry, short.get(entry.runId)));
+    return entries.map(entry => entry.run ? summary(entry.run, short.get(entry.runId)) : corruptSummary(entry, short.get(entry.runId)));
   }
 
   async open(runRef: string, _ctx: ExtensionContext): Promise<WorkflowRunProjection> {
@@ -246,7 +246,7 @@ export class WorkflowNamedService implements WorkflowNamedClient {
       await Promise.all([
         writeCanonical(temporaryPaths.projectManifest, project),
         writeCanonical(temporaryPaths.staticResources, prepared.static),
-        ...(replay ? [writeCanonical(path.join(temporaryPaths.context, "replay.json"), { formatVersion: 1, ...replay })] : []),
+        ...(replay ? [writeCanonical(path.join(temporaryPaths.context, "replay.json"), { ...replay })] : []),
       ]);
       database = WorkflowRunDatabase.create(temporaryPaths.database, {
         runId,
@@ -373,7 +373,7 @@ export class WorkflowNamedService implements WorkflowNamedClient {
     if (!this.context || this.notified.has(run.runId)) return;
     this.notified.add(run.runId);
     const content = `Workflow ${run.workflowId} (${run.shortRunId}) ended ${run.status}.`;
-    const data = { formatVersion: 1, runId: run.runId, shortRunId: run.shortRunId,
+    const data = { runId: run.runId, shortRunId: run.shortRunId,
       workflowId: run.workflowId, status: run.status, revision: run.revision };
     this.pi.sendMessage({ customType: "workflow-completion", content, display: true, details: data }, { deliverAs: "nextTurn" });
     this.pi.appendEntry("workflow-completion", data);
@@ -428,16 +428,16 @@ function summary(run: ReturnType<WorkflowRunDatabaseReader["readRun"]>, shortRun
   };
 }
 
-function legacySummary(entry: WorkflowRunCatalogEntry, shortRunId = entry.runId.slice(5, 13)): WorkflowRunSummary {
+function corruptSummary(entry: WorkflowRunCatalogEntry, shortRunId = entry.runId.slice(5, 13)): WorkflowRunSummary {
   const at = new Date(0).toISOString();
   return {
     runId: entry.runId,
     shortRunId,
-    workflowId: "legacy:schema-3",
-    workflowName: "Legacy schema-3 run",
-    status: "legacy",
+    workflowId: "unreadable",
+    workflowName: "Unreadable workflow run",
+    status: "corrupt",
     revision: 0,
-    reason: { category: "legacy", code: "schema-3", summary: entry.error ?? "Legacy workflow evidence", retryable: false },
+    reason: { category: "system", code: "run-unreadable", summary: entry.error ?? "Unreadable workflow evidence", retryable: false },
     createdAt: at,
     updatedAt: at,
   };

@@ -346,7 +346,6 @@ function sdkWorkerDescriptor(): AgentExecutorDescriptor {
   ];
   return {
     id: "pi-sdk-worker",
-    protocolVersion: 1,
     capabilities: {
       persistentSessions: true,
       candidateWorkspace: true,

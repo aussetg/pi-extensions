@@ -63,7 +63,7 @@ export function workflowNamedToolParameters(options: {
         description: "No workflows are currently exposed to the model.",
       };
   if (Buffer.byteLength(JSON.stringify(schema), "utf8") > DEFINITION_LIMITS.schemaBytes * 3) {
-    throw new Error("Workflow v17 model tool schema exceeds its session bound");
+    throw new Error("Workflow model tool schema exceeds its session bound");
   }
   return Type.Unsafe<WorkflowNamedToolArguments>(schema);
 }
@@ -97,7 +97,7 @@ export function registerWorkflowNamedTool(
         onUpdate: async summary => {
           if (signal?.aborted) return;
           onUpdate?.({ content: [{ type: "text", text: `${summary.workflowId} (${summary.shortRunId}) · ${summary.status} · r${summary.revision}` }],
-            details: { runtimeVersion: 17, runId: summary.runId, status: summary.status, revision: summary.revision } });
+            details: { runId: summary.runId, status: summary.status, revision: summary.revision } });
         },
       });
       const projection = await workflows.open(result.runId, ctx);
@@ -111,7 +111,6 @@ export function registerWorkflowNamedTool(
         "\n[… workflow result truncated; inspect the run by id …]",
       );
       return { content: [{ type: "text", text }], details: {
-        runtimeVersion: 17,
         runId: result.runId,
         status: result.status,
         handoff: result.handoff,

@@ -8,7 +8,7 @@ export interface WorkflowRunSummary {
   shortRunId: string;
   workflowId: string;
   workflowName: string;
-  status: "queued" | "running" | "waiting" | "paused" | "completed" | "failed" | "stopped" | "legacy";
+  status: "queued" | "running" | "waiting" | "paused" | "completed" | "failed" | "stopped" | "corrupt";
   revision: number;
   reason?: JsonObject;
   currentOperationId?: string;
@@ -19,7 +19,7 @@ export interface WorkflowRunSummary {
 
 export interface WorkflowNamedResult {
   runId: string;
-  status: Exclude<WorkflowRunSummary["status"], "legacy">;
+  status: Exclude<WorkflowRunSummary["status"], "corrupt">;
   summary: WorkflowRunSummary;
   result?: JsonValue;
   handoff: boolean;

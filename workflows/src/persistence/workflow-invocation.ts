@@ -10,7 +10,6 @@ import { collectWorkflowSchemaResources } from "../definition/workflow-schema.js
 import {
   WORKFLOW_RUNTIME_API_DESCRIPTOR,
   WORKFLOW_RUNTIME_API_HASH,
-  WORKFLOW_RUNTIME_API_VERSION,
   type WorkflowResourceIdentity,
 } from "../definition/workflow-language.js";
 import type {
@@ -51,7 +50,6 @@ export interface WorkflowMeasurementResourceUse {
 }
 
 export interface WorkflowMeasurementResourceBinding {
-  formatVersion: 1;
   identity: WorkflowResourceIdentity & { kind: "measurement-profile" };
   inputPath: string;
   profile: MeasurementProfileSnapshot;
@@ -60,7 +58,6 @@ export interface WorkflowMeasurementResourceBinding {
 }
 
 export interface PersistedWorkflowInvocation {
-  formatVersion: 1;
   workflowId: WorkflowId;
   namespace: "builtin" | "user" | "project";
   name: string;
@@ -73,7 +70,6 @@ export interface PersistedWorkflowInvocation {
     policyHash: string;
     projectTrusted: boolean;
   };
-  runtimeApiVersion: 17;
   runtimeApiHash: string;
   sourceHash: string;
   executableSourceHash: string;
@@ -173,7 +169,7 @@ export function workflowInvocationFilesystemPaths(
   });
 }
 
-/** Atomically create one standalone immutable v17 invocation snapshot directory. */
+/** Atomically create one standalone immutable invocation snapshot directory. */
 export async function writeWorkflowInvocationSnapshot(
   runDirInput: string,
   snapshot: WorkflowInvocationSnapshot,
@@ -183,14 +179,14 @@ export async function writeWorkflowInvocationSnapshot(
   const paths = workflowInvocationFilesystemPaths(runDirInput);
   const parent = path.dirname(paths.root);
   await fs.promises.mkdir(parent, { recursive: true });
-  await assertDirectory(parent, "Workflow v17 snapshot parent");
+  await assertDirectory(parent, "Workflow snapshot parent");
   try {
     await fs.promises.lstat(paths.root);
     throw existsError(paths.root);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  const temporary = path.join(parent, `.${path.basename(paths.root)}.v17-${process.pid}-${crypto.randomUUID()}`);
+  const temporary = path.join(parent, `.${path.basename(paths.root)}.snapshot-${process.pid}-${crypto.randomUUID()}`);
   const temporaryPaths = workflowInvocationFilesystemPaths(temporary);
   await fs.promises.mkdir(temporaryPaths.context, { recursive: true, mode: 0o700 });
   const persisted = persistedFromSnapshot(snapshot);
@@ -202,7 +198,6 @@ export async function writeWorkflowInvocationSnapshot(
       writeExclusive(temporaryPaths.policy, `${stableJson(snapshot.policy)}\n`),
       writeExclusive(temporaryPaths.resources, `${stableJson(snapshot.resources)}\n`),
       writeExclusive(temporaryPaths.runtimeApi, `${stableJson({
-        version: WORKFLOW_RUNTIME_API_VERSION,
         hash: WORKFLOW_RUNTIME_API_HASH,
         descriptor: WORKFLOW_RUNTIME_API_DESCRIPTOR,
       })}\n`),
@@ -223,8 +218,8 @@ export async function readWorkflowInvocationSnapshot(
   runDirInput: string,
 ): Promise<WorkflowInvocationSnapshot> {
   const paths = workflowInvocationFilesystemPaths(runDirInput);
-  await assertDirectory(paths.root, "Workflow v17 snapshot root");
-  await assertDirectory(paths.context, "Workflow v17 snapshot context");
+  await assertDirectory(paths.root, "Workflow snapshot root");
+  await assertDirectory(paths.context, "Workflow snapshot context");
   const [source, executableSource, persisted, policy, resources, runtimeApi] = await Promise.all([
     readText(paths.source, DEFINITION_LIMITS.sourceBytes),
     readText(paths.executable, EXECUTABLE_BYTES),
@@ -249,26 +244,25 @@ export async function readWorkflowInvocationSnapshot(
 export function assertWorkflowInvocationSnapshot(
   snapshot: WorkflowInvocationSnapshot,
 ): void {
-  if (snapshot.formatVersion !== 1 || snapshot.runtimeApiVersion !== WORKFLOW_RUNTIME_API_VERSION
-    || snapshot.runtimeApiHash !== WORKFLOW_RUNTIME_API_HASH) {
-    throw new Error("Workflow v17 invocation uses another language revision");
+  if (snapshot.runtimeApiHash !== WORKFLOW_RUNTIME_API_HASH) {
+    throw new Error("Workflow invocation uses another language API");
   }
   if (!FLOW_NAME_PATTERN.test(snapshot.name)
     || snapshot.workflowId !== `${snapshot.namespace}:${snapshot.name}`) {
-    throw new Error("Workflow v17 invocation identity is invalid");
+    throw new Error("Workflow invocation identity is invalid");
   }
   if (path.basename(snapshot.installedPath) !== `${snapshot.name}.flow.ts`) {
-    throw new Error("Workflow v17 installed path does not match its identity");
+    throw new Error("Workflow installed path does not match its identity");
   }
   if (snapshot.exposure !== "human" && snapshot.exposure !== "model") {
-    throw new Error("Workflow v17 invocation exposure is invalid");
+    throw new Error("Workflow invocation exposure is invalid");
   }
-  exactKeys(snapshot.launch, ["authority", "policyHash", "projectTrusted"], "Workflow v17 launch binding");
+  exactKeys(snapshot.launch, ["authority", "policyHash", "projectTrusted"], "Workflow launch binding");
   if (!["model", "user", "rpc"].includes(snapshot.launch.authority)) {
-    throw new Error("Workflow v17 invocation launch authority is invalid");
+    throw new Error("Workflow invocation launch authority is invalid");
   }
   if (typeof snapshot.launch.projectTrusted !== "boolean") {
-    throw new Error("Workflow v17 invocation project trust is invalid");
+    throw new Error("Workflow invocation project trust is invalid");
   }
   if (snapshot.namespace === "project" && !snapshot.launch.projectTrusted) {
     throw new Error("A project workflow snapshot requires project trust");
@@ -281,24 +275,24 @@ export function assertWorkflowInvocationSnapshot(
     || snapshot.transform.sourceHash !== snapshot.sourceHash
     || snapshot.transform.executableSourceHash !== snapshot.executableSourceHash
     || snapshot.transform.runtimeApiHash !== WORKFLOW_RUNTIME_API_HASH) {
-    throw new Error("Workflow v17 invocation source transform is corrupt");
+    throw new Error("Workflow invocation source transform is corrupt");
   }
   assertPolicy(snapshot.policy, snapshot.namespace, snapshot.launch.policyHash);
   if (workflowExposure(snapshot.policy, snapshot.name) !== snapshot.exposure) {
-    throw new Error("Workflow v17 invocation exposure differs from its policy snapshot");
+    throw new Error("Workflow invocation exposure differs from its policy snapshot");
   }
   assertResourceBindings(snapshot.resources);
   if (stableHash(snapshot.resources) !== snapshot.resourcesHash) {
-    throw new Error("Workflow v17 invocation resource hash is corrupt");
+    throw new Error("Workflow invocation resource hash is corrupt");
   }
   if (stableHash(snapshot.input) !== snapshot.inputHash) {
-    throw new Error("Workflow v17 invocation input hash is corrupt");
+    throw new Error("Workflow invocation input hash is corrupt");
   }
   validateInvocationInput(snapshot.workflowId, snapshot.inputSchema, snapshot.input);
   const persisted = persistedFromSnapshot(snapshot);
   const { snapshotHash: _snapshotHash, ...body } = persisted;
   if (stableHash(body) !== snapshot.snapshotHash) {
-    throw new Error("Workflow v17 invocation snapshot hash is corrupt");
+    throw new Error("Workflow invocation snapshot hash is corrupt");
   }
 }
 
@@ -310,7 +304,6 @@ function persistedInvocationBody(
   projectTrusted: boolean,
 ): Omit<PersistedWorkflowInvocation, "snapshotHash"> {
   return {
-    formatVersion: 1,
     workflowId: ref.id,
     namespace: ref.namespace,
     name: ref.name,
@@ -319,7 +312,6 @@ function persistedInvocationBody(
     ...(ref.concurrency !== undefined ? { concurrency: ref.concurrency } : {}),
     exposure: ref.exposure,
     launch: { authority, policyHash: ref.policy.hash, projectTrusted },
-    runtimeApiVersion: WORKFLOW_RUNTIME_API_VERSION,
     runtimeApiHash: WORKFLOW_RUNTIME_API_HASH,
     sourceHash: ref.sourceHash,
     executableSourceHash: ref.parsed.transform.executableSourceHash,
@@ -377,7 +369,6 @@ function prepareInvocationResources(
     const profile = structuredClone(profiles.resolve(selector));
     assertMeasurementProfileSnapshot(profile, selector);
     const identity: WorkflowResourceIdentity & { kind: "measurement-profile" } = {
-      formatVersion: 1,
       kind: "measurement-profile",
       selector,
       snapshotHash: profile.hash,
@@ -398,7 +389,7 @@ function prepareInvocationResources(
         outputs,
       };
     });
-    const body = { formatVersion: 1 as const, identity, inputPath, profile, uses: resolvedUses };
+    const body = { identity, inputPath, profile, uses: resolvedUses };
     return { ...body, bindingHash: stableHash(body) };
   });
 }
@@ -454,19 +445,19 @@ function assertMeasurementProfileSnapshot(profile: MeasurementProfileSnapshot, s
 }
 
 function assertResourceBindings(resources: readonly WorkflowMeasurementResourceBinding[]): void {
-  if (!Array.isArray(resources)) throw new Error("Workflow v17 invocation resources must be an array");
+  if (!Array.isArray(resources)) throw new Error("Workflow invocation resources must be an array");
   const paths = new Set<string>();
   for (const resource of resources) {
-    if (resource.formatVersion !== 1 || resource.identity?.kind !== "measurement-profile"
+    if (resource.identity?.kind !== "measurement-profile"
       || resource.identity.selector !== resource.profile?.id
       || resource.identity.snapshotHash !== resource.profile?.hash
       || typeof resource.inputPath !== "string" || paths.has(resource.inputPath)) {
-      throw new Error("Workflow v17 invocation resource identity is invalid");
+      throw new Error("Workflow invocation resource identity is invalid");
     }
     paths.add(resource.inputPath);
     assertMeasurementProfileSnapshot(resource.profile, resource.identity.selector);
     const { bindingHash, ...body } = resource;
-    if (stableHash(body) !== bindingHash) throw new Error(`Workflow v17 resource ${resource.inputPath} hash is corrupt`);
+    if (stableHash(body) !== bindingHash) throw new Error(`Workflow resource ${resource.inputPath} hash is corrupt`);
   }
 }
 
@@ -477,23 +468,23 @@ function assertPolicy(
 ): void {
   exactKeys(
     policy as unknown as Record<string, unknown>,
-    ["formatVersion", "namespace", "path", "source", "model", "hash"],
-    "Workflow v17 registry policy snapshot",
+    ["namespace", "path", "source", "model", "hash"],
+    "Workflow registry policy snapshot",
   );
-  if (policy.formatVersion !== 1 || policy.namespace !== namespace || !Array.isArray(policy.model)
+  if (policy.namespace !== namespace || !Array.isArray(policy.model)
     || typeof policy.path !== "string" || !path.isAbsolute(policy.path)
     || (policy.source !== "default" && policy.source !== "file")) {
-    throw new Error("Workflow v17 registry policy snapshot is invalid");
+    throw new Error("Workflow registry policy snapshot is invalid");
   }
   const model = [...policy.model].sort();
   if (model.some((name, index) => !FLOW_NAME_PATTERN.test(name) || (index > 0 && model[index - 1] === name))) {
-    throw new Error("Workflow v17 registry policy model entries are invalid");
+    throw new Error("Workflow registry policy model entries are invalid");
   }
   if (model.some((name, index) => policy.model[index] !== name)) {
-    throw new Error("Workflow v17 registry policy model entries are not canonical");
+    throw new Error("Workflow registry policy model entries are not canonical");
   }
-  const hash = stableHash({ formatVersion: 1, namespace, model });
-  if (policy.hash !== hash || expectedHash !== hash) throw new Error("Workflow v17 registry policy hash is corrupt");
+  const hash = stableHash({ namespace, model });
+  if (policy.hash !== hash || expectedHash !== hash) throw new Error("Workflow registry policy hash is corrupt");
 }
 
 function assertSnapshotFrontend(
@@ -511,7 +502,7 @@ function assertSnapshotFrontend(
     || stableHash(parsed.descriptors) !== stableHash(snapshot.descriptors)
     || stableHash(parsed.review) !== stableHash(snapshot.review)
     || stableHash(parsed.transform) !== stableHash(snapshot.transform)) {
-    throw new Error("Workflow v17 invocation differs from its exact source review");
+    throw new Error("Workflow invocation differs from its exact source review");
   }
 }
 
@@ -525,7 +516,7 @@ function validateSnapshotAgainstSource(snapshot: WorkflowInvocationSnapshot): vo
     snapshot.launch.projectTrusted,
   );
   if (stableHash(expectedResources) !== stableHash(snapshot.resources)) {
-    throw new Error("Workflow v17 invocation resources differ from source review and input");
+    throw new Error("Workflow invocation resources differ from source review and input");
   }
 }
 
@@ -534,7 +525,7 @@ function resourceResolver(resources: readonly WorkflowMeasurementResourceBinding
   return {
     resolve(selector: string): MeasurementProfileSnapshot {
       const profile = profiles.get(selector);
-      if (!profile) throw new Error(`Workflow v17 invocation did not pin measurement profile ${selector}`);
+      if (!profile) throw new Error(`Workflow invocation did not pin measurement profile ${selector}`);
       return structuredClone(profile);
     },
   };
@@ -542,9 +533,9 @@ function resourceResolver(resources: readonly WorkflowMeasurementResourceBinding
 
 function persistedInvocationKeys(value: PersistedWorkflowInvocation): string[] {
   return [
-    "formatVersion", "workflowId", "namespace", "name", ...(value.title === undefined ? [] : ["title"]),
+    "workflowId", "namespace", "name", ...(value.title === undefined ? [] : ["title"]),
     "description", ...(value.concurrency === undefined ? [] : ["concurrency"]),
-    "exposure", "launch", "runtimeApiVersion", "runtimeApiHash", "sourceHash",
+    "exposure", "launch", "runtimeApiHash", "sourceHash",
     "executableSourceHash", "definitionHash", "inputSchema", "outputSchema", "descriptors", "review",
     "transform", "input", "inputHash", "resourcesHash", "installedPath", "snapshotHash",
   ];
@@ -557,22 +548,21 @@ function validateInvocationInput(workflowId: string, schema: JsonSchema, input: 
 }
 
 function persistedShape(value: unknown): asserts value is PersistedWorkflowInvocation {
-  const record = plainRecord(value, "Workflow v17 persisted invocation");
+  const record = plainRecord(value, "Workflow persisted invocation");
   const expected = persistedInvocationKeys(record as unknown as PersistedWorkflowInvocation).sort();
   const actual = Object.keys(record).sort();
   if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
-    throw new Error("Workflow v17 persisted invocation contains unexpected fields");
+    throw new Error("Workflow persisted invocation contains unexpected fields");
   }
 }
 
 function assertRuntimeApi(value: unknown): void {
-  const record = plainRecord(value, "Workflow v17 runtime API snapshot");
+  const record = plainRecord(value, "Workflow runtime API snapshot");
   const keys = Object.keys(record).sort();
-  if (keys.join(",") !== "descriptor,hash,version"
-    || record.version !== WORKFLOW_RUNTIME_API_VERSION
+  if (keys.join(",") !== "descriptor,hash"
     || record.hash !== WORKFLOW_RUNTIME_API_HASH
     || stableHash(record.descriptor) !== WORKFLOW_RUNTIME_API_HASH) {
-    throw new Error("Workflow v17 runtime API snapshot is invalid");
+    throw new Error("Workflow runtime API snapshot is invalid");
   }
 }
 
@@ -628,7 +618,7 @@ function invocationLimits() {
 async function readCanonicalJson<T>(filePath: string, maximumBytes: number): Promise<T> {
   const source = await readText(filePath, maximumBytes);
   const value = JSON.parse(source) as unknown;
-  if (source !== `${stableJson(value)}\n`) throw new Error(`Workflow v17 snapshot file is not canonical: ${filePath}`);
+  if (source !== `${stableJson(value)}\n`) throw new Error(`Workflow snapshot file is not canonical: ${filePath}`);
   if (filePath.endsWith("invocation.json")) persistedShape(value);
   return value as T;
 }
@@ -636,7 +626,7 @@ async function readCanonicalJson<T>(filePath: string, maximumBytes: number): Pro
 async function readText(filePath: string, maximumBytes: number): Promise<string> {
   const stat = await fs.promises.lstat(filePath);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maximumBytes) {
-    throw new Error(`Unsafe workflow v17 snapshot file ${filePath}`);
+    throw new Error(`Unsafe workflow snapshot file ${filePath}`);
   }
   return await fs.promises.readFile(filePath, "utf8");
 }
@@ -658,7 +648,7 @@ async function assertDirectory(directory: string, label: string): Promise<void> 
 }
 
 function existsError(filePath: string): NodeJS.ErrnoException {
-  const error = new Error(`Workflow v17 invocation snapshot already exists: ${filePath}`) as NodeJS.ErrnoException;
+  const error = new Error(`Workflow invocation snapshot already exists: ${filePath}`) as NodeJS.ErrnoException;
   error.code = "EEXIST";
   return error;
 }

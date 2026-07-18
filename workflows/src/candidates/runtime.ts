@@ -45,7 +45,6 @@ import {
 } from "../workspaces/project-snapshot.js";
 
 const MAX_REVISION_RETRIES = 16;
-const PRIVATE_FORMAT = 1;
 
 export class CandidateWriteScopeError extends Error {
   constructor(readonly offending: CandidatePathChange[]) {
@@ -118,20 +117,17 @@ interface CandidatePlan {
 }
 
 interface LaunchPrivateAuthority {
-  formatVersion: 1;
   runId: string;
   snapshotHash: string;
 }
 
 interface WorkspacePrivateAuthority {
-  formatVersion: 1;
   runId: string;
   workspaceId: string;
   recordHash: string;
 }
 
 interface CandidatePrivateAuthority {
-  formatVersion: 1;
   runId: string;
   candidateId: string;
   recordHash: string;
@@ -139,7 +135,7 @@ interface CandidatePrivateAuthority {
   dispositionHash?: string;
 }
 
-/** Candidate authority and lifecycle bound to one schema-4 run. */
+/** Candidate authority and lifecycle bound to one run. */
 export class WorkflowCandidateRuntime implements WorkflowSemanticCandidateRuntime {
   private readonly workspaces = new Map<string, object>();
   private readonly candidates = new Map<string, { hash: string; value: object }>();
@@ -153,7 +149,6 @@ export class WorkflowCandidateRuntime implements WorkflowSemanticCandidateRuntim
   ) {
     const run = database.readRun();
     const privateAuthority = freezePrivate<LaunchPrivateAuthority>({
-      formatVersion: PRIVATE_FORMAT,
       runId: run.runId,
       snapshotHash: run.projectSnapshotHash,
     });
@@ -321,7 +316,6 @@ export class WorkflowCandidateRuntime implements WorkflowSemanticCandidateRuntim
     const existing = this.workspaces.get(workspace.workspaceId);
     if (existing) return existing;
     const privateAuthority = freezePrivate<WorkspacePrivateAuthority>({
-      formatVersion: PRIVATE_FORMAT,
       runId: workspace.runId,
       workspaceId: workspace.workspaceId,
       recordHash: stableHash(workspace),
@@ -375,8 +369,8 @@ export class WorkflowCandidateRuntime implements WorkflowSemanticCandidateRuntim
   }
 
   private plan(run: WorkflowRunRecord, input: unknown): CandidatePlan {
-    const record = plainRecord(input, "workflow v17 candidate options");
-    exactKeys(record, ["base", "writes"], "workflow v17 candidate options");
+    const record = plainRecord(input, "workflow candidate options");
+    exactKeys(record, ["base", "writes"], "workflow candidate options");
     let parent: WorkflowCandidateRecord | undefined;
     let base: JsonValue = { kind: "launch-snapshot", snapshotHash: run.projectSnapshotHash };
     if (record.base !== undefined) {
@@ -405,7 +399,6 @@ export class WorkflowCandidateRuntime implements WorkflowSemanticCandidateRuntim
       ...(parent ? { parent } : {}),
       writeScope,
       semanticInput: canonicalJsonValue({
-        formatVersion: 1,
         base,
         writeScope: writeScope as unknown as JsonValue,
         writeScopeHash: stableHash(writeScope),
@@ -419,7 +412,6 @@ export class WorkflowCandidateRuntime implements WorkflowSemanticCandidateRuntim
     if (!manifest || !diff) throw new WorkflowCandidateAuthorityError("Candidate artifact evidence is unavailable");
     return {
       result: {
-        formatVersion: 1,
         candidateId: candidate.candidateId,
         outputHash: stableHash(candidate.output),
         changedPathsHash: stableHash(candidate.changedPaths),
@@ -436,7 +428,6 @@ export class WorkflowCandidateRuntime implements WorkflowSemanticCandidateRuntim
     const key = `${accepted ? "accepted" : "candidate"}:${candidate.candidateId}`;
     const recordHash = candidateImmutableHash(candidate);
     const authorityHash = stableHash({
-      formatVersion: 1,
       kind: accepted ? "workflow-accepted-candidate-authority" : "workflow-candidate-authority",
       runId: candidate.runId,
       candidateId: candidate.candidateId,
@@ -451,7 +442,6 @@ export class WorkflowCandidateRuntime implements WorkflowSemanticCandidateRuntim
       return existing.value;
     }
     const privateAuthority = freezePrivate<CandidatePrivateAuthority>({
-      formatVersion: PRIVATE_FORMAT,
       runId: candidate.runId,
       candidateId: candidate.candidateId,
       recordHash,
@@ -459,7 +449,6 @@ export class WorkflowCandidateRuntime implements WorkflowSemanticCandidateRuntim
       ...(accepted ? { dispositionHash: candidate.disposition!.authorityHash } : {}),
     });
     const identity: WorkflowProductIdentity = {
-      formatVersion: 1,
       kind: accepted ? "accepted-candidate" : "candidate",
       authorityId: `${accepted ? "accepted" : "candidate"}-${candidate.candidateId.slice(-32)}`,
       authorityHash,
@@ -507,7 +496,6 @@ export class WorkflowFilesystemCandidateDriver implements WorkflowCandidateWorks
     }
     const writeScopeHash = stableHash(input.writeScope);
     const workspaceId = `workspace_${stableHash({
-      formatVersion: 1,
       runId: input.run.runId,
       operationId: input.operation.operationId,
       parentCandidateId: input.parent?.candidateId ?? null,
@@ -556,7 +544,6 @@ export class WorkflowFilesystemCandidateDriver implements WorkflowCandidateWorks
     enforceWriteScope(input.workspace.writeScope as CandidateWriteScope, changes);
     const changedPaths = [...new Set(changes.map(change => change.path))].sort();
     const lineageHash = stableHash({
-      formatVersion: 1,
       operationId: input.operation.operationId,
       baseLineageHash: input.workspace.baseLineageHash,
       treeHash: current.treeHash,
@@ -565,7 +552,6 @@ export class WorkflowFilesystemCandidateDriver implements WorkflowCandidateWorks
     const manifest = await this.store.putJson({
       kind: "candidate-manifest",
       value: {
-        formatVersion: 1,
         operationId: input.operation.operationId,
         workspaceId: input.workspace.workspaceId,
         tree: current as unknown as JsonValue,
@@ -577,7 +563,6 @@ export class WorkflowFilesystemCandidateDriver implements WorkflowCandidateWorks
     const diff = await this.store.putJson({
       kind: "candidate-diff",
       value: {
-        formatVersion: 1,
         baseTreeHash: baseTree.treeHash,
         treeHash: current.treeHash,
         changes: changes as unknown as JsonValue,
@@ -636,7 +621,6 @@ export class WorkflowCandidateAuthorityError extends Error {
 
 export function workflowCheckpointId(runId: string, operationId: string, workspaceId: string): string {
   return `checkpoint_${stableHash({
-    formatVersion: 1,
     kind: "workflow-workspace-checkpoint",
     runId,
     operationId,
@@ -649,18 +633,17 @@ function candidateResult(value: JsonValue): {
   outputHash: string;
   changedPathsHash: string;
 } {
-  const record = plainRecord(value, "workflow v17 candidate result");
-  exactKeys(record, ["formatVersion", "candidateId", "outputHash", "changedPathsHash"], "workflow v17 candidate result");
-  if (record.formatVersion !== 1 || typeof record.candidateId !== "string"
+  const record = plainRecord(value, "workflow candidate result");
+  exactKeys(record, ["candidateId", "outputHash", "changedPathsHash"], "workflow candidate result");
+  if (typeof record.candidateId !== "string"
     || typeof record.outputHash !== "string" || typeof record.changedPathsHash !== "string") {
-    throw new WorkflowCandidateAuthorityError("Workflow v17 candidate result is invalid");
+    throw new WorkflowCandidateAuthorityError("Workflow candidate result is invalid");
   }
   return record as unknown as ReturnType<typeof candidateResult>;
 }
 
 function candidateImmutableHash(candidate: WorkflowCandidateRecord): string {
   return stableHash({
-    formatVersion: 1,
     candidateId: candidate.candidateId,
     runId: candidate.runId,
     operationId: candidate.operationId,
@@ -683,7 +666,7 @@ function referenceIdentity(
   authorityId: string,
   privateAuthority: object,
 ): WorkflowReferenceIdentity {
-  return { formatVersion: 1, kind, authorityId, authorityHash: stableHash(privateAuthority) };
+  return { kind, authorityId, authorityHash: stableHash(privateAuthority) };
 }
 
 function candidatePrivate(
@@ -694,7 +677,7 @@ function candidatePrivate(
   const privateAuthority = description?.privateAuthority;
   if (!description || description.family !== "product"
     || description.identity.kind !== (accepted ? "accepted-candidate" : "candidate")
-    || !plainPrivate(privateAuthority) || privateAuthority.formatVersion !== PRIVATE_FORMAT
+    || !plainPrivate(privateAuthority)
     || privateAuthority.runId !== runId || privateAuthority.accepted !== accepted
     || typeof privateAuthority.candidateId !== "string" || typeof privateAuthority.recordHash !== "string") {
     throw new WorkflowCandidateAuthorityError(
@@ -705,12 +688,11 @@ function candidatePrivate(
 }
 
 function launchPrivate(value: unknown, runId: string, snapshotHash: string): boolean {
-  return plainPrivate(value) && value.formatVersion === PRIVATE_FORMAT
-    && value.runId === runId && value.snapshotHash === snapshotHash;
+  return plainPrivate(value) && value.runId === runId && value.snapshotHash === snapshotHash;
 }
 
 function workspacePrivate(value: unknown, runId: string): value is WorkspacePrivateAuthority {
-  return plainPrivate(value) && value.formatVersion === PRIVATE_FORMAT && value.runId === runId
+  return plainPrivate(value) && value.runId === runId
     && typeof value.workspaceId === "string" && typeof value.recordHash === "string";
 }
 
@@ -806,7 +788,7 @@ async function revisionRetry<T>(body: () => T | Promise<T>): Promise<T> {
       throw error;
     }
   }
-  throw new Error("Workflow v17 candidate lifecycle exceeded revision retries");
+  throw new Error("Workflow candidate lifecycle exceeded revision retries");
 }
 
 function reason(code: string, summary: string): JsonObject {
@@ -815,7 +797,7 @@ function reason(code: string, summary: string): JsonObject {
 
 function timestamp(now: () => Date): string {
   const value = now();
-  if (!(value instanceof Date) || !Number.isFinite(value.getTime())) throw new TypeError("Workflow v17 candidate clock is invalid");
+  if (!(value instanceof Date) || !Number.isFinite(value.getTime())) throw new TypeError("Workflow candidate clock is invalid");
   return value.toISOString();
 }
 

@@ -84,7 +84,7 @@ const VALUE_IMPORTS = new Set(["agent", "command", "schema", "workflow"]);
 const PROFILE_SELECTOR = /^(?:builtin|user|project):[a-z][a-z0-9_-]{0,63}$/;
 const TYPESCRIPT_SUPPRESSION = /\/\/[ \t]*@ts-(?:ignore|expect-error|nocheck|check)\b|\/\*[\s\S]*?@ts-(?:ignore|expect-error|nocheck|check)\b/giu;
 
-/** Parse, typecheck, statically review, and instrument one v17 workflow source module. */
+/** Parse, typecheck, statically review, and instrument one workflow source module. */
 export function parseWorkflow(
   source: string,
   options: ParseWorkflowOptions = {},
@@ -142,7 +142,6 @@ export function parseWorkflow(
     operationNodes: analysis.operationNodes,
   });
   const parsed: ParsedWorkflow = {
-    formatVersion: 1,
     fileName: path.basename(fileName),
     installedName: path.basename(fileName, WORKFLOW_SOURCE_EXTENSION),
     source,
@@ -511,7 +510,6 @@ function parseAgentDescriptor(
     ...(instructions ? { instructions } : {}),
   };
   const identity: WorkflowDescriptorIdentity = {
-    formatVersion: 1,
     kind: "agent-task",
     sourceSite,
     definitionHash: stableHash(semantic),
@@ -546,7 +544,6 @@ function parseCommandDescriptor(
   const title = optionalBoundedField(evaluator, definition, "title", DEFINITION_LIMITS.titleScalars);
   const semantic = { profile, output, effect, allowFailure: allowFailureValue };
   const identity: WorkflowDescriptorIdentity = {
-    formatVersion: 1,
     kind: "command-task",
     sourceSite,
     definitionHash: stableHash(semantic),
@@ -664,7 +661,6 @@ function buildExecutableSource(input: {
   executableSource = `${executableSource}\n;__flowDefinition;`;
   assertExecutableSyntax(executableSource);
   const body = {
-    formatVersion: 1 as const,
     sourceHash: sha256(input.source),
     strippedSourceHash: sha256(input.strippedSource),
     executableSourceHash: sha256(executableSource),

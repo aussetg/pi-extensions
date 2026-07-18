@@ -71,10 +71,9 @@ interface StagedBody {
 }
 
 interface ArtifactMetadata extends WorkflowArtifactRecord {
-  formatVersion: 1;
 }
 
-/** Content-addressed schema-4 artifact storage used by v17 product factories and replay. */
+/** Content-addressed artifact storage used by product factories and replay. */
 export class WorkflowArtifactStore {
   readonly runDir: string;
   readonly root: string;
@@ -91,7 +90,7 @@ export class WorkflowArtifactStore {
   ) {
     this.runDir = path.resolve(runDirInput);
     if (path.resolve(database.databasePath) !== path.join(this.runDir, "run.sqlite")) {
-      throw new Error("Workflow v17 artifact store and database directories differ");
+      throw new Error("Workflow artifact store and database directories differ");
     }
     this.root = path.join(this.runDir, "artifacts");
     const run = database.readRun();
@@ -116,13 +115,13 @@ export class WorkflowArtifactStore {
 
   async putText(options: PutWorkflowTextArtifact): Promise<StoredWorkflowArtifact> {
     if (typeof options.text !== "string" || /[\ud800-\udfff]/u.test(options.text)) {
-      throw new TypeError("Workflow v17 text artifact must contain valid Unicode");
+      throw new TypeError("Workflow text artifact must contain valid Unicode");
     }
     return await this.putBuffer(Buffer.from(options.text, "utf8"), "text/plain; charset=utf-8", options);
   }
 
   async putBytes(options: PutWorkflowBytesArtifact): Promise<StoredWorkflowArtifact> {
-    if (!(options.bytes instanceof Uint8Array)) throw new TypeError("Workflow v17 binary artifact requires bytes");
+    if (!(options.bytes instanceof Uint8Array)) throw new TypeError("Workflow binary artifact requires bytes");
     return await this.putBuffer(Buffer.from(options.bytes), "application/octet-stream", options);
   }
 
@@ -138,9 +137,9 @@ export class WorkflowArtifactStore {
     const digest = typeof value === "string" ? value : value.digest;
     assertDigest(digest);
     const record = this.database.readArtifact(digest);
-    if (!record) throw new WorkflowArtifactStoreError(`Unknown workflow v17 artifact ${digest}`);
+    if (!record) throw new WorkflowArtifactStoreError(`Unknown workflow artifact ${digest}`);
     if (typeof value !== "string" && !sameArtifact(value, record, true)) {
-      throw new WorkflowArtifactStoreError(`Workflow v17 artifact ${digest} changed identity`);
+      throw new WorkflowArtifactStoreError(`Workflow artifact ${digest} changed identity`);
     }
     return await this.validate(record);
   }
@@ -152,7 +151,7 @@ export class WorkflowArtifactStore {
   ): Promise<StoredWorkflowArtifact> {
     const common = this.normalizeCommon(options);
     if (body.length > common.maximumBytes) {
-      throw new WorkflowArtifactStoreError(`Workflow v17 artifact exceeds ${common.maximumBytes} bytes`);
+      throw new WorkflowArtifactStoreError(`Workflow artifact exceeds ${common.maximumBytes} bytes`);
     }
     await this.ensureRoot();
     const temporary = path.join(this.root, `.body-${crypto.randomUUID()}.tmp`);
@@ -171,7 +170,7 @@ export class WorkflowArtifactStore {
   private async stageFile(sourcePath: string, maximumBytes: number): Promise<StagedBody> {
     const before = await fs.promises.lstat(sourcePath);
     if (!before.isFile() || before.isSymbolicLink() || before.size > maximumBytes) {
-      throw new WorkflowArtifactStoreError("Workflow v17 artifact source is unsafe or too large");
+      throw new WorkflowArtifactStoreError("Workflow artifact source is unsafe or too large");
     }
     const source = await fs.promises.open(
       sourcePath,
@@ -189,13 +188,13 @@ export class WorkflowArtifactStore {
         const chunk = await source.read(buffer, 0, buffer.length, null);
         if (chunk.bytesRead === 0) break;
         bytes += chunk.bytesRead;
-        if (bytes > maximumBytes) throw new WorkflowArtifactStoreError("Workflow v17 artifact source is too large");
+        if (bytes > maximumBytes) throw new WorkflowArtifactStoreError("Workflow artifact source is too large");
         hash.update(buffer.subarray(0, chunk.bytesRead));
         await output.write(buffer.subarray(0, chunk.bytesRead));
       }
       const after = await source.stat();
       if (opened.size !== after.size || opened.mtimeMs !== after.mtimeMs || bytes !== opened.size) {
-        throw new WorkflowArtifactStoreError("Workflow v17 artifact source changed while copied");
+        throw new WorkflowArtifactStoreError("Workflow artifact source changed while copied");
       }
       await output.sync();
       await output.close();
@@ -257,7 +256,7 @@ export class WorkflowArtifactStore {
         throw error;
       }
     }
-    throw new WorkflowArtifactStoreError(`Could not admit workflow v17 artifact ${proposed.digest}`);
+    throw new WorkflowArtifactStoreError(`Could not admit workflow artifact ${proposed.digest}`);
   }
 
   private async install(
@@ -292,7 +291,7 @@ export class WorkflowArtifactStore {
       assertSameArtifact(record, proposed, false);
       return record;
     }
-    const metadata: ArtifactMetadata = { formatVersion: 1, ...proposed };
+    const metadata: ArtifactMetadata = { ...proposed };
     const text = canonicalJson(metadata as unknown as JsonValue, {
       ...METADATA_LIMITS,
       maxBytes: this.maximumMetadataBytes + 4_096,
@@ -323,14 +322,14 @@ export class WorkflowArtifactStore {
 
   private async validate(record: WorkflowArtifactRecord): Promise<StoredWorkflowArtifact> {
     if (record.runId !== this.runId || record.bodyPath !== relativeBodyPath(record.digest)) {
-      throw new WorkflowArtifactStoreError(`Workflow v17 artifact ${record.digest} has invalid run identity`);
+      throw new WorkflowArtifactStoreError(`Workflow artifact ${record.digest} has invalid run identity`);
     }
     await ensureRealDirectory(this.root);
     const directory = path.join(this.root, digestHex(record.digest));
     await ensureRealDirectory(directory);
     const metadata = stripFormat(await readMetadata(path.join(directory, "metadata.json"), this.maximumMetadataBytes));
     if (!sameArtifact(metadata, record, true)) {
-      throw new WorkflowArtifactStoreError(`Workflow v17 artifact ${record.digest} metadata differs from SQLite`);
+      throw new WorkflowArtifactStoreError(`Workflow artifact ${record.digest} metadata differs from SQLite`);
     }
     const bodyPath = path.join(directory, "body");
     await validateBody(bodyPath, record.digest, record.bytes);
@@ -345,7 +344,7 @@ export class WorkflowArtifactStore {
   } {
     if (typeof value.kind !== "string" || !value.kind.trim() || value.kind.length > 128
       || /[\u0000-\u001f\u007f]/u.test(value.kind)) {
-      throw new TypeError("Workflow v17 artifact kind is invalid");
+      throw new TypeError("Workflow artifact kind is invalid");
     }
     const metadataLimits: CanonicalJsonLimits = {
       ...METADATA_LIMITS,
@@ -354,7 +353,7 @@ export class WorkflowArtifactStore {
     const metadata = canonicalJsonObject(value.metadata ?? {}, metadataLimits);
     const createdAt = value.createdAt ?? this.now().toISOString();
     if (!Number.isFinite(Date.parse(createdAt)) || new Date(createdAt).toISOString() !== createdAt) {
-      throw new TypeError("Workflow v17 artifact time is invalid");
+      throw new TypeError("Workflow artifact time is invalid");
     }
     return {
       kind: value.kind,
@@ -395,13 +394,13 @@ export class WorkflowArtifactStoreError extends Error {
 async function validateBody(filePath: string, digest: string, bytes: number): Promise<void> {
   const stat = await fs.promises.lstat(filePath);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== bytes) {
-    throw new WorkflowArtifactStoreError(`Workflow v17 artifact body ${digest} is unsafe`);
+    throw new WorkflowArtifactStoreError(`Workflow artifact body ${digest} is unsafe`);
   }
   const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
   try {
     const body = await handle.readFile();
     if (body.length !== bytes || sha256(body) !== digest) {
-      throw new WorkflowArtifactStoreError(`Workflow v17 artifact body ${digest} failed validation`);
+      throw new WorkflowArtifactStoreError(`Workflow artifact body ${digest} failed validation`);
     }
   } finally {
     await handle.close();
@@ -422,16 +421,18 @@ async function readOptionalMetadata(
 async function readMetadata(filePath: string, maximumBytes: number): Promise<ArtifactMetadata> {
   const stat = await fs.promises.lstat(filePath);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maximumBytes + 4_096) {
-    throw new WorkflowArtifactStoreError("Workflow v17 artifact metadata is unsafe");
+    throw new WorkflowArtifactStoreError("Workflow artifact metadata is unsafe");
   }
   const text = await fs.promises.readFile(filePath, "utf8");
   let parsed: unknown;
   try { parsed = JSON.parse(text); }
-  catch { throw new WorkflowArtifactStoreError("Workflow v17 artifact metadata is invalid JSON"); }
+  catch { throw new WorkflowArtifactStoreError("Workflow artifact metadata is invalid JSON"); }
   const canonical = canonicalJsonValue(parsed, { ...METADATA_LIMITS, maxBytes: maximumBytes + 4_096 });
-  if (stableJson(canonical) !== text || !canonical || typeof canonical !== "object" || Array.isArray(canonical)
-    || (canonical as { formatVersion?: unknown }).formatVersion !== 1) {
-    throw new WorkflowArtifactStoreError("Workflow v17 artifact metadata is not canonical");
+  if (stableJson(canonical) !== text || !canonical || typeof canonical !== "object" || Array.isArray(canonical)) {
+    throw new WorkflowArtifactStoreError("Workflow artifact metadata is not canonical");
+  }
+  if (Object.keys(canonical).sort().join(",") !== "bodyPath,bytes,createdAt,digest,kind,mediaType,metadata,runId") {
+    throw new WorkflowArtifactStoreError("Workflow artifact metadata has unexpected fields");
   }
   return canonical as unknown as ArtifactMetadata;
 }
@@ -442,7 +443,7 @@ function assertSameArtifact(
   includeCreatedAt: boolean,
 ): void {
   if (!sameArtifact(actual, expected, includeCreatedAt)) {
-    throw new WorkflowArtifactStoreError(`Workflow v17 artifact digest collision ${expected.digest}`);
+    throw new WorkflowArtifactStoreError(`Workflow artifact digest collision ${expected.digest}`);
   }
 }
 
@@ -458,17 +459,16 @@ function sameArtifact(
 }
 
 function stripFormat(value: ArtifactMetadata): WorkflowArtifactRecord {
-  const { formatVersion: _formatVersion, ...record } = value;
-  return record;
+  return value;
 }
 
 function assertDigest(value: string): void {
-  if (!DIGEST.test(value)) throw new TypeError("Workflow v17 artifact digest is invalid");
+  if (!DIGEST.test(value)) throw new TypeError("Workflow artifact digest is invalid");
 }
 
 function digestHex(value: string): string {
   const match = DIGEST.exec(value);
-  if (!match) throw new TypeError("Workflow v17 artifact digest is invalid");
+  if (!match) throw new TypeError("Workflow artifact digest is invalid");
   return match[1]!;
 }
 
@@ -477,14 +477,14 @@ function relativeBodyPath(digest: string): string {
 }
 
 function positiveInteger(value: number, label: string): number {
-  if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(`Workflow v17 ${label} is invalid`);
+  if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(`Workflow ${label} is invalid`);
   return value;
 }
 
 async function ensureRealDirectory(directory: string): Promise<void> {
   const stat = await fs.promises.lstat(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink() || await fs.promises.realpath(directory) !== path.resolve(directory)) {
-    throw new WorkflowArtifactStoreError(`Unsafe workflow v17 artifact directory ${directory}`);
+    throw new WorkflowArtifactStoreError(`Unsafe workflow artifact directory ${directory}`);
   }
 }
 

@@ -22,7 +22,6 @@ import {
 } from "../src/measurements/profiles.js";
 import {
   WORKFLOW_RUNTIME_API_HASH,
-  WORKFLOW_RUNTIME_API_VERSION,
 } from "../src/definition/workflow-language.js";
 import { stableHash } from "../src/utils/hashes.js";
 
@@ -44,13 +43,13 @@ afterEach(async () => {
   await fs.promises.rm(root, { recursive: true, force: true });
 });
 
-describe("workflow v17 filesystem registry", () => {
+describe("workflow filesystem registry", () => {
   test("discovers only .flow.ts definitions and applies fail-safe namespace policy", async () => {
     await Promise.all([
       writeFlow(builtinDir, "inspect"),
       writeFlow(userDir, "inspect"),
       writeFlow(projectDir, "project-check"),
-      fs.promises.writeFile(path.join(userDir, "legacy.flow.js"), "not v17", "utf8"),
+      fs.promises.writeFile(path.join(userDir, "ignored.js"), "not a workflow", "utf8"),
       writePolicy(builtinDir, ["inspect"]),
       writePolicy(projectDir, ["project-check"]),
     ]);
@@ -77,7 +76,7 @@ describe("workflow v17 filesystem registry", () => {
     await writeFlow(userDir, "safe");
     await fs.promises.writeFile(
       path.join(userDir, WORKFLOW_REGISTRY_POLICY_FILE),
-      JSON.stringify({ formatVersion: 1, model: ["safe", "missing"] }),
+      JSON.stringify({ model: ["safe", "missing"] }),
       "utf8",
     );
     await fs.promises.symlink(path.join(userDir, "safe.flow.ts"), path.join(userDir, "linked.flow.ts"));
@@ -146,7 +145,7 @@ describe("workflow v17 filesystem registry", () => {
   });
 });
 
-describe("workflow v17 invocation snapshots", () => {
+describe("workflow invocation snapshots", () => {
   test("binds launch actor and exact policy without admitting model launches of human workflows", async () => {
     await writeFlow(userDir, "private");
     const registry = new WorkflowRegistry();
@@ -163,7 +162,6 @@ describe("workflow v17 invocation snapshots", () => {
       workflowId: "user:private",
       exposure: "human",
       launch: { authority: "user", policyHash: ref.policy.hash },
-      runtimeApiVersion: WORKFLOW_RUNTIME_API_VERSION,
       runtimeApiHash: WORKFLOW_RUNTIME_API_HASH,
       definitionHash: ref.definitionHash,
       sourceHash: ref.sourceHash,
@@ -348,7 +346,7 @@ export default workflow({
 async function writePolicy(directory: string, model: string[]): Promise<void> {
   await fs.promises.writeFile(
     path.join(directory, WORKFLOW_REGISTRY_POLICY_FILE),
-    `${JSON.stringify({ formatVersion: 1, model })}\n`,
+    `${JSON.stringify({ model })}\n`,
     "utf8",
   );
 }

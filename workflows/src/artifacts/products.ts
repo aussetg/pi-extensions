@@ -27,14 +27,12 @@ const JSON_LIMITS = {
 } as const;
 
 export interface WorkflowArtifactPrivateAuthority {
-  formatVersion: 1;
   runId: string;
   artifact: WorkflowArtifactRecord;
   recordHash: string;
 }
 
 export interface WorkflowEffectProductPrivateAuthority {
-  formatVersion: 1;
   runId: string;
   kind: Exclude<WorkflowProductKind, "artifact">;
   authorityId: string;
@@ -72,7 +70,7 @@ export interface CreateWorkflowMeasurement {
   diagnostics?: object;
 }
 
-/** Mints the exact public products from canonical schema-4 artifact evidence. */
+/** Mints the exact public products from canonical artifact evidence. */
 export class WorkflowEffectProductFactory {
   private readonly artifacts = new Map<string, object>();
   private readonly products = new Map<string, { value: object; authorityHash: string }>();
@@ -88,17 +86,14 @@ export class WorkflowEffectProductFactory {
     if (existing) return existing;
     const authorityId = `artifact-${record.digest.slice(7)}`;
     const privateAuthority = freezePrivate<WorkflowArtifactPrivateAuthority>({
-      formatVersion: 1,
       runId: this.store.runId,
       artifact: structuredClone(record),
       recordHash: stableHash(record),
     });
     const identity: WorkflowProductIdentity = {
-      formatVersion: 1,
       kind: "artifact",
       authorityId,
       authorityHash: stableHash({
-        formatVersion: 1,
         kind: "workflow-artifact-authority",
         runId: this.store.runId,
         recordHash: privateAuthority.recordHash,
@@ -129,11 +124,11 @@ export class WorkflowEffectProductFactory {
   async commandResult(input: CreateWorkflowCommandResult): Promise<object> {
     if (typeof input.ok !== "boolean" || !Number.isSafeInteger(input.exitCode)
       || input.exitCode < -1 || !Number.isSafeInteger(input.durationMs) || input.durationMs < 0) {
-      throw new TypeError("Workflow v17 command result is invalid");
+      throw new TypeError("Workflow command result is invalid");
     }
     if (input.stderrPreview !== undefined
       && (typeof input.stderrPreview !== "string" || Buffer.byteLength(input.stderrPreview) > 64 * 1024)) {
-      throw new TypeError("Workflow v17 command stderr preview is invalid");
+      throw new TypeError("Workflow command stderr preview is invalid");
     }
     const output = canonicalJsonValue(input.output, JSON_LIMITS);
     const body = canonicalJsonObject({
@@ -151,7 +146,7 @@ export class WorkflowEffectProductFactory {
   async verification(input: CreateWorkflowVerification): Promise<object> {
     assertDomainIdentifier(input.receiptId, "verification receipt id");
     if (!new Set(["passed", "failed", "blocked"]).has(input.status)) {
-      throw new TypeError("Workflow v17 verification status is invalid");
+      throw new TypeError("Workflow verification status is invalid");
     }
     const evidence = input.evidence === undefined
       ? undefined
@@ -207,13 +202,13 @@ export class WorkflowEffectProductFactory {
   ): object {
     if (identity.kind === "artifact" || !ATTACHABLE_PRODUCTS.has(identity.kind)) {
       throw new WorkflowArtifactAuthorityError(
-        `Workflow v17 product ${identity.kind} is not a restorable attachable product`,
+        `Workflow product ${identity.kind} is not a restorable attachable product`,
       );
     }
     const artifact = fields.artifact;
     if (!artifact || typeof artifact !== "object") {
       throw new WorkflowArtifactAuthorityError(
-        `Workflow v17 product ${identity.authorityId} lacks its canonical artifact`,
+        `Workflow product ${identity.authorityId} lacks its canonical artifact`,
       );
     }
     this.artifactRecord(artifact);
@@ -222,7 +217,7 @@ export class WorkflowEffectProductFactory {
     if (!description || description.family !== "product"
       || stableJson(description.identity) !== stableJson(identity)) {
       throw new WorkflowArtifactAuthorityError(
-        `Workflow v17 product ${identity.authorityId} differs from its structural authority`,
+        `Workflow product ${identity.authorityId} differs from its structural authority`,
       );
     }
     return restored;
@@ -231,13 +226,13 @@ export class WorkflowEffectProductFactory {
   artifactRecord(value: unknown): WorkflowArtifactRecord {
     const description = this.authority.describe(value);
     if (!description || description.family !== "product" || description.identity.kind !== "artifact") {
-      throw new WorkflowArtifactAuthorityError("Value has no workflow v17 artifact authority");
+      throw new WorkflowArtifactAuthorityError("Value has no workflow artifact authority");
     }
     const record = artifactRecordFromDescription(description, this.store.runId);
     const stored = this.store.database.readArtifact(record.digest);
     if (!stored || stableJson(stored) !== stableJson(record)) {
       throw new WorkflowArtifactAuthorityError(
-        `Workflow v17 artifact ${record.digest} is not bound to this run database`,
+        `Workflow artifact ${record.digest} is not bound to this run database`,
       );
     }
     return record;
@@ -249,7 +244,7 @@ export class WorkflowEffectProductFactory {
   } {
     const description = this.authority.describe(value);
     if (!description || description.family !== "product") {
-      throw new WorkflowArtifactAuthorityError("Value has no workflow v17 attachable authority");
+      throw new WorkflowArtifactAuthorityError("Value has no workflow attachable authority");
     }
     const identity = description.identity as WorkflowProductIdentity;
     if (identity.kind === "artifact") {
@@ -257,27 +252,26 @@ export class WorkflowEffectProductFactory {
     }
     if (!ATTACHABLE_PRODUCTS.has(identity.kind)) {
       throw new WorkflowArtifactAuthorityError(
-        `Workflow v17 product ${identity.kind} is not attachable`,
+        `Workflow product ${identity.kind} is not attachable`,
       );
     }
     const artifact = description.fields.artifact;
     const record = this.artifactRecord(artifact);
     const privateAuthority = description.privateAuthority;
     const expectedHash = stableHash({
-      formatVersion: 1,
       kind: `workflow-${identity.kind}-authority`,
       runId: this.store.runId,
       authorityId: identity.authorityId,
       fields: authoritySemantics(this.authority, description.fields),
     });
-    if (!plainRecord(privateAuthority) || privateAuthority.formatVersion !== 1
+    if (!plainRecord(privateAuthority)
       || privateAuthority.runId !== this.store.runId || privateAuthority.kind !== identity.kind
       || privateAuthority.authorityId !== identity.authorityId
       || privateAuthority.artifactDigest !== record.digest
       || privateAuthority.bindingHash !== identity.authorityHash
       || expectedHash !== identity.authorityHash) {
       throw new WorkflowArtifactAuthorityError(
-        `Workflow v17 product ${identity.authorityId} has invalid attachable authority`,
+        `Workflow product ${identity.authorityId} has invalid attachable authority`,
       );
     }
     return { productKind: identity.kind, artifact: record };
@@ -292,7 +286,6 @@ export class WorkflowEffectProductFactory {
     assertSafeIdentifier(authorityId, `${kind} authority id`);
     const semanticFields = authoritySemantics(this.authority, fields);
     const authorityHash = stableHash({
-      formatVersion: 1,
       kind: `workflow-${kind}-authority`,
       runId: this.store.runId,
       authorityId,
@@ -302,13 +295,12 @@ export class WorkflowEffectProductFactory {
     const existing = this.products.get(key);
     if (existing) {
       if (existing.authorityHash !== authorityHash) {
-        throw new WorkflowArtifactAuthorityError(`Workflow v17 product ${authorityId} changed identity`);
+        throw new WorkflowArtifactAuthorityError(`Workflow product ${authorityId} changed identity`);
       }
       return existing.value;
     }
-    const identity: WorkflowProductIdentity = { formatVersion: 1, kind, authorityId, authorityHash };
+    const identity: WorkflowProductIdentity = { kind, authorityId, authorityHash };
     const privateAuthority = freezePrivate<WorkflowEffectProductPrivateAuthority>({
-      formatVersion: 1,
       runId: this.store.runId,
       kind,
       authorityId,
@@ -350,20 +342,19 @@ function artifactRecordFromDescription(
   runId: string,
 ): WorkflowArtifactRecord {
   const privateAuthority = description.privateAuthority;
-  if (!plainRecord(privateAuthority) || privateAuthority.formatVersion !== 1
+  if (!plainRecord(privateAuthority)
     || privateAuthority.runId !== runId || !plainRecord(privateAuthority.artifact)
     || typeof privateAuthority.recordHash !== "string") {
-    throw new WorkflowArtifactAuthorityError("Workflow v17 artifact private authority is invalid");
+    throw new WorkflowArtifactAuthorityError("Workflow artifact private authority is invalid");
   }
   const record = structuredClone(privateAuthority.artifact) as unknown as WorkflowArtifactRecord;
   if (record.runId !== runId || stableHash(record) !== privateAuthority.recordHash
     || stableHash({
-      formatVersion: 1,
       kind: "workflow-artifact-authority",
       runId,
       recordHash: privateAuthority.recordHash,
     }) !== (description.identity as WorkflowProductIdentity).authorityHash) {
-    throw new WorkflowArtifactAuthorityError("Workflow v17 artifact authority hash is invalid");
+    throw new WorkflowArtifactAuthorityError("Workflow artifact authority hash is invalid");
   }
   return record;
 }
@@ -376,10 +367,10 @@ function authoritySemantics(
   if (value === undefined) return null;
   if (value === null || typeof value === "boolean" || typeof value === "string") return value;
   if (typeof value === "number") {
-    if (!Number.isFinite(value) || Object.is(value, -0)) throw new TypeError("Workflow v17 product fields require finite numbers");
+    if (!Number.isFinite(value) || Object.is(value, -0)) throw new TypeError("Workflow product fields require finite numbers");
     return value;
   }
-  if (!value || typeof value !== "object") throw new TypeError("Workflow v17 product field is unavailable");
+  if (!value || typeof value !== "object") throw new TypeError("Workflow product field is unavailable");
   const described = authority.describe(value);
   if (described) {
     return {
@@ -387,11 +378,11 @@ function authoritySemantics(
       identity: structuredClone(described.identity) as unknown as JsonValue,
     };
   }
-  if (ancestors.has(value)) throw new TypeError("Workflow v17 product fields may not be cyclic");
+  if (ancestors.has(value)) throw new TypeError("Workflow product fields may not be cyclic");
   ancestors.add(value);
   try {
     if (Array.isArray(value)) return value.map(entry => authoritySemantics(authority, entry, ancestors));
-    if (!plainRecord(value)) throw new TypeError("Workflow v17 product fields must be plain data or authority");
+    if (!plainRecord(value)) throw new TypeError("Workflow product fields must be plain data or authority");
     return Object.fromEntries(Object.keys(value).sort().map(key => [
       key,
       authoritySemantics(authority, value[key], ancestors),
@@ -403,13 +394,13 @@ function authoritySemantics(
 
 function assertSafeIdentifier(value: string, label: string): void {
   if (typeof value !== "string" || !AUTHORITY_ID.test(value)) {
-    throw new TypeError(`Workflow v17 ${label} is invalid`);
+    throw new TypeError(`Workflow ${label} is invalid`);
   }
 }
 
 function assertDomainIdentifier(value: string, label: string): void {
   if (typeof value !== "string" || !/^[a-z][a-z0-9_-]{0,127}$/u.test(value)) {
-    throw new TypeError(`Workflow v17 ${label} is invalid`);
+    throw new TypeError(`Workflow ${label} is invalid`);
   }
 }
 

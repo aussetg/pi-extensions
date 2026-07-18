@@ -3,7 +3,7 @@ import type { WorkflowInspectorPageKind, WorkflowRunProjection } from "../projec
 import type { WorkflowNamedClient } from "../runtime/named-workflow-types.js";
 import { boundedWorkflowProjectionText } from "../projection/run-projection.js";
 
-/** Compact TUI inspector backed exclusively by bounded schema-4 projections and pages. */
+/** Compact TUI inspector backed exclusively by bounded projections and pages. */
 export async function openWorkflowInspector(
   workflows: WorkflowNamedClient,
   runRef: string,
