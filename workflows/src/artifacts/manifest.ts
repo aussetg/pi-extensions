@@ -40,8 +40,18 @@ export function workflowArtifactManifest(
       );
     }
     if (value && typeof value === "object") {
+      let attachable: ReturnType<WorkflowEffectProductFactory["attachableArtifact"]> | undefined;
       try {
-        const attachable = products.attachableArtifact(value);
+        attachable = products.attachableArtifact(value);
+      } catch (error) {
+        if (products.authority.describe(value)) {
+          throw new WorkflowArtifactManifestError(
+            `Workflow v17 artifact input ${currentPath} is not attachable`,
+            { cause: error },
+          );
+        }
+      }
+      if (attachable) {
         entries.push(Object.freeze({
           path: currentPath,
           productKind: attachable.productKind,
@@ -53,13 +63,6 @@ export function workflowArtifactManifest(
           );
         }
         return;
-      } catch (error) {
-        if (products.authority.describe(value)) {
-          throw new WorkflowArtifactManifestError(
-            `Workflow v17 artifact input ${currentPath} is not attachable`,
-            { cause: error },
-          );
-        }
       }
     }
 

@@ -55,7 +55,11 @@ export class WorkflowCoordinatorService {
         id: runId,
         argv: [this.nodePath, "--experimental-transform-types", this.entryPath, "--run-dir", runDir],
         workingDirectory: runDir,
-        environment: { NODE_NO_WARNINGS: "1", ...credentials() },
+        environment: {
+          NODE_NO_WARNINGS: "1",
+          PI_WORKFLOW_COORDINATOR_UNIT: unit,
+          ...credentials(),
+        },
       });
       return { runId, unit, handle };
     } catch (error) {
@@ -80,7 +84,7 @@ function credentials(): Record<string, string> {
     const value = process.env[name];
     if (value && value.length <= 16_384 && !/[\u0000\r\n]/u.test(value)) result[name] = value;
   }
-  const kagi = process.env.KAGI_API_KEY;
+  const kagi = process.env.PI_WORKFLOW_KAGI_API_KEY ?? process.env.KAGI_API_KEY;
   if (kagi && kagi.length <= 4_096 && !/[\u0000\r\n]/u.test(kagi)) result.PI_WORKFLOW_KAGI_API_KEY = kagi;
   return result;
 }

@@ -394,6 +394,26 @@ describe("workflow v17 control process", () => {
     await expect(execution).rejects.toBeInstanceOf(WorkflowControlExecutionLimitError);
   });
 
+  it("enforces wire byte and node ceilings before host values enter control", async () => {
+    const workflow = parse("wire-volume", `
+      import { schema as s, workflow } from "pi/workflows";
+      export default workflow({
+        description: "Reject oversized host values.", input: s.object({}), output: s.json(),
+        async run(flow, _input) { return await flow.ask({ prompt: "large", response: s.json() }); },
+      });
+    `);
+    await expect(execute(
+      workflow,
+      { ask: () => "x".repeat(4 * 1024 * 1024 + 1) },
+      new WorkflowControlAuthorityRegistry("run:wire-bytes"),
+    )).rejects.toBeInstanceOf(WorkflowControlExecutionLimitError);
+    await expect(execute(
+      workflow,
+      { ask: () => Array.from({ length: 50_001 }, () => null) },
+      new WorkflowControlAuthorityRegistry("run:wire-nodes"),
+    )).rejects.toBeInstanceOf(WorkflowControlExecutionLimitError);
+  });
+
   it("contains control heap exhaustion inside the worker", async () => {
     const workflow = parse("heap-limit", `
       import { schema as s, workflow } from "pi/workflows";

@@ -346,7 +346,11 @@ export class WorkflowCandidateRuntime implements WorkflowSemanticCandidateRuntim
       || !workspace || workspace.state !== "frozen") {
       throw new WorkflowCandidateAuthorityError("Candidate workspace evidence is stale");
     }
-    return await this.driver.describe(workspace);
+    const handle = await this.driver.describe(workspace);
+    if (handle.currentTreeHash !== candidate.treeHash) {
+      throw new WorkflowCandidateAuthorityError("Frozen candidate workspace tree changed");
+    }
+    return handle;
   }
 
   async checkpoint(value: unknown, operation: WorkflowOperationRecord): Promise<WorkflowWorkspaceCheckpointRecord> {
@@ -469,7 +473,7 @@ export class WorkflowCandidateRuntime implements WorkflowSemanticCandidateRuntim
   }
 }
 
-/** Btrfs candidate/checkpoint implementation used by the eventual coordinator cutover. */
+/** Btrfs candidate/checkpoint implementation used by the production coordinator. */
 export class WorkflowFilesystemCandidateDriver implements WorkflowCandidateWorkspaceDriver {
   readonly runDir: string;
   private launch?: { manifest: ProjectSnapshotManifest; tree: CandidateTreeManifest };
@@ -478,9 +482,11 @@ export class WorkflowFilesystemCandidateDriver implements WorkflowCandidateWorks
     runDir: string,
     readonly database: WorkflowRunDatabase,
     readonly store: WorkflowArtifactStore,
+    private readonly launchManifest: ProjectSnapshotManifest,
     private readonly now: () => Date = () => new Date(),
   ) {
     this.runDir = path.resolve(runDir);
+    assertProjectSnapshotManifest(launchManifest);
   }
 
   async prepare(input: {
@@ -615,9 +621,7 @@ export class WorkflowFilesystemCandidateDriver implements WorkflowCandidateWorks
 
   private async launchState(run: WorkflowRunRecord): Promise<{ manifest: ProjectSnapshotManifest; tree: CandidateTreeManifest }> {
     if (this.launch) return this.launch;
-    const source = await fs.promises.readFile(path.join(this.runDir, "context", "project-manifest.json"), "utf8");
-    const manifest = JSON.parse(source) as ProjectSnapshotManifest;
-    assertProjectSnapshotManifest(manifest);
+    const manifest = this.launchManifest;
     if (manifest.treeHash !== run.projectSnapshotHash) throw new Error("Launch snapshot differs from workflow run");
     const root = path.join(this.runDir, "context", "project");
     if ((await scanCandidateTree(root)).treeHash !== manifest.treeHash) throw new Error("Launch snapshot tree is corrupt");

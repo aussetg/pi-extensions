@@ -913,6 +913,81 @@ describe("workflow v17 run database", () => {
     expect(database.readRun().revision).toBe(revision);
   });
 
+  it("accepts only the exact apply challenge and requires explicit resume after approval", () => {
+    const fixture = createRunningDatabase();
+    const database = fixture.database;
+    const operation = database.claimOperation({
+      expectedRevision: database.readRun().revision,
+      scopeId: database.readRun().rootScopeId,
+      cursor: 0,
+      kind: "apply",
+      sourceSite: "site-exact-apply",
+      semanticInputHash: hash("exact-apply-input"),
+      at: later(database.readRun().revision + 1),
+    }).operation;
+    const request = { formatVersion: 1, kind: "apply", candidateId: "candidate_exact" } as const;
+    const challengeHash = stableHash(request);
+    const interaction = database.requestHumanInteraction({
+      expectedRevision: database.readRun().revision,
+      interactionId: "interaction_exact_apply",
+      operationId: operation.operationId,
+      kind: "apply",
+      challengeHash,
+      request,
+      at: later(database.readRun().revision + 1),
+    });
+    expect(database.readRun().status).toBe("waiting");
+
+    database.enqueueControlRequest({
+      requestId: "request_stale_apply",
+      runId: database.readRun().runId,
+      kind: "apply-approve",
+      targetId: interaction.interactionId,
+      challengeHash: hash("wrong-apply-challenge"),
+      actor: "human:test",
+      status: "pending",
+      requestedAt: later(database.readRun().revision + 1),
+    });
+    expect(database.processControlRequest(
+      "request_stale_apply",
+      later(database.readRun().revision + 1),
+    )).toMatchObject({ status: "rejected", reason: { code: "request-rejected" } });
+    expect(database.readHumanInteraction(interaction.interactionId)?.status).toBe("waiting");
+
+    database.enqueueControlRequest({
+      requestId: "request_exact_apply",
+      runId: database.readRun().runId,
+      kind: "apply-approve",
+      targetId: interaction.interactionId,
+      challengeHash,
+      actor: "human:test",
+      status: "pending",
+      requestedAt: later(database.readRun().revision + 1),
+    });
+    expect(database.processControlRequest(
+      "request_exact_apply",
+      later(database.readRun().revision + 1),
+    ).status).toBe("processed");
+    expect(database.readHumanInteraction(interaction.interactionId)?.status).toBe("approved");
+    expect(database.readRun()).toMatchObject({
+      status: "paused",
+      currentOperationId: operation.operationId,
+    });
+    expect(database.readOperation(operation.operationId)?.status).toBe("running");
+
+    database.enqueueControlRequest({
+      requestId: "request_resume_apply",
+      runId: database.readRun().runId,
+      kind: "resume",
+      actor: "human:test",
+      status: "pending",
+      requestedAt: later(database.readRun().revision + 1),
+    });
+    database.processControlRequest("request_resume_apply", later(database.readRun().revision + 1));
+    expect(database.readRun().status).toBe("queued");
+    database.validateIntegrity();
+  });
+
   it("persists attempt and exact workspace-checkpoint authority and settles live attempts on stop", () => {
     const fixture = createRunningDatabase();
     const database = fixture.database;

@@ -125,7 +125,7 @@ export async function prepareWorkflowResources(
       const profileId = selectorIds.get(profile.adversarialReview.profile)!;
       const agentProfile = snapshots.get(profileId)!;
       const route = routesByProfile.get(profileId)!;
-      const tools = resolveAgentTools(agentProfile, { workspace: "snapshot", network: "none" }, options.agentExecutor);
+      const tools = resolveAgentTools(agentProfile, { workspace: "candidate", network: "none" }, options.agentExecutor);
       reviewer = jsonObject({
         profile: agentProfile, route, tools, executor: options.agentExecutor,
         profileHash: agentProfile.hash, routeHash: route.hash,

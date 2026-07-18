@@ -7,6 +7,10 @@ explicit through the `pi/workflows` API.
 Runtime 17 is the only executable runtime. Its SQLite format is schema 4. Schema-3 databases are
 immutable legacy evidence: they may be reported by discovery, but cannot resume or replay.
 
+The current boundaries are documented in [`SECURITY.md`](SECURITY.md), performance limits in
+[`PERFORMANCE.md`](PERFORMANCE.md), and the pre-rollout verification split in
+[`HARDENING.md`](HARDENING.md).
+
 ### Installed surfaces
 
 - Model tool `workflow`: launches only definitions exposed as `model` by registry policy.

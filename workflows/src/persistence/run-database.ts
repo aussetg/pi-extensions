@@ -102,6 +102,11 @@ export interface CreateWorkflowRunDatabaseOptions {
   /** Exact reviewed descriptor/profile authority. */
   staticResourcesHash: string;
   contextIdentityHash: string;
+  launch?: {
+    mode: "await" | "async";
+    sessionId: string;
+    projectRoot: string;
+  };
   safety: SafetyConfiguration;
   createdAt: string;
 }
@@ -1342,6 +1347,11 @@ export class WorkflowRunDatabase extends WorkflowRunDatabaseReader {
           payload: {
             workflowId: options.snapshot.workflowId,
             snapshotHash: options.snapshot.snapshotHash,
+            ...(options.launch ? {
+              mode: options.launch.mode,
+              sessionId: options.launch.sessionId,
+              projectRoot: options.launch.projectRoot,
+            } : {}),
           },
           at: options.createdAt,
         });
@@ -3805,6 +3815,15 @@ function assertCreateOptions(options: CreateWorkflowRunDatabaseOptions): void {
   assertHash(options.routeSnapshotHash, "workflow v17 route snapshot hash");
   assertHash(options.staticResourcesHash, "workflow v17 static resources hash");
   assertHash(options.contextIdentityHash, "workflow v17 context identity hash");
+  if (options.launch) {
+    if (options.launch.mode !== "await" && options.launch.mode !== "async") {
+      throw new TypeError("Workflow v17 launch mode is invalid");
+    }
+    assertText(options.launch.sessionId, "workflow v17 launch session", 256);
+    if (!path.isAbsolute(options.launch.projectRoot)) {
+      throw new TypeError("Workflow v17 launch project root must be absolute");
+    }
+  }
   assertSafety(options.safety);
   assertIsoDate(options.createdAt, "workflow v17 run createdAt");
 }

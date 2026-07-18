@@ -232,6 +232,19 @@ describe("workflow v17 artifacts and products", () => {
     expect(Object.isFrozen(manifest.entries)).toBe(true);
   });
 
+  it("accepts exactly 64 manifest leaves and rejects the 65th", async () => {
+    const fixture = createFixture();
+    const stored = await fixture.store.putText({ kind: "evidence", text: "bounded" });
+    const artifact = fixture.products.artifact(stored.record);
+    const allowed = Object.fromEntries(Array.from({ length: 64 }, (_, index) => [
+      `item${String(index).padStart(2, "0")}`,
+      artifact,
+    ]));
+    expect(workflowArtifactManifest(fixture.products, allowed).entries).toHaveLength(64);
+    expect(() => workflowArtifactManifest(fixture.products, { ...allowed, overflow: artifact }))
+      .toThrow("Workflow v17 artifact bundle exceeds 64 leaves");
+  });
+
   it("rejects plain leaves, lookalikes, unsafe segments, cycles, and nonattachable authority", async () => {
     const fixture = createFixture();
     const finding = await fixture.products.agentResult({

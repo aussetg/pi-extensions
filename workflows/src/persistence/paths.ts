@@ -19,6 +19,11 @@ export function workflowDraftRoot(agentDir = getAgentDir()): string {
   return path.join(path.resolve(agentDir), "workflow-drafts");
 }
 
+/** Kernel-backed locks serializing live-project mutation across coordinators. */
+export function workflowApplyLockRoot(agentDir = getAgentDir()): string {
+  return path.join(path.resolve(agentDir), "workflow-locks");
+}
+
 export function userWorkflowDir(): string {
   return path.join(getAgentDir(), "workflows");
 }

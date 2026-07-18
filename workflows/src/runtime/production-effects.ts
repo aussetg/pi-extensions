@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type {
@@ -38,7 +37,8 @@ import type {
   WorkflowVerificationExecutor,
 } from "./effect-adapters.js";
 import { WorkflowHumanSuspension } from "./semantic-engine.js";
-import { scanProjectSource, type ProjectSnapshotManifest } from "../workspaces/project-snapshot.js";
+import { scanProjectSource } from "../workspaces/project-snapshot.js";
+import { withWorkflowApplyLock } from "../workspaces/apply-lock.js";
 
 /** Production bridge from reviewed agent descriptors to the supervised SDK worker. */
 export class WorkflowProductionAgentExecutor implements WorkflowAgentEffectExecutor {
@@ -234,6 +234,9 @@ export class WorkflowProductionVerificationExecutor implements WorkflowVerificat
     const evidence: JsonObject = {};
     const failures: string[] = [];
     const tree = await scanCandidateTree(request.workspace.root);
+    if (tree.treeHash !== request.candidate.treeHash) {
+      throw new Error("Frozen candidate tree changed before verification");
+    }
     if (profile.diffInspection.requireChanges && request.candidate.changedPaths.length === 0) failures.push("candidate has no changes");
     if (request.candidate.changedPaths.length > profile.diffInspection.maximumChangedPaths) failures.push("too many changed paths");
     for (const changed of request.candidate.changedPaths) {
@@ -329,13 +332,13 @@ export class WorkflowProductionVerificationExecutor implements WorkflowVerificat
 export class WorkflowProductionApplyExecutor implements WorkflowApplyExecutor {
   constructor(
     private readonly database: WorkflowRunDatabase,
-    private readonly runDir: string,
     private readonly sourceRoot: string,
+    private readonly launchRoot: string,
+    private readonly launchTreeHash: string,
     private readonly now: () => Date = () => new Date(),
   ) {}
 
   async apply(request: Parameters<WorkflowApplyExecutor["apply"]>[0]) {
-    const candidateTree = await scanCandidateTree(request.workspace.root);
     let interaction = this.database.readHumanInteractionByOperation(request.operation.operationId);
     if (!interaction) {
       const live = await scanProjectSource(this.sourceRoot);
@@ -368,15 +371,20 @@ export class WorkflowProductionApplyExecutor implements WorkflowApplyExecutor {
     if (interaction.status === "rejected") throw new Error("Exact workflow apply was rejected by the human");
     if (interaction.status !== "approved") throw new Error(`Workflow apply interaction is ${interaction.status}`);
 
-    const manifest = JSON.parse(await fs.promises.readFile(path.join(this.runDir, "context", "project-manifest.json"), "utf8")) as ProjectSnapshotManifest;
-    await applyCandidateTree({
-      sourceRoot: this.sourceRoot,
-      launchRoot: path.join(this.runDir, "context", "project"),
-      candidateRoot: request.workspace.root,
-      expectedLaunchTreeHash: manifest.treeHash,
-      expectedCandidateTreeHash: candidateTree.treeHash,
-      changedPaths: request.candidate.changedPaths,
-      signal: request.signal,
+    await withWorkflowApplyLock(this.sourceRoot, request.signal, async () => {
+      const candidateTree = await scanCandidateTree(request.workspace.root);
+      if (candidateTree.treeHash !== request.candidate.treeHash) {
+        throw new Error("Frozen candidate tree changed before apply");
+      }
+      await applyWorkflowCandidateTree({
+        sourceRoot: this.sourceRoot,
+        launchRoot: this.launchRoot,
+        candidateRoot: request.workspace.root,
+        expectedLaunchTreeHash: this.launchTreeHash,
+        expectedCandidateTreeHash: request.candidate.treeHash,
+        changedPaths: request.candidate.changedPaths,
+        signal: request.signal,
+      });
     });
     const receiptId = `apply_${stableHash({
       interactionId: interaction.interactionId,
@@ -431,7 +439,7 @@ function reviewSchema(): JsonSchema {
   };
 }
 
-async function applyCandidateTree(options: {
+export async function applyWorkflowCandidateTree(options: {
   sourceRoot: string;
   launchRoot: string;
   candidateRoot: string;
@@ -440,21 +448,34 @@ async function applyCandidateTree(options: {
   changedPaths: readonly string[];
   signal: AbortSignal;
 }): Promise<void> {
-  const [before, after, live] = await Promise.all([
+  const [before, after] = await Promise.all([
     scanCandidateTree(options.launchRoot),
     scanCandidateTree(options.candidateRoot),
-    scanCandidateTree(options.sourceRoot),
   ]);
   if (before.treeHash !== options.expectedLaunchTreeHash || after.treeHash !== options.expectedCandidateTreeHash) {
     throw new Error("Workflow apply source evidence changed");
   }
-  if (live.treeHash === after.treeHash) return;
   const beforeEntries = new Map(before.entries.map(entry => [entry.path, entry]));
   const afterEntries = new Map(after.entries.map(entry => [entry.path, entry]));
+  for (const entryPath of options.changedPaths) {
+    const post = afterEntries.get(entryPath);
+    if (post && post.type !== "directory") {
+      const target = safePath(options.sourceRoot, entryPath);
+      await assertSafeApplyAncestors(options.sourceRoot, target);
+      await removeApplyTemporary(applyTemporaryPath(
+        target,
+        options.expectedCandidateTreeHash,
+        entryPath,
+      ));
+    }
+  }
+  const live = await scanCandidateTree(options.sourceRoot);
+  if (live.treeHash === after.treeHash) return;
   const liveEntries = new Map(live.entries.map(entry => [entry.path, entry]));
   const changed = new Set(options.changedPaths);
-  for (const [entryPath, entry] of liveEntries) {
-    if (!changed.has(entryPath) && stableJson(entry) !== stableJson(beforeEntries.get(entryPath))) {
+  const outsidePaths = new Set([...beforeEntries.keys(), ...liveEntries.keys()]);
+  for (const entryPath of outsidePaths) {
+    if (!changed.has(entryPath) && !sameTreeEntry(liveEntries.get(entryPath), beforeEntries.get(entryPath))) {
       throw new Error(`Live project drifted outside apply scope at ${entryPath}`);
     }
   }
@@ -462,15 +483,19 @@ async function applyCandidateTree(options: {
     const current = liveEntries.get(entryPath);
     const pre = beforeEntries.get(entryPath);
     const post = afterEntries.get(entryPath);
-    if (stableJson(current) !== stableJson(pre) && stableJson(current) !== stableJson(post)) {
+    if (current !== undefined && !sameTreeEntry(current, pre) && !sameTreeEntry(current, post)) {
       throw new Error(`Live project conflicts with apply at ${entryPath}`);
     }
   }
   const removals = [...changed].filter(entryPath => !afterEntries.has(entryPath))
     .sort((a, b) => b.split("/").length - a.split("/").length || b.localeCompare(a));
+  const dirtyDirectories = new Set<string>([path.resolve(options.sourceRoot)]);
   for (const entryPath of removals) {
     options.signal.throwIfAborted();
-    await fs.promises.rm(safePath(options.sourceRoot, entryPath), { recursive: true, force: true });
+    const target = safePath(options.sourceRoot, entryPath);
+    await assertSafeApplyAncestors(options.sourceRoot, target);
+    await fs.promises.rm(target, { recursive: true, force: true });
+    markApplyParents(dirtyDirectories, options.sourceRoot, path.dirname(target));
   }
   const additions = [...changed].filter(entryPath => afterEntries.has(entryPath))
     .sort((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b));
@@ -479,20 +504,114 @@ async function applyCandidateTree(options: {
     const entry = afterEntries.get(entryPath)!;
     const target = safePath(options.sourceRoot, entryPath);
     const source = safePath(options.candidateRoot, entryPath);
+    await assertSafeApplyAncestors(options.sourceRoot, target);
     await fs.promises.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
-    await fs.promises.rm(target, { recursive: true, force: true });
-    if (entry.type === "directory") await fs.promises.mkdir(target, { recursive: true, mode: entry.mode });
-    else if (entry.type === "symlink") await fs.promises.symlink(entry.target, target);
-    else {
-      const temporary = `${target}.workflow-${crypto.randomUUID()}`;
-      await fs.promises.copyFile(source, temporary, fs.constants.COPYFILE_EXCL | fs.constants.COPYFILE_FICLONE);
-      await fs.promises.chmod(temporary, entry.mode);
-      await fs.promises.rename(temporary, target);
+    await assertSafeApplyAncestors(options.sourceRoot, target);
+    const current = await lstatOptional(target);
+    if (entry.type === "directory") {
+      if (current && (!current.isDirectory() || current.isSymbolicLink())) {
+        await fs.promises.rm(target, { recursive: true, force: true });
+      }
+      await fs.promises.mkdir(target, { recursive: true, mode: entry.mode });
+      await fs.promises.chmod(target, entry.mode);
+      dirtyDirectories.add(target);
+    } else {
+      const temporary = applyTemporaryPath(target, options.expectedCandidateTreeHash, entryPath);
+      await removeApplyTemporary(temporary);
+      try {
+        if (entry.type === "symlink") await fs.promises.symlink(entry.target, temporary);
+        else {
+          await fs.promises.copyFile(source, temporary, fs.constants.COPYFILE_EXCL | fs.constants.COPYFILE_FICLONE);
+          await fs.promises.chmod(temporary, entry.mode);
+          await syncFile(temporary);
+        }
+        if (current?.isDirectory() && !current.isSymbolicLink()) {
+          await fs.promises.rm(target, { recursive: true, force: true });
+        }
+        await fs.promises.rename(temporary, target);
+      } catch (error) {
+        await fs.promises.rm(temporary, { recursive: true, force: true }).catch(() => undefined);
+        throw error;
+      }
     }
+    markApplyParents(dirtyDirectories, options.sourceRoot, path.dirname(target));
+  }
+  for (const directory of [...dirtyDirectories]
+    .sort((left, right) => right.split(path.sep).length - left.split(path.sep).length)) {
+    await syncDirectory(directory);
   }
   if ((await scanCandidateTree(options.sourceRoot)).treeHash !== after.treeHash) {
     throw new Error("Live project differs from candidate after apply");
   }
+}
+
+function applyTemporaryPath(target: string, candidateTreeHash: string, entryPath: string): string {
+  const suffix = stableHash({ formatVersion: 1, candidateTreeHash, entryPath }).slice(7, 23);
+  return path.join(path.dirname(target), `.${path.basename(target)}.pi-workflow-${suffix}.tmp`);
+}
+
+async function removeApplyTemporary(temporary: string): Promise<void> {
+  const current = await lstatOptional(temporary);
+  if (!current) return;
+  if (!current.isFile() || current.isSymbolicLink() || current.nlink !== 1) {
+    throw new Error(`Workflow apply temporary path is unsafe: ${temporary}`);
+  }
+  await fs.promises.rm(temporary);
+}
+
+async function lstatOptional(target: string): Promise<fs.Stats | undefined> {
+  try { return await fs.promises.lstat(target); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+}
+
+async function assertSafeApplyAncestors(rootInput: string, targetInput: string): Promise<void> {
+  const root = path.resolve(rootInput);
+  const target = path.resolve(targetInput);
+  const relative = path.relative(root, path.dirname(target));
+  if (relative === "") return;
+  let current = root;
+  for (const segment of relative.split(path.sep)) {
+    current = path.join(current, segment);
+    try {
+      const stat = await fs.promises.lstat(current);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        throw new Error(`Workflow apply ancestor is unsafe: ${current}`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+  }
+}
+
+function markApplyParents(directories: Set<string>, rootInput: string, startInput: string): void {
+  const root = path.resolve(rootInput);
+  let current = path.resolve(startInput);
+  while (current !== root) {
+    directories.add(current);
+    const parent = path.dirname(current);
+    if (parent === current || path.relative(root, parent).startsWith("..")) break;
+    current = parent;
+  }
+  directories.add(root);
+}
+
+async function syncFile(file: string): Promise<void> {
+  const handle = await fs.promises.open(file, fs.constants.O_RDONLY);
+  try { await handle.sync(); } finally { await handle.close(); }
+}
+
+async function syncDirectory(directory: string): Promise<void> {
+  const handle = await fs.promises.open(directory, fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0));
+  try { await handle.sync(); } finally { await handle.close(); }
+}
+
+function sameTreeEntry(
+  left: Awaited<ReturnType<typeof scanCandidateTree>>["entries"][number] | undefined,
+  right: Awaited<ReturnType<typeof scanCandidateTree>>["entries"][number] | undefined,
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return stableJson(left) === stableJson(right);
 }
 
 function safePath(rootInput: string, relative: string): string {

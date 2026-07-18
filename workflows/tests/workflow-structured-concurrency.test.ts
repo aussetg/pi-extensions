@@ -140,6 +140,36 @@ describe("workflow v17 structured concurrency", () => {
     fixture.database.validateIntegrity();
   });
 
+  it("sustains the full 256-item map bound without leaking scheduling into identity", async () => {
+    const fixture = createFixture("flow_v17_map_bound", 8);
+    const adapter = new StructuredAdapter();
+    const items = Array.from({ length: 256 }, (_, index) => ({
+      key: `lane${String(index).padStart(3, "0")}`,
+      value: index,
+      delay: index % 7,
+    }));
+    const outcome = await new WorkflowSemanticEngine(fixture.database, [adapter], {
+      now: clock(),
+    }).run(async flow => await flow.map(items, async item => await call(
+      flow,
+      (item as JsonObject).key as string,
+      (item as JsonObject).value as number,
+      (item as JsonObject).delay as number,
+    ), {
+      sourceSite: "site-map-bound",
+      key: item => (item as JsonObject).key as string,
+      concurrency: 8,
+    }));
+    expect(outcome.status).toBe("completed");
+    if (outcome.status !== "completed") throw new Error("Bounded map did not complete");
+    expect(outcome.result).toHaveLength(256);
+    expect(outcome.result[255]).toEqual({ value: 256 });
+    expect(adapter.maximumActive).toBe(8);
+    const group = fixture.database.listOperations().find(operation => operation.kind === "map")!;
+    expect(fixture.database.readStructuralJoin(group.operationId)?.lanes).toHaveLength(256);
+    fixture.database.validateIntegrity();
+  }, 30_000);
+
   it("collects failed lanes as typed results and preserves successful siblings", async () => {
     const fixture = createFixture("flow_v17_collect");
     const adapter = new StructuredAdapter({ failures: new Set(["bad"]) });

@@ -7,6 +7,7 @@ import { KagiWebMediator } from "../agents/kagi-mediator.js";
 import { WorkflowArtifactStore } from "../artifacts/store.js";
 import { WorkflowEffectProductFactory } from "../artifacts/products.js";
 import { WorkflowCandidateRuntime, WorkflowFilesystemCandidateDriver } from "../candidates/runtime.js";
+import { scanCandidateTree } from "../candidates/tree.js";
 import { SandboxedCommandExecutor } from "../commands/executor.js";
 import { parseWorkflow } from "../definition/workflow-frontend.js";
 import { HostMeasurementEnvironmentProvider } from "../measurements/environment.js";
@@ -61,10 +62,18 @@ export async function executePreparedWorkflowRun(
   }
   const projectRoot = path.join(runDir, "context", "project");
   const projectCwd = path.resolve(projectRoot, manifest.cwd === "." ? "" : manifest.cwd);
+  if ((await scanCandidateTree(projectRoot)).treeHash !== manifest.treeHash) {
+    throw new Error("Prepared workflow project snapshot tree is corrupt");
+  }
   const authority = new WorkflowControlAuthorityRegistry(`${run.runId}:${snapshot.definitionHash}`);
   const artifacts = new WorkflowArtifactStore(runDir, database);
   const products = new WorkflowEffectProductFactory(authority, artifacts);
-  const candidateDriver = new WorkflowFilesystemCandidateDriver(runDir, database, artifacts);
+  const candidateDriver = new WorkflowFilesystemCandidateDriver(
+    runDir,
+    database,
+    artifacts,
+    manifest,
+  );
   const candidates = new WorkflowCandidateRuntime(database, authority, candidateDriver);
   const commandExecutor = new SandboxedCommandExecutor();
   const environment = new HostMeasurementEnvironmentProvider();
@@ -90,19 +99,24 @@ export async function executePreparedWorkflowRun(
   );
   const verification = new WorkflowProductionVerificationExecutor(runDir, commandExecutor, agent);
   const ask = new WorkflowProductionAskExecutor(database);
-  const apply = new WorkflowProductionApplyExecutor(database, runDir, manifest.sourceRoot);
+  const apply = new WorkflowProductionApplyExecutor(
+    database,
+    manifest.sourceRoot,
+    projectRoot,
+    manifest.treeHash,
+  );
   let replay: WorkflowCausalReplay | undefined;
-  if (replayBinding && !replayBinding.fresh) {
-    if (replayBinding.formatVersion !== 1 || replayBinding.sourceRunId !== path.basename(replayBinding.sourceRunDir)) {
-      throw new Error("Prepared workflow replay binding is invalid");
-    }
-    replay = await WorkflowCausalReplay.open({
-      targetRunDir: runDir,
-      target: database,
-      sourceRunDir: replayBinding.sourceRunDir,
-    });
-  }
   try {
+    if (replayBinding && !replayBinding.fresh) {
+      if (replayBinding.formatVersion !== 1 || replayBinding.sourceRunId !== path.basename(replayBinding.sourceRunDir)) {
+        throw new Error("Prepared workflow replay binding is invalid");
+      }
+      replay = await WorkflowCausalReplay.open({
+        targetRunDir: runDir,
+        target: database,
+        sourceRunDir: replayBinding.sourceRunDir,
+      });
+    }
     return await new WorkflowExecutableRuntime({
       workflow,
       invocation: snapshot,

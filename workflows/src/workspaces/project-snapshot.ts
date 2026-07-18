@@ -78,7 +78,7 @@ interface NodeResult {
 
 const REFLINK_FLAGS = fs.constants.COPYFILE_EXCL | fs.constants.COPYFILE_FICLONE_FORCE;
 const BTRFS_SUPER_MAGIC = 0x9123683e;
-const WORKFLOW_STATE_DIRS = new Set(["workflow-runs", "workflow-drafts"]);
+const WORKFLOW_STATE_DIRS = new Set(["workflow-runs", "workflow-drafts", "workflow-locks"]);
 const VCS_INTERNAL_NAMES = new Set([".git", ".hg", ".svn", ".jj", ".bzr", "_darcs", "CVS"]);
 
 /**

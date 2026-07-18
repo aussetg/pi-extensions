@@ -230,6 +230,23 @@ describe("workflow v17 effect APIs and candidate lifecycle", () => {
     fixture.database.validateIntegrity();
   });
 
+  it("refuses verification when a frozen candidate workspace changes after freeze", async () => {
+    const fixture = createFixture(ACCEPT_SOURCE, "effects-frozen-tamper");
+    const backends = scriptedBackends(fixture);
+    await expect(runtime(fixture, backends, {
+      faultInjector: point => {
+        if (point === "after-candidate-frozen") throw new WorkflowSemanticEngineCrashError(point);
+      },
+    }).run()).rejects.toBeInstanceOf(WorkflowSemanticEngineCrashError);
+    fixture.driver.tampered = true;
+    const outcome = await runtime(fixture, backends).run();
+    expect(outcome).toMatchObject({
+      status: "failed",
+      failure: { code: "execution-failed", effectKind: "verify" },
+    });
+    expect(backends.calls.verify).toBe(0);
+  });
+
   it("rejects invalid human responses before they become durable results", async () => {
     const fixture = createFixture(ACCEPT_SOURCE, "effects-ask-schema");
     const backends = scriptedBackends(fixture);
@@ -473,6 +490,7 @@ function scriptedBackends(
 
 class FakeCandidateDriver implements WorkflowCandidateWorkspaceDriver {
   changed = false;
+  tampered = false;
 
   constructor(
     private readonly store: WorkflowArtifactStore,
@@ -503,7 +521,9 @@ class FakeCandidateDriver implements WorkflowCandidateWorkspaceDriver {
       record,
       root: path.join(this.store.runDir, record.rootPath),
       cwd: path.join(this.store.runDir, record.rootPath),
-      currentTreeHash: this.changed ? sha256(`changed:${record.workspaceId}`) : record.initialTreeHash,
+      currentTreeHash: this.tampered
+        ? sha256(`tampered:${record.workspaceId}`)
+        : this.changed ? sha256(`changed:${record.workspaceId}`) : record.initialTreeHash,
     };
   }
 

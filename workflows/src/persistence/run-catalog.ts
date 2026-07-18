@@ -37,6 +37,7 @@ export class WorkflowRunCatalog {
     await fs.promises.mkdir(this.root, { recursive: true, mode: 0o700 });
     const stat = await fs.promises.lstat(this.root);
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Unsafe workflow run root");
+    await fs.promises.chmod(this.root, 0o700);
   }
 
   allocate(): { runId: string; paths: WorkflowRunPaths } {
@@ -45,9 +46,12 @@ export class WorkflowRunCatalog {
   }
 
   async list(): Promise<WorkflowRunCatalogEntry[]> {
-    let entries: fs.Dirent[];
-    try { entries = await fs.promises.readdir(this.root, { withFileTypes: true }); }
+    let root: fs.Stats;
+    try { root = await fs.promises.lstat(this.root); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+    if (!root.isDirectory() || root.isSymbolicLink()) throw new Error("Unsafe workflow run root");
+    let entries: fs.Dirent[];
+    entries = await fs.promises.readdir(this.root, { withFileTypes: true });
     const result = entries.filter(entry => entry.isDirectory() && !entry.isSymbolicLink() && RUN_ID.test(entry.name))
       .map(entry => {
         const paths = workflowRunPaths(this.root, entry.name);

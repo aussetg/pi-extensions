@@ -20,7 +20,11 @@ import { WorkflowRegistry } from "../registry/structured-workflows.js";
 import type { JsonObject, JsonValue } from "../types.js";
 import { stableHash } from "../utils/hashes.js";
 import { stableJson } from "../utils/stable-json.js";
-import { captureProjectSnapshot } from "../workspaces/project-snapshot.js";
+import {
+  assertProjectSnapshotManifest,
+  captureProjectSnapshot,
+  type ProjectSnapshotManifest,
+} from "../workspaces/project-snapshot.js";
 import { coordinatorUnitName } from "./coordinator-identity.js";
 import { WorkflowCoordinatorAlreadyRunningError, WorkflowCoordinatorService } from "./coordinator-service.js";
 import type { WorkflowNamedClient, WorkflowNamedResult, WorkflowRunSummary } from "./named-workflow-types.js";
@@ -28,6 +32,14 @@ import { prepareWorkflowResources } from "./prepare-resources.js";
 import { WorkflowControlClient } from "./workflow-control-client.js";
 
 const SETTLED = new Set(["waiting", "paused", "completed", "failed", "stopped"]);
+const TERMINAL = new Set(["completed", "failed", "stopped"]);
+const COORDINATOR_PROBE_MS = 1_000;
+
+interface WorkflowLaunchBinding {
+  mode: "await" | "async";
+  sessionId: string;
+  projectRoot: string;
+}
 
 export class WorkflowNamedService implements WorkflowNamedClient {
   readonly registry: WorkflowRegistry;
@@ -40,6 +52,7 @@ export class WorkflowNamedService implements WorkflowNamedClient {
   private context?: ExtensionContext;
   private readonly listeners = new Set<(projection: WorkflowRunProjection) => void>();
   private readonly watchers = new Map<string, NodeJS.Timeout>();
+  private readonly notified = new Set<string>();
 
   constructor(private readonly pi: ExtensionAPI, options: {
     registry?: WorkflowRegistry;
@@ -52,7 +65,13 @@ export class WorkflowNamedService implements WorkflowNamedClient {
     this.controls = new WorkflowControlClient(this.catalog, this.coordinator);
   }
 
-  bindContext(ctx: ExtensionContext): void { this.context = ctx; }
+  bindContext(ctx: ExtensionContext): void {
+    if (this.context && (
+      sessionId(this.context) !== sessionId(ctx)
+      || path.resolve(projectRoot(this.context.cwd)) !== path.resolve(projectRoot(ctx.cwd))
+    )) this.clearWatchers();
+    this.context = ctx;
+  }
   detachContext(): void { for (const timer of this.watchers.values()) clearTimeout(timer); this.watchers.clear(); this.context = undefined; }
   subscribeProjection(listener: (projection: WorkflowRunProjection) => void): () => void {
     this.listeners.add(listener); return () => this.listeners.delete(listener);
@@ -74,7 +93,7 @@ export class WorkflowNamedService implements WorkflowNamedClient {
     const ref = this.registry.resolve(input.name);
     const launched = await this.launch(ref.id, input.args, authority, input.mode, ctx);
     if (input.mode === "async") {
-      this.watch(launched);
+      this.watch(launched, launched.binding);
       return await this.result(launched);
     }
     const settled = await this.awaitSettled(launched, ctx.signal, options.onUpdate);
@@ -87,9 +106,11 @@ export class WorkflowNamedService implements WorkflowNamedClient {
     ctx: ExtensionContext,
   ): Promise<WorkflowNamedResult> {
     this.assertPrimary(ctx);
+    validateMode(input.mode, ctx.mode);
     const source = await this.catalog.resolve(input.sourceRunRef);
     if (!source.run) throw new Error(source.error ?? "Replay source is unavailable");
     const sourceSnapshot = await readWorkflowInvocationSnapshot(source.paths.root);
+    await assertReplayProject(source.paths.projectManifest, ctx.cwd);
     await this.refreshDefinitions(ctx);
     const ref = this.registry.resolve(sourceSnapshot.workflowId);
     const launched = await this.launch(
@@ -100,7 +121,7 @@ export class WorkflowNamedService implements WorkflowNamedClient {
       ctx,
       { sourceRunId: source.runId, sourceRunDir: source.paths.root, fresh: input.fresh },
     );
-    if (input.mode === "async") { this.watch(launched); return await this.result(launched); }
+    if (input.mode === "async") { this.watch(launched, launched.binding); return await this.result(launched); }
     const settled = await this.awaitSettled(launched, ctx.signal);
     return await this.result({ ...launched, run: settled });
   }
@@ -143,8 +164,27 @@ export class WorkflowNamedService implements WorkflowNamedClient {
 
   async restoreAsyncNotifications(ctx: ExtensionContext): Promise<void> {
     this.bindContext(ctx);
-    for (const entry of await this.catalog.list()) {
-      if (entry.run && !SETTLED.has(entry.run.status)) this.watch({ entry, run: entry.run });
+    const owner = sessionId(ctx);
+    if (!owner) return;
+    for (const entry of ctx.sessionManager.getEntries()) {
+      if (entry.type !== "custom" || entry.customType !== "workflow-completion") continue;
+      const data = plainRecord(entry.data);
+      if (typeof data?.runId === "string") this.notified.add(data.runId);
+    }
+    const currentProject = await fs.promises.realpath(projectRoot(ctx.cwd));
+    for (const entry of (await this.catalog.list()).slice(0, 256)) {
+      if (!entry.run || this.notified.has(entry.runId)) continue;
+      let binding: WorkflowLaunchBinding | undefined;
+      try { binding = readLaunchBinding(entry); } catch { continue; }
+      const boundProject = binding
+        ? await fs.promises.realpath(binding.projectRoot).catch(() => "")
+        : "";
+      if (!binding || binding.mode !== "async" || binding.sessionId !== owner
+        || boundProject !== currentProject) continue;
+      try { await assertReplayProject(entry.paths.projectManifest, ctx.cwd); } catch { continue; }
+      const value = { entry, run: entry.run, binding };
+      if (TERMINAL.has(entry.run.status)) this.notify(summary(entry.run, await this.shortId(entry.runId)));
+      else this.watch(value, binding);
     }
   }
 
@@ -155,7 +195,11 @@ export class WorkflowNamedService implements WorkflowNamedClient {
     mode: "await" | "async",
     ctx: ExtensionContext,
     replay?: { sourceRunId: string; sourceRunDir: string; fresh: boolean },
-  ): Promise<{ entry: WorkflowRunCatalogEntry; run: ReturnType<WorkflowRunDatabase["readRun"]> }> {
+  ): Promise<{
+    entry: WorkflowRunCatalogEntry;
+    run: ReturnType<WorkflowRunDatabase["readRun"]>;
+    binding: WorkflowLaunchBinding;
+  }> {
     await this.catalog.ensureRoot();
     const ref = this.registry.resolve(workflowId);
     const availableModels = ctx.modelRegistry.getAvailable().map(model => `${model.provider}/${model.id}`);
@@ -180,6 +224,8 @@ export class WorkflowNamedService implements WorkflowNamedClient {
     const { runId, paths } = this.catalog.allocate();
     const temporary = path.join(this.catalog.root, `.launch-${runId}-${crypto.randomUUID()}`);
     let database: WorkflowRunDatabase | undefined;
+    let published = false;
+    let coordinatorStarted = false;
     try {
       await writeWorkflowInvocationSnapshot(temporary, snapshot);
       const temporaryPaths = { ...paths, root: temporary, database: path.join(temporary, "run.sqlite"),
@@ -191,6 +237,11 @@ export class WorkflowNamedService implements WorkflowNamedClient {
       }
       const sourceRoot = await fs.promises.realpath(projectRoot(ctx.cwd));
       const sourceCwd = await fs.promises.realpath(ctx.cwd);
+      const binding: WorkflowLaunchBinding = {
+        mode,
+        sessionId: sessionId(ctx)!,
+        projectRoot: sourceRoot,
+      };
       const project = await captureProjectSnapshot(sourceRoot, sourceCwd, temporaryPaths.projectSnapshot);
       await Promise.all([
         writeCanonical(temporaryPaths.projectManifest, project),
@@ -204,6 +255,7 @@ export class WorkflowNamedService implements WorkflowNamedClient {
         routeSnapshotHash: prepared.routeSnapshotHash,
         staticResourcesHash: prepared.static.hash,
         contextIdentityHash: stableHash({ prepared: prepared.contextIdentityHash, project: project.manifestHash }),
+        launch: binding,
         safety: {
           concurrency: 4,
           maximumAgentLaunches: 1_000,
@@ -218,21 +270,25 @@ export class WorkflowNamedService implements WorkflowNamedClient {
       });
       database.close(); database = undefined;
       await fs.promises.rename(temporary, paths.root);
+      published = true;
       try { await this.coordinator.launch(paths.root); }
       catch (error) {
         if (!(error instanceof WorkflowCoordinatorAlreadyRunningError)) throw error;
       }
+      coordinatorStarted = true;
       const reader = WorkflowRunDatabaseReader.open(paths.database);
       try {
         const run = reader.readRun();
         const entry = { runId, paths, run };
         await this.emit(entry);
-        return { entry, run };
+        return { entry, run, binding };
       } finally { reader.close(); }
     } catch (error) {
       database?.close();
       await fs.promises.rm(temporary, { recursive: true, force: true }).catch(() => undefined);
-      await fs.promises.rm(paths.root, { recursive: true, force: true }).catch(() => undefined);
+      if (published && !coordinatorStarted) {
+        await fs.promises.rm(paths.root, { recursive: true, force: true }).catch(() => undefined);
+      }
       throw error;
     }
   }
@@ -273,27 +329,49 @@ export class WorkflowNamedService implements WorkflowNamedClient {
     };
   }
 
-  private watch(value: { entry: WorkflowRunCatalogEntry; run: ReturnType<WorkflowRunDatabaseReader["readRun"]> }): void {
-    if (this.watchers.has(value.run.runId)) return;
+  private watch(
+    value: {
+      entry: WorkflowRunCatalogEntry;
+      run: ReturnType<WorkflowRunDatabaseReader["readRun"]>;
+      binding?: WorkflowLaunchBinding;
+    },
+    binding: WorkflowLaunchBinding,
+  ): void {
+    if (!binding.sessionId || this.watchers.has(value.run.runId) || this.notified.has(value.run.runId)) return;
+    let lastCoordinatorProbe = 0;
     const poll = async () => {
       this.watchers.delete(value.run.runId);
-      if (!this.context) return;
+      if (!this.matchesBinding(binding)) return;
       try {
         const reader = WorkflowRunDatabaseReader.open(value.entry.paths.database);
         const run = (() => { try { return reader.readRun(); } finally { reader.close(); } })();
-        await this.emit({ ...value.entry, run });
-        if (SETTLED.has(run.status)) {
-          if (["completed", "failed", "stopped"].includes(run.status)) this.notify(summary(run, await this.shortId(run.runId)));
+        await this.emit({ ...value.entry, run }, binding);
+        if (TERMINAL.has(run.status)) {
+          const terminal = summary(run, await this.shortId(run.runId));
+          if (this.matchesBinding(binding)) this.notify(terminal);
           return;
         }
+        if ((run.status === "queued" || run.status === "running")
+          && Date.now() - lastCoordinatorProbe >= COORDINATOR_PROBE_MS) {
+          lastCoordinatorProbe = Date.now();
+          const state = await this.coordinator.launcher.inspect(coordinatorUnitName(run.runId));
+          if (!["active", "activating", "deactivating", "reloading"].includes(state.activeState)) {
+            try { await this.coordinator.launch(value.entry.paths.root); }
+            catch (error) {
+              if (!(error instanceof WorkflowCoordinatorAlreadyRunningError)) throw error;
+            }
+          }
+        }
       } catch { /* retry presentation reads */ }
+      if (!this.matchesBinding(binding)) return;
       const timer = setTimeout(() => void poll(), 250); timer.unref?.(); this.watchers.set(value.run.runId, timer);
     };
     const timer = setTimeout(() => void poll(), 250); timer.unref?.(); this.watchers.set(value.run.runId, timer);
   }
 
   private notify(run: WorkflowRunSummary): void {
-    if (!this.context) return;
+    if (!this.context || this.notified.has(run.runId)) return;
+    this.notified.add(run.runId);
     const content = `Workflow ${run.workflowId} (${run.shortRunId}) ended ${run.status}.`;
     const data = { formatVersion: 1, runId: run.runId, shortRunId: run.shortRunId,
       workflowId: run.workflowId, status: run.status, revision: run.revision };
@@ -302,18 +380,23 @@ export class WorkflowNamedService implements WorkflowNamedClient {
     this.context.ui.notify(content, run.status === "failed" ? "error" : "info");
   }
 
-  private async emit(entry: WorkflowRunCatalogEntry & { run: ReturnType<WorkflowRunDatabaseReader["readRun"]> }): Promise<void> {
+  private async emit(
+    entry: WorkflowRunCatalogEntry & { run: ReturnType<WorkflowRunDatabaseReader["readRun"]> },
+    binding?: WorkflowLaunchBinding,
+  ): Promise<void> {
     if (!this.listeners.size) return;
     try {
       const snapshot = await readWorkflowInvocationSnapshot(entry.paths.root);
       const reader = WorkflowRunDatabaseReader.open(entry.paths.database);
       const projection = (() => { try { return readWorkflowRunProjection(reader, snapshot, { shortRunId: entry.runId.slice(5, 13) }); }
         finally { reader.close(); } })();
+      if (binding && !this.matchesBinding(binding)) return;
       for (const listener of this.listeners) listener(structuredClone(projection));
     } catch { /* projections never alter execution */ }
   }
 
   private assertPrimary(ctx: ExtensionContext): void {
+    if (!sessionId(ctx)) throw new Error("Workflow launch requires an identified primary session");
     if (this.context && sessionId(this.context) !== sessionId(ctx)) throw new Error("Workflow launch is available only in the primary bound session");
     this.bindContext(ctx);
   }
@@ -321,6 +404,17 @@ export class WorkflowNamedService implements WorkflowNamedClient {
   private async shortId(runId: string): Promise<string> {
     const ids = (await this.catalog.list()).map(entry => entry.runId);
     return workflowShortRunIds(ids).get(runId) ?? runId.slice(5, 13);
+  }
+
+  private matchesBinding(binding: WorkflowLaunchBinding): boolean {
+    return Boolean(this.context)
+      && sessionId(this.context!) === binding.sessionId
+      && path.resolve(projectRoot(this.context!.cwd)) === path.resolve(binding.projectRoot);
+  }
+
+  private clearWatchers(): void {
+    for (const timer of this.watchers.values()) clearTimeout(timer);
+    this.watchers.clear();
   }
 }
 
@@ -359,6 +453,43 @@ function validateMode(mode: string, host: ExtensionContext["mode"]): void {
   if (mode === "async" && host !== "tui" && host !== "rpc") throw new Error(`Async workflows are unavailable in ${host} mode`);
 }
 function sessionId(ctx: ExtensionContext): string | undefined { return ctx.sessionManager.getSessionId() ?? ctx.sessionManager.getHeader()?.id; }
+function plainRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function readLaunchBinding(entry: WorkflowRunCatalogEntry): WorkflowLaunchBinding | undefined {
+  if (!entry.run) return undefined;
+  const reader = WorkflowRunDatabaseReader.open(entry.paths.database);
+  try {
+    const event = reader.listEvents({ limit: 1 })[0];
+    const payload = plainRecord(event?.payload);
+    const mode = payload?.mode;
+    const owner = payload?.sessionId;
+    const root = payload?.projectRoot;
+    return event?.type === "run-created" && (mode === "await" || mode === "async")
+      && typeof owner === "string" && typeof root === "string" && path.isAbsolute(root)
+      ? { mode, sessionId: owner, projectRoot: root }
+      : undefined;
+  } finally { reader.close(); }
+}
+
+async function assertReplayProject(manifestPath: string, cwd: string): Promise<void> {
+  const stat = await fs.promises.lstat(manifestPath);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024 * 1024) {
+    throw new Error("Replay source project manifest is unsafe");
+  }
+  const source = await fs.promises.readFile(manifestPath, "utf8");
+  const manifest = JSON.parse(source) as ProjectSnapshotManifest;
+  if (source !== `${stableJson(manifest)}\n`) throw new Error("Replay source project manifest is noncanonical");
+  assertProjectSnapshotManifest(manifest);
+  const [sourceProject, currentProject] = await Promise.all([
+    fs.promises.realpath(manifest.sourceRoot),
+    fs.promises.realpath(projectRoot(cwd)),
+  ]);
+  if (sourceProject !== currentProject) throw new Error("Replay source belongs to another project");
+}
 async function delay(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return;
   await new Promise<void>(resolve => { const timer = setTimeout(done, ms); signal?.addEventListener("abort", done, { once: true });
