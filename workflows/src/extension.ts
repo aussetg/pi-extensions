@@ -16,10 +16,11 @@ import { registerWorkflowCompletionRenderers } from "./ui/workflow-completion-re
 const MODEL_BUILTINS = ["coding", "execute-plan", "goal", "optimize", "package-audit", "research"] as const;
 
 /** Thin primary-session registration and client wiring. Run ownership stays in systemd. */
-export async function createWorkflowExtension(pi: ExtensionAPI): Promise<void> {
+export async function createWorkflowExtension(
+  pi: ExtensionAPI,
+  initialContext?: ExtensionContext,
+): Promise<void> {
   const registry = new WorkflowRegistry();
-  await registry.refresh(process.cwd(), { includeProject: false });
-  assertDefinitionGate(registry);
 
   const ui = new FlowUiController();
   const launcher = new WorkflowCoordinatorService();
@@ -36,7 +37,10 @@ export async function createWorkflowExtension(pi: ExtensionAPI): Promise<void> {
   registerWorkflowCompletionRenderers(pi);
 
   let namedToolRegistered = false;
-  pi.on("session_start", async (_event, ctx) => {
+  const startedContexts = new WeakSet<object>();
+  const startSession = async (ctx: ExtensionContext): Promise<void> => {
+    if (startedContexts.has(ctx)) return;
+    startedContexts.add(ctx);
     workflows.bindContext(ctx);
     ui.bind(ctx, { sessionId: sessionId(ctx), projectId: projectRoot(ctx.cwd) });
     await workflows.refreshDefinitions(ctx);
@@ -56,7 +60,8 @@ export async function createWorkflowExtension(pi: ExtensionAPI): Promise<void> {
       pi.setActiveTools([...new Set([...active, ...required])]);
     }
     await workflows.restoreAsyncNotifications(ctx);
-  });
+  };
+  pi.on("session_start", async (_event, ctx) => { await startSession(ctx); });
 
   pi.on("session_info_changed", async (_event, ctx) => {
     workflows.bindContext(ctx);
@@ -68,6 +73,8 @@ export async function createWorkflowExtension(pi: ExtensionAPI): Promise<void> {
     workflows.detachContext();
     ui.clear(ctx);
   });
+
+  if (initialContext) await startSession(initialContext);
 }
 
 export function assertDefinitionGate(registry: WorkflowRegistry): void {

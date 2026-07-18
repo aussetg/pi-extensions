@@ -2,8 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { SdkAgentWorkerExecutor } from "../agents/sdk-executor.js";
-import { SandboxedCommandExecutor } from "../commands/executor.js";
+import { sdkAgentWorkerDescriptor } from "../agents/sdk-descriptor.js";
+import { sandboxedCommandExecutorDescriptor } from "../commands/executor-descriptor.js";
 import { HostMeasurementEnvironmentProvider, type MeasurementEnvironmentDescriptor } from "../measurements/environment.js";
 import { WorkflowRunCatalog, workflowShortRunIds, type WorkflowRunCatalogEntry } from "../persistence/run-catalog.js";
 import { WorkflowRunDatabase, WorkflowRunDatabaseReader } from "../persistence/run-database.js";
@@ -20,15 +20,10 @@ import { WorkflowRegistry } from "../registry/structured-workflows.js";
 import type { JsonObject, JsonValue } from "../types.js";
 import { stableHash } from "../utils/hashes.js";
 import { stableJson } from "../utils/stable-json.js";
-import {
-  assertProjectSnapshotManifest,
-  captureProjectSnapshot,
-  type ProjectSnapshotManifest,
-} from "../workspaces/project-snapshot.js";
+import type { ProjectSnapshotManifest } from "../workspaces/project-snapshot.js";
 import { coordinatorUnitName } from "./coordinator-identity.js";
 import { WorkflowCoordinatorAlreadyRunningError, WorkflowCoordinatorService } from "./coordinator-service.js";
 import type { WorkflowNamedClient, WorkflowNamedResult, WorkflowRunSummary } from "./named-workflow-types.js";
-import { prepareWorkflowResources } from "./prepare-resources.js";
 import { WorkflowControlClient } from "./workflow-control-client.js";
 
 const SETTLED = new Set(["waiting", "paused", "completed", "failed", "stopped"]);
@@ -46,8 +41,8 @@ export class WorkflowNamedService implements WorkflowNamedClient {
   readonly catalog: WorkflowRunCatalog;
   readonly coordinator: WorkflowCoordinatorService;
   readonly controls: WorkflowControlClient;
-  readonly agentExecutorDescriptor = new SdkAgentWorkerExecutor().describe();
-  private readonly commandExecutorDescriptor = new SandboxedCommandExecutor().describe();
+  readonly agentExecutorDescriptor = sdkAgentWorkerDescriptor();
+  private readonly commandExecutorDescriptor = sandboxedCommandExecutorDescriptor();
   private readonly measurementEnvironmentDescriptor: MeasurementEnvironmentDescriptor = new HostMeasurementEnvironmentProvider().describe();
   private context?: ExtensionContext;
   private readonly listeners = new Set<(projection: WorkflowRunProjection) => void>();
@@ -201,6 +196,10 @@ export class WorkflowNamedService implements WorkflowNamedClient {
     binding: WorkflowLaunchBinding;
   }> {
     await this.catalog.ensureRoot();
+    const [{ prepareWorkflowResources }, { captureProjectSnapshot }] = await Promise.all([
+      import("./prepare-resources.js"),
+      import("../workspaces/project-snapshot.js"),
+    ]);
     const ref = this.registry.resolve(workflowId);
     const availableModels = ctx.modelRegistry.getAvailable().map(model => `${model.provider}/${model.id}`);
     const defaultModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : availableModels[0];
@@ -476,6 +475,7 @@ function readLaunchBinding(entry: WorkflowRunCatalogEntry): WorkflowLaunchBindin
 }
 
 async function assertReplayProject(manifestPath: string, cwd: string): Promise<void> {
+  const { assertProjectSnapshotManifest } = await import("../workspaces/project-snapshot.js");
   const stat = await fs.promises.lstat(manifestPath);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024 * 1024) {
     throw new Error("Replay source project manifest is unsafe");

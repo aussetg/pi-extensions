@@ -29,6 +29,7 @@ let root: string;
 let builtinDir: string;
 let userDir: string;
 let projectDir: string;
+const API = path.resolve("workflow-api.d.ts");
 
 beforeEach(async () => {
   root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "workflow-registry-"));
@@ -97,6 +98,92 @@ describe("workflow filesystem registry", () => {
     await refresh(registry, false);
     expect(registry.resolve("user:safe").exposure).toBe("human");
     expect(registry.listInvalid().some((entry) => entry.kind === "policy" && /not JSON/.test(entry.error))).toBe(true);
+  }, 30_000);
+
+  test("attributes batched TypeScript diagnostics without rejecting valid siblings", async () => {
+    await Promise.all([
+      writeFlow(builtinDir, "valid"),
+      fs.promises.writeFile(
+        path.join(userDir, "invalid.flow.ts"),
+        simpleFlow("Invalid type fixture.").replace("objective: input.objective", "objective: 42"),
+        "utf8",
+      ),
+    ]);
+    const registry = new WorkflowRegistry();
+    await refresh(registry, false);
+
+    expect(registry.list().map(ref => ref.id)).toEqual(["builtin:valid"]);
+    expect(registry.listInvalid()).toMatchObject([{
+      kind: "definition",
+      namespace: "user",
+      name: "invalid",
+      error: expect.stringMatching(/TypeScript TS2322/),
+    }]);
+  }, 30_000);
+
+  test("rejects ambient augmentation before batching so valid siblings remain isolated", async () => {
+    const augmenting = simpleFlow("Ambient augmentation fixture.").replace(
+      "\nconst Input",
+      '\ndeclare module "pi/workflows" { function workflow(value: any): any }\nconst Input',
+    ).replace("async run(_flow, input)", "async run(_flow: any, input: any)");
+    await Promise.all([
+      writeFlow(builtinDir, "isolated", "Batched isolation fixture."),
+      fs.promises.writeFile(path.join(userDir, "augmenting.flow.ts"), augmenting, "utf8"),
+    ]);
+    const registry = new WorkflowRegistry();
+    await refresh(registry, false);
+
+    expect(registry.list().map(ref => ref.id)).toEqual(["builtin:isolated"]);
+    expect(registry.listInvalid()).toMatchObject([{
+      kind: "definition",
+      namespace: "user",
+      name: "augmenting",
+      error: "Module and namespace declarations are unavailable (2:1)",
+    }]);
+  }, 30_000);
+
+  test("reuses only exact content-addressed frontend results", async () => {
+    const apiPath = path.join(root, "workflow-api.d.ts");
+    await Promise.all([
+      fs.promises.copyFile(API, apiPath),
+      writeFlow(userDir, "cached", "Cache identity fixture."),
+    ]);
+    const registry = new WorkflowRegistry();
+    const refreshCached = async () => await registry.refresh(root, {
+      builtinDir,
+      userDir,
+      projectDir,
+      includeProject: false,
+      apiPath,
+    });
+
+    await refreshCached();
+    const first = registry.resolve("user:cached");
+
+    // Discovery still reads source and policy: unchanged bytes reuse the frontend,
+    // while a policy-only edit changes exposure without invalidating it.
+    await Promise.all([
+      fs.promises.writeFile(first.path, first.source, "utf8"),
+      writePolicy(userDir, ["cached"]),
+    ]);
+    await refreshCached();
+    const policyChanged = registry.resolve("user:cached");
+    expect(policyChanged.exposure).toBe("model");
+    expect(policyChanged.parsed).toBe(first.parsed);
+
+    // Exact API declaration bytes participate in the cache identity even when
+    // the semantic change is only a comment.
+    await fs.promises.appendFile(apiPath, "\n// cache identity changed\n", "utf8");
+    await refreshCached();
+    const apiChanged = registry.resolve("user:cached");
+    expect(apiChanged.parsed).not.toBe(first.parsed);
+    expect(apiChanged.sourceHash).toBe(first.sourceHash);
+
+    await writeFlow(userDir, "cached", "Cache source changed.");
+    await refreshCached();
+    const sourceChanged = registry.resolve("user:cached");
+    expect(sourceChanged.parsed).not.toBe(apiChanged.parsed);
+    expect(sourceChanged.sourceHash).not.toBe(apiChanged.sourceHash);
   }, 30_000);
 
   test("filename identity makes copy and rename explicit while exposure remains non-semantic", async () => {

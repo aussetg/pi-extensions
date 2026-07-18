@@ -18,7 +18,10 @@ registerHooks({
 });
 
 try {
-  const { agentWorkerMain } = await import("./sdk-worker.ts");
+  const implementation = fs.existsSync(new URL("./sdk-worker.js", import.meta.url))
+    ? "./sdk-worker.js"
+    : "./sdk-worker.ts";
+  const { agentWorkerMain } = await import(implementation);
   process.exitCode = await agentWorkerMain(process.argv.slice(2));
 } catch (error) {
   const message = error instanceof Error ? error.stack ?? error.message : String(error);

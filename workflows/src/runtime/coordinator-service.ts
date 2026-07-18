@@ -8,7 +8,7 @@ import {
   type WorkflowUnitHandle,
 } from "../systemd/launcher.js";
 import { coordinatorUnitName } from "./coordinator-identity.js";
-import { workflowCoordinatorEntryPath } from "./run-coordinator.js";
+import { workflowCoordinatorEntryPath } from "./entry-paths.js";
 
 export class WorkflowCoordinatorAlreadyRunningError extends Error {
   constructor(readonly runId: string, readonly unit: string) {

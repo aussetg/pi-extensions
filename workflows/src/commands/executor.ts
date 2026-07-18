@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import { DEFINITION_LIMITS } from "../definition/limits.js";
 import type { SafetyConfiguration } from "../runtime/durable-types.js";
@@ -20,6 +19,18 @@ import {
   type ResolvedCommandInvocation,
 } from "./profiles.js";
 import { resolveCommandExecutionLimits } from "./run-safety.js";
+import {
+  sandboxedCommandExecutorDescriptor,
+  type HostCommandExecutorDescriptor,
+  type SandboxedCommandExecutorOptions,
+} from "./executor-descriptor.js";
+
+export {
+  sameCommandExecutorProtocol,
+  type CommandExecutableDiagnostic,
+  type HostCommandExecutorDescriptor,
+  type SandboxedCommandExecutorOptions,
+} from "./executor-descriptor.js";
 
 export interface HostCommandRequest {
   runId: string;
@@ -105,35 +116,6 @@ export interface HostCommandExecutor {
   ): Promise<HostCommandResult>;
 }
 
-export interface CommandExecutableDiagnostic {
-  path: string;
-  version?: string;
-}
-
-export interface HostCommandExecutorDescriptor {
-  id: string;
-  sandbox: "bwrap-systemd" | "fake";
-  executables?: {
-    bubblewrap: CommandExecutableDiagnostic;
-    systemdRun: CommandExecutableDiagnostic;
-    systemctl: CommandExecutableDiagnostic;
-  };
-}
-
-export interface SandboxedCommandExecutorOptions {
-  bwrapPath?: string;
-  systemdRunPath?: string;
-  systemctlPath?: string;
-}
-
-/** Executable diagnostics and run-owned safety are evidence, not replay identity. */
-export function sameCommandExecutorProtocol(
-  left: HostCommandExecutorDescriptor,
-  right: HostCommandExecutorDescriptor,
-): boolean {
-  return left.id === right.id && left.sandbox === right.sandbox;
-}
-
 /**
  * Linux-only command containment. There is intentionally no direct-spawn or
  * portable fallback: every command is a transient systemd service whose payload
@@ -154,15 +136,7 @@ export class SandboxedCommandExecutor implements HostCommandExecutor {
       systemdRunPath: this.systemdRun,
       systemctlPath: this.systemctl,
     });
-    this.descriptor = Object.freeze({
-      id: "sandboxed-command",
-      sandbox: "bwrap-systemd",
-      executables: {
-        bubblewrap: executableDiagnostic(this.bwrap, ["--version"]),
-        systemdRun: executableDiagnostic(this.systemdRun, ["--version"]),
-        systemctl: executableDiagnostic(this.systemctl, ["--version"]),
-      },
-    } satisfies HostCommandExecutorDescriptor);
+    this.descriptor = sandboxedCommandExecutorDescriptor(options);
   }
 
   describe(): HostCommandExecutorDescriptor {
@@ -558,12 +532,6 @@ async function assertExecutable(filePath: string): Promise<void> {
   } catch {
     throw new Error(`Required command sandbox executable is unavailable: ${filePath}`);
   }
-}
-
-function executableDiagnostic(filePath: string, args: string[]): CommandExecutableDiagnostic {
-  const result = spawnSync(filePath, args, { encoding: "utf8", timeout: 2_000, maxBuffer: 8_192 });
-  const firstLine = `${result.stdout ?? ""}${result.stderr ?? ""}`.split(/\r?\n/, 1)[0]?.trim();
-  return { path: filePath, ...(firstLine ? { version: firstLine.slice(0, 512) } : {}) };
 }
 
 async function settleCommandTimers(

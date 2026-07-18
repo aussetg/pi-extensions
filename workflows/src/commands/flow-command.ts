@@ -10,7 +10,6 @@ import {
   type FlowProtocolEnvelope,
 } from "../ui/flow-protocol.js";
 import { boundedWorkflowProjectionText as sanitizeProjectionText } from "../projection/run-projection.js";
-import { projectWorkflowDraftPromotion, projectWorkflowDraftReview } from "../projection/approval-inspectors.js";
 import { openWorkflowInspector } from "../ui/flow-inspector.js";
 import {
   renderApplyApprovalConfirmation,
@@ -154,6 +153,7 @@ export async function routeFlowCommand(
     }
     case "validate": {
       const review = await dependencies.drafts.validate(command.draftId, ctx);
+      const { projectWorkflowDraftReview } = await import("../projection/approval-inspectors.js");
       const projection = projectWorkflowDraftReview(review);
       return createFlowEnvelope({
         kind: "flow-draft-validation",
@@ -243,6 +243,7 @@ async function promote(
   ctx: ExtensionCommandContext,
 ): Promise<FlowProtocolEnvelope> {
   const prepared = await dependencies.drafts.promotionChallenge(command.draftId, command.exposure, ctx);
+  const { projectWorkflowDraftPromotion } = await import("../projection/approval-inspectors.js");
   if (ctx.mode === "tui") {
     const projection = projectWorkflowDraftPromotion(prepared.review, prepared.challenge);
     const confirmed = await ctx.ui.confirm(

@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   createAgentSession,
   createExtensionRuntime,
@@ -254,10 +253,6 @@ export async function agentWorkerMain(args: readonly string[]): Promise<number> 
   if (config.resultPath) await writeWorkerResult(config.runDir, config.request, config.resultPath, serialized);
   else process.stdout.write(serialized);
   return result.outcome === "failed" ? 1 : 0;
-}
-
-export function agentWorkerEntryPath(): string {
-  return fileURLToPath(new URL("./agent-worker-entry.js", import.meta.url));
 }
 
 export async function openPinnedAgentSession(runDirInput: string, request: AgentExecutionRequest): Promise<SessionManager> {

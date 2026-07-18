@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { WorkflowScriptError } from "../runtime/errors.js";
+import { stableHash } from "../utils/hashes.js";
 import { WORKFLOW_MODULE } from "./workflow-language.js";
 
 const DEFAULT_API_PATH = fileURLToPath(new URL("../../workflow-api.d.ts", import.meta.url));
@@ -9,6 +10,33 @@ const DEFAULT_API_PATH = fileURLToPath(new URL("../../workflow-api.d.ts", import
 export interface WorkflowTypecheckOptions {
   fileName: string;
   apiPath?: string;
+}
+
+export interface WorkflowTypecheckSource {
+  fileName: string;
+  source: string;
+}
+
+export interface WorkflowTypecheckBatchOptions {
+  apiPath?: string;
+  /** Exact API bytes already read and hashed by registry discovery. */
+  apiSource?: string;
+}
+
+export interface WorkflowTypecheckResult {
+  fileName: string;
+  error?: WorkflowScriptError;
+}
+
+/** Content identity for the exact runtime compiler and options. */
+export const WORKFLOW_TYPECHECK_IDENTITY = stableHash({
+  revision: 2,
+  typescriptVersion: ts.version,
+  compilerOptions: runtimeCompilerOptions(),
+});
+
+export function workflowTypecheckApiPath(apiPath?: string): string {
+  return path.resolve(apiPath ?? DEFAULT_API_PATH);
 }
 
 /** Inspect syntax that Node's strip-only pass deliberately erases, especially type-only imports. */
@@ -40,6 +68,7 @@ export function validateWorkflowTypeScriptEnvelope(source: string, fileName: str
   if (file.referencedFiles.length || file.typeReferenceDirectives.length || file.libReferenceDirectives.length) {
     throw new WorkflowScriptError("TypeScript reference directives are unavailable", { line: 1, column: 1 });
   }
+  validateErasedTypeScriptDependencies(file);
   for (const statement of file.statements) {
     if (statement === declaration) continue;
     if (ts.isExportDeclaration(statement)) {
@@ -53,52 +82,120 @@ export function validateWorkflowTypeScriptEnvelope(source: string, fileName: str
   }
 }
 
+function validateErasedTypeScriptDependencies(file: ts.SourceFile): void {
+  const visit = (node: ts.Node): void => {
+    if (ts.isModuleDeclaration(node)) {
+      throw nodeError(file, node, "Module and namespace declarations are unavailable");
+    }
+    if (ts.isImportTypeNode(node)) {
+      const argument = node.argument;
+      if (!ts.isLiteralTypeNode(argument)
+        || !ts.isStringLiteral(argument.literal)
+        || argument.literal.text !== WORKFLOW_MODULE) {
+        throw nodeError(
+          file,
+          node,
+          `Type imports are restricted to ${JSON.stringify(WORKFLOW_MODULE)}`,
+        );
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(file, visit);
+}
+
 /** Strictly typecheck one original `.flow.ts` module against the pinned virtual API. */
 export function typecheckWorkflowSource(
   source: string,
   options: WorkflowTypecheckOptions,
 ): void {
-  const fileName = path.resolve(options.fileName);
-  const apiPath = path.resolve(options.apiPath ?? DEFAULT_API_PATH);
-  const compilerOptions: ts.CompilerOptions = {
-    target: ts.ScriptTarget.ES2022,
-    module: ts.ModuleKind.NodeNext,
-    moduleResolution: ts.ModuleResolutionKind.NodeNext,
-    strict: true,
-    noUncheckedIndexedAccess: true,
-    exactOptionalPropertyTypes: true,
-    skipLibCheck: false,
-    noEmit: true,
-    noErrorTruncation: true,
-    types: [],
-  };
+  const [result] = typecheckWorkflowSources(
+    [{ source, fileName: options.fileName }],
+    options.apiPath ? { apiPath: options.apiPath } : {},
+  );
+  if (result?.error) throw result.error;
+}
+
+/** Strictly typecheck many original `.flow.ts` modules in one TypeScript program. */
+export function typecheckWorkflowSources(
+  inputs: readonly WorkflowTypecheckSource[],
+  options: WorkflowTypecheckBatchOptions = {},
+): WorkflowTypecheckResult[] {
+  if (inputs.length === 0) return [];
+  const apiPath = workflowTypecheckApiPath(options.apiPath);
+  const apiKey = canonicalFileName(apiPath);
+  const sources = new Map<string, { fileName: string; source: string }>();
+  for (const input of inputs) {
+    const fileName = path.resolve(input.fileName);
+    const key = canonicalFileName(fileName);
+    if (key === apiKey) throw new Error("Workflow source path collides with the public API declaration");
+    if (sources.has(key)) throw new Error(`Duplicate workflow typecheck source ${fileName}`);
+    sources.set(key, { fileName, source: input.source });
+  }
+  const compilerOptions = runtimeCompilerOptions();
   const host = ts.createCompilerHost(compilerOptions, true);
   const originalGetSourceFile = host.getSourceFile.bind(host);
   const originalReadFile = host.readFile.bind(host);
   const originalFileExists = host.fileExists.bind(host);
-  const sourceKey = canonicalFileName(fileName);
 
-  host.fileExists = (candidate): boolean =>
-    canonicalFileName(candidate) === sourceKey || originalFileExists(candidate);
-  host.readFile = (candidate): string | undefined =>
-    canonicalFileName(candidate) === sourceKey ? source : originalReadFile(candidate);
+  host.fileExists = (candidate): boolean => {
+    const key = canonicalFileName(candidate);
+    return sources.has(key) || (options.apiSource !== undefined && key === apiKey) || originalFileExists(candidate);
+  };
+  host.readFile = (candidate): string | undefined => {
+    const key = canonicalFileName(candidate);
+    if (options.apiSource !== undefined && key === apiKey) return options.apiSource;
+    const source = sources.get(key);
+    return source ? source.source : originalReadFile(candidate);
+  };
   host.getSourceFile = (candidate, languageVersion, onError, shouldCreateNewSourceFile) => {
-    if (canonicalFileName(candidate) === sourceKey) {
-      return ts.createSourceFile(candidate, source, languageVersion, true, ts.ScriptKind.TS);
+    const key = canonicalFileName(candidate);
+    if (options.apiSource !== undefined && key === apiKey) {
+      return ts.createSourceFile(apiPath, options.apiSource, languageVersion, true, ts.ScriptKind.TS);
+    }
+    const source = sources.get(key);
+    if (source) {
+      return ts.createSourceFile(source.fileName, source.source, languageVersion, true, ts.ScriptKind.TS);
     }
     return originalGetSourceFile(candidate, languageVersion, onError, shouldCreateNewSourceFile);
   };
 
   const program = ts.createProgram({
-    rootNames: [apiPath, fileName],
+    rootNames: [apiPath, ...[...sources.values()].map(source => source.fileName)],
     options: compilerOptions,
     host,
   });
   const errors = ts.getPreEmitDiagnostics(program)
     .filter((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error)
     .sort(compareDiagnostics);
-  if (errors.length === 0) return;
-  throw diagnosticError(errors[0]!);
+  const shared = errors.filter(diagnostic =>
+    !diagnostic.file || !sources.has(canonicalFileName(diagnostic.file.fileName)));
+  return [...sources.entries()].map(([key, source]) => {
+    const error = [...shared, ...errors.filter(diagnostic =>
+      diagnostic.file && canonicalFileName(diagnostic.file.fileName) === key)]
+      .sort(compareDiagnostics)[0];
+    return {
+      fileName: source.fileName,
+      ...(error ? { error: diagnosticError(error) } : {}),
+    };
+  });
+}
+
+function runtimeCompilerOptions(): ts.CompilerOptions {
+  return {
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    strict: true,
+    noUncheckedIndexedAccess: true,
+    exactOptionalPropertyTypes: true,
+    // Runtime checks workflow consumers; pinned declaration integrity is covered by the
+    // strict development and conformance typechecks.
+    skipLibCheck: true,
+    noEmit: true,
+    noErrorTruncation: true,
+    types: [],
+  };
 }
 
 function diagnosticError(diagnostic: ts.Diagnostic): WorkflowScriptError {

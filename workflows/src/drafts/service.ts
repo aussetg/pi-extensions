@@ -1,11 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentExecutorDescriptor } from "../agents/executor.js";
-import { AgentProfileRegistry } from "../agents/profiles.js";
-import { AgentRouteRegistry } from "../agents/routes.js";
-import { MeasurementProfileRegistry } from "../measurements/profiles.js";
 import type { WorkflowExposure } from "../registry/workflow-policy.js";
 import { stableHash } from "../utils/hashes.js";
-import { reviewWorkflowDraft, type WorkflowDraftReviewOptions } from "./review.js";
+import type { WorkflowDraftReviewOptions } from "./review.js";
 import { WorkflowDraftStore, type WorkflowDraftStoreOptions } from "./store.js";
 import type {
   WorkflowDraftId,
@@ -67,6 +64,7 @@ export class WorkflowDraftService {
 
   async validate(selector: string, ctx: ExtensionContext): Promise<WorkflowDraftReviewRecord> {
     const draft = await this.inspect(selector, ctx);
+    const { reviewWorkflowDraft } = await import("./review.js");
     return await reviewWorkflowDraft(draft, await this.reviewOptions(ctx));
   }
 
@@ -155,8 +153,13 @@ export class WorkflowDraftService {
   }
 
   private async reviewOptions(ctx: ExtensionContext): Promise<WorkflowDraftReviewOptions> {
+    const [agents, routesModule, measurementsModule] = await Promise.all([
+      import("../agents/profiles.js"),
+      import("../agents/routes.js"),
+      import("../measurements/profiles.js"),
+    ]);
     const includeProject = ctx.isProjectTrusted();
-    const profiles = new AgentProfileRegistry();
+    const profiles = new agents.AgentProfileRegistry();
     await profiles.refresh(ctx.cwd, { includeProject });
     const availableModels = ctx.modelRegistry.getAvailable().map(model => `${model.provider}/${model.id}`);
     const selectedModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : availableModels[0];
@@ -166,9 +169,9 @@ export class WorkflowDraftService {
           thinking: this.pi.getThinkingLevel(),
         }]))
       : {};
-    const routes = new AgentRouteRegistry();
+    const routes = new routesModule.AgentRouteRegistry();
     await routes.refresh({ defaults, ...(this.routeFile ? { filePath: this.routeFile } : {}) });
-    const measurements = new MeasurementProfileRegistry();
+    const measurements = new measurementsModule.MeasurementProfileRegistry();
     await measurements.refresh(ctx.cwd, { includeProject });
     return {
       cwd: ctx.cwd,

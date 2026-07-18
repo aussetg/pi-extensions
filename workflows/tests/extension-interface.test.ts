@@ -2,14 +2,31 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import workflowsExtension from "../index.js";
 import { createWorkflowExtension } from "../src/extension.js";
 import { parseFlowCommand } from "../src/commands/flow-command-parser.js";
+import { WorkflowRegistry } from "../src/registry/structured-workflows.js";
 import { WorkflowNamedService } from "../src/runtime/named-workflow-service.js";
 
 const roots: string[] = [];
-afterEach(async () => { await Promise.all(roots.splice(0).map(root => fs.promises.rm(root, { recursive: true, force: true }))); });
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await Promise.all(roots.splice(0).map(root => fs.promises.rm(root, { recursive: true, force: true })));
+});
 
 describe("workflow extension cutover", () => {
+  it("keeps the discovered entry to one lazy session bootstrap", () => {
+    const tools: any[] = [];
+    const commands: string[] = [];
+    const events = new Map<string, Function[]>();
+    workflowsExtension(fakePi(tools, commands, events) as any);
+
+    expect(tools).toEqual([]);
+    expect(commands).toEqual([]);
+    expect([...events.keys()]).toEqual(["session_start"]);
+    expect(events.get("session_start")).toHaveLength(1);
+  });
+
   it("registers only the strict TypeScript tools after primary-session trust is known", async () => {
     const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "workflow-extension-"));
     roots.push(root);
@@ -20,12 +37,16 @@ describe("workflow extension cutover", () => {
       const commands: string[] = [];
       const events = new Map<string, Function[]>();
       const pi = fakePi(tools, commands, events);
+      const refresh = vi.spyOn(WorkflowRegistry.prototype, "refresh");
       await createWorkflowExtension(pi as any);
+      expect(refresh).not.toHaveBeenCalled();
       expect(tools.map(tool => tool.name)).toEqual(["workflow_draft"]);
 
       const ctx = context("primary", process.cwd());
       await events.get("session_start")![0]!({}, ctx);
 
+      expect(refresh).toHaveBeenCalledTimes(1);
+      expect(refresh).toHaveBeenCalledWith(ctx.cwd, { includeProject: false });
       expect(tools.map(tool => tool.name).sort()).toEqual(["workflow", "workflow_draft"]);
       expect(commands.sort()).toEqual(["execute-plan", "flow", "goal"]);
       const execution = tools.find(tool => tool.name === "workflow");

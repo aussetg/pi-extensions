@@ -9,6 +9,8 @@
     ".": "./index.ts"
   },
   "scripts": {
+    "build": "node scripts/build.mjs",
+    "postinstall": "npm run build",
     "typecheck": "tsc --noEmit",
     "typecheck:flows": "tsc -p tsconfig.flows.json",
     "typecheck:conformance": "tsc -p tests/conformance/typecheck/tsconfig.json",
@@ -17,9 +19,10 @@
     "test:systemd": "vitest run tests/systemd-substrate.test.ts tests/command-executor.test.ts",
     "test:coordinator": "vitest run tests/workflow-coordinator.test.ts",
     "test:semantic-engine": "vitest run tests/workflow-semantic-engine.test.ts",
+    "test:production": "npm run build && node scripts/production-smoke.mjs",
     "test:unit": "vitest run --no-file-parallelism",
     "test": "npm run test:unit && npm run test:conformance",
-    "check": "npm run typecheck && npm run typecheck:flows && npm run typecheck:conformance && npm test"
+    "check": "npm run typecheck && npm run typecheck:flows && npm run typecheck:conformance && npm run test:production && npm test"
   },
   "dependencies": {
     "acorn": "8.16.0",

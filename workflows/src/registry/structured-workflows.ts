@@ -3,11 +3,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFINITION_LIMITS } from "../definition/limits.js";
 import type { WorkflowNamespace } from "../definition/types.js";
-import { parseWorkflow } from "../definition/workflow-frontend.js";
+import {
+  parseTypecheckedWorkflow,
+  WORKFLOW_FRONTEND_REVISION,
+} from "../definition/workflow-frontend.js";
 import {
   WORKFLOW_RUNTIME_API_HASH,
   WORKFLOW_SOURCE_EXTENSION,
 } from "../definition/workflow-language.js";
+import {
+  typecheckWorkflowSources,
+  validateWorkflowTypeScriptEnvelope,
+  workflowTypecheckApiPath,
+  WORKFLOW_TYPECHECK_IDENTITY,
+} from "../definition/workflow-typecheck.js";
 import type {
   ParsedWorkflow,
   WorkflowSourceLocation,
@@ -15,7 +24,7 @@ import type {
 import { WorkflowScriptError } from "../runtime/errors.js";
 import { projectWorkflowDir, userWorkflowDir } from "../persistence/paths.js";
 import { readBoundedTextFile } from "../persistence/safe-paths.js";
-import { stableHash } from "../utils/hashes.js";
+import { sha256, stableHash } from "../utils/hashes.js";
 import {
   defaultWorkflowRegistryPolicy,
   readWorkflowRegistryPolicy,
@@ -68,6 +77,47 @@ interface RegistryRoot {
   directory: string;
 }
 
+interface WorkflowSourceCandidate {
+  filePath: string;
+  installedName: string;
+  source: string;
+  sourceHash: string;
+}
+
+interface WorkflowRootScan {
+  root: RegistryRoot;
+  directory: string;
+  policy?: WorkflowRegistryPolicySnapshot;
+  fallbackPolicy: boolean;
+  candidates: WorkflowSourceCandidate[];
+  invalid: InvalidWorkflowDefinitionRef[];
+}
+
+interface WorkflowFrontendPlan {
+  apiPath: string;
+  apiSource: string;
+  apiError?: unknown;
+  cached: ReadonlyMap<string, ParsedWorkflow>;
+  cacheKeys: ReadonlyMap<string, string>;
+  misses: WorkflowSourceCandidate[];
+}
+
+interface WorkflowFrontendCacheEntry {
+  parsed: ParsedWorkflow;
+  bytes: number;
+}
+
+interface WorkflowFrontendCacheStore {
+  formatVersion: 1;
+  bytes: number;
+  entries: Map<string, WorkflowFrontendCacheEntry>;
+}
+
+const FRONTEND_CACHE_FORMAT_VERSION = 1;
+const FRONTEND_CACHE_MAX_ENTRIES = 512;
+const FRONTEND_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+const FRONTEND_CACHE_SYMBOL = Symbol.for("pi.workflows.frontend-cache");
+
 /** Filesystem registry for reviewed TypeScript workflow definitions. */
 export class WorkflowRegistry {
   private refs = new Map<string, WorkflowDefinitionRef>();
@@ -84,8 +134,14 @@ export class WorkflowRegistry {
       roots.push({ namespace: "project", directory: options.projectDir ?? projectWorkflowDir(cwd) });
     }
 
-    for (const root of roots) {
-      const discovered = await discoverWorkflowRoot(root, options.apiPath);
+    const scans: WorkflowRootScan[] = [];
+    for (const root of roots) scans.push(await scanWorkflowRoot(root));
+    const candidates = scans.flatMap(scan => scan.candidates);
+    const frontend = await planWorkflowFrontends(candidates, options.apiPath);
+    const typecheckErrors = batchTypecheckErrors(frontend.misses, frontend);
+
+    for (const scan of scans) {
+      const discovered = await materializeWorkflowRoot(scan, frontend, typecheckErrors);
       invalid.push(...discovered.invalid);
       for (const ref of discovered.refs) refs.set(ref.id, ref);
     }
@@ -137,11 +193,15 @@ export function workflowDefinitionHash(
   });
 }
 
-async function discoverWorkflowRoot(
-  root: RegistryRoot,
-  apiPath: string | undefined,
-): Promise<{ refs: WorkflowDefinitionRef[]; invalid: InvalidWorkflowDefinitionRef[] }> {
+async function scanWorkflowRoot(root: RegistryRoot): Promise<WorkflowRootScan> {
   const directory = path.resolve(root.directory);
+  const empty = (invalid: InvalidWorkflowDefinitionRef[] = []): WorkflowRootScan => ({
+    root,
+    directory,
+    fallbackPolicy: false,
+    candidates: [],
+    invalid,
+  });
   let names: string[];
   try {
     const stat = await fs.promises.lstat(directory);
@@ -152,29 +212,23 @@ async function discoverWorkflowRoot(
       .filter((name) => name.endsWith(WORKFLOW_SOURCE_EXTENSION))
       .sort();
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { refs: [], invalid: [] };
-    return {
-      refs: [],
-      invalid: [{
-        kind: "definition",
-        namespace: root.namespace,
-        path: directory,
-        name: path.basename(directory),
-        error: errorMessage(error),
-      }],
-    };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return empty();
+    return empty([{
+      kind: "definition",
+      namespace: root.namespace,
+      path: directory,
+      name: path.basename(directory),
+      error: errorMessage(error),
+    }]);
   }
   if (names.length > DEFINITION_LIMITS.filesPerNamespace) {
-    return {
-      refs: [],
-      invalid: [{
-        kind: "definition",
-        namespace: root.namespace,
-        path: directory,
-        name: path.basename(directory),
-        error: `Too many ${WORKFLOW_SOURCE_EXTENSION} files (${names.length}/${DEFINITION_LIMITS.filesPerNamespace})`,
-      }],
-    };
+    return empty([{
+      kind: "definition",
+      namespace: root.namespace,
+      path: directory,
+      name: path.basename(directory),
+      error: `Too many ${WORKFLOW_SOURCE_EXTENSION} files (${names.length}/${DEFINITION_LIMITS.filesPerNamespace})`,
+    }]);
   }
 
   let policy: WorkflowRegistryPolicySnapshot;
@@ -184,16 +238,13 @@ async function discoverWorkflowRoot(
     policy = await readWorkflowRegistryPolicy(directory, root.namespace);
   } catch (error) {
     if (error instanceof WorkflowRegistryPromotionPendingError) {
-      return {
-        refs: [],
-        invalid: [{
-          kind: "policy",
-          namespace: root.namespace,
-          path: error.transactionPath,
-          name: "registry",
-          error: error.message,
-        }],
-      };
+      return empty([{
+        kind: "policy",
+        namespace: root.namespace,
+        path: error.transactionPath,
+        name: "registry",
+        error: error.message,
+      }]);
     }
     fallbackPolicy = true;
     policy = defaultWorkflowRegistryPolicy(directory, root.namespace);
@@ -206,7 +257,7 @@ async function discoverWorkflowRoot(
     });
   }
 
-  const refs: WorkflowDefinitionRef[] = [];
+  const candidates: WorkflowSourceCandidate[] = [];
   const installedNames = new Set(names.map((name) => name.slice(0, -WORKFLOW_SOURCE_EXTENSION.length)));
   for (const exposed of policy.model) {
     if (!installedNames.has(exposed)) {
@@ -229,32 +280,130 @@ async function discoverWorkflowRoot(
         throw new Error("Workflow definition must be a regular non-symlink file");
       }
       const source = await readBoundedTextFile(filePath, DEFINITION_LIMITS.sourceBytes);
-      const parsed = parseWorkflow(source, {
-        fileName: filePath,
-        ...(apiPath ? { apiPath } : {}),
+      validateWorkflowTypeScriptEnvelope(source, filePath);
+      candidates.push({ filePath, installedName, source, sourceHash: sha256(source) });
+    } catch (error) {
+      invalid.push(invalidDefinition(root.namespace, filePath, installedName, error));
+    }
+  }
+  return { root, directory, policy, fallbackPolicy, candidates, invalid };
+}
+
+async function planWorkflowFrontends(
+  candidates: readonly WorkflowSourceCandidate[],
+  apiPathInput: string | undefined,
+): Promise<WorkflowFrontendPlan> {
+  const apiPath = workflowTypecheckApiPath(apiPathInput);
+  let apiSource = "";
+  try {
+    if (candidates.length > 0) {
+      apiSource = await readBoundedTextFile(apiPath, DEFINITION_LIMITS.sourceBytes);
+    }
+  } catch (apiError) {
+    return {
+      apiPath,
+      apiSource,
+      apiError,
+      cached: new Map(),
+      cacheKeys: new Map(),
+      misses: [...candidates],
+    };
+  }
+  const environmentHash = stableHash({
+    cacheFormatVersion: FRONTEND_CACHE_FORMAT_VERSION,
+    frontendRevision: WORKFLOW_FRONTEND_REVISION,
+    runtimeApiHash: WORKFLOW_RUNTIME_API_HASH,
+    workflowApiSourceHash: sha256(apiSource),
+    typecheck: WORKFLOW_TYPECHECK_IDENTITY,
+  });
+  const cached = new Map<string, ParsedWorkflow>();
+  const cacheKeys = new Map<string, string>();
+  const misses: WorkflowSourceCandidate[] = [];
+
+  for (const candidate of candidates) {
+    const candidatePath = path.resolve(candidate.filePath);
+    const cacheKey = stableHash({
+      environmentHash,
+      fileName: path.basename(candidate.filePath),
+      sourceHash: candidate.sourceHash,
+    });
+    cacheKeys.set(candidatePath, cacheKey);
+    const parsed = readFrontendCache(cacheKey);
+    if (parsed && cachedWorkflowMatches(parsed, candidate)) cached.set(candidatePath, parsed);
+    else {
+      if (parsed) deleteFrontendCache(cacheKey);
+      misses.push(candidate);
+    }
+  }
+  return { apiPath, apiSource, cached, cacheKeys, misses };
+}
+
+function batchTypecheckErrors(
+  candidates: readonly WorkflowSourceCandidate[],
+  frontend: Pick<WorkflowFrontendPlan, "apiPath" | "apiSource" | "apiError">,
+): ReadonlyMap<string, unknown> {
+  if (frontend.apiError) {
+    return new Map(candidates.map(candidate => [path.resolve(candidate.filePath), frontend.apiError]));
+  }
+  try {
+    const results = typecheckWorkflowSources(
+      candidates.map(candidate => ({ fileName: candidate.filePath, source: candidate.source })),
+      { apiPath: frontend.apiPath, apiSource: frontend.apiSource },
+    );
+    return new Map(results.flatMap(result =>
+      result.error ? [[path.resolve(result.fileName), result.error] as const] : []));
+  } catch (error) {
+    return new Map(candidates.map(candidate => [path.resolve(candidate.filePath), error]));
+  }
+}
+
+async function materializeWorkflowRoot(
+  scan: WorkflowRootScan,
+  frontend: WorkflowFrontendPlan,
+  typecheckErrors: ReadonlyMap<string, unknown>,
+): Promise<{ refs: WorkflowDefinitionRef[]; invalid: InvalidWorkflowDefinitionRef[] }> {
+  const { root, directory, policy, fallbackPolicy } = scan;
+  const invalid = [...scan.invalid];
+  if (!policy) return { refs: [], invalid };
+  const refs: WorkflowDefinitionRef[] = [];
+
+  for (const candidate of scan.candidates) {
+    try {
+      const candidatePath = path.resolve(candidate.filePath);
+      const typecheckError = typecheckErrors.get(candidatePath);
+      if (typecheckError) throw typecheckError;
+      const cached = frontend.cached.get(candidatePath);
+      const parsed = cached ?? parseTypecheckedWorkflow(candidate.source, {
+        fileName: candidate.filePath,
       });
-      if (parsed.installedName !== installedName) throw new Error("Workflow frontend returned another installed name");
-      const id = `${root.namespace}:${installedName}` as WorkflowId;
+      if (parsed.installedName !== candidate.installedName) {
+        throw new Error("Workflow frontend returned another installed name");
+      }
+      if (!cached) {
+        const cacheKey = frontend.cacheKeys.get(candidatePath);
+        if (cacheKey) writeFrontendCache(cacheKey, parsed);
+      }
+      const id = `${root.namespace}:${candidate.installedName}` as WorkflowId;
       const ref: WorkflowDefinitionRef = {
         id,
         namespace: root.namespace,
-        name: installedName,
+        name: candidate.installedName,
         ...(parsed.metadata.title ? { title: parsed.metadata.title } : {}),
         description: parsed.metadata.description,
         input: parsed.metadata.input,
         output: parsed.metadata.output,
         ...(parsed.metadata.concurrency !== undefined ? { concurrency: parsed.metadata.concurrency } : {}),
-        exposure: workflowExposure(policy, installedName),
+        exposure: workflowExposure(policy, candidate.installedName),
         policy,
-        path: filePath,
-        source,
+        path: candidate.filePath,
+        source: candidate.source,
         sourceHash: parsed.sourceHash,
         definitionHash: workflowDefinitionHash(id, parsed),
         parsed,
       };
       refs.push(Object.freeze(ref));
     } catch (error) {
-      invalid.push(invalidDefinition(root.namespace, filePath, installedName, error));
+      invalid.push(invalidDefinition(root.namespace, candidate.filePath, candidate.installedName, error));
     }
   }
   try {
@@ -297,6 +446,66 @@ async function discoverWorkflowRoot(
     };
   }
   return { refs, invalid };
+}
+
+function cachedWorkflowMatches(parsed: ParsedWorkflow, candidate: WorkflowSourceCandidate): boolean {
+  try {
+    return parsed.fileName === path.basename(candidate.filePath)
+      && parsed.installedName === candidate.installedName
+      && parsed.source === candidate.source
+      && parsed.sourceHash === candidate.sourceHash
+      && parsed.transform.sourceHash === candidate.sourceHash
+      && parsed.transform.runtimeApiHash === WORKFLOW_RUNTIME_API_HASH;
+  } catch {
+    return false;
+  }
+}
+
+function frontendCacheStore(): WorkflowFrontendCacheStore {
+  const scope = globalThis as unknown as Record<PropertyKey, unknown>;
+  const existing = scope[FRONTEND_CACHE_SYMBOL] as WorkflowFrontendCacheStore | undefined;
+  if (existing?.formatVersion === FRONTEND_CACHE_FORMAT_VERSION
+    && existing.entries instanceof Map
+    && Number.isSafeInteger(existing.bytes)
+    && existing.bytes >= 0) return existing;
+  const created: WorkflowFrontendCacheStore = {
+    formatVersion: FRONTEND_CACHE_FORMAT_VERSION,
+    bytes: 0,
+    entries: new Map(),
+  };
+  scope[FRONTEND_CACHE_SYMBOL] = created;
+  return created;
+}
+
+function readFrontendCache(key: string): ParsedWorkflow | undefined {
+  const store = frontendCacheStore();
+  const entry = store.entries.get(key);
+  if (!entry) return undefined;
+  store.entries.delete(key);
+  store.entries.set(key, entry);
+  return entry.parsed;
+}
+
+function writeFrontendCache(key: string, parsed: ParsedWorkflow): void {
+  const store = frontendCacheStore();
+  const bytes = Buffer.byteLength(JSON.stringify(parsed), "utf8");
+  if (bytes > FRONTEND_CACHE_MAX_BYTES) return;
+  deleteFrontendCache(key);
+  store.entries.set(key, { parsed, bytes });
+  store.bytes += bytes;
+  while (store.entries.size > FRONTEND_CACHE_MAX_ENTRIES || store.bytes > FRONTEND_CACHE_MAX_BYTES) {
+    const oldest = store.entries.keys().next().value as string | undefined;
+    if (!oldest) break;
+    deleteFrontendCache(oldest);
+  }
+}
+
+function deleteFrontendCache(key: string): void {
+  const store = frontendCacheStore();
+  const entry = store.entries.get(key);
+  if (!entry) return;
+  store.entries.delete(key);
+  store.bytes -= entry.bytes;
 }
 
 function invalidDefinition(

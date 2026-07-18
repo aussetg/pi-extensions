@@ -396,6 +396,32 @@ export default workflow({ description: "Hidden import.", input: s.object({}), ou
 `, { fileName: "type-import.flow.ts" }), /exactly one import/, { line: 3, column: 1 });
   });
 
+  test("rejects erased module augmentation before it can affect another workflow", () => {
+    expectWorkflowError(() => parseWorkflow(`
+import { schema as s, workflow } from "pi/workflows";
+declare module "pi/workflows" { function workflow(value: any): any }
+const Output = s.object({ ok: s.boolean() });
+export default workflow({ description: "Module augmentation.", input: s.object({}), output: Output,
+  async run(_flow: any, _input: any) { return { ok: true }; } });
+`, { fileName: "module-augmentation.flow.ts" }), /Module and namespace declarations are unavailable/, {
+      line: 3,
+      column: 1,
+    });
+  });
+
+  test("restricts erased import types to the virtual workflow module", () => {
+    expectWorkflowError(() => parseWorkflow(`
+import { schema as s, workflow } from "pi/workflows";
+type Hidden = typeof import("node:fs");
+const Output = s.object({ ok: s.boolean() });
+export default workflow({ description: "Hidden type dependency.", input: s.object({}), output: Output,
+  async run(_flow, _input) { return { ok: true }; } });
+`, { fileName: "import-type.flow.ts" }), /Type imports are restricted to "pi\/workflows"/, {
+      line: 3,
+      column: 15,
+    });
+  });
+
   test("rejects type-only named exports erased before Acorn review", () => {
     expectWorkflowError(() => parseWorkflow(`
 import { schema as s, workflow } from "pi/workflows";

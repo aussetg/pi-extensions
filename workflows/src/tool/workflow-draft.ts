@@ -3,7 +3,6 @@ import { Type } from "typebox";
 import { DEFINITION_LIMITS, FLOW_NAME_PATTERN } from "../definition/limits.js";
 import type { WorkflowDraftService } from "../drafts/service.js";
 import type { WorkflowDraftNamespace } from "../drafts/types.js";
-import { projectWorkflowDraftReview } from "../projection/approval-inspectors.js";
 import { stableJson } from "../utils/stable-json.js";
 import { truncateBytes } from "../utils/truncate.js";
 
@@ -59,6 +58,7 @@ export function registerWorkflowDraftTool(pi: ExtensionAPI, drafts: WorkflowDraf
           throw new Error("workflow_draft validate accepts only action, namespace, and name");
         }
         const review = await drafts.validate(selector, ctx);
+        const { projectWorkflowDraftReview } = await import("../projection/approval-inspectors.js");
         const projection = projectWorkflowDraftReview(review);
         const rendered = truncateBytes(
           `${review.valid ? "Valid" : "Invalid"} draft ${review.draftId} · review ${review.reviewHash}\n${stableJson(projection)}`,

@@ -84,10 +84,29 @@ const VALUE_IMPORTS = new Set(["agent", "command", "schema", "workflow"]);
 const PROFILE_SELECTOR = /^(?:builtin|user|project):[a-z][a-z0-9_-]{0,63}$/;
 const TYPESCRIPT_SUPPRESSION = /\/\/[ \t]*@ts-(?:ignore|expect-error|nocheck|check)\b|\/\*[\s\S]*?@ts-(?:ignore|expect-error|nocheck|check)\b/giu;
 
+/** Bump whenever frontend or analyzer behavior can change a parsed workflow or diagnostic. */
+export const WORKFLOW_FRONTEND_REVISION = 2;
+
 /** Parse, typecheck, statically review, and instrument one workflow source module. */
 export function parseWorkflow(
   source: string,
   options: ParseWorkflowOptions = {},
+): ParsedWorkflow {
+  return parseWorkflowSource(source, options, true);
+}
+
+/** Parse an exact source that has already passed the batch TypeScript checker. */
+export function parseTypecheckedWorkflow(
+  source: string,
+  options: Pick<ParseWorkflowOptions, "fileName"> = {},
+): ParsedWorkflow {
+  return parseWorkflowSource(source, options, false);
+}
+
+function parseWorkflowSource(
+  source: string,
+  options: ParseWorkflowOptions,
+  typecheck: boolean,
 ): ParsedWorkflow {
   const fileName = validateFileName(options.fileName ?? "workflow.flow.ts");
   validateSourceEnvelope(source);
@@ -105,10 +124,12 @@ export function parseWorkflow(
   const inputPaths = createInputPathResolver(definition.argsPattern);
   rejectReservedBindingShadows(ast, imports, definition, inputPaths.names);
   validateConstructorUse(ast, imports, definition, parents);
-  typecheckWorkflowSource(source, {
-    fileName: path.resolve(fileName),
-    ...(options.apiPath ? { apiPath: options.apiPath } : {}),
-  });
+  if (typecheck) {
+    typecheckWorkflowSource(source, {
+      fileName: path.resolve(fileName),
+      ...(options.apiPath ? { apiPath: options.apiPath } : {}),
+    });
+  }
 
   const constants = collectTopLevelConstants(ast, imports.declaration, definition.exportNode);
   const schemaBinding = imports.byImported.get("schema")!;

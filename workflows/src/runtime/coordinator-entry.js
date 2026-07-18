@@ -21,7 +21,10 @@ registerHooks({
 });
 
 try {
-  const { workflowCoordinatorMain } = await import("./run-coordinator.ts");
+  const implementation = fs.existsSync(new URL("./run-coordinator.js", import.meta.url))
+    ? "./run-coordinator.js"
+    : "./run-coordinator.ts";
+  const { workflowCoordinatorMain } = await import(implementation);
   process.exitCode = await workflowCoordinatorMain(process.argv.slice(2));
 } catch (error) {
   const message = error instanceof Error ? error.stack ?? error.message : String(error);

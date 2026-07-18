@@ -1,8 +1,14 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createWorkflowExtension } from "./src/index.js";
 
-export * from "./src/index.js";
+const RUNTIME_MODULE = "./dist/src/extension.js";
 
-export default async function workflowsExtension(pi: ExtensionAPI): Promise<void> {
-  await createWorkflowExtension(pi);
+/** Tiny source bootstrap. The production runtime is compiled and loaded only for a real session. */
+export default function workflowsExtension(pi: ExtensionAPI): void {
+  let activation: Promise<void> | undefined;
+  pi.on("session_start", (_event, ctx) => {
+    activation ??= import(RUNTIME_MODULE).then(async ({ createWorkflowExtension }) => {
+      await createWorkflowExtension(pi, ctx);
+    });
+    return activation;
+  });
 }

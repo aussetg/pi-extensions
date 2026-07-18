@@ -1,14 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  createEditTool,
-  createFindTool,
-  createGrepTool,
-  createLsTool,
-  createReadTool,
-  createWriteTool,
-} from "@earendil-works/pi-coding-agent";
 import { zeroUsage } from "../runtime/durable-types.js";
 import {
   SystemdUserUnitLauncher,
@@ -26,10 +18,10 @@ import type {
   AgentExecutionResult,
   AgentExecutor,
   AgentExecutorDescriptor,
-  AgentToolDescriptor,
 } from "./executor.js";
-import { sdkSemanticToolDescriptors } from "./sdk-semantic-tools.js";
-import { agentWorkerEntryPath, type SdkAgentWorkerConfig } from "./sdk-worker.js";
+import { agentWorkerEntryPath } from "./entry-paths.js";
+import { sdkAgentWorkerDescriptor } from "./sdk-descriptor.js";
+import type { SdkAgentWorkerConfig } from "./sdk-worker.js";
 import {
   AgentSessionSupervisor,
   type AgentSupervisionStore,
@@ -37,7 +29,8 @@ import {
 } from "./supervisor.js";
 
 const MAX_WORKER_RESULT_BYTES = 1024 * 1024;
-const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const MODULE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const PACKAGE_ROOT = path.basename(MODULE_ROOT) === "dist" ? path.dirname(MODULE_ROOT) : MODULE_ROOT;
 
 export interface SdkAgentWorkerExecutorOptions {
   nodePath?: string;
@@ -54,7 +47,7 @@ export interface SdkAgentWorkerExecutorOptions {
 
 /** The production executor is one supervised logical Pi session. */
 export class SdkAgentWorkerExecutor implements AgentExecutor {
-  private readonly descriptor = sdkWorkerDescriptor();
+  private readonly descriptor = sdkAgentWorkerDescriptor();
   private readonly cycleExecutor: AgentWorkerCycleExecutor;
   private readonly maximumInfrastructureFailures?: number;
   private readonly backoffMs?: readonly number[];
@@ -323,38 +316,6 @@ class SettledCycle extends SystemdCycle {
     return this.resultOrFailure("Persisted SDK worker result is invalid");
   }
   async cancel(_reason: AgentCancellationReason): Promise<void> { this.cancelled = true; }
-}
-
-function sdkWorkerDescriptor(): AgentExecutorDescriptor {
-  const builtins = [
-    createReadTool("/workspace"),
-    createGrepTool("/workspace"),
-    createFindTool("/workspace"),
-    createLsTool("/workspace"),
-    createEditTool("/workspace"),
-    createWriteTool("/workspace"),
-  ];
-  const mutating = new Set(["edit", "write"]);
-  const toolCatalog: AgentToolDescriptor[] = [
-    ...builtins.map((tool) => ({
-      name: tool.name,
-      schemaHash: stableHash(tool.parameters).slice(7),
-      mutatesWorkspace: mutating.has(tool.name),
-      usesMediatedNetwork: false,
-    })),
-    ...sdkSemanticToolDescriptors(),
-  ];
-  return {
-    id: "pi-sdk-worker",
-    capabilities: {
-      persistentSessions: true,
-      candidateWorkspace: true,
-      mediatedNetwork: true,
-      liveProgress: true,
-      artifactPublication: true,
-    },
-    toolCatalog,
-  };
 }
 
 function mapRequestIntoSandbox(

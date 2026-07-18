@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   WorkflowRunDatabase,
   WorkflowRunDatabaseRevisionConflictError,
@@ -122,10 +121,6 @@ export async function workflowCoordinatorMain(args: readonly string[]): Promise<
     process.off("SIGTERM", stop);
     process.off("SIGINT", stop);
   }
-}
-
-export function workflowCoordinatorEntryPath(): string {
-  return fileURLToPath(new URL("./coordinator-entry.js", import.meta.url));
 }
 
 async function drain(database: WorkflowRunDatabase): Promise<number> {
