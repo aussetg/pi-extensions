@@ -1,6 +1,6 @@
 import path from "node:path";
-import { stripTypeScriptTypes } from "node:module";
 import { parse } from "acorn";
+import { transformSync } from "amaro";
 import type { JsonSchema, JsonValue } from "../types.js";
 import { WorkflowScriptError } from "../runtime/errors.js";
 import { sha256, stableHash } from "../utils/hashes.js";
@@ -187,7 +187,7 @@ function rejectTypeScriptSuppressions(source: string): void {
 
 function stripErasableTypeScript(source: string): string {
   try {
-    return stripTypeScriptTypes(source, { mode: "strip", sourceMap: false });
+    return transformSync(source, { mode: "strip-only" }).code;
   } catch (error) {
     const line = stripErrorLine(error);
     const sourceLine = line ? source.split("\n")[line - 1] ?? "" : "";
@@ -811,8 +811,8 @@ function offsetLocation(source: string, offset: number): { line: number; column:
 }
 
 function stripErrorLine(error: unknown): number | undefined {
-  const stack = error instanceof Error ? error.stack : undefined;
-  const match = stack?.match(/^:(\d+)\s*$/mu);
+  const detail = error instanceof Error ? `${error.stack ?? ""}\n${error.message}` : String(error);
+  const match = detail.match(/^:(\d+)\s*$/mu) ?? detail.match(/,-\[(\d+):\d+\]/u);
   return match ? Number(match[1]) : undefined;
 }
 

@@ -74,7 +74,12 @@ export function assertDefinitionGate(registry: WorkflowRegistry): void {
   const builtins = registry.list().filter((ref) => ref.namespace === "builtin");
   const visible = builtins.filter((ref) => ref.exposure === "model").map((ref) => ref.name).sort();
   if (visible.length !== MODEL_BUILTINS.length || visible.some((name, index) => name !== MODEL_BUILTINS[index])) {
-    throw new Error(`Named workflow gate failed: expected model-visible built-ins ${MODEL_BUILTINS.join(", ")}`);
+    const invalid = registry.listInvalid().filter(entry => entry.namespace === "builtin");
+    throw new Error(
+      `Named workflow gate failed: expected model-visible built-ins ${MODEL_BUILTINS.join(", ")}; `
+      + `found ${visible.join(", ") || "none"}`
+      + (invalid.length ? `; ${invalid.map(entry => entry.error).join("; ")}` : ""),
+    );
   }
   const invalid = registry.listInvalid().find((entry) => entry.namespace === "builtin");
   if (invalid) throw new Error(`Named workflow gate failed: ${invalid.error}`);

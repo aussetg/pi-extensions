@@ -119,8 +119,8 @@ export async function captureProjectSnapshot(
     lstatBigInt(destinationParent),
   ]);
   if (
-    sourceFilesystem.type !== BTRFS_SUPER_MAGIC
-    || destinationFilesystem.type !== BTRFS_SUPER_MAGIC
+    filesystemType(sourceFilesystem.type) !== BTRFS_SUPER_MAGIC
+    || filesystemType(destinationFilesystem.type) !== BTRFS_SUPER_MAGIC
     || rootStat.dev !== destinationParentStat.dev
   ) {
     throw new Error("Project snapshots require one shared Btrfs filesystem");
@@ -160,6 +160,11 @@ export async function captureProjectSnapshot(
     await fs.promises.rm(destinationRoot, { recursive: true, force: true }).catch(() => undefined);
     throw error;
   }
+}
+
+/** Pi's extension host reports Linux statfs magic numbers as signed int32. */
+function filesystemType(value: number | bigint): number {
+  return Number(value) >>> 0;
 }
 
 /** Re-hash a captured tree without consulting the live project. */

@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { Ajv } from "ajv";
 import { canonicalJsonValue, deepFreezeJson } from "../definition/canonical-json.js";
 import { DEFINITION_LIMITS } from "../definition/limits.js";
@@ -38,6 +37,7 @@ import {
   requiredString,
   type SqlRow,
 } from "./run-database-codec.js";
+import { DatabaseSync } from "./sqlite.js";
 import {
   WORKFLOW_RUN_DATABASE_BUSY_TIMEOUT_MS,
   WORKFLOW_RUN_DATABASE_SQL,
