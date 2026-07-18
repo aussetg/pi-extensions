@@ -334,7 +334,7 @@ function createFixture(
     definitionHash: workflowDefinitionHash(`user:${name}`, parsed),
     parsed,
   };
-  const profile = measurementProfile(root, profileChange);
+  const profile = measurementProfile(profileChange);
   const args = {
     evaluator: profile.id,
     metrics: {
@@ -444,7 +444,7 @@ function createFixture(
   };
 }
 
-function measurementProfile(root: string, change: Partial<MeasurementProfileDefinition>): MeasurementProfileSnapshot {
+function measurementProfile(change: Partial<MeasurementProfileDefinition>): MeasurementProfileSnapshot {
   const definition = normalizeMeasurementProfile({
     name: "bench",
     description: "Measure parser latency and resident memory.",

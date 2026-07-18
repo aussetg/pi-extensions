@@ -31,7 +31,7 @@ import type {
   WorkflowReview,
 } from "./workflow-types.js";
 
-export const WORKFLOW_FLOW_METHODS = Object.freeze([
+const WORKFLOW_FLOW_METHODS = Object.freeze([
   "parallel",
   "map",
   "agent",
@@ -145,7 +145,7 @@ export function analyzeWorkflowSource(
       const method = flowMethod(node, input.flowName);
       if (method) {
         directEffects.get(fn)!.push({ node, method });
-        markStructuredCallbacks(input, model, fn, node, method, edges);
+        markStructuredCallbacks(model, fn, node, method, edges);
       }
       if (node.type === "CallExpression" && node.callee?.type === "Identifier") {
         const target = resolveFunctionBinding(model, fn, node.callee.name);
@@ -177,7 +177,7 @@ export function analyzeWorkflowSource(
     owner: call.owner,
   }));
 
-  const metricBindings = collectMetricBindings(input, model, internalSites);
+  const metricBindings = collectMetricBindings(input, internalSites);
   const dynamicResources: WorkflowDynamicResourceUse[] = [];
   const candidateWrites: WorkflowCandidateWriteSite[] = [];
   const measurementProfiles = new Set<string>();
@@ -536,7 +536,6 @@ function isSafeWriteSchema(schema: JsonSchema | undefined): boolean {
 
 function collectMetricBindings(
   input: AnalyzeWorkflowSourceInput,
-  model: FunctionModel,
   sites: readonly InternalOperationSite[],
 ): MetricBinding[] {
   const result: MetricBinding[] = [];
@@ -669,7 +668,6 @@ function resolveFunctionBinding(
 }
 
 function markStructuredCallbacks(
-  input: AnalyzeWorkflowSourceInput,
   model: FunctionModel,
   owner: WorkflowAstNode,
   call: WorkflowAstNode,

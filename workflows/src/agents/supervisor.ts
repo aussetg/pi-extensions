@@ -190,7 +190,7 @@ interface FileSupervisionState {
 export class FileAgentSupervisionStore implements AgentSupervisionStore {
   readonly statePath: string;
 
-  constructor(private readonly request: AgentExecutionRequest) {
+  constructor(request: AgentExecutionRequest) {
     this.statePath = path.join(path.dirname(path.resolve(request.session.piSessionPath)), "supervision.json");
   }
 

@@ -174,7 +174,7 @@ export class WorkflowArtifactStore {
     }
     const source = await fs.promises.open(
       sourcePath,
-      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0),
+      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
     );
     const temporary = path.join(this.root, `.body-${crypto.randomUUID()}.tmp`);
     let output: fs.promises.FileHandle | undefined;
@@ -396,7 +396,7 @@ async function validateBody(filePath: string, digest: string, bytes: number): Pr
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== bytes) {
     throw new WorkflowArtifactStoreError(`Workflow artifact body ${digest} is unsafe`);
   }
-  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
     const body = await handle.readFile();
     if (body.length !== bytes || sha256(body) !== digest) {

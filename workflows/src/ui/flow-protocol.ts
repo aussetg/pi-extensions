@@ -77,24 +77,3 @@ export function flowEnvelopeJson(envelope: FlowProtocolEnvelope): string {
   if (Buffer.byteLength(text) > FLOW_PROTOCOL_MAX_BYTES) throw new Error("Flow protocol envelope exceeds its byte bound");
   return text;
 }
-
-export function boundFlowToolResultDetails(details: FlowToolResultDetails): FlowToolResultDetails {
-  if (Buffer.byteLength(stableJson(details)) <= FLOW_PROTOCOL_MAX_BYTES) return details;
-  let bounded: FlowToolResultDetails = { ...details };
-  delete bounded.resultPreview;
-  if (bounded.challenge?.request) {
-    bounded.challenge = {
-      ...bounded.challenge,
-      request: { omitted: true, hash: stableHash(bounded.challenge.request), reason: "challenge request exceeds tool-detail bound" },
-    };
-  }
-  if (Buffer.byteLength(stableJson(bounded)) > FLOW_PROTOCOL_MAX_BYTES) delete bounded.challenge;
-  if (Buffer.byteLength(stableJson(bounded)) > FLOW_PROTOCOL_MAX_BYTES) {
-    bounded = {
-      ...(details.runId ? { runId: details.runId } : {}),
-      ...(details.projection ? { projection: details.projection } : {}),
-      error: { name: "FlowProjectionLimitError", message: "Tool details exceeded their serialized byte bound" },
-    };
-  }
-  return bounded;
-}

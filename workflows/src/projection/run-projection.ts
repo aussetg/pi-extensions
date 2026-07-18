@@ -74,7 +74,7 @@ export function readWorkflowRunProjection(
     const resources = database.listInvocationResources().map(record => projectResource(record.resource, record.resourceId));
     const structures = projectedOperations
       .filter(operation => operation.kind === "parallel" || operation.kind === "map" || operation.kind === "candidate")
-      .map(operation => projectStructure(database, operation, scopes, projectedOperations));
+      .map(operation => projectStructure(database, operation, projectedOperations));
     const humanInteractions = projectHumanInteractions(database, projectedOperations, candidates);
     const attention = projectAttention(run.reason, projectedOperations, candidates, humanInteractions);
     const projection: WorkflowRunProjection = {
@@ -237,7 +237,6 @@ function projectOperation(
 function projectStructure(
   database: WorkflowRunDatabaseReader,
   operation: WorkflowOperationProjection,
-  scopes: ReadonlyMap<string, WorkflowScopeRecord>,
   operations: readonly WorkflowOperationProjection[],
 ): WorkflowStructureProjection {
   const children = database.listChildScopes(operation.operationId);

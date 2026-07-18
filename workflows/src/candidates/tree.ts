@@ -238,7 +238,7 @@ async function walkFile(state: WalkState, relative: string, expected: BigStats):
   let digest: string;
   if (state.destination) {
     const destination = path.join(state.destination, relative);
-    const handle = await fs.promises.open(source, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const handle = await fs.promises.open(source, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     try {
       const opened = await handle.stat({ bigint: true });
       assertUnchanged(expected, opened, `Candidate file changed while opened: ${portable(relative)}`);
@@ -272,7 +272,7 @@ async function walkSymlink(state: WalkState, relative: string, before: BigStats)
 }
 
 async function hashStableFile(filePath: string, expected: BigStats, relative: string): Promise<string> {
-  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
     const before = await handle.stat({ bigint: true });
     assertUnchanged(expected, before, `Candidate file changed while hashing: ${portable(relative)}`);

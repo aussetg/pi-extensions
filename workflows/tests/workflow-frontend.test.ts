@@ -24,7 +24,6 @@ const parsedCorpus = new Map<string, ParsedWorkflow>();
 
 describe("workflow TypeScript frontend", () => {
   test.each(FILES)("parses and instruments the strict corpus: %s", (fileName) => {
-    const filePath = path.join(CORPUS, fileName);
     const parsed = loadCorpus(fileName);
 
     expect(parsed.installedName).toBe(fileName.slice(0, -".flow.ts".length));

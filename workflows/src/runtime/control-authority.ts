@@ -165,10 +165,6 @@ export class WorkflowStaleAuthorityError extends Error {
   }
 }
 
-export function isWorkflowControlAuthority(value: unknown): value is object {
-  return Boolean(value) && typeof value === "object" && AUTHORITY_VALUES.has(value as object);
-}
-
 export function assertDescriptorIdentity(value: WorkflowDescriptorIdentity): void {
   if (!plainRecord(value) || !WORKFLOW_DESCRIPTOR_KINDS.includes(value.kind as never)
     || typeof value.sourceSite !== "string" || !SOURCE_SITE.test(value.sourceSite)

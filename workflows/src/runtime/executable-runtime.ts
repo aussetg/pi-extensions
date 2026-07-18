@@ -353,7 +353,6 @@ export class WorkflowExecutableRuntime {
         products: this.options.products,
         candidates: this.options.candidates,
         metrics: this.options.metrics,
-        ...(this.options.now ? { now: this.options.now } : {}),
       })] : []),
       ...(this.options.apply ? [new WorkflowApplyEffectAdapter({ ...common, executor: this.options.apply })] : []),
     ];

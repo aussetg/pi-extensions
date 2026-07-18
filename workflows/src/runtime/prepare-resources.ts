@@ -7,7 +7,7 @@ import { assertCommandEffectAllowed, CommandProfileRegistry } from "../commands/
 import type { ParsedWorkflow } from "../definition/workflow-types.js";
 import type { MeasurementEnvironmentDescriptor } from "../measurements/environment.js";
 import { MeasurementProfileRegistry } from "../measurements/profiles.js";
-import type { JsonObject, JsonValue } from "../types.js";
+import type { JsonObject } from "../types.js";
 import { stableHash } from "../utils/hashes.js";
 import { VerificationProfileRegistry } from "../verification/profiles.js";
 import {

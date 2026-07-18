@@ -119,8 +119,8 @@ export async function captureProjectSnapshot(
     lstatBigInt(destinationParent),
   ]);
   if (
-    filesystemType(sourceFilesystem.type) !== BTRFS_SUPER_MAGIC
-    || filesystemType(destinationFilesystem.type) !== BTRFS_SUPER_MAGIC
+    sourceFilesystem.type !== BTRFS_SUPER_MAGIC
+    || destinationFilesystem.type !== BTRFS_SUPER_MAGIC
     || rootStat.dev !== destinationParentStat.dev
   ) {
     throw new Error("Project snapshots require one shared Btrfs filesystem");
@@ -160,11 +160,6 @@ export async function captureProjectSnapshot(
     await fs.promises.rm(destinationRoot, { recursive: true, force: true }).catch(() => undefined);
     throw error;
   }
-}
-
-/** Bun reports Linux statfs magic numbers as signed int32; Node reports them unsigned. */
-function filesystemType(value: number | bigint): number {
-  return Number(value) >>> 0;
 }
 
 /** Re-hash a captured tree without consulting the live project. */
@@ -445,7 +440,7 @@ async function cloneFile(state: CaptureState, relative: string, pathStat: BigInt
 
   const source = path.join(state.sourceRoot, relative);
   const destination = path.join(state.destinationRoot, relative);
-  const handle = await fs.promises.open(source, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  const handle = await fs.promises.open(source, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
     const before = await handle.stat({ bigint: true });
     assertUnchanged(pathStat, before, `Project file changed while opening for snapshot capture: ${portablePath(relative)}`);
@@ -489,7 +484,7 @@ async function cloneSymlink(state: CaptureState, relative: string, before: BigIn
 }
 
 async function hashStableFile(filePath: string, expected: BigIntStats, message: string): Promise<string> {
-  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
     const before = await handle.stat({ bigint: true });
     assertUnchanged(expected, before, message);

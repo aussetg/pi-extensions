@@ -325,7 +325,7 @@ export class WorkflowNamedService implements WorkflowNamedClient {
       status: value.run.status,
       summary: runSummary,
       ...(value.run.result !== undefined ? { result: structuredClone(value.run.result) } : {}),
-      handoff: !new Set(["completed", "failed", "stopped"]).has(value.run.status),
+      handoff: !TERMINAL.has(value.run.status),
     };
   }
 

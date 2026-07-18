@@ -480,17 +480,13 @@ interface StoredExperiment {
 /** Durable experiment timeline records remain ordinary JSON at the language boundary. */
 export class WorkflowExperimentEffectAdapter implements WorkflowSemanticEffectAdapter {
   readonly kind = "record-experiment" as const;
-  private readonly now: () => Date;
 
   constructor(private readonly options: {
     database: WorkflowRunDatabase;
     products: WorkflowEffectProductFactory;
     candidates: WorkflowCandidateRuntime;
     metrics: WorkflowMetricSetRuntime;
-    now?: () => Date;
-  }) {
-    this.now = options.now ?? (() => new Date());
-  }
+  }) {}
 
   semanticInput(context: Omit<WorkflowEffectAdapterContext, "semanticInput" | "operation">): JsonValue {
     const value = this.resolve(context.input);

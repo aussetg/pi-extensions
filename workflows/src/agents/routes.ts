@@ -133,22 +133,6 @@ export function parseAgentRouteFile(source: string, filePath = "<routes>"): Agen
   return Object.freeze({ routes: Object.freeze(routes) });
 }
 
-export function exactRouteIdentity(route: AgentRouteSnapshot): {
-  routeId: string;
-  routeHash: string;
-  provider: string;
-  model: string;
-  thinking: AgentThinkingLevel;
-} {
-  return {
-    routeId: route.id,
-    routeHash: route.hash,
-    provider: route.provider,
-    model: route.model,
-    thinking: route.thinking,
-  };
-}
-
 function snapshotRoute(profileId: string, targetInput: AgentRouteTarget): AgentRouteSnapshot {
   const target = normalizeTarget(targetInput, `route for ${profileId}`);
   const provider = target.model.slice(0, target.model.indexOf("/"));

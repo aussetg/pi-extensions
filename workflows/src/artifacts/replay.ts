@@ -206,7 +206,7 @@ async function validateBody(filePath: string, digest: string, bytes: number): Pr
   }
   const handle = await fs.promises.open(
     filePath,
-    fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0),
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
   );
   try {
     const body = await handle.readFile();

@@ -10,17 +10,11 @@ import type {
   AgentWorkspaceHandle,
 } from "../agents/executor.js";
 import type { AgentProtocolServer } from "../agents/sdk-protocol-server.js";
-import type { WorkflowArtifactStore } from "../artifacts/store.js";
 import type { HostCommandExecutor, HostCommandResult } from "../commands/executor.js";
-import { resolveCommandInvocation, type CommandProfileSnapshot } from "../commands/profiles.js";
+import type { CommandProfileSnapshot } from "../commands/profiles.js";
 import { DEFINITION_LIMITS } from "../definition/limits.js";
 import type { WorkflowAgentDescriptor } from "../definition/workflow-types.js";
 import type { WorkflowRunDatabase } from "../persistence/run-database.js";
-import type {
-  WorkflowCandidateRecord,
-  WorkflowCandidateWorkspaceRecord,
-  WorkflowOperationRecord,
-} from "../persistence/run-database-types.js";
 import type { JsonObject, JsonSchema, JsonValue } from "../types.js";
 import { stableHash } from "../utils/hashes.js";
 import { stableJson } from "../utils/stable-json.js";
@@ -155,7 +149,6 @@ export class WorkflowProductionCommandExecutor implements WorkflowCommandEffectE
     const authority = record(request.binding.authority, "command authority");
     const profile = authority.profile as unknown as CommandProfileSnapshot;
     if (!profile || profile.hash !== request.binding.authority.profileHash) throw new Error("Pinned command profile is corrupt");
-    const invocation = resolveCommandInvocation(profile, request.args, request.descriptor.effect);
     const root = request.workspace?.root ?? this.launchWorkspace.root;
     const cwd = request.workspace?.cwd ?? this.launchWorkspace.cwd;
     const started = Date.now();
@@ -242,7 +235,7 @@ export class WorkflowProductionVerificationExecutor implements WorkflowVerificat
       const entry = tree.entries.find(value => value.path === changed);
       if (entry?.type === "file" && entry.bytes > profile.diffInspection.maximumFileBytes) failures.push(`${changed} is too large`);
       if (entry?.type === "file" && profile.diffInspection.forbidSecrets) {
-        const text = await fs.promises.readFile(path.join(request.workspace.root, changed), "utf8").catch(() => "");
+        const text = await fs.promises.readFile(path.join(request.workspace.root, changed), "utf8");
         if (/(?:api[_-]?key|secret|private[_-]?key)\s*[:=]/iu.test(text)) failures.push(`${changed} resembles a secret`);
       }
     }
@@ -599,7 +592,7 @@ async function syncFile(file: string): Promise<void> {
 }
 
 async function syncDirectory(directory: string): Promise<void> {
-  const handle = await fs.promises.open(directory, fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0));
+  const handle = await fs.promises.open(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
   try { await handle.sync(); } finally { await handle.close(); }
 }
 

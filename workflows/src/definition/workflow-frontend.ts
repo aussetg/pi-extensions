@@ -114,7 +114,7 @@ export function parseWorkflow(
   const schemaBinding = imports.byImported.get("schema")!;
   const evaluator = new WorkflowSchemaEvaluator(schemaBinding, constants.initializers);
   const metadata = parseMetadata(definition, evaluator);
-  const descriptors = parseDescriptors(ast, imports, constants, evaluator);
+  const descriptors = parseDescriptors(imports, constants, evaluator);
   validateStaticTopLevelBindings(constants, descriptors, evaluator);
   rejectDescriptorShadows(ast, constants, descriptors);
   const analysis = analyzeWorkflowSource({
@@ -457,7 +457,6 @@ function parseMetadata(
 }
 
 function parseDescriptors(
-  ast: WorkflowAstNode,
   imports: VirtualImportBindings,
   constants: TopLevelConstants,
   evaluator: WorkflowSchemaEvaluator,

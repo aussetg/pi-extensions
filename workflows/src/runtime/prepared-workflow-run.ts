@@ -15,7 +15,6 @@ import { WorkflowMetricSetRuntime } from "../measurements/metric-set.js";
 import { WorkflowRunDatabase } from "../persistence/run-database.js";
 import { readWorkflowInvocationSnapshot } from "../persistence/workflow-invocation.js";
 import { assertProjectSnapshotManifest, type ProjectSnapshotManifest } from "../workspaces/project-snapshot.js";
-import { stableHash } from "../utils/hashes.js";
 import { stableJson } from "../utils/stable-json.js";
 import { WorkflowCausalReplay } from "./causal-replay.js";
 import { WorkflowControlAuthorityRegistry } from "./control-authority.js";

@@ -80,9 +80,6 @@ const DIAGNOSTIC_FIELDS = new Set(["extract", "schema"]);
 const EXTRACTOR_FIELDS = new Set(["kind", "path", "pattern", "group", "flags"]);
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 
-/** Measurement authority is installed explicitly; there is no implicit executable evaluator. */
-export const BUILTIN_MEASUREMENT_PROFILES: readonly MeasurementProfileDefinition[] = Object.freeze([]);
-
 export class MeasurementProfileRegistry {
   private refs = new Map<string, MeasurementProfileRef>();
   private invalid: InvalidMeasurementProfileRef[] = [];
@@ -90,7 +87,7 @@ export class MeasurementProfileRegistry {
   async refresh(cwd: string, options: MeasurementProfileRegistryRefreshOptions = {}): Promise<void> {
     const refs = new Map<string, MeasurementProfileRef>();
     const invalid: InvalidMeasurementProfileRef[] = [];
-    const builtinEntries = (options.builtins ?? BUILTIN_MEASUREMENT_PROFILES).map((definition) => {
+    const builtinEntries = (options.builtins ?? []).map((definition) => {
       try {
         return { ref: profileRef("builtin", `<builtin:${String(definition.name)}>`, definition) };
       } catch (error) {
