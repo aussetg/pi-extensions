@@ -41,7 +41,7 @@ export function parseWorkflowModule(source: string): WorkflowAstNode {
 export function findWorkflowDefinition(ast: WorkflowAstNode): WorkflowAstDefinition {
   const exports = ast.body.filter((node: WorkflowAstNode) => node.type.startsWith("Export"));
   if (exports.length !== 1 || exports[0]?.type !== "ExportDefaultDeclaration") {
-    throw new WorkflowScriptError("A .flow.js file must export exactly one default defineWorkflow({...}) definition");
+    throw new WorkflowScriptError("A .flow.ts file must export exactly one default workflow({...}) definition");
   }
   const exportNode = exports[0]!;
   const call = exportNode.declaration;
@@ -49,11 +49,11 @@ export function findWorkflowDefinition(ast: WorkflowAstNode): WorkflowAstDefinit
     call?.type !== "CallExpression" ||
     call.optional ||
     call.callee?.type !== "Identifier" ||
-    call.callee.name !== "defineWorkflow" ||
+    call.callee.name !== "workflow" ||
     call.arguments.length !== 1 ||
     call.arguments[0]?.type !== "ObjectExpression"
   ) {
-    throw new WorkflowScriptError("Default export must be defineWorkflow({...})", location(exportNode));
+    throw new WorkflowScriptError("Default export must be workflow({...})", location(exportNode));
   }
 
   const definitionNode = call.arguments[0];

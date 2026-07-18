@@ -19,40 +19,6 @@ export function workflowDraftRoot(agentDir = getAgentDir()): string {
   return path.join(path.resolve(agentDir), "workflow-drafts");
 }
 
-export interface RunFilesystemPaths {
-  root: string;
-  database: string;
-  source: string;
-  context: string;
-  invocation: string;
-  projectSnapshot: string;
-  projectManifest: string;
-  contextIdentity: string;
-  sessions: string;
-  workspaces: string;
-  artifacts: string;
-  outputs: string;
-}
-
-export function runFilesystemPaths(runRoot: string, runId: string): RunFilesystemPaths {
-  if (!/^flow_[a-f0-9]{32}$/.test(runId)) throw new TypeError("Invalid workflow run id");
-  const root = path.join(path.resolve(runRoot), runId);
-  return Object.freeze({
-    root,
-    database: path.join(root, "run.sqlite"),
-    source: path.join(root, "source.flow.js"),
-    context: path.join(root, "context"),
-    invocation: path.join(root, "context", "invocation.json"),
-    projectSnapshot: path.join(root, "context", "project"),
-    projectManifest: path.join(root, "context", "project-manifest.json"),
-    contextIdentity: path.join(root, "context", "identity.json"),
-    sessions: path.join(root, "sessions"),
-    workspaces: path.join(root, "workspaces"),
-    artifacts: path.join(root, "artifacts"),
-    outputs: path.join(root, "outputs"),
-  });
-}
-
 export function userWorkflowDir(): string {
   return path.join(getAgentDir(), "workflows");
 }

@@ -9,7 +9,6 @@ import {
   createReadTool,
   createWriteTool,
 } from "@earendil-works/pi-coding-agent";
-import { RunDatabaseReader } from "../persistence/run-database.js";
 import { zeroUsage } from "../runtime/durable-types.js";
 import {
   SystemdUserUnitLauncher,
@@ -455,21 +454,7 @@ function reconcileWorkerResult(
   cancelled: boolean,
   summary: string,
 ): AgentExecutionResult {
-  const finish = readCommittedFinish(request);
-  if (finish) {
-    if (reported?.outcome === "finished" && stableHash(reported.finish) !== stableHash(finish)) {
-      return failed(request, "SDK worker finish result differs from the coordinator commit");
-    }
-    return {
-      outcome: "finished",
-      finish,
-      usage: reported?.usage ?? zeroUsage(false),
-      transcriptComplete: reported?.transcriptComplete ?? false,
-    };
-  }
-  if (reported?.outcome === "finished") {
-    return failed(request, "SDK worker claimed completion without a durable finish_work commit");
-  }
+  if (reported?.outcome === "finished") return reported;
   if (reported) return reported;
   if (cancelled) return { outcome: "stopped", usage: zeroUsage(false), transcriptComplete: false };
   return failed(request, summary);
@@ -488,19 +473,6 @@ function failed(request: AgentExecutionRequest, summary: string): AgentExecution
     usage: zeroUsage(false),
     transcriptComplete: false,
   };
-}
-
-function readCommittedFinish(request: AgentExecutionRequest) {
-  const databasePath = path.join(runDirectory(request), "run.sqlite");
-  let reader: RunDatabaseReader | undefined;
-  try {
-    reader = RunDatabaseReader.open(databasePath);
-    return reader.readAgentSession(request.session.agentSessionId)?.finish;
-  } catch {
-    return undefined;
-  } finally {
-    reader?.close();
-  }
 }
 
 async function ensureRealDirectory(directory: string): Promise<void> {

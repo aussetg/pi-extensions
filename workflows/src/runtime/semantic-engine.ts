@@ -1,988 +1,1782 @@
-import path from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { ParsedStructuredWorkflow } from "../definition/types.js";
+import { canonicalJsonObject, canonicalJsonValue, deepFreezeJson } from "../definition/canonical-json.js";
 import { DEFINITION_LIMITS } from "../definition/limits.js";
-import { evaluateControlDefinition } from "./control-worker-host.js";
-import { ArtifactStore } from "../artifacts/store.js";
+import type {
+  WorkflowEffectSettlementRecord,
+  WorkflowOperationKind,
+  WorkflowOperationRecord,
+  WorkflowRunRecord,
+  WorkflowScopeCallRecord,
+  WorkflowScopeRecord,
+  WorkflowStructuralJoinLaneRecord,
+  WorkflowCallArtifactInput,
+} from "../persistence/run-database-types.js";
 import {
-  RunDatabase,
-  RunDatabaseAdmissionError,
-  RunDatabaseStateError,
-  RunRevisionConflictError,
+  WorkflowRunDatabase,
+  WorkflowRunDatabaseAdmissionError,
+  WorkflowRunDatabaseRevisionConflictError,
+  WorkflowRunDatabaseStateError,
 } from "../persistence/run-database.js";
-import {
-  zeroUsage,
-  type HumanCheckpointRequest,
-  type OperationKind,
-  type OperationRecord,
-  type OperationResult,
-  type RunRecord,
-  type StructuredReason,
-} from "./durable-types.js";
-import type { JsonValue } from "../types.js";
+import type { JsonObject, JsonValue } from "../types.js";
 import { stableHash } from "../utils/hashes.js";
 import {
-  boundedError,
-  canonicalInvocationInput,
-  canonicalStructuralJson,
-  effectFailureReason,
-  normalizeCheckpointRequest,
-  normalizeStageOptions,
-  operationSourceId,
-  validateJsonSchema,
-  workflowFailureReason,
-} from "./semantic-engine-values.js";
-import {
-  SemanticEngineCrashError,
-  SemanticRunawayAdmissionError,
-  SemanticOperationError,
-  type SemanticEffectAdapter,
-  type SemanticEffectAdmissionRequest,
-  type SemanticEffectKind,
-  type SemanticEffectOutcome,
-  type SemanticEngineFaultPoint,
-  type SemanticEngineInvocation,
-  type SemanticEngineScope,
-  type SequentialSemanticEngineOptions,
-  type SequentialSemanticRunOutcome,
-} from "./semantic-engine-types.js";
-import {
-  CandidateConcurrencyGuard,
-  SemanticConcurrencyLimiter,
-} from "./semantic-engine-concurrency.js";
-import {
-  StructuredConcurrencyRuntime,
-  type StructuralBranchBinding,
-  type StructuralPreclaim,
-} from "./semantic-structured-concurrency.js";
-import { SemanticRunLifecycle } from "./semantic-run-lifecycle.js";
-import {
-  assertPreclaimedSemanticOperation,
-  assertSemanticOperationIdentity,
-  boundedOperationAdmissionLimit,
-  boundedSemanticPollInterval,
-  deterministicSemanticId,
-  linkedSemanticController,
-  recordedSemanticFailure,
-  semanticInvocationHash,
-  semanticOperationPath,
-} from "./semantic-engine-helpers.js";
-import type { SemanticEffectJournalIdentity } from "./semantic-engine-types.js";
-import { SemanticJournalRuntime } from "./semantic-journal.js";
-import {
-  applyMetricDispositionToHandles,
-  createMetricHandle,
-  metricHandleState,
-} from "../measurements/metrics.js";
-import { isCandidateWorkspaceCapability } from "../candidates/store.js";
-
-export { semanticInvocationHash } from "./semantic-engine-helpers.js";
-
-export * from "./semantic-engine-types.js";
+  workflowFreshCallKey,
+  workflowLaneSeed,
+  workflowOperationIdentity,
+  workflowStructuralJoinKey,
+} from "./causal-identity.js";
+import type { WorkflowCausalReplay } from "./causal-replay.js";
+import { SemanticConcurrencyLimiter } from "./semantic-engine-concurrency.js";
+import type { WorkflowReplayWorkspaceTarget } from "../workspaces/replay.js";
 
 const MAX_REVISION_RETRIES = 16;
+const HASH = /^sha256:[a-f0-9]{64}$/u;
+const EFFECT_KINDS = new Set<WorkflowOperationKind>([
+  "agent", "command", "ask", "measure", "verify", "accept", "reject", "record-experiment", "apply",
+]);
 
-class SemanticRunSuspension extends Error {
-  constructor(readonly status: "waiting" | "paused" | "stopped", message: string) {
-    super(message);
-    this.name = "SemanticRunSuspension";
+export type WorkflowSemanticEngineFaultPoint =
+  | "after-run-start"
+  | "after-operation-claim"
+  | "after-effect-settled"
+  | "after-operation-complete"
+  | "after-operation-failure"
+  | "after-child-scopes-preclaimed"
+  | "after-lane-scope-complete"
+  | "after-lane-scope-failure"
+  | "after-lane-scope-cancelled"
+  | "after-candidate-frozen"
+  | "after-structural-join"
+  | "after-root-scope-complete"
+  | "after-root-scope-failure";
+
+type WorkflowEffectKind = Exclude<WorkflowOperationKind, "parallel" | "map" | "candidate">;
+
+export interface WorkflowEffectInvocation {
+  sourceSite: string;
+  descriptorSourceSite?: string;
+  title?: string;
+  candidateWorkspaceIds?: readonly string[];
+  input: unknown;
+}
+
+export interface WorkflowStructuredOptions {
+  sourceSite: string;
+  title?: string;
+  concurrency?: number;
+  errors?: "fail-fast" | "collect";
+}
+
+export interface WorkflowMapOptions extends WorkflowStructuredOptions {
+  key(item: JsonValue, index: number): string | Promise<string>;
+}
+
+export interface WorkflowCandidateInvocation {
+  sourceSite: string;
+  title?: string;
+  body(workspace: unknown): JsonValue | Promise<JsonValue>;
+  input: unknown;
+}
+
+export interface WorkflowCandidateRuntimeContext {
+  run: WorkflowRunRecord;
+  operation: WorkflowOperationRecord;
+  bodyScope: WorkflowScopeRecord;
+  input: unknown;
+  signal: AbortSignal;
+}
+
+export interface WorkflowCandidateRuntimeValue {
+  result: JsonValue;
+  value: unknown;
+  artifacts?: WorkflowCallArtifactInput[];
+}
+
+export interface WorkflowSemanticCandidateRuntime {
+  semanticInput(context: { run: WorkflowRunRecord; input: unknown; signal: AbortSignal }): JsonValue | Promise<JsonValue>;
+  existing(context: WorkflowCandidateRuntimeContext): WorkflowCandidateRuntimeValue | undefined | Promise<WorkflowCandidateRuntimeValue | undefined>;
+  open(context: WorkflowCandidateRuntimeContext): unknown | Promise<unknown>;
+  freeze(
+    context: WorkflowCandidateRuntimeContext & { output: JsonValue; bodyTerminalKey: string },
+  ): WorkflowCandidateRuntimeValue | Promise<WorkflowCandidateRuntimeValue>;
+  restore(context: WorkflowCandidateRuntimeContext & { result: JsonValue }): unknown;
+  abandon(context: WorkflowCandidateRuntimeContext, failure: JsonObject): void | Promise<void>;
+}
+
+export interface WorkflowEffectIdentity {
+  semanticKey: string;
+  completionAuthority: Exclude<WorkflowScopeCallRecord["completionAuthority"], "structural-join">;
+  replayPolicy: WorkflowScopeCallRecord["replayPolicy"];
+  workspace?: WorkflowReplayWorkspaceTarget;
+  postWorkspaceCheckpointId?: string;
+}
+
+export interface WorkflowEffectAdapterContext {
+  run: WorkflowRunRecord;
+  input: unknown;
+  semanticInput: JsonValue;
+  operation?: WorkflowOperationRecord;
+  signal: AbortSignal;
+}
+
+export interface WorkflowEffectRestoreContext extends WorkflowEffectAdapterContext {
+  operation: WorkflowOperationRecord;
+  call: WorkflowScopeCallRecord;
+  result: JsonValue;
+}
+
+export interface WorkflowSemanticEffectAdapter {
+  readonly kind: WorkflowEffectKind;
+  semanticInput(context: Omit<WorkflowEffectAdapterContext, "semanticInput" | "operation">): JsonValue | Promise<JsonValue>;
+  journalIdentity(context: WorkflowEffectAdapterContext & { operation: WorkflowOperationRecord }): WorkflowEffectIdentity | Promise<WorkflowEffectIdentity>;
+  execute(context: WorkflowEffectAdapterContext & { operation: WorkflowOperationRecord }): JsonValue | Promise<JsonValue>;
+  evidence?(context: WorkflowEffectAdapterContext & {
+    operation: WorkflowOperationRecord;
+    result: JsonValue;
+  }): { artifacts?: WorkflowCallArtifactInput[] } | Promise<{ artifacts?: WorkflowCallArtifactInput[] }>;
+  restore?(context: WorkflowEffectRestoreContext): unknown | Promise<unknown>;
+}
+
+export interface WorkflowSequentialFlow {
+  effect<T = JsonValue>(kind: WorkflowEffectKind, invocation: WorkflowEffectInvocation): Promise<T>;
+  parallel<const B extends Readonly<Record<string, () => unknown | Promise<unknown>>>>(
+    branches: B,
+    options: WorkflowStructuredOptions,
+  ): Promise<{ [K in keyof B]: Awaited<ReturnType<B[K]>> }>;
+  map<T>(
+    items: readonly JsonValue[],
+    body: (item: JsonValue, index: number) => T | Promise<T>,
+    options: WorkflowMapOptions,
+  ): Promise<T[]>;
+  candidate(invocation: WorkflowCandidateInvocation): Promise<unknown>;
+}
+
+export type WorkflowSemanticRunOutcome<T extends JsonValue = JsonValue> =
+  | { status: "completed"; result: T; terminalKey: string }
+  | { status: "failed"; failure: JsonObject }
+  | { status: "paused"; failure: JsonObject }
+  | { status: "waiting"; failure: JsonObject }
+  | { status: "stopped"; failure: JsonObject };
+
+export interface WorkflowSemanticEngineOptions {
+  replay?: WorkflowCausalReplay;
+  signal?: AbortSignal;
+  operationAdmissionLimit?: number;
+  now?: () => Date;
+  candidate?: WorkflowSemanticCandidateRuntime;
+  structuralValues?: {
+    encode(value: unknown): JsonValue;
+    decode(value: JsonValue): unknown;
+  };
+  faultInjector?: (
+    point: WorkflowSemanticEngineFaultPoint,
+    operation?: WorkflowOperationRecord,
+  ) => void | Promise<void>;
+}
+
+interface CursorScope {
+  record: WorkflowScopeRecord;
+  cursor: number;
+  previousCallKey: string;
+  signal: AbortSignal;
+  branchLineage: ReadonlyArray<{ groupOperationId: string; laneKey: string }>;
+}
+
+interface StructuredLane {
+  key: string;
+  scope: WorkflowScopeRecord;
+  body: () => unknown | Promise<unknown>;
+  groupOperationId: string;
+}
+
+interface StructuredLaneOutcome {
+  key: string;
+  scope: WorkflowScopeRecord;
+  outcome: "success" | "failure" | "cancelled";
+  terminalKey: string;
+  value?: unknown;
+  failure?: JsonObject;
+}
+
+interface NormalizedStructuredOptions {
+  sourceSite: string;
+  title?: string;
+  concurrency: number;
+  errors: "fail-fast" | "collect";
+}
+
+export class WorkflowSemanticEngineCrashError extends Error {
+  constructor(
+    readonly point: WorkflowSemanticEngineFaultPoint,
+    readonly operationPath?: string,
+  ) {
+    super(`Workflow v17 simulated crash at ${point}${operationPath ? ` ${operationPath}` : ""}`);
+    this.name = "WorkflowSemanticEngineCrashError";
   }
 }
 
-/** SQLite-backed sequential control and effect engine. */
-export class SequentialSemanticEngine {
-  private readonly storage = new AsyncLocalStorage<SemanticEngineScope>();
-  private readonly adapters = new Map<SemanticEffectKind, SemanticEffectAdapter>();
-  private readonly rootController = new AbortController();
+export class WorkflowSemanticDriftError extends Error {
+  constructor(message: string, readonly operationPath?: string) {
+    super(message);
+    this.name = "WorkflowSemanticDriftError";
+  }
+}
+
+export class WorkflowRecordedEffectError extends Error {
+  readonly operationPath: string;
+  readonly failure: JsonObject;
+
+  constructor(operationPath: string, failure: JsonObject) {
+    super(typeof failure.summary === "string" ? failure.summary : `Recorded workflow effect failed at ${operationPath}`);
+    this.name = "WorkflowRecordedEffectError";
+    this.operationPath = operationPath;
+    this.failure = deepFreezeJson(structuredClone(failure));
+  }
+}
+
+export class WorkflowRecordedStructuralError extends Error {
+  readonly operationPath: string;
+  readonly failure: JsonObject;
+
+  constructor(operationPath: string, failure: JsonObject) {
+    super(typeof failure.summary === "string" ? failure.summary : `Recorded workflow structure failed at ${operationPath}`);
+    this.name = "WorkflowRecordedStructuralError";
+    this.operationPath = operationPath;
+    this.failure = deepFreezeJson(structuredClone(failure));
+  }
+}
+
+/** A durable human boundary. The operation remains unsettled and resumes from the same cursor. */
+export class WorkflowHumanSuspension extends Error {
+  constructor(readonly interactionId: string, readonly failure: JsonObject) {
+    super(typeof failure.summary === "string" ? failure.summary : "Workflow is waiting for human input");
+    this.name = "WorkflowHumanSuspension";
+  }
+}
+
+class WorkflowSiblingCancellation extends Error {
+  constructor(readonly laneKey: string) {
+    super(`Workflow v17 sibling lane cancelled after ${laneKey} failed`);
+    this.name = "WorkflowSiblingCancellation";
+  }
+}
+
+/** Cursor-owned v17 execution with keyed structured child scopes. */
+export class WorkflowSemanticEngine {
+  private readonly storage = new AsyncLocalStorage<CursorScope>();
+  private readonly adapters = new Map<WorkflowEffectKind, WorkflowSemanticEffectAdapter>();
+  private readonly controller = new AbortController();
   private readonly now: () => Date;
-  private readonly pollIntervalMs: number;
-  private readonly lifecycle: SemanticRunLifecycle;
-  private readonly externalSignal?: AbortSignal;
-  private readonly externalAbort?: () => void;
-  private readonly limiter: SemanticConcurrencyLimiter;
-  private readonly candidateConcurrency: CandidateConcurrencyGuard;
-  private readonly structures: StructuredConcurrencyRuntime;
-  private readonly metricHandles = new Map<string, object>();
   private readonly operationAdmissionLimit: number;
-  private readonly journal: SemanticJournalRuntime;
+  private readonly limiter: SemanticConcurrencyLimiter;
+  private readonly controlContexts = new WeakSet<object>();
+  private readonly externalAbort?: () => void;
+  private running = false;
+  private used = false;
+  private fatalFault?: unknown;
 
   constructor(
-    readonly runDir: string,
-    readonly database: RunDatabase,
-    readonly parsed: ParsedStructuredWorkflow,
-    readonly invocation: SemanticEngineInvocation,
-    adapters: readonly SemanticEffectAdapter[],
-    readonly options: SequentialSemanticEngineOptions = {},
+    readonly database: WorkflowRunDatabase,
+    adapters: readonly WorkflowSemanticEffectAdapter[],
+    readonly options: WorkflowSemanticEngineOptions = {},
   ) {
-    this.runDir = path.resolve(runDir);
-    if (path.resolve(database.databasePath) !== path.join(this.runDir, "run.sqlite")) {
-      throw new Error("Semantic engine run directory and database do not match");
-    }
     this.now = options.now ?? (() => new Date());
-    this.pollIntervalMs = boundedSemanticPollInterval(options.controlPollIntervalMs ?? 25);
-    const run = database.readRun();
     this.operationAdmissionLimit = boundedOperationAdmissionLimit(
       options.operationAdmissionLimit ?? DEFINITION_LIMITS.semanticOperations,
     );
-    const concurrency = Math.min(
-      run.safety.concurrency,
-      parsed.metadata.maxParallelism ?? DEFINITION_LIMITS.concurrency,
+    this.limiter = new SemanticConcurrencyLimiter(Math.min(
+      database.readRun().safety.concurrency,
       DEFINITION_LIMITS.concurrency,
-    );
-    this.limiter = new SemanticConcurrencyLimiter(concurrency);
-    this.candidateConcurrency = new CandidateConcurrencyGuard(run.runId);
-    const artifacts = new ArtifactStore(this.runDir, database, {
-      now: this.now,
-      maximumArtifactBytes: run.safety.outputBytes,
-    });
-    this.lifecycle = new SemanticRunLifecycle(database, parsed, artifacts, {
-      timestamp: () => this.timestamp(),
-      boundary: async () => await this.boundary(),
-      faultAfterResultArtifact: async () => await this.fault("after-result-artifact"),
-    });
+    ));
     for (const adapter of adapters) {
-      if (this.adapters.has(adapter.kind)) throw new Error(`Duplicate semantic effect adapter ${adapter.kind}`);
+      if (!EFFECT_KINDS.has(adapter.kind)) throw new TypeError(`Workflow v17 ${adapter.kind} is not a sequential effect`);
+      if (this.adapters.has(adapter.kind)) throw new TypeError(`Duplicate workflow v17 effect adapter ${adapter.kind}`);
       this.adapters.set(adapter.kind, adapter);
     }
-    this.structures = new StructuredConcurrencyRuntime({
-      concurrency,
-      structuralOperation: async (kind, id, semanticInputHash, body) => await this.structuralOperation(
-        kind, id, semanticInputHash, body,
-      ),
-      preclaim: async (parent, specs) => await this.preclaim(parent, specs),
-      children: (parentOperationId) => this.database.readStructuredQueue(parentOperationId)?.children ?? [],
-      runPreclaimedChild: async (parent, operation, body, branch) => await this.runPreclaimedChild(
-        parent, operation, body, branch,
-      ),
-      branchFailure: (error, branch) => this.branchFailure(error, branch),
-      isPassthrough: (error) => this.isPassthrough(error),
-      cancelSiblings: (error) => !(error instanceof SemanticRunawayAdmissionError),
-      branchSettled: (operationPath) => this.journal.settleStructuralScope(operationPath),
-    });
-    this.assertIdentity();
-    this.journal = new SemanticJournalRuntime(this.runDir, database, options.replaySourceRunDir, {
-      timestamp: () => this.timestamp(),
-      boundary: async (operationId) => await this.boundary(operationId),
-      fault: async (point, operation) => await this.fault(point, operation),
-      currentOperationId: (excludingOperationId) => this.activeAncestor(this.scope(), excludingOperationId),
-    });
     if (options.signal) {
-      this.externalSignal = options.signal;
       this.externalAbort = () => {
-        if (!this.rootController.signal.aborted) this.rootController.abort(options.signal!.reason);
+        if (!this.controller.signal.aborted) this.controller.abort(options.signal!.reason);
       };
       options.signal.addEventListener("abort", this.externalAbort, { once: true });
       if (options.signal.aborted) this.externalAbort();
     }
   }
 
-  async run(): Promise<SequentialSemanticRunOutcome> {
+  async run<T extends JsonValue>(
+    body: (flow: WorkflowSequentialFlow) => T | Promise<T>,
+  ): Promise<WorkflowSemanticRunOutcome<T>> {
+    if (this.running || this.used) throw new Error("Workflow v17 semantic engine instances execute exactly once");
+    this.running = true;
+    this.used = true;
     try {
-      const terminal = await this.lifecycle.startOrReadTerminal(
-        () => this.rootController.signal.aborted,
-        async () => await this.pauseForExternalCancellation(),
-      );
-      if (terminal) return terminal;
-      await this.fault("after-run-start");
-      const input = canonicalInvocationInput(this.invocation.input);
-      validateJsonSchema(this.parsed.metadata.inputSchema, input, "workflow inputSchema");
-      const root: SemanticEngineScope = {
-        path: "run",
-        seenIds: new Set(),
-        signal: this.rootController.signal,
-        branchLineage: new Map(),
+      await this.startRun();
+      const root = this.database.readScope(this.database.readRun().rootScopeId);
+      if (!root) throw new Error("Workflow v17 root scope is missing");
+      const scope: CursorScope = {
+        record: root,
+        cursor: 0,
+        previousCallKey: root.seedKey,
+        signal: this.controller.signal,
+        branchLineage: [],
       };
-      const value = await this.storage.run(root, () => evaluateControlDefinition({
-        executableSource: this.parsed.executableSource,
-        workflowName: this.parsed.metadata.name,
-        flow: this.flowApi(),
-        args: input,
-        ...(this.options.snapshot !== undefined ? { snapshot: this.options.snapshot } : {}),
-        signal: this.rootController.signal,
-        rootContext: root,
-        currentContext: () => this.scope(),
-        runInContext: (scope, body) => this.storage.run(scope, body),
-      }));
-      await this.boundary();
-      const result = canonicalStructuralJson(value);
-      validateJsonSchema(this.parsed.metadata.outputSchema, result, "workflow outputSchema");
-      return await this.lifecycle.complete(result);
-    } catch (error) {
-      if (error instanceof SemanticEngineCrashError) throw error;
-      if (this.externalSignal?.aborted) {
-        await this.limiter.whenIdle();
-        return await this.pauseForExternalCancellation();
+      this.controlContexts.add(scope);
+      try {
+        const raw = await this.storage.run(scope, async () => await body(this.flowApi()));
+        if (this.fatalFault !== undefined) throw this.fatalFault;
+        if (this.controller.signal.aborted) throw this.controller.signal.reason;
+        const result = canonical(raw) as T;
+        const pending = this.database.listCandidates().filter(candidate =>
+          candidate.state === "pending" && candidate.changedPaths.length > 0);
+        if (pending.length > 0) {
+          throw new Error(`Workflow completed with ${pending.length} undisposed nonempty candidate${pending.length === 1 ? "" : "s"}`);
+        }
+        const terminalKey = scope.previousCallKey;
+        await this.completeRootScope(scope, terminalKey);
+        await this.transitionRun("completed", undefined, terminalKey, result);
+        return { status: "completed", result: structuredClone(result), terminalKey };
+      } catch (error) {
+        if (this.fatalFault !== undefined) throw this.fatalFault;
+        if (error instanceof WorkflowHumanSuspension) {
+          const current = this.database.readRun();
+          if (current.status !== "waiting") {
+            throw new WorkflowSemanticDriftError("Workflow v17 human suspension lacks a waiting run");
+          }
+          return { status: "waiting", failure: structuredClone(error.failure) };
+        }
+        if (isPassthrough(error)) throw error;
+        if (error instanceof WorkflowRunDatabaseAdmissionError) {
+          const failure = failureReason("workflow", `admission-${error.limit}`, error.message, true);
+          await this.transitionRun("paused", failure);
+          return { status: "paused", failure };
+        }
+        if (this.controller.signal.aborted) {
+          const failure = failureReason("workflow", "cancelled", "Workflow control was cancelled", true);
+          const current = this.database.readRun();
+          if (current.status === "paused") return { status: "paused", failure: current.reason ?? failure };
+          if (current.status === "stopped") return { status: "stopped", failure: current.reason ?? failure };
+          await this.transitionRun("paused", failure);
+          return { status: "paused", failure };
+        }
+        const failure = failureFromError(error);
+        try {
+          await this.failRootScope(scope, failure);
+        } catch (scopeError) {
+          if (!(scopeError instanceof WorkflowRunDatabaseStateError)
+            || !/unsettled operations/u.test(scopeError.message)) throw scopeError;
+          // An adapter/protocol failure can occur after claim but before a
+          // durable effect outcome exists. The terminal run transition below
+          // cancels that operation and its active scope atomically.
+        }
+        await this.transitionRun("failed", failure);
+        return { status: "failed", failure };
       }
-      if (error instanceof SemanticRunawayAdmissionError) return await this.pauseForRunaway(error);
-      if (error instanceof SemanticRunSuspension) {
-        await this.limiter.whenIdle();
-        return await this.controlledOutcome(error);
-      }
-      return await this.lifecycle.fail(error);
     } finally {
-      if (this.externalSignal && this.externalAbort) {
-        this.externalSignal.removeEventListener("abort", this.externalAbort);
+      this.running = false;
+      if (this.options.signal && this.externalAbort) {
+        this.options.signal.removeEventListener("abort", this.externalAbort);
       }
-      this.journal.close();
-      await Promise.all([...this.adapters.values()].map(async (adapter) => await adapter.dispose?.()));
     }
   }
 
-  private flowApi(): Record<string, unknown> {
+  private flowApi(): WorkflowSequentialFlow {
     return Object.freeze({
-      stage: (id: unknown, body: unknown, options?: unknown) => this.stage(id, body, options),
-      loop: (id: unknown, options: unknown, body: unknown) => this.structures.loop(id, options, body),
-      parallel: (id: unknown, branches: unknown, options?: unknown) => this.structures.parallel(id, branches, options),
-      fanOut: (id: unknown, items: unknown, options: unknown, body: unknown) => this.structures.fanOut(id, items, options, body),
-      agent: (id: unknown, input: unknown) => this.effect("agent", id, input),
-      command: (id: unknown, input: unknown) => this.effect("command", id, input),
-      checkpoint: (id: unknown, input: unknown) => this.checkpoint(id, input),
-      metric: (id: unknown, definition: unknown) => this.createMetric(id, definition),
-      measure: (id: unknown, input: unknown) => this.effect("measure", id, input),
-      candidate: (id: unknown, body: unknown, options?: unknown) => this.candidate(id, body, options),
-      verify: (id: unknown, input: unknown) => this.effect("verify", id, input),
-      accept: (id: unknown, input: unknown) => this.effect("accept", id, input),
-      reject: (id: unknown, input: unknown) => this.effect("reject", id, input),
-      recordExperiment: (id: unknown, input: unknown) => this.effect("record-experiment", id, input),
-      apply: (id: unknown, input: unknown) => this.effect("apply", id, input),
+      effect: async <T>(kind: WorkflowEffectKind, invocation: WorkflowEffectInvocation): Promise<T> =>
+        await this.effect(kind, invocation) as T,
+      parallel: async <B extends Readonly<Record<string, () => unknown | Promise<unknown>>>>(
+        branches: B,
+        options: WorkflowStructuredOptions,
+      ): Promise<{ [K in keyof B]: Awaited<ReturnType<B[K]>> }> => await this.parallel(branches, options),
+      map: async <T>(
+        items: readonly JsonValue[],
+        body: (item: JsonValue, index: number) => T | Promise<T>,
+        options: WorkflowMapOptions,
+      ): Promise<T[]> => await this.map(items, body, options),
+      candidate: async (invocation: WorkflowCandidateInvocation): Promise<unknown> =>
+        await this.candidate(invocation),
     });
   }
 
-  private async stage(idValue: unknown, body: unknown, optionsValue: unknown): Promise<unknown> {
-    if (typeof body !== "function") throw new Error("flow.stage() body must be a callback");
-    const options = normalizeStageOptions(optionsValue);
-    return await this.structuralOperation(
-      "stage",
-      idValue,
-      stableHash({ title: options.title ?? null }),
-      async () => await Promise.resolve((body as () => unknown)()),
-    );
+  currentControlContext(): object {
+    return this.scope();
   }
 
-  private async structuralOperation<T>(
-    kind: Extract<OperationKind, "stage" | "loop" | "parallel" | "fan-out">,
-    idValue: unknown,
-    semanticInputHash: string,
-    body: (operation: OperationRecord, scope: SemanticEngineScope) => Promise<T>,
-  ): Promise<T> {
-    const id = operationSourceId(idValue);
-    const parent = this.scope();
-    const operation = await this.claim(parent, kind, id, semanticInputHash);
-    return await this.executeStructuralOperation(operation, parent, body);
+  runInControlContext<T>(context: object, body: () => T): T {
+    if (!this.controlContexts.has(context)) throw new TypeError("Unknown workflow v17 semantic control context");
+    return this.storage.run(context as CursorScope, body);
   }
 
-  private async runPreclaimedChild<T>(
-    parent: SemanticEngineScope,
-    operation: OperationRecord,
-    body: () => unknown,
-    branch?: StructuralBranchBinding,
-  ): Promise<T> {
-    let current = this.database.readOperation(operation.operationId);
-    if (!current) throw new RunDatabaseStateError(`Missing preclaimed operation ${operation.path}`);
-    if (current.status === "queued") current = await this.focus(current);
-    return await this.executeStructuralOperation(current, parent, async () => await Promise.resolve(body()) as T, branch);
-  }
+  private async effect(kind: WorkflowEffectKind, invocation: WorkflowEffectInvocation): Promise<unknown> {
+    if (this.fatalFault !== undefined) throw this.fatalFault;
+    const scope = this.scope();
+    if (scope.signal.aborted) throw scope.signal.reason;
+    if (!EFFECT_KINDS.has(kind)) throw new TypeError(`Workflow v17 ${kind} is not a sequential effect`);
+    const adapter = this.adapters.get(kind);
+    if (!adapter) throw new Error(`No workflow v17 adapter for ${kind}`);
+    const run = this.database.readRun();
+    await this.bindCandidateWorkspaceLanes(scope, invocation.candidateWorkspaceIds ?? []);
+    const semanticInput = canonical(await adapter.semanticInput({
+      run,
+      input: invocation.input,
+      signal: scope.signal,
+    }));
+    const cursor = scope.cursor++;
+    const claimed = await this.claim(scope, cursor, kind, invocation, stableHash(semanticInput));
+    const operation = claimed.operation;
+    if (claimed.claimed) await this.fault("after-operation-claim", operation);
+    const identity = normalizeIdentity(await adapter.journalIdentity({
+      run: this.database.readRun(),
+      input: invocation.input,
+      semanticInput,
+      operation,
+      signal: scope.signal,
+    }), kind);
 
-  private async executeStructuralOperation<T>(
-    operation: OperationRecord,
-    parent: SemanticEngineScope,
-    body: (operation: OperationRecord, scope: SemanticEngineScope) => Promise<T>,
-    branch?: StructuralBranchBinding,
-  ): Promise<T> {
-    if (operation.status === "failed") throw recordedSemanticFailure(operation);
-    if (operation.status === "paused" || operation.status === "stopped" || operation.status === "waiting") {
-      throw new SemanticRunSuspension(operation.status, `Structure ${operation.path} is ${operation.status}`);
+    if (operation.status === "completed" || operation.status === "failed") {
+      return await this.restoreCommitted(scope, adapter, invocation.input, semanticInput, operation, identity);
     }
-    if (branch?.signal.aborted) throw branch.signal.reason;
-    const branchLineage = new Map(parent.branchLineage);
-    if (branch) branchLineage.set(branch.groupId, branch.key);
-    const child: SemanticEngineScope = {
-      path: operation.path,
-      operationId: operation.operationId,
+    if (operation.status !== "running" && operation.status !== "waiting") {
+      throw new WorkflowSemanticDriftError(
+        `Workflow v17 operation ${operation.path} cannot resume from ${operation.status}`,
+        operation.path,
+      );
+    }
+
+    const settlement = this.database.readEffectSettlement(operation.operationId);
+    if (settlement) {
+      assertSettlementIdentity(operation, settlement, identity);
+      return await this.completeSettlement(scope, adapter, invocation.input, semanticInput, operation, settlement);
+    }
+
+    if (this.options.replay) {
+      const decision = await this.options.replay.tryReplayCall({
+        operationId: operation.operationId,
+        semanticKey: identity.semanticKey,
+        completionAuthority: identity.completionAuthority,
+        replayPolicy: identity.replayPolicy,
+        ...(identity.workspace ? { workspace: identity.workspace } : {}),
+        at: this.timestamp(),
+      });
+      if (decision.kind === "hit") {
+        const current = this.database.readOperation(operation.operationId)!;
+        await this.fault("after-operation-complete", current);
+        return await this.restoreCommitted(scope, adapter, invocation.input, semanticInput, current, identity);
+      }
+    }
+
+    let result: JsonValue;
+    try {
+      if (scope.signal.aborted) throw scope.signal.reason;
+      const lease = await this.limiter.acquire(scope.signal);
+      try {
+        if (this.fatalFault !== undefined) throw this.fatalFault;
+        if (scope.signal.aborted) throw scope.signal.reason;
+        result = canonical(await adapter.execute({
+          run: this.database.readRun(),
+          input: invocation.input,
+          semanticInput,
+          operation,
+          signal: scope.signal,
+        }));
+        if (this.fatalFault !== undefined) throw this.fatalFault;
+      } finally {
+        lease.release();
+      }
+    } catch (error) {
+      if (isPassthrough(error)) throw error;
+      if (scope.signal.aborted) throw error;
+      const failure = failureFromError(error, kind);
+      const settled = await this.settle(operation, {
+        semanticKey: identity.semanticKey,
+        completionAuthority: identity.completionAuthority,
+        replayPolicy: "never",
+      }, { outcome: "failure", failure });
+      await this.fault("after-effect-settled", operation);
+      return await this.completeSettlement(scope, adapter, invocation.input, semanticInput, operation, settled);
+    }
+    const settled = await this.settle(operation, identity, { outcome: "success", result });
+    await this.fault("after-effect-settled", operation);
+    return await this.completeSettlement(scope, adapter, invocation.input, semanticInput, operation, settled);
+  }
+
+  private async parallel<B extends Readonly<Record<string, () => unknown | Promise<unknown>>>>(
+    branches: B,
+    optionsValue: WorkflowStructuredOptions,
+  ): Promise<{ [K in keyof B]: Awaited<ReturnType<B[K]>> }> {
+    const options = normalizeStructuredOptions(optionsValue, "parallel", this.limiter.limit);
+    if (!branches || typeof branches !== "object" || Array.isArray(branches)) {
+      throw new TypeError("Workflow v17 parallel branches must be an object");
+    }
+    const keys = Object.keys(branches);
+    if (keys.length < 1 || keys.length > DEFINITION_LIMITS.parallelBranches) {
+      throw new TypeError(`Workflow v17 parallel requires 1–${DEFINITION_LIMITS.parallelBranches} branches`);
+    }
+    const seen = new Set<string>();
+    for (const key of keys) {
+      assertLaneKey(key);
+      if (seen.has(key)) throw new TypeError(`Duplicate workflow v17 parallel lane ${key}`);
+      seen.add(key);
+      if (typeof branches[key] !== "function") throw new TypeError(`Workflow v17 parallel lane ${key} is not a callback`);
+    }
+    const values = await this.runStructure(
+      "parallel",
+      keys.map((key) => ({ key, body: branches[key]! })),
+      canonical({ formatVersion: 1, kind: "parallel", keys, errors: options.errors }),
+      options,
+    );
+    if (!values || typeof values !== "object" || Array.isArray(values)) {
+      throw new Error("Workflow v17 parallel produced an invalid result");
+    }
+    return values as { [K in keyof B]: Awaited<ReturnType<B[K]>> };
+  }
+
+  private async map<T>(
+    itemsValue: readonly JsonValue[],
+    body: (item: JsonValue, index: number) => T | Promise<T>,
+    optionsValue: WorkflowMapOptions,
+  ): Promise<T[]> {
+    const options = normalizeMapOptions(optionsValue, this.limiter.limit);
+    if (!Array.isArray(itemsValue) || itemsValue.length > DEFINITION_LIMITS.mapItems) {
+      throw new TypeError(`Workflow v17 map accepts at most ${DEFINITION_LIMITS.mapItems} items`);
+    }
+    if (typeof body !== "function") throw new TypeError("Workflow v17 map body must be a callback");
+    const items = canonical(itemsValue) as JsonValue[];
+    const keys: string[] = [];
+    const seen = new Set<string>();
+    for (let index = 0; index < items.length; index++) {
+      const key = await Promise.resolve(options.key(structuredClone(items[index]!), index));
+      assertLaneKey(key);
+      if (seen.has(key)) throw new TypeError(`Duplicate workflow v17 map lane ${key}`);
+      seen.add(key);
+      keys.push(key);
+    }
+    const result = await this.runStructure(
+      "map",
+      items.map((item, index) => ({
+        key: keys[index]!,
+        body: () => body(structuredClone(item), index),
+      })),
+      canonical({
+        formatVersion: 1,
+        kind: "map",
+        errors: options.errors,
+        entries: items.map((item, index) => ({ key: keys[index]!, item })),
+      }),
+      options,
+    );
+    if (!Array.isArray(result)) throw new Error("Workflow v17 map produced an invalid result");
+    return result as T[];
+  }
+
+  private async candidate(invocation: WorkflowCandidateInvocation): Promise<unknown> {
+    const runtime = this.options.candidate;
+    if (!runtime) throw new Error("Workflow v17 candidate runtime is unavailable");
+    if (!invocation || typeof invocation.body !== "function") {
+      throw new TypeError("Workflow v17 candidate body must be a callback");
+    }
+    const parent = this.scope();
+    if (parent.signal.aborted) throw parent.signal.reason;
+    const semanticInput = canonical(await runtime.semanticInput({
+      run: this.database.readRun(), input: invocation.input, signal: parent.signal,
+    }));
+    const cursor = parent.cursor++;
+    const claimed = await this.claim(parent, cursor, "candidate", invocation, stableHash(semanticInput));
+    const operation = claimed.operation;
+    if (claimed.claimed) await this.fault("after-operation-claim", operation);
+    const semanticKey = stableHash({
+      formatVersion: 1,
+      kind: "workflow-candidate-join",
+      semanticInputHash: operation.semanticInputHash,
+      contextIdentityHash: this.database.readRun().contextIdentityHash,
+    });
+    const policyHash = stableHash({
+      formatVersion: 1,
+      kind: "workflow-candidate-policy",
+      semanticInput,
+    });
+    if (operation.status === "completed" || operation.status === "failed") {
+      const restored = this.restoreCandidateStructure(parent, operation, semanticKey, policyHash);
+      if (restored.failure) throw new WorkflowRecordedStructuralError(operation.path, restored.failure);
+      return runtime.restore({
+        run: this.database.readRun(), operation, bodyScope: restored.bodyScope,
+        input: invocation.input, signal: parent.signal, result: restored.result!,
+      });
+    }
+    if (operation.status !== "running" && operation.status !== "waiting") {
+      throw new WorkflowSemanticDriftError(
+        `Workflow v17 candidate ${operation.path} cannot resume from ${operation.status}`,
+        operation.path,
+      );
+    }
+    const bodyScope = await this.preclaimCandidateBody(parent, operation);
+    const context: WorkflowCandidateRuntimeContext = {
+      run: this.database.readRun(), operation, bodyScope, input: invocation.input, signal: parent.signal,
+    };
+    const existing = await runtime.existing(context);
+    if (existing) {
+      const joinKey = await this.completeCandidateJoin(
+        parent, operation, bodyScope, semanticKey, policyHash, existing,
+      );
+      parent.previousCallKey = joinKey;
+      await this.fault("after-structural-join", operation);
+      return existing.value;
+    }
+    if (bodyScope.status !== "active") {
+      throw new WorkflowSemanticDriftError(
+        `Workflow v17 candidate body ${bodyScope.path} has no frozen authority`,
+        operation.path,
+      );
+    }
+    const workspace = await runtime.open(context);
+    const bodyContext: CursorScope = {
+      record: bodyScope,
+      cursor: 0,
+      previousCallKey: bodyScope.seedKey,
+      signal: parent.signal,
+      branchLineage: [...parent.branchLineage],
+    };
+    this.controlContexts.add(bodyContext);
+    try {
+      const output = canonical(await this.storage.run(bodyContext, async () =>
+        await invocation.body(workspace)));
+      if (this.fatalFault !== undefined) throw this.fatalFault;
+      if (parent.signal.aborted) throw parent.signal.reason;
+      const frozen = await runtime.freeze({
+        ...context,
+        run: this.database.readRun(),
+        output,
+        bodyTerminalKey: bodyContext.previousCallKey,
+      });
+      await this.fault("after-candidate-frozen", operation);
+      const currentBody = this.database.readScope(bodyScope.scopeId)!;
+      if (currentBody.status !== "completed" || currentBody.terminalKey !== bodyContext.previousCallKey) {
+        throw new WorkflowSemanticDriftError("Workflow v17 candidate freeze did not settle its body scope");
+      }
+      const joinKey = await this.completeCandidateJoin(
+        parent, operation, currentBody, semanticKey, policyHash, frozen,
+      );
+      parent.previousCallKey = joinKey;
+      await this.fault("after-structural-join", operation);
+      return frozen.value;
+    } catch (error) {
+      if (isPassthrough(error) || error instanceof WorkflowRunDatabaseAdmissionError) throw error;
+      if (this.fatalFault !== undefined) throw this.fatalFault;
+      if (parent.signal.aborted) throw error;
+      const failure = failureFromError(error);
+      let currentBody = this.database.readScope(bodyScope.scopeId)!;
+      if (currentBody.status === "active") {
+        const terminalKey = failedScopeTerminal(bodyContext.previousCallKey, failure);
+        await this.completeScope(currentBody, "failed", terminalKey, failure);
+        currentBody = this.database.readScope(bodyScope.scopeId)!;
+      }
+      await runtime.abandon({ ...context, run: this.database.readRun(), bodyScope: currentBody }, failure);
+      const lanes = [{
+        laneKey: "candidate",
+        scopeId: currentBody.scopeId,
+        terminalKey: currentBody.terminalKey!,
+        outcome: currentBody.status === "cancelled" ? "cancelled" as const : "failure" as const,
+      }];
+      const structural = structuralFailure("candidate", "candidate", failure);
+      const joinKey = workflowStructuralJoinKey({
+        previousCallKey: parent.previousCallKey,
+        operation: workflowOperationIdentity(operation),
+        semanticKey,
+        policyHash,
+        outputOrder: ["candidate"],
+        lanes,
+        outcome: "failure",
+        failure: structural,
+      });
+      await this.completeFailedStructure(operation, {
+        previousCallKey: parent.previousCallKey,
+        semanticKey,
+        policyHash,
+        outputOrder: ["candidate"],
+        lanes,
+        joinKey,
+        failure: structural,
+      });
+      parent.previousCallKey = joinKey;
+      await this.fault("after-structural-join", operation);
+      throw new WorkflowRecordedStructuralError(operation.path, structural);
+    }
+  }
+
+  private async runStructure(
+    kind: "parallel" | "map",
+    laneBodies: ReadonlyArray<{ key: string; body: () => unknown | Promise<unknown> }>,
+    semanticInput: JsonValue,
+    options: NormalizedStructuredOptions,
+  ): Promise<unknown> {
+    if (this.fatalFault !== undefined) throw this.fatalFault;
+    const parent = this.scope();
+    if (parent.signal.aborted) throw parent.signal.reason;
+    const cursor = parent.cursor++;
+    const claimed = await this.claim(
       parent,
-      seenIds: new Set(),
-      signal: branch?.signal ?? parent.signal,
-      branchLineage,
+      cursor,
+      kind,
+      options,
+      stableHash(semanticInput),
+    );
+    const operation = claimed.operation;
+    if (claimed.claimed) await this.fault("after-operation-claim", operation);
+    const outputOrder = laneBodies.map((lane) => lane.key);
+    const semanticKey = stableHash({
+      formatVersion: 1,
+      kind: `workflow-${kind}-join`,
+      semanticInputHash: operation.semanticInputHash,
+    });
+    const policyHash = stableHash({
+      formatVersion: 1,
+      kind: `workflow-${kind}-policy`,
+      errors: options.errors,
+    });
+    if (operation.status === "completed" || operation.status === "failed") {
+      return this.restoreStructure(parent, operation, semanticKey, policyHash, outputOrder);
+    }
+    if (operation.status !== "running" && operation.status !== "waiting") {
+      throw new WorkflowSemanticDriftError(
+        `Workflow v17 structure ${operation.path} cannot resume from ${operation.status}`,
+        operation.path,
+      );
+    }
+    const scopes = await this.preclaimLanes(parent, operation, kind, outputOrder);
+    const lanes: StructuredLane[] = laneBodies.map((lane, index) => ({
+      ...lane,
+      scope: scopes[index]!,
+      groupOperationId: operation.operationId,
+    }));
+    const outcomes = await this.runLanes(lanes, options);
+    if (this.fatalFault !== undefined) throw this.fatalFault;
+    if (parent.signal.aborted) throw parent.signal.reason;
+    const firstFailure = options.errors === "fail-fast"
+      ? outcomes.find((lane) => lane.outcome === "failure")
+      : undefined;
+    const laneRecords = outcomes.map((lane): Omit<WorkflowStructuralJoinLaneRecord, "ordinal"> => ({
+      laneKey: lane.key,
+      scopeId: lane.scope.scopeId,
+      terminalKey: lane.terminalKey,
+      outcome: lane.outcome,
+    }));
+    if (firstFailure) {
+      const failure = structuralFailure(kind, firstFailure.key, firstFailure.failure!);
+      const joinKey = workflowStructuralJoinKey({
+        previousCallKey: parent.previousCallKey,
+        operation: workflowOperationIdentity(operation),
+        semanticKey,
+        policyHash,
+        outputOrder,
+        lanes: laneRecords,
+        outcome: "failure",
+        failure,
+      });
+      await this.completeFailedStructure(operation, {
+        previousCallKey: parent.previousCallKey,
+        semanticKey,
+        policyHash,
+        outputOrder,
+        lanes: laneRecords,
+        joinKey,
+        failure,
+      });
+      parent.previousCallKey = joinKey;
+      await this.fault("after-structural-join", operation);
+      throw new WorkflowRecordedStructuralError(operation.path, failure);
+    }
+    const runtimeResult = kind === "parallel"
+      ? Object.fromEntries(outcomes.map((lane) => [lane.key, laneResult(lane, options.errors)]))
+      : outcomes.map((lane) => laneResult(lane, options.errors));
+    const result = this.encodeStructuralValue(runtimeResult);
+    const joinKey = await this.completeSuccessfulStructure(operation, {
+      previousCallKey: parent.previousCallKey,
+      semanticKey,
+      policyHash,
+      outputOrder,
+      lanes: laneRecords,
+      result,
+    });
+    parent.previousCallKey = joinKey;
+    await this.fault("after-structural-join", operation);
+    return runtimeResult;
+  }
+
+  private restoreStructure(
+    parent: CursorScope,
+    operation: WorkflowOperationRecord,
+    semanticKey: string,
+    policyHash: string,
+    outputOrder: readonly string[],
+  ): unknown {
+    const call = this.database.readScopeCall(operation.operationId);
+    const join = this.database.readStructuralJoin(operation.operationId);
+    if (!call || !join || call.previousCallKey !== parent.previousCallKey
+      || call.semanticKey !== semanticKey || call.completionAuthority !== "structural-join"
+      || join.policyHash !== policyHash || !equalStrings(join.outputOrder, outputOrder)
+      || join.joinKey !== call.callKey) {
+      throw new WorkflowSemanticDriftError(
+        `Workflow v17 same-run structure changed identity at ${operation.path}`,
+        operation.path,
+      );
+    }
+    parent.previousCallKey = call.callKey;
+    if (call.outcome === "failure") {
+      if (operation.status !== "failed" || call.replayPolicy !== "never" || !operation.failure) {
+        throw new WorkflowSemanticDriftError(`Workflow v17 failed structure is corrupt at ${operation.path}`);
+      }
+      throw new WorkflowRecordedStructuralError(operation.path, operation.failure);
+    }
+    if (operation.status !== "completed" || operation.result === undefined) {
+      throw new WorkflowSemanticDriftError(`Workflow v17 completed structure is corrupt at ${operation.path}`);
+    }
+    return this.decodeStructuralValue(operation.result);
+  }
+
+  private restoreCandidateStructure(
+    parent: CursorScope,
+    operation: WorkflowOperationRecord,
+    semanticKey: string,
+    policyHash: string,
+  ): { bodyScope: WorkflowScopeRecord; result?: JsonValue; failure?: JsonObject } {
+    const call = this.database.readScopeCall(operation.operationId);
+    const join = this.database.readStructuralJoin(operation.operationId);
+    const [bodyScope] = this.database.listChildScopes(operation.operationId);
+    if (!call || !join || !bodyScope || join.kind !== "candidate"
+      || call.previousCallKey !== parent.previousCallKey || call.semanticKey !== semanticKey
+      || call.completionAuthority !== "structural-join" || join.policyHash !== policyHash
+      || !equalStrings(join.outputOrder, ["candidate"]) || join.joinKey !== call.callKey
+      || join.lanes.length !== 1 || join.lanes[0]!.scopeId !== bodyScope.scopeId) {
+      throw new WorkflowSemanticDriftError(
+        `Workflow v17 same-run candidate changed identity at ${operation.path}`,
+        operation.path,
+      );
+    }
+    parent.previousCallKey = call.callKey;
+    if (call.outcome === "failure") {
+      if (operation.status !== "failed" || call.replayPolicy !== "never" || !operation.failure) {
+        throw new WorkflowSemanticDriftError(`Workflow v17 failed candidate is corrupt at ${operation.path}`);
+      }
+      return { bodyScope, failure: operation.failure };
+    }
+    if (operation.status !== "completed" || operation.result === undefined) {
+      throw new WorkflowSemanticDriftError(`Workflow v17 completed candidate is corrupt at ${operation.path}`);
+    }
+    return { bodyScope, result: structuredClone(operation.result) };
+  }
+
+  private async restoreCommitted(
+    scope: CursorScope,
+    adapter: WorkflowSemanticEffectAdapter,
+    input: unknown,
+    semanticInput: JsonValue,
+    operation: WorkflowOperationRecord,
+    identity: WorkflowEffectIdentity,
+  ): Promise<unknown> {
+    const call = this.database.readScopeCall(operation.operationId);
+    if (!call || call.previousCallKey !== scope.previousCallKey || call.semanticKey !== identity.semanticKey
+      || call.completionAuthority !== identity.completionAuthority
+      || (call.outcome === "success" && call.replayPolicy !== identity.replayPolicy)
+      || (call.outcome === "success" && call.postWorkspaceCheckpointId !== identity.postWorkspaceCheckpointId)
+      || (call.outcome === "failure" && (call.replayPolicy !== "never" || call.postWorkspaceCheckpointId !== undefined))) {
+      throw new WorkflowSemanticDriftError(
+        `Workflow v17 same-run call changed identity at ${operation.path}`,
+        operation.path,
+      );
+    }
+    scope.previousCallKey = call.callKey;
+    if (call.outcome === "failure") throw new WorkflowRecordedEffectError(operation.path, operation.failure!);
+    const result = structuredClone(operation.result!);
+    return await adapter.restore?.({
+      run: this.database.readRun(),
+      input,
+      semanticInput,
+      operation,
+      call,
+      result,
+      signal: scope.signal,
+    }) ?? result;
+  }
+
+  private async preclaimLanes(
+    parent: CursorScope,
+    operation: WorkflowOperationRecord,
+    kind: "parallel" | "map",
+    keys: readonly string[],
+  ): Promise<WorkflowScopeRecord[]> {
+    const childKind = kind === "parallel" ? "parallel-branch" as const : "map-item" as const;
+    const specs = keys.map((laneKey) => ({
+      kind: childKind,
+      laneKey,
+      seedKey: workflowLaneSeed({
+        parentPreviousCallKey: parent.previousCallKey,
+        ownerOperationPath: operation.path,
+        ownerKind: kind,
+        childKind,
+        laneKey,
+      }),
+    }));
+    for (let retry = 0; retry < MAX_REVISION_RETRIES; retry++) {
+      try {
+        const result = this.database.createChildScopes(
+          this.database.readRun().revision,
+          operation.operationId,
+          specs,
+          this.timestamp(),
+        );
+        if (result.created) await this.fault("after-child-scopes-preclaimed", operation);
+        return result.scopes;
+      } catch (error) {
+        if (error instanceof WorkflowRunDatabaseRevisionConflictError) continue;
+        throw error;
+      }
+    }
+    throw new Error(`Could not preclaim workflow v17 ${kind} lanes`);
+  }
+
+  private async preclaimCandidateBody(
+    parent: CursorScope,
+    operation: WorkflowOperationRecord,
+  ): Promise<WorkflowScopeRecord> {
+    const spec = {
+      kind: "candidate-body" as const,
+      seedKey: workflowLaneSeed({
+        parentPreviousCallKey: parent.previousCallKey,
+        ownerOperationPath: operation.path,
+        ownerKind: "candidate",
+        childKind: "candidate-body",
+      }),
+    };
+    for (let retry = 0; retry < MAX_REVISION_RETRIES; retry++) {
+      try {
+        const result = this.database.createChildScopes(
+          this.database.readRun().revision,
+          operation.operationId,
+          [spec],
+          this.timestamp(),
+        );
+        if (result.created) await this.fault("after-child-scopes-preclaimed", operation);
+        return result.scopes[0]!;
+      } catch (error) {
+        if (error instanceof WorkflowRunDatabaseRevisionConflictError) continue;
+        throw error;
+      }
+    }
+    throw new Error("Could not preclaim workflow v17 candidate body");
+  }
+
+  private async completeCandidateJoin(
+    parent: CursorScope,
+    operation: WorkflowOperationRecord,
+    bodyScope: WorkflowScopeRecord,
+    semanticKey: string,
+    policyHash: string,
+    value: WorkflowCandidateRuntimeValue,
+  ): Promise<string> {
+    return await this.completeSuccessfulStructure(operation, {
+      previousCallKey: parent.previousCallKey,
+      semanticKey,
+      policyHash,
+      outputOrder: ["candidate"],
+      lanes: [{
+        laneKey: "candidate",
+        scopeId: bodyScope.scopeId,
+        terminalKey: bodyScope.terminalKey!,
+        outcome: "success",
+      }],
+      result: value.result,
+      ...(value.artifacts?.length ? { artifacts: value.artifacts } : {}),
+    });
+  }
+
+  private async bindCandidateWorkspaceLanes(
+    scope: CursorScope,
+    workspaceIds: readonly string[],
+  ): Promise<void> {
+    if (!Array.isArray(workspaceIds) || new Set(workspaceIds).size !== workspaceIds.length) {
+      throw new TypeError("Workflow v17 candidate workspace identities must be unique");
+    }
+    for (const workspaceId of workspaceIds) {
+      if (typeof workspaceId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:@/+~-]{0,255}$/u.test(workspaceId)) {
+        throw new TypeError("Workflow v17 candidate workspace identity is invalid");
+      }
+      for (const binding of scope.branchLineage) {
+        let bound = false;
+        for (let retry = 0; retry < MAX_REVISION_RETRIES; retry++) {
+          try {
+            this.database.bindCandidateWorkspaceLane(this.database.readRun().revision, {
+              workspaceId,
+              groupOperationId: binding.groupOperationId,
+              laneKey: binding.laneKey,
+              at: this.timestamp(),
+            });
+            bound = true;
+            break;
+          } catch (error) {
+            if (error instanceof WorkflowRunDatabaseRevisionConflictError) continue;
+            throw error;
+          }
+        }
+        if (!bound) throw new Error(`Could not bind workflow v17 candidate workspace ${workspaceId}`);
+      }
+    }
+  }
+
+  private async runLanes(
+    lanes: readonly StructuredLane[],
+    options: NormalizedStructuredOptions,
+  ): Promise<StructuredLaneOutcome[]> {
+    if (lanes.length === 0) return [];
+    const parent = this.scope();
+    const controller = linkedController(parent.signal);
+    const outcomes = new Array<StructuredLaneOutcome | undefined>(lanes.length);
+    let cursor = 0;
+    let firstFailure: StructuredLaneOutcome | undefined;
+    let passthrough: unknown;
+    const worker = async (): Promise<void> => {
+      while (passthrough === undefined && !(firstFailure && options.errors === "fail-fast")) {
+        const index = cursor++;
+        if (index >= lanes.length) return;
+        try {
+          const outcome = await this.runLane(lanes[index]!, controller.signal);
+          outcomes[index] = outcome;
+          if (outcome.outcome === "failure" && options.errors === "fail-fast" && !firstFailure) {
+            firstFailure = outcome;
+            controller.abort(new WorkflowSiblingCancellation(outcome.key));
+          }
+        } catch (error) {
+          if (passthrough === undefined) passthrough = error;
+          controller.abort(error);
+        }
+      }
     };
     try {
-      // Completed stages deliberately re-enter deterministic control so nested
-      // committed effects can reconstruct workflow-facing opaque handles.
-      const result = await this.storage.run(child, () => body(operation, child));
-      await this.boundary();
-      const current = this.database.readOperation(operation.operationId);
-      if (!current) throw new RunDatabaseStateError(`Missing structural operation ${operation.path}`);
-      if (current.status !== "completed") await this.completeOperation(current, { artifacts: [] });
-      if (operation.kind === "parallel" || operation.kind === "fan-out") await this.normalizeOperationOrder();
-      return result;
-    } catch (error) {
-      if (this.isPassthrough(error)) throw error;
-      const current = this.database.readOperation(operation.operationId);
-      if (current && current.status !== "completed" && current.status !== "failed") {
-        await this.failOperation(current, workflowFailureReason(error, current.operationId));
-      }
-      throw error;
-    }
-  }
-
-  private async preclaim(
-    parent: OperationRecord,
-    specs: readonly StructuralPreclaim[],
-  ): Promise<OperationRecord[]> {
-    if (specs.length === 0) return [];
-    for (let retry = 0; retry < MAX_REVISION_RETRIES; retry++) {
-      await this.boundary(parent.operationId);
-      const existing = specs.map((spec) => this.database.readOperationByPath(spec.path));
-      if (existing.every(Boolean)) {
-        for (let index = 0; index < specs.length; index++) {
-          assertPreclaimedSemanticOperation(existing[index]!, parent.operationId, specs[index]!);
+      await Promise.all(Array.from(
+        { length: Math.min(options.concurrency, lanes.length) },
+        () => worker(),
+      ));
+      if (this.fatalFault !== undefined) throw this.fatalFault;
+      if (passthrough !== undefined) throw passthrough;
+      if (parent.signal.aborted) throw parent.signal.reason;
+      if (firstFailure && options.errors === "fail-fast") {
+        const cancellation = cancellationFailure(firstFailure.key);
+        for (let index = 0; index < lanes.length; index++) {
+          if (outcomes[index]) continue;
+          const cancelled = await this.cancelLane(lanes[index]!, cancellation);
+          outcomes[index] = cancelled;
         }
-        return existing as OperationRecord[];
       }
-      if (existing.some(Boolean)) throw new RunDatabaseStateError(`Structural queue ${parent.path} was only partly preclaimed`);
-      const run = this.database.readRun();
-      const at = this.timestamp();
-      const firstOrdinal = this.database.nextOperationOrdinal();
-      const operations = specs.map((spec, index): OperationRecord => ({
-        operationId: deterministicSemanticId("operation", run.runId, spec.path),
-        runId: run.runId,
-        parentOperationId: parent.operationId,
-        path: spec.path,
-        sourceId: spec.sourceId,
-        kind: "stage",
-        ordinal: firstOrdinal + index,
-        status: "queued",
-        semanticInputHash: spec.semanticInputHash,
-        attemptCount: 0,
-        createdAt: at,
-        updatedAt: at,
-      }));
+      if (outcomes.some((outcome) => outcome === undefined)) {
+        throw new Error("Workflow v17 structured scheduler left an unsettled lane");
+      }
+      return outcomes as StructuredLaneOutcome[];
+    } finally {
+      controller.dispose();
+    }
+  }
+
+  private async runLane(lane: StructuredLane, signal: AbortSignal): Promise<StructuredLaneOutcome> {
+    let current = this.database.readScope(lane.scope.scopeId);
+    if (!current) throw new Error(`Workflow v17 lane ${lane.scope.path} disappeared`);
+    if (current.status === "failed") return laneFromTerminal(current);
+    if (current.status === "cancelled") return laneFromTerminal(current);
+    const scope: CursorScope = {
+      record: current,
+      cursor: 0,
+      previousCallKey: current.seedKey,
+      signal,
+      branchLineage: [
+        ...this.scope().branchLineage,
+        { groupOperationId: lane.groupOperationId, laneKey: lane.key },
+      ],
+    };
+    this.controlContexts.add(scope);
+    try {
+      const value = await this.storage.run(scope, async () => await lane.body());
+      if (this.fatalFault !== undefined) throw this.fatalFault;
+      if (signal.aborted) throw signal.reason;
+      current = this.database.readScope(current.scopeId)!;
+      if (current.status === "completed") {
+        if (current.terminalKey !== scope.previousCallKey) {
+          throw new WorkflowSemanticDriftError(
+            `Workflow v17 lane ${current.path} terminal changed after restart`,
+          );
+        }
+      } else if (current.status === "active") {
+        await this.completeScope(current, "completed", scope.previousCallKey);
+        await this.fault("after-lane-scope-complete");
+        current = this.database.readScope(current.scopeId)!;
+      } else {
+        throw new WorkflowSemanticDriftError(`Workflow v17 successful lane ${current.path} is ${current.status}`);
+      }
+      return {
+        key: lane.key,
+        scope: current,
+        outcome: "success",
+        terminalKey: current.terminalKey!,
+        value,
+      };
+    } catch (error) {
+      if (isPassthrough(error) || error instanceof WorkflowRunDatabaseAdmissionError) throw error;
+      if (this.fatalFault !== undefined) throw this.fatalFault;
+      if (this.controller.signal.aborted) throw error;
+      if (signal.aborted && signal.reason instanceof WorkflowSiblingCancellation) {
+        return await this.cancelLane(lane, cancellationFailure(signal.reason.laneKey));
+      }
+      if (signal.aborted) throw error;
+      const failure = failureFromError(error);
+      current = this.database.readScope(lane.scope.scopeId)!;
+      if (current.status === "failed") {
+        if (stableHash(current.failure) !== stableHash(failure)) {
+          throw new WorkflowSemanticDriftError(`Workflow v17 lane ${current.path} failure changed after restart`);
+        }
+      } else if (current.status === "active") {
+        const terminalKey = failedScopeTerminal(scope.previousCallKey, failure);
+        await this.completeScope(current, "failed", terminalKey, failure);
+        await this.fault("after-lane-scope-failure");
+        current = this.database.readScope(current.scopeId)!;
+      } else {
+        throw new WorkflowSemanticDriftError(`Workflow v17 failed lane ${current.path} is ${current.status}`);
+      }
+      return {
+        key: lane.key,
+        scope: current,
+        outcome: "failure",
+        terminalKey: current.terminalKey!,
+        failure,
+      };
+    }
+  }
+
+  private async cancelLane(
+    lane: StructuredLane,
+    failure: JsonObject,
+  ): Promise<StructuredLaneOutcome> {
+    for (let retry = 0; retry < MAX_REVISION_RETRIES; retry++) {
+      const current = this.database.readScope(lane.scope.scopeId);
+      if (!current) throw new Error(`Workflow v17 lane ${lane.scope.path} disappeared`);
+      if (current.status !== "active") return laneFromTerminal(current);
       try {
-        return this.database.preclaimOperations({
-          expectedRevision: run.revision,
-          operations,
-          admission: this.admissionLimits(run),
-          event: {
-            type: "structure-preclaimed",
-            operationId: parent.operationId,
-            payload: { path: parent.path, count: operations.length, firstOrdinal },
-            at,
-          },
+        const cancelled = this.database.cancelScopeTree({
+          expectedRevision: this.database.readRun().revision,
+          scopeId: current.scopeId,
+          failure,
+          at: this.timestamp(),
         });
+        await this.fault("after-lane-scope-cancelled");
+        return laneFromTerminal(cancelled);
       } catch (error) {
-        if (error instanceof RunRevisionConflictError) continue;
-        if (error instanceof RunDatabaseAdmissionError) throw this.runaway(error, parent.operationId);
+        if (error instanceof WorkflowRunDatabaseRevisionConflictError) continue;
         throw error;
       }
     }
-    throw new Error("Could not preclaim structural operations after repeated revision races");
+    throw new Error(`Could not cancel workflow v17 lane ${lane.scope.path}`);
   }
 
-  private async focus(operation: OperationRecord): Promise<OperationRecord> {
+  private async completeSuccessfulStructure(
+    operation: WorkflowOperationRecord,
+    input: {
+      previousCallKey: string;
+      semanticKey: string;
+      policyHash: string;
+      outputOrder: string[];
+      lanes: Array<Omit<WorkflowStructuralJoinLaneRecord, "ordinal">>;
+      result: JsonValue;
+      artifacts?: WorkflowCallArtifactInput[];
+    },
+  ): Promise<string> {
+    if (this.options.replay) {
+      const completed = this.options.replay.completeStructuralJoin({
+        operationId: operation.operationId,
+        ...input,
+        kind: operation.kind as "parallel" | "map" | "candidate",
+        at: this.timestamp(),
+      });
+      return completed.joinKey;
+    }
+    const joinKey = workflowStructuralJoinKey({
+      previousCallKey: input.previousCallKey,
+      operation: workflowOperationIdentity(operation),
+      semanticKey: input.semanticKey,
+      policyHash: input.policyHash,
+      outputOrder: input.outputOrder,
+      lanes: input.lanes,
+      result: input.result,
+    });
     for (let retry = 0; retry < MAX_REVISION_RETRIES; retry++) {
-      await this.boundary(operation.operationId);
-      const current = this.database.readOperation(operation.operationId);
-      if (!current) throw new RunDatabaseStateError(`Missing operation ${operation.path}`);
-      if (current.status !== "queued") return current;
-      const run = this.database.readRun();
       try {
-        return this.database.focusOperation({
-          expectedRevision: run.revision,
+        this.database.completeStructuralJoin({
+          expectedRevision: this.database.readRun().revision,
           operationId: operation.operationId,
-          focusedAt: this.timestamp(),
-          event: { type: "operation-started", payload: { path: operation.path } },
+          previousCallKey: input.previousCallKey,
+          semanticKey: input.semanticKey,
+          callKey: joinKey,
+          kind: operation.kind as "parallel" | "map" | "candidate",
+          policyHash: input.policyHash,
+          joinKey,
+          outputOrder: input.outputOrder,
+          lanes: input.lanes,
+          result: input.result,
+          ...(input.artifacts?.length ? { artifacts: input.artifacts } : {}),
+          at: this.timestamp(),
         });
+        return joinKey;
       } catch (error) {
-        if (error instanceof RunRevisionConflictError) continue;
+        if (error instanceof WorkflowRunDatabaseRevisionConflictError) continue;
+        const current = this.database.readOperation(operation.operationId);
+        if (current?.status === "completed" && current.callKey === joinKey) return joinKey;
         throw error;
       }
     }
-    throw new Error("Could not start preclaimed operation after repeated revision races");
+    throw new Error(`Could not complete workflow v17 ${operation.kind} join`);
   }
 
-  private async normalizeOperationOrder(): Promise<void> {
+  private encodeStructuralValue(value: unknown): JsonValue {
+    return this.options.structuralValues
+      ? this.options.structuralValues.encode(value)
+      : canonical(value);
+  }
+
+  private decodeStructuralValue(value: JsonValue): unknown {
+    return this.options.structuralValues
+      ? this.options.structuralValues.decode(value)
+      : structuredClone(value);
+  }
+
+  private async completeFailedStructure(
+    operation: WorkflowOperationRecord,
+    input: {
+      previousCallKey: string;
+      semanticKey: string;
+      policyHash: string;
+      outputOrder: string[];
+      lanes: Array<Omit<WorkflowStructuralJoinLaneRecord, "ordinal">>;
+      joinKey: string;
+      failure: JsonObject;
+    },
+  ): Promise<void> {
     for (let retry = 0; retry < MAX_REVISION_RETRIES; retry++) {
-      await this.boundary();
-      const run = this.database.readRun();
       try {
-        this.database.normalizeOperationOrdinals(run.revision, this.timestamp());
+        this.database.completeStructuralFailure({
+          expectedRevision: this.database.readRun().revision,
+          operationId: operation.operationId,
+          previousCallKey: input.previousCallKey,
+          semanticKey: input.semanticKey,
+          callKey: input.joinKey,
+          kind: operation.kind as "parallel" | "map" | "candidate",
+          policyHash: input.policyHash,
+          joinKey: input.joinKey,
+          outputOrder: input.outputOrder,
+          lanes: input.lanes,
+          failure: input.failure,
+          at: this.timestamp(),
+        });
         return;
       } catch (error) {
-        if (error instanceof RunRevisionConflictError) continue;
+        if (error instanceof WorkflowRunDatabaseRevisionConflictError) continue;
+        const current = this.database.readOperation(operation.operationId);
+        if (current?.status === "failed" && current.callKey === input.joinKey) return;
         throw error;
       }
     }
-    throw new Error("Could not normalize operation order after repeated revision races");
+    throw new Error(`Could not complete failed workflow v17 ${operation.kind} join`);
   }
 
-  private async effect(kind: SemanticEffectKind, idValue: unknown, input: unknown): Promise<unknown> {
-    const id = operationSourceId(idValue);
-    const adapter = this.adapters.get(kind);
-    if (!adapter) throw new Error(`No semantic effect adapter is installed for ${kind}`);
-    const parent = this.scope();
-    this.candidateConcurrency.assertSafe(input, parent.branchLineage);
-    const pathValue = semanticOperationPath(parent.path, kind, id);
-    const admission: SemanticEffectAdmissionRequest = {
-      run: this.database.readRun(), kind, sourceId: id, path: pathValue, input,
+  private async completeSettlement(
+    scope: CursorScope,
+    adapter: WorkflowSemanticEffectAdapter,
+    input: unknown,
+    semanticInput: JsonValue,
+    operation: WorkflowOperationRecord,
+    settlement: WorkflowEffectSettlementRecord,
+  ): Promise<unknown> {
+    const terminal = settlement.outcome === "success" ? settlement.result! : settlement.failure!;
+    const callKey = workflowFreshCallKey({
+      runId: operation.runId,
+      previousCallKey: scope.previousCallKey,
+      operation: workflowOperationIdentity(operation),
+      semanticKey: settlement.semanticKey,
+      outcome: settlement.outcome,
+      completionAuthority: settlement.completionAuthority,
+      replayPolicy: settlement.replayPolicy,
+      result: terminal,
+    });
+    const evidence = settlement.outcome === "success" && adapter.evidence
+      ? await adapter.evidence({
+          run: this.database.readRun(), input, semanticInput, operation,
+          result: settlement.result!, signal: scope.signal,
+        })
+      : undefined;
+    let completed: WorkflowOperationRecord | undefined;
+    for (let retry = 0; retry < MAX_REVISION_RETRIES; retry++) {
+      try {
+        completed = this.database.completeCall({
+          expectedRevision: this.database.readRun().revision,
+          operationId: operation.operationId,
+          previousCallKey: scope.previousCallKey,
+          semanticKey: settlement.semanticKey,
+          callKey,
+          outcome: settlement.outcome,
+          completionAuthority: settlement.completionAuthority,
+          replayPolicy: settlement.replayPolicy,
+          ...(settlement.outcome === "success" ? { result: settlement.result! } : { failure: settlement.failure! }),
+          ...(settlement.postWorkspaceCheckpointId ? {
+            postWorkspaceCheckpointId: settlement.postWorkspaceCheckpointId,
+          } : {}),
+          ...(evidence?.artifacts?.length ? { artifacts: evidence.artifacts } : {}),
+          at: this.timestamp(),
+        });
+        break;
+      } catch (error) {
+        if (error instanceof WorkflowRunDatabaseRevisionConflictError) continue;
+        const current = this.database.readOperation(operation.operationId);
+        if (current?.status === "completed" || current?.status === "failed") {
+          completed = current;
+          break;
+        }
+        throw error;
+      }
+    }
+    if (!completed) throw new Error("Could not complete workflow v17 effect after repeated revision races");
+    await this.fault(settlement.outcome === "success" ? "after-operation-complete" : "after-operation-failure", completed);
+    const identity: WorkflowEffectIdentity = {
+      semanticKey: settlement.semanticKey,
+      completionAuthority: settlement.completionAuthority,
+      replayPolicy: settlement.outcome === "success" ? settlement.replayPolicy : "never",
+      ...(settlement.outcome === "success" && settlement.postWorkspaceCheckpointId ? {
+        postWorkspaceCheckpointId: settlement.postWorkspaceCheckpointId,
+      } : {}),
     };
-    const semanticInput = canonicalStructuralJson(await adapter.semanticInput(admission));
-    const journalIdentity = await this.journal.identity(adapter, admission);
-    const operation = await this.claim(parent, kind, id, stableHash(semanticInput));
-    if (operation.status === "completed") return await this.restore(adapter, admission, operation);
-    if (operation.status === "failed") throw recordedSemanticFailure(operation);
-    if (operation.status === "paused" || operation.status === "stopped" || operation.status === "waiting") {
-      throw new SemanticRunSuspension(operation.status, `Effect ${operation.path} is ${operation.status}`);
-    }
-
-    const controller = linkedSemanticController(parent.signal);
-    const monitor = setInterval(() => {
-      const suspension = this.controlSuspension(operation.operationId);
-      if (suspension && !controller.signal.aborted) controller.abort(suspension);
-    }, this.pollIntervalMs);
-    monitor.unref?.();
-    let lease: Awaited<ReturnType<SemanticConcurrencyLimiter["acquire"]>> | undefined;
-    try {
-      lease = await this.limiter.acquire(controller.signal);
-      await this.boundary(operation.operationId);
-      const request = { ...admission, database: this.database, operation, signal: controller.signal };
-      const replayed = await this.journal.consume(adapter, request, journalIdentity);
-      if (replayed) return await this.restore(adapter, admission, replayed);
-      if (controller.signal.aborted) throw controller.signal.reason;
-      await this.boundary(operation.operationId);
-      const outcome = await adapter.execute(request);
-      if (outcome.completionAuthority !== journalIdentity.completionAuthority) {
-        throw new Error(`Effect ${operation.path} completed through the wrong authority`);
-      }
-      if (
-        (kind === "agent" || kind === "command")
-        && containsCandidateWorkspaceCapability(input)
-        && (!outcome.result.workspace || outcome.result.workspace.kind !== "candidate" || !outcome.workspaceCheckpoint)
-      ) {
-        throw new Error(`Mutating child ${operation.path} completed without an exact candidate checkpoint`);
-      }
-      await this.fault("after-effect-settled", operation);
-      await this.boundary(operation.operationId);
-      const completed = await this.completeOperation(operation, outcome.result, outcome, journalIdentity);
-      await this.fault("after-operation-completion", completed);
-      return await this.restore(adapter, admission, completed);
-    } catch (error) {
-      if (error instanceof SemanticEngineCrashError) throw error;
-      const suspension = await this.detectSuspension(operation.operationId);
-      if (suspension) throw suspension;
-      const current = this.database.readOperation(operation.operationId);
-      if (current?.status === "completed") return await this.restore(adapter, admission, current);
-      if (current && current.status !== "failed") {
-        const failed = await this.failOperation(current, effectFailureReason(error, current.operationId));
-        throw new SemanticOperationError(failed, boundedError(error));
-      }
-      throw error;
-    } finally {
-      lease?.release();
-      clearInterval(monitor);
-      controller.dispose();
-    }
-  }
-
-  /**
-   * Candidate owns a callback scope rather than one host effect. Its mutating
-   * children are journaled and checkpointed normally; the container merely
-   * freezes their final tree, so journaling it would put a parent call before
-   * the child calls whose post-state it summarizes.
-   */
-  private async candidate(idValue: unknown, body: unknown, options: unknown): Promise<unknown> {
-    if (typeof body !== "function") throw new Error("flow.candidate() body must be a callback");
-    const id = operationSourceId(idValue);
-    const adapter = this.adapters.get("candidate");
-    if (!adapter) throw new Error("No semantic effect adapter is installed for candidate");
-    const parent = this.scope();
-    const input = { body, options };
-    const pathValue = semanticOperationPath(parent.path, "candidate", id);
-    const admission: SemanticEffectAdmissionRequest = {
-      run: this.database.readRun(), kind: "candidate", sourceId: id, path: pathValue, input,
-    };
-    const semanticInput = canonicalStructuralJson(await adapter.semanticInput(admission));
-    const operation = await this.claim(parent, "candidate", id, stableHash(semanticInput));
-    if (operation.status === "completed") return await this.restore(adapter, admission, operation);
-    if (operation.status === "failed") throw recordedSemanticFailure(operation);
-    if (operation.status === "paused" || operation.status === "stopped" || operation.status === "waiting") {
-      throw new SemanticRunSuspension(operation.status, `Candidate ${operation.path} is ${operation.status}`);
-    }
-
-    const controller = linkedSemanticController(parent.signal);
-    const monitor = setInterval(() => {
-      const suspension = this.controlSuspension(operation.operationId);
-      if (suspension && !controller.signal.aborted) controller.abort(suspension);
-    }, this.pollIntervalMs);
-    monitor.unref?.();
-    const child: SemanticEngineScope = {
-      path: operation.path,
-      operationId: operation.operationId,
-      parent,
-      seenIds: new Set(),
-      signal: controller.signal,
-      branchLineage: new Map(parent.branchLineage),
-    };
-    try {
-      await this.boundary(operation.operationId);
-      const request = { ...admission, database: this.database, operation, signal: controller.signal };
-      const outcome = await this.storage.run(child, async () => await adapter.execute(request));
-      if (outcome.completionAuthority !== "host-effect") {
-        throw new Error(`Candidate ${operation.path} completed through the wrong authority`);
-      }
-      if (outcome.result.workspace || outcome.workspaceCheckpoint) {
-        throw new Error(`Candidate container ${operation.path} cannot replace child checkpoint authority`);
-      }
-      await this.fault("after-effect-settled", operation);
-      await this.boundary(operation.operationId);
-      const completed = await this.completeOperation(operation, outcome.result, outcome);
-      await this.fault("after-operation-completion", completed);
-      return await this.restore(adapter, admission, completed);
-    } catch (error) {
-      if (error instanceof SemanticEngineCrashError) throw error;
-      const suspension = await this.detectSuspension(operation.operationId);
-      if (suspension) throw suspension;
-      const current = this.database.readOperation(operation.operationId);
-      if (current?.status === "completed") return await this.restore(adapter, admission, current);
-      if (current && current.status !== "failed") {
-        const failed = await this.failOperation(current, effectFailureReason(error, current.operationId));
-        throw new SemanticOperationError(failed, boundedError(error));
-      }
-      throw error;
-    } finally {
-      clearInterval(monitor);
-      controller.dispose();
-    }
-  }
-
-  private async checkpoint(idValue: unknown, input: unknown): Promise<JsonValue> {
-    if (!this.database.readRun().workflow.capabilities.includes("human-input")) {
-      throw new Error("flow.checkpoint() requires human-input capability");
-    }
-    const id = operationSourceId(idValue);
-    const request = normalizeCheckpointRequest(input);
-    const parent = this.scope();
-    const operation = await this.claim(parent, "checkpoint", id, stableHash(request));
-    const checkpointId = deterministicSemanticId("checkpoint", this.database.readRun().runId, operation.path);
-    let checkpoint = this.database.readHumanCheckpoint(checkpointId);
-    if (!checkpoint) {
-      checkpoint = await this.createCheckpoint(operation, request, checkpointId);
-      await this.fault("after-checkpoint-request", operation);
-    }
-    if (checkpoint.operationId !== operation.operationId || stableHash(checkpoint.request) !== stableHash(request)) {
-      throw new RunDatabaseStateError(`Checkpoint ${checkpointId} changed semantic identity`);
-    }
-    if (checkpoint.status === "waiting") this.suspend("waiting", `Checkpoint ${operation.path} is waiting for human input`);
-    if (checkpoint.status === "stopped") this.suspend("stopped", `Checkpoint ${operation.path} was stopped`);
-    if (checkpoint.response === undefined) throw new RunDatabaseStateError(`Completed checkpoint ${checkpointId} has no response`);
-    await this.fault("after-checkpoint-response", operation);
-    const current = this.database.readOperation(operation.operationId)!;
-    if (current.status !== "completed") {
-      await this.completeOperation(current, { value: checkpoint.response, artifacts: [] });
-      await this.fault("after-checkpoint-completion", current);
-    }
-    return checkpoint.response;
+    return await this.restoreCommitted(scope, adapter, input, semanticInput, completed, identity);
   }
 
   private async claim(
-    parent: SemanticEngineScope,
-    kind: OperationKind,
-    id: string,
+    scope: CursorScope,
+    cursor: number,
+    kind: WorkflowOperationKind,
+    invocation: Pick<WorkflowEffectInvocation, "sourceSite" | "descriptorSourceSite" | "title">,
     semanticInputHash: string,
-  ): Promise<OperationRecord> {
-    if (parent.seenIds.has(id)) throw new Error(`Duplicate sibling operation id ${id} in ${parent.path}`);
-    parent.seenIds.add(id);
-    const pathValue = semanticOperationPath(parent.path, kind, id);
-    const existing = this.database.readOperationByPath(pathValue);
-    if (existing) {
-      assertSemanticOperationIdentity(existing, parent.operationId, kind, id, semanticInputHash);
-      if (existing.status === "completed" || existing.status === "failed") return existing;
-    }
+  ): Promise<{ operation: WorkflowOperationRecord; claimed: boolean }> {
     for (let retry = 0; retry < MAX_REVISION_RETRIES; retry++) {
-      await this.boundary(existing?.operationId);
-      const run = this.database.readRun();
-      const at = this.timestamp();
-      const operation: OperationRecord = {
-        operationId: deterministicSemanticId("operation", run.runId, pathValue),
-        runId: run.runId,
-        ...(parent.operationId ? { parentOperationId: parent.operationId } : {}),
-        path: pathValue,
-        sourceId: id,
-        kind,
-        ordinal: existing?.ordinal ?? this.database.nextOperationOrdinal(),
-        status: "running",
-        semanticInputHash,
-        attemptCount: 0,
-        createdAt: existing?.createdAt ?? at,
-        startedAt: existing?.startedAt ?? at,
-        updatedAt: at,
-      };
       try {
-        const claimed = this.database.claimOperation({
-          expectedRevision: run.revision,
-          operation,
-          admission: this.admissionLimits(run),
-          event: { type: existing ? "operation-focused" : "operation-claimed", operationId: operation.operationId, payload: { path: pathValue, kind }, at },
-        }).operation;
-        await this.fault("after-operation-claim", claimed);
-        return claimed;
+        return this.database.claimOperation({
+          expectedRevision: this.database.readRun().revision,
+          scopeId: scope.record.scopeId,
+          cursor,
+          kind,
+          sourceSite: invocation.sourceSite,
+          ...(invocation.descriptorSourceSite ? { descriptorSourceSite: invocation.descriptorSourceSite } : {}),
+          ...(invocation.title ? { title: invocation.title } : {}),
+          semanticInputHash,
+          maximumOperations: this.operationAdmissionLimit,
+          maximumAgentOperations: this.database.readRun().safety.maximumAgentLaunches,
+          at: this.timestamp(),
+        });
       } catch (error) {
-        if (error instanceof RunRevisionConflictError) continue;
-        if (error instanceof RunDatabaseAdmissionError) throw this.runaway(error, parent.operationId);
+        if (error instanceof WorkflowRunDatabaseRevisionConflictError) continue;
+        if (error instanceof WorkflowRunDatabaseStateError && /Semantic operation changed/u.test(error.message)) {
+          const existing = this.database.readOperationAt(scope.record.scopeId, cursor);
+          throw new WorkflowSemanticDriftError(error.message, existing?.path);
+        }
         throw error;
       }
     }
-    throw new Error("Could not claim operation after repeated revision races");
+    throw new Error("Could not claim workflow v17 operation after repeated revision races");
   }
 
-  private async completeOperation(
-    operation: OperationRecord,
-    result: OperationResult,
-    outcome: Partial<Omit<SemanticEffectOutcome, "result">> = {},
-    journalIdentity?: SemanticEffectJournalIdentity,
-  ): Promise<OperationRecord> {
-    const already = this.database.readOperation(operation.operationId);
-    if (already?.status === "completed") return already;
+  private async settle(
+    operation: WorkflowOperationRecord,
+    identity: WorkflowEffectIdentity,
+    terminal: { outcome: "success"; result: JsonValue } | { outcome: "failure"; failure: JsonObject },
+  ): Promise<WorkflowEffectSettlementRecord> {
     for (let retry = 0; retry < MAX_REVISION_RETRIES; retry++) {
-      const current = this.database.readOperation(operation.operationId);
-      if (current?.status === "completed") return current;
-      await this.boundary(operation.operationId);
-      const run = this.database.readRun();
       try {
-        const journal = journalIdentity
-          ? this.journal.call(operation, result, journalIdentity, outcome.workspaceCheckpoint)
-          : undefined;
-        return this.database.completeOperation({
-          expectedRevision: run.revision,
+        return this.database.settleEffect({
+          expectedRevision: this.database.readRun().revision,
           operationId: operation.operationId,
-          ...(outcome.attemptId ? { attemptId: outcome.attemptId } : {}),
-          completedAt: this.timestamp(),
-          result,
-          ...(outcome.artifacts ? { artifacts: outcome.artifacts } : {}),
-          ...(outcome.evidenceArtifacts ? { evidenceArtifacts: outcome.evidenceArtifacts } : {}),
-          ...(outcome.progressArtifacts ? { progressArtifacts: outcome.progressArtifacts } : {}),
-          usage: outcome.usage ?? zeroUsage(),
-          ...(outcome.resources ? { resources: outcome.resources } : {}),
-          ...(outcome.workspaceCheckpoint ? { workspaceCheckpoint: outcome.workspaceCheckpoint } : {}),
-          ...(outcome.measurement ? { measurement: outcome.measurement } : {}),
-          ...(outcome.experiment ? { experiment: outcome.experiment } : {}),
-          ...(outcome.verification ? { verification: outcome.verification } : {}),
-          ...(journal ? { journal } : {}),
-          currentOperationId: this.activeAncestor(this.scope(), operation.operationId),
-          event: { type: "operation-completed", payload: { path: operation.path, kind: operation.kind } },
+          semanticKey: identity.semanticKey,
+          outcome: terminal.outcome,
+          completionAuthority: identity.completionAuthority,
+          replayPolicy: identity.replayPolicy,
+          ...(terminal.outcome === "success" ? { result: terminal.result } : { failure: terminal.failure }),
+          ...(terminal.outcome === "success" && identity.postWorkspaceCheckpointId ? {
+            postWorkspaceCheckpointId: identity.postWorkspaceCheckpointId,
+          } : {}),
+          at: this.timestamp(),
         });
       } catch (error) {
-        if (error instanceof RunRevisionConflictError) continue;
+        if (error instanceof WorkflowRunDatabaseRevisionConflictError) continue;
+        const existing = this.database.readEffectSettlement(operation.operationId);
+        if (existing) {
+          assertSettlementIdentity(operation, existing, identity, terminal.outcome);
+          return existing;
+        }
         throw error;
       }
     }
-    throw new Error("Could not complete operation after repeated revision races");
+    throw new Error("Could not settle workflow v17 effect after repeated revision races");
   }
 
-  private async failOperation(operation: OperationRecord, reason: StructuredReason): Promise<OperationRecord> {
-    for (let retry = 0; retry < MAX_REVISION_RETRIES; retry++) {
-      const suspension = await this.detectSuspension(operation.operationId);
-      if (suspension) throw suspension;
-      const current = this.database.readOperation(operation.operationId);
-      if (!current || current.status === "failed") return current ?? operation;
-      if (current.status === "completed") return current;
-      const run = this.database.readRun();
-      try {
-        return this.database.failOperation({
-          expectedRevision: run.revision,
-          operationId: operation.operationId,
-          failedAt: this.timestamp(),
-          reason,
-          currentOperationId: this.activeAncestor(this.scope(), operation.operationId),
-          event: { type: "operation-failed", payload: { path: operation.path, kind: operation.kind } },
-        });
-      } catch (error) {
-        if (error instanceof RunRevisionConflictError) continue;
-        throw error;
-      }
-    }
-    throw new Error("Could not fail operation after repeated revision races");
-  }
-
-  private async createCheckpoint(
-    operation: OperationRecord,
-    request: HumanCheckpointRequest,
-    checkpointId: string,
-  ) {
-    for (let retry = 0; retry < MAX_REVISION_RETRIES; retry++) {
-      await this.boundary(operation.operationId);
-      const run = this.database.readRun();
-      const requestedRevision = run.revision + 1;
-      const requestedAt = this.timestamp();
-      const challengeHash = stableHash({
-        runId: run.runId, operationId: operation.operationId, path: operation.path,
-        semanticInputHash: operation.semanticInputHash, request, requestedRevision,
-      });
-      try {
-        return this.database.createHumanCheckpoint(run.revision, {
-          checkpointId, runId: run.runId, operationId: operation.operationId,
-          status: "waiting", request, challengeHash, requestedRevision, requestedAt,
-        }, {
-          type: "checkpoint-requested", operationId: operation.operationId,
-          payload: { checkpointId, challengeHash }, at: requestedAt,
-        });
-      } catch (error) {
-        if (error instanceof RunRevisionConflictError) continue;
-        throw error;
-      }
-    }
-    throw new Error("Could not create checkpoint after repeated revision races");
-  }
-
-  private async restore(
-    adapter: SemanticEffectAdapter,
-    admission: SemanticEffectAdmissionRequest,
-    operation: OperationRecord,
-  ): Promise<unknown> {
-    if (!operation.result) throw new RunDatabaseStateError(`Completed operation ${operation.path} has no result`);
-    if (operation.result.workspace?.kind === "candidate" && !adapter.restore) {
-      throw new RunDatabaseStateError(`Completed mutation ${operation.path} has no workspace restore adapter`);
-    }
-    const value = adapter.restore
-      ? await adapter.restore({ ...admission, database: this.database, operation: operation as OperationRecord & { result: OperationResult } })
-      : operation.result.value;
-    this.restoreMetricDisposition(operation);
-    return value;
-  }
-
-  private createMetric(id: unknown, definition: unknown): object {
-    const handle = createMetricHandle(id, definition);
-    const metricId = metricHandleState(handle).metricId;
-    if (this.metricHandles.has(metricId)) throw new Error(`Duplicate metric id ${metricId}`);
-    this.metricHandles.set(metricId, handle);
-    return handle;
-  }
-
-  private restoreMetricDisposition(operation: OperationRecord): void {
-    if (operation.kind !== "accept" && operation.kind !== "reject") return;
-    const disposition = this.database.readMeasurementDispositionByOperation(operation.operationId);
-    if (!disposition) return;
-    const measurement = this.database.readMeasurement(disposition.measurementId);
-    if (!measurement) {
-      throw new RunDatabaseStateError(`Measurement disposition ${operation.path} lost its cohort`);
-    }
-    applyMetricDispositionToHandles(this.metricHandles, measurement.delta, disposition.disposition);
-  }
-
-  private async controlledOutcome(suspension: SemanticRunSuspension): Promise<SequentialSemanticRunOutcome> {
+  private async startRun(): Promise<void> {
     const run = this.database.readRun();
-    if (run.status === "failed") return { status: "failed", run, error: run.reason?.summary ?? suspension.message };
-    if (run.status === "waiting" || run.status === "paused" || run.status === "stopped") return { status: run.status, run };
-    if (suspension.status === "stopped") {
-      for (let retry = 0; retry < MAX_REVISION_RETRIES; retry++) {
-        const current = this.database.readRun();
-        if (current.status === "stopped") return { status: "stopped", run: current };
-        try {
-          const stopped = this.database.transitionRun(current.revision, {
-            status: "stopped", reason: current.reason ?? {
-              category: "control", code: "effect-stopped", summary: suspension.message, retryable: false,
-            }, currentOperationId: null, endedAt: this.timestamp(),
-            event: { type: "run-stopped", payload: {}, at: this.timestamp() },
-          });
-          return { status: "stopped", run: stopped };
-        } catch (error) { if (!(error instanceof RunRevisionConflictError)) throw error; }
-      }
+    if (run.status === "running") return;
+    if (run.status !== "queued" && run.status !== "paused") {
+      throw new Error(`Workflow v17 run is already ${run.status}`);
     }
-    throw new RunDatabaseStateError(`Run remained ${run.status} after ${suspension.status} suspension`);
+    await this.transitionRun("running");
+    await this.fault("after-run-start");
   }
 
-  private async pauseForExternalCancellation(): Promise<SequentialSemanticRunOutcome> {
+  private async completeRootScope(scope: CursorScope, terminalKey: string): Promise<void> {
+    const current = this.database.readScope(scope.record.scopeId)!;
+    if (current.status === "completed") {
+      if (current.terminalKey !== terminalKey) {
+        throw new WorkflowSemanticDriftError("Workflow v17 root terminal key changed after restart");
+      }
+      return;
+    }
+    if (current.status !== "active") {
+      throw new WorkflowSemanticDriftError(`Workflow v17 root scope is already ${current.status}`);
+    }
+    await this.completeScope(current, "completed", terminalKey);
+    await this.fault("after-root-scope-complete");
+  }
+
+  private async failRootScope(scope: CursorScope, failure: JsonObject): Promise<void> {
+    const terminalKey = stableHash({
+      formatVersion: 1,
+      kind: "workflow-scope-failure",
+      previousCallKey: scope.previousCallKey,
+      failure,
+    });
+    const current = this.database.readScope(scope.record.scopeId)!;
+    if (current.status === "failed") {
+      if (current.terminalKey !== terminalKey || stableHash(current.failure) !== stableHash(failure)) {
+        throw new WorkflowSemanticDriftError("Workflow v17 root failure changed after restart");
+      }
+      return;
+    }
+    if (current.status !== "active") {
+      throw new WorkflowSemanticDriftError(`Workflow v17 root scope is already ${current.status}`);
+    }
+    await this.completeScope(current, "failed", terminalKey, failure);
+    await this.fault("after-root-scope-failure");
+  }
+
+  private async completeScope(
+    scope: WorkflowScopeRecord,
+    status: "completed" | "failed",
+    terminalKey: string,
+    failure?: JsonObject,
+  ): Promise<void> {
     for (let retry = 0; retry < MAX_REVISION_RETRIES; retry++) {
-      const run = this.database.readRun();
-      if (run.status === "paused" || run.status === "waiting" || run.status === "stopped") return { status: run.status, run };
-      if (run.status === "failed") return { status: "failed", run, error: run.reason?.summary ?? "Workflow failed" };
-      if (run.status === "completed") return await this.lifecycle.readCompleted(run);
       try {
-        const paused = this.database.pauseCoordinatorForSignal(run.revision, this.timestamp(), "Semantic engine execution was cancelled");
-        return { status: "paused", run: paused };
-      } catch (error) { if (!(error instanceof RunRevisionConflictError)) throw error; }
+        this.database.completeScope({
+          expectedRevision: this.database.readRun().revision,
+          scopeId: scope.scopeId,
+          status,
+          terminalKey,
+          ...(failure ? { failure } : {}),
+          at: this.timestamp(),
+        });
+        return;
+      } catch (error) {
+        if (error instanceof WorkflowRunDatabaseRevisionConflictError) continue;
+        throw error;
+      }
     }
-    throw new Error("Could not pause cancelled run after repeated revision races");
+    throw new Error("Could not complete workflow v17 scope after repeated revision races");
   }
 
-  private async pauseForRunaway(error: SemanticRunawayAdmissionError): Promise<SequentialSemanticRunOutcome> {
-    await this.limiter.whenIdle();
+  private async transitionRun(
+    status: "running" | "paused" | "completed" | "failed",
+    reason?: JsonObject,
+    rootTerminalKey?: string,
+    result?: JsonValue,
+  ): Promise<void> {
     for (let retry = 0; retry < MAX_REVISION_RETRIES; retry++) {
-      const run = this.database.readRun();
-      if (run.status === "paused" || run.status === "waiting" || run.status === "stopped") {
-        return { status: run.status, run };
-      }
-      if (run.status === "completed") return await this.lifecycle.readCompleted(run);
-      if (run.status === "failed") return { status: "failed", run, error: run.reason?.summary ?? error.message };
+      const current = this.database.readRun();
+      if (current.status === status) return;
       try {
-        const paused = this.database.pauseRunForSafety(run.revision, this.timestamp(), error.reason);
-        return { status: "paused", run: paused };
-      } catch (transitionError) {
-        if (transitionError instanceof RunRevisionConflictError) continue;
-        throw transitionError;
+        this.database.transitionRun(current.revision, {
+          status,
+          ...(reason ? { reason } : {}),
+          ...(rootTerminalKey ? { rootTerminalKey } : {}),
+          ...(result !== undefined ? { result } : {}),
+          at: this.timestamp(),
+        });
+        return;
+      } catch (error) {
+        if (error instanceof WorkflowRunDatabaseRevisionConflictError) continue;
+        throw error;
       }
     }
-    throw new Error("Could not pause runaway workflow after repeated revision races");
+    throw new Error(`Could not transition workflow v17 run to ${status}`);
   }
 
-  private admissionLimits(run: RunRecord) {
-    return {
-      maximumOperations: this.operationAdmissionLimit,
-      maximumAgentOperations: run.safety.maximumAgentLaunches,
-    };
-  }
-
-  private runaway(error: RunDatabaseAdmissionError, operationId?: string): SemanticRunawayAdmissionError {
-    const reason: StructuredReason = {
-      category: "safety",
-      code: error.guard === "operations" ? "operation-runaway" : "agent-launch-runaway",
-      summary: error.message,
-      retryable: true,
-      ...(operationId ? { operationId } : {}),
-      details: {
-        guard: error.guard,
-        admitted: error.admitted,
-        requested: error.requested,
-        limit: error.limit,
-      },
-    };
-    const runaway = new SemanticRunawayAdmissionError(reason);
-    this.limiter.close(runaway);
-    return runaway;
-  }
-
-  private isPassthrough(error: unknown): boolean {
-    return error instanceof SemanticRunSuspension
-      || error instanceof SemanticEngineCrashError
-      || error instanceof SemanticRunawayAdmissionError;
-  }
-
-  private branchFailure(error: unknown, branch: OperationRecord): Record<string, unknown> {
-    const failed = error instanceof SemanticOperationError
-      ? this.database.readOperation(error.operationId)
-      : this.database.readOperation(branch.operationId);
-    const operation = failed ?? branch;
-    const kind = operation.kind === "agent"
-      ? "agent"
-      : operation.kind === "command"
-        ? "command"
-        : operation.reason?.category === "infrastructure" || operation.reason?.category === "provider"
-          ? "infrastructure"
-          : "control";
-    return {
-      operationPath: error instanceof SemanticOperationError ? error.operationPath : operation.path,
-      kind,
-      summary: boundedError(error),
-    };
-  }
-
-  private async boundary(operationId?: string): Promise<void> {
-    if (this.externalSignal?.aborted) throw new SemanticRunSuspension("paused", "Semantic engine execution was cancelled");
-    const suspension = this.controlSuspension(operationId);
-    if (suspension) throw suspension;
-  }
-
-  private async detectSuspension(operationId?: string): Promise<SemanticRunSuspension | undefined> {
-    if (this.externalSignal?.aborted) {
-      const outcome = await this.pauseForExternalCancellation();
-      if (outcome.status === "failed" || outcome.status === "completed") return undefined;
-      return new SemanticRunSuspension(outcome.status, "Semantic engine execution was cancelled");
-    }
-    return this.controlSuspension(operationId);
-  }
-
-  private controlSuspension(operationId?: string): SemanticRunSuspension | undefined {
-    const run = this.database.readRun();
-    if (run.status === "waiting" || run.status === "paused" || run.status === "stopped") {
-      return new SemanticRunSuspension(run.status, run.reason?.summary ?? `Run is ${run.status}`);
-    }
-    if (!operationId) return undefined;
-    const operation = this.database.readOperation(operationId);
-    if (operation?.status === "waiting" || operation?.status === "paused" || operation?.status === "stopped") {
-      return new SemanticRunSuspension(operation.status, operation.reason?.summary ?? `Operation is ${operation.status}`);
-    }
-    return undefined;
-  }
-
-  private activeAncestor(scope: SemanticEngineScope, excludingOperationId?: string): string | null {
-    for (let current: SemanticEngineScope | undefined = scope; current; current = current.parent) {
-      if (!current.operationId) continue;
-      if (current.operationId === excludingOperationId) continue;
-      const operation = this.database.readOperation(current.operationId);
-      if (operation?.status === "running") return operation.operationId;
-    }
-    return null;
-  }
-
-  private scope(): SemanticEngineScope {
+  private scope(): CursorScope {
     const scope = this.storage.getStore();
-    if (!scope) throw new Error("Flow operation called outside workflow execution");
+    if (!scope) throw new Error("Workflow v17 effect escaped its semantic scope");
     return scope;
-  }
-
-  private suspend(status: "waiting" | "paused" | "stopped", message: string): never {
-    const error = new SemanticRunSuspension(status, message);
-    if (!this.rootController.signal.aborted) this.rootController.abort(error);
-    throw error;
-  }
-
-  private async fault(point: SemanticEngineFaultPoint, operation?: OperationRecord): Promise<void> {
-    try { await this.options.faultInjector?.(point, operation); }
-    catch (error) {
-      if (error instanceof SemanticEngineCrashError) throw error;
-      throw new SemanticEngineCrashError(`Semantic engine crashed at ${point}`, { cause: error });
-    }
   }
 
   private timestamp(): string {
     const value = this.now();
-    if (!(value instanceof Date) || !Number.isFinite(value.getTime())) throw new Error("Semantic engine clock returned an invalid date");
+    if (!(value instanceof Date) || !Number.isFinite(value.getTime())) throw new TypeError("Workflow v17 engine clock is invalid");
     return value.toISOString();
   }
 
-  private assertIdentity(): void {
-    const run = this.database.readRun();
-    if (this.parsed.sourceHash !== run.workflow.sourceHash || this.parsed.metadata.name !== run.workflow.name) {
-      throw new Error("Workflow source does not match the run database");
-    }
-    if (this.invocation.workflowId !== run.workflow.id || this.invocation.definitionHash !== run.workflow.definitionHash) {
-      throw new Error("Workflow invocation definition does not match the run database");
-    }
-    if (stableHash(this.invocation.input) !== this.invocation.inputHash) throw new Error("Workflow invocation input hash is corrupt");
-    if (semanticInvocationHash(this.invocation) !== run.invocationHash) throw new Error("Workflow invocation identity does not match the run database");
-    if (stableHash(this.parsed.metadata.capabilities) !== stableHash(run.workflow.capabilities)) {
-      throw new Error("Workflow capabilities do not match the run database");
+  private async fault(point: WorkflowSemanticEngineFaultPoint, operation?: WorkflowOperationRecord): Promise<void> {
+    try {
+      await this.options.faultInjector?.(point, operation);
+    } catch (error) {
+      this.fatalFault = error;
+      throw error;
     }
   }
 }
 
-function containsCandidateWorkspaceCapability(value: unknown): boolean {
-  const seen = new Set<object>();
-  let nodes = 0;
-  const visit = (current: unknown): boolean => {
-    if (!current || typeof current !== "object") return false;
-    if (++nodes > 50_000) throw new Error("Effect input exceeds the candidate-capability traversal limit");
-    if (candidateCapability(current)) return true;
-    if (seen.has(current)) return false;
-    seen.add(current);
-    if (Array.isArray(current)) return current.some(visit);
-    return (Object.values(Object.getOwnPropertyDescriptors(current)) as PropertyDescriptor[]).some((descriptor) => (
-      descriptor.enumerable && "value" in descriptor && visit(descriptor.value)
-    ));
+function normalizeIdentity(value: WorkflowEffectIdentity, kind: WorkflowEffectKind): WorkflowEffectIdentity {
+  if (!value || typeof value !== "object" || !HASH.test(value.semanticKey)) {
+    throw new TypeError(`Workflow v17 ${kind} adapter returned an invalid semantic key`);
+  }
+  if (value.completionAuthority !== "finish-work" && value.completionAuthority !== "host-effect") {
+    throw new TypeError(`Workflow v17 ${kind} adapter returned an invalid completion authority`);
+  }
+  if (!new Set(["immutable", "workspace", "never"]).has(value.replayPolicy)) {
+    throw new TypeError(`Workflow v17 ${kind} adapter returned an invalid replay policy`);
+  }
+  if (kind === "apply" && value.replayPolicy !== "never") {
+    throw new TypeError("Workflow v17 apply adapter must use never replay policy");
+  }
+  if (value.replayPolicy === "workspace") {
+    if (!value.workspace || !value.postWorkspaceCheckpointId) {
+      throw new TypeError(`Workflow v17 ${kind} workspace effect lacks replay/checkpoint authority`);
+    }
+  } else if (value.workspace || value.postWorkspaceCheckpointId) {
+    throw new TypeError(`Workflow v17 ${kind} non-workspace effect carries workspace authority`);
+  }
+  return value;
+}
+
+function assertSettlementIdentity(
+  operation: WorkflowOperationRecord,
+  settlement: WorkflowEffectSettlementRecord,
+  identity: WorkflowEffectIdentity,
+  expectedOutcome?: WorkflowEffectSettlementRecord["outcome"],
+): void {
+  if (settlement.semanticKey !== identity.semanticKey
+    || settlement.completionAuthority !== identity.completionAuthority
+    || (settlement.outcome === "success" && settlement.replayPolicy !== identity.replayPolicy)
+    || (settlement.outcome === "success"
+      && settlement.postWorkspaceCheckpointId !== identity.postWorkspaceCheckpointId)
+    || (settlement.outcome === "failure" && settlement.replayPolicy !== "never")
+    || (expectedOutcome !== undefined && settlement.outcome !== expectedOutcome)) {
+    throw new WorkflowSemanticDriftError(
+      `Workflow v17 effect settlement changed identity at ${operation.path}`,
+      operation.path,
+    );
+  }
+}
+
+function canonical(value: unknown): JsonValue {
+  return canonicalJsonValue(value, {
+    maxBytes: DEFINITION_LIMITS.structuralValueBytes,
+    maxDepth: DEFINITION_LIMITS.structuralValueDepth,
+    maxNodes: DEFINITION_LIMITS.structuralValueNodes,
+    maxStringScalars: DEFINITION_LIMITS.structuralStringScalars,
+  });
+}
+
+function failureFromError(error: unknown, effectKind?: WorkflowEffectKind): JsonObject {
+  if (error instanceof WorkflowRecordedEffectError) return structuredClone(error.failure);
+  if (error instanceof WorkflowRecordedStructuralError) return structuredClone(error.failure);
+  const record = error && typeof error === "object" ? error as Record<string, unknown> : undefined;
+  const summary = boundedText(
+    typeof record?.message === "string" ? record.message : String(error),
+    16_000,
+  );
+  return canonicalJsonObject({
+    category: "effect",
+    code: "execution-failed",
+    summary,
+    retryable: false,
+    ...(effectKind ? { effectKind } : {}),
+    ...(typeof record?.name === "string" ? { name: boundedText(record.name, 256) } : {}),
+  }, {
+    maxBytes: 64 * 1024,
+    maxDepth: 8,
+    maxNodes: 64,
+    maxStringScalars: 20_000,
+  });
+}
+
+function failureReason(
+  category: string,
+  code: string,
+  summary: string,
+  retryable: boolean,
+): JsonObject {
+  return { category, code, summary: boundedText(summary, 16_000), retryable };
+}
+
+function boundedText(value: string, maximum: number): string {
+  return Array.from(value).slice(0, maximum).join("");
+}
+
+function boundedOperationAdmissionLimit(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > DEFINITION_LIMITS.semanticOperations) {
+    throw new TypeError(`Workflow v17 operation admission limit must be 1–${DEFINITION_LIMITS.semanticOperations}`);
+  }
+  return value;
+}
+
+function normalizeStructuredOptions(
+  value: WorkflowStructuredOptions,
+  label: "parallel" | "map",
+  hostConcurrency: number,
+): NormalizedStructuredOptions {
+  if (!value || typeof value !== "object") throw new TypeError(`Workflow v17 ${label} options must be an object`);
+  if (typeof value.sourceSite !== "string" || !/^[a-z][a-z0-9-]{0,127}$/u.test(value.sourceSite)) {
+    throw new TypeError(`Workflow v17 ${label} source site is invalid`);
+  }
+  const concurrency = value.concurrency ?? hostConcurrency;
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > hostConcurrency
+    || concurrency > DEFINITION_LIMITS.concurrency) {
+    throw new TypeError(`Workflow v17 ${label} concurrency must be 1–${Math.min(hostConcurrency, DEFINITION_LIMITS.concurrency)}`);
+  }
+  const errors = value.errors ?? "fail-fast";
+  if (errors !== "fail-fast" && errors !== "collect") {
+    throw new TypeError(`Workflow v17 ${label} errors must be fail-fast or collect`);
+  }
+  if (value.title !== undefined && (typeof value.title !== "string" || !value.title.trim()
+    || Array.from(value.title).length > DEFINITION_LIMITS.titleScalars)) {
+    throw new TypeError(`Workflow v17 ${label} title is invalid`);
+  }
+  return {
+    sourceSite: value.sourceSite,
+    ...(value.title ? { title: value.title } : {}),
+    concurrency,
+    errors,
   };
-  return visit(value);
 }
 
-function candidateCapability(value: unknown): boolean {
-  return isCandidateWorkspaceCapability(value);
+function normalizeMapOptions(
+  value: WorkflowMapOptions,
+  hostConcurrency: number,
+): NormalizedStructuredOptions & Pick<WorkflowMapOptions, "key"> {
+  const normalized = normalizeStructuredOptions(value, "map", hostConcurrency);
+  if (typeof value.key !== "function") throw new TypeError("Workflow v17 map requires a key callback");
+  return { ...normalized, key: value.key };
 }
 
-export async function executeSequentialSemanticRun(
-  runDir: string,
-  database: RunDatabase,
-  parsed: ParsedStructuredWorkflow,
-  invocation: SemanticEngineInvocation,
-  adapters: readonly SemanticEffectAdapter[],
-  options: SequentialSemanticEngineOptions = {},
-): Promise<SequentialSemanticRunOutcome> {
-  return await new SequentialSemanticEngine(runDir, database, parsed, invocation, adapters, options).run();
+function assertLaneKey(value: unknown): asserts value is string {
+  if (typeof value !== "string" || !/^[a-z][a-z0-9_-]{0,63}$/u.test(value)) {
+    throw new TypeError("Workflow v17 lane key must match ^[a-z][a-z0-9_-]{0,63}$");
+  }
 }
 
+function failedScopeTerminal(previousCallKey: string, failure: JsonObject): string {
+  return stableHash({
+    formatVersion: 1,
+    kind: "workflow-scope-failure",
+    previousCallKey,
+    failure,
+  });
+}
+
+function laneFromTerminal(scope: WorkflowScopeRecord): StructuredLaneOutcome {
+  if (scope.status !== "failed" && scope.status !== "cancelled") {
+    throw new WorkflowSemanticDriftError(`Workflow v17 lane ${scope.path} is not failed or cancelled`);
+  }
+  if (!scope.laneKey || !scope.terminalKey || !scope.failure) {
+    throw new WorkflowSemanticDriftError(`Workflow v17 terminal lane ${scope.path} is incomplete`);
+  }
+  return {
+    key: scope.laneKey,
+    scope,
+    outcome: scope.status === "failed" ? "failure" : "cancelled",
+    terminalKey: scope.terminalKey,
+    failure: structuredClone(scope.failure),
+  };
+}
+
+function laneResult(
+  lane: StructuredLaneOutcome,
+  errors: "fail-fast" | "collect",
+): unknown {
+  if (errors === "collect") {
+    return lane.outcome === "success"
+      ? { ok: true, value: lane.value! }
+      : { ok: false, error: branchError(lane.failure!) };
+  }
+  if (lane.outcome !== "success") {
+    throw new Error(`Workflow v17 fail-fast lane ${lane.key} has no successful value`);
+  }
+  return lane.value!;
+}
+
+function branchError(failure: JsonObject): JsonObject {
+  const category = typeof failure.category === "string" ? failure.category : "control";
+  const effectKind = typeof failure.effectKind === "string" ? failure.effectKind : undefined;
+  const kind = effectKind === "agent" ? "agent"
+    : effectKind === "command" ? "command"
+    : category === "agent" ? "agent"
+    : category === "command" ? "command"
+      : category === "infrastructure" ? "infrastructure"
+        : "control";
+  return {
+    kind,
+    summary: typeof failure.summary === "string" ? failure.summary : "Concurrent workflow lane failed",
+    evidence: [],
+  };
+}
+
+function structuralFailure(
+  kind: "parallel" | "map" | "candidate",
+  laneKey: string,
+  cause: JsonObject,
+): JsonObject {
+  return canonicalJsonObject({
+    category: "structure",
+    code: `${kind}-lane-failed`,
+    summary: `${kind} lane ${laneKey} failed: ${typeof cause.summary === "string" ? cause.summary : "unknown failure"}`,
+    retryable: false,
+    laneKey,
+    cause,
+  }, {
+    maxBytes: 64 * 1024,
+    maxDepth: 12,
+    maxNodes: 256,
+    maxStringScalars: 20_000,
+  });
+}
+
+function cancellationFailure(laneKey: string): JsonObject {
+  return {
+    category: "structure",
+    code: "sibling-cancelled",
+    summary: `Cancelled after lane ${laneKey} failed`,
+    retryable: false,
+    laneKey,
+  };
+}
+
+function equalStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((entry, index) => entry === right[index]);
+}
+
+function linkedController(parent: AbortSignal): AbortController & { dispose(): void } {
+  const controller = new AbortController() as AbortController & { dispose(): void };
+  const abort = () => {
+    if (!controller.signal.aborted) controller.abort(parent.reason);
+  };
+  parent.addEventListener("abort", abort, { once: true });
+  if (parent.aborted) abort();
+  controller.dispose = () => parent.removeEventListener("abort", abort);
+  return controller;
+}
+
+function isPassthrough(error: unknown): boolean {
+  return error instanceof WorkflowSemanticEngineCrashError
+    || error instanceof WorkflowSemanticDriftError
+    || error instanceof WorkflowHumanSuspension;
+}

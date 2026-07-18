@@ -149,17 +149,17 @@ No control-flow compiler is required.
   candidates, helpers, and invocation resources; strict TypeScript checks cover the compile-time
   contract separately.
 - Six complete workflows compile with strict TypeScript.
-- Target corpus: 1,013 lines; current built-ins: 1,436 lines.
+- Installed TypeScript built-ins: 1,019 lines.
 - No target workflow uses structural control APIs, manual operation IDs, result modes, capability
   declarations, casts, ignored type errors, or duplicate hand-written result interfaces.
 - The production frontend now strictly typechecks and strip-parses all six fixtures, evaluates their
   schemas/descriptors, derives exact authority/review snapshots, validates helper contexts and native
   loops, and injects non-semantic source-site tokens.
-- The separate production v17 registry now discovers `.flow.ts` by namespace/filename, applies
+- The production registry discovers `.flow.ts` by namespace/filename, applies
   fail-safe external exposure policy, derives definition identity, validates canonical invocation
   input, pins trusted dynamic measurement resources, and writes independently reconstructable source,
-  executable, policy, resource, and language snapshots. The v16 launch/runtime path remains unchanged.
-- The separate schema-4 v17 run database now persists immutable run/resource identity, sequential
+  executable, policy, resource, and language snapshots.
+- The schema-4 run database persists immutable run/resource identity, sequential
   scope cursors, keyed child scopes, local calls, structural joins, attempts/checkpoints/artifacts,
   and explicit candidate workspace/measurement/verification/disposition/apply state. Real SQLite
   tests enforce revision CAS, atomic preclaim, completion-order independence, lifecycle termination,
@@ -180,32 +180,31 @@ No control-flow compiler is required.
   restores completed capture boundaries directly, and reconstructs incomplete lanes from local calls.
   Real-SQLite tests cover nested groups, scheduler timing, cancellation, structural crash boundaries,
   independent sibling replay, map reorder, and semantic-policy drift.
-- The production v17 control process now reconstructs the strict schema facade, workflow wrapper,
+- The production control process reconstructs the strict schema facade, workflow wrapper,
   reviewed descriptors, flow/source-site wrappers, callbacks, and frozen product/reference views from
   control-realm intrinsics. Explicit wire variants retain host WeakMap authority while rejecting plain
   lookalikes, foreign scopes, revocation, changed identities, malformed messages, and unreviewed
   source sites. Tests load all six definitions and contain memory, wire, callback, cancellation,
-  worker-crash, and asynchronous-runaway failures. The path remains isolated before effect adapters
-  and runtime cutover.
-- The production v17 artifact layer now stores canonical schema-4 bodies/metadata, reconstructs exact
+  worker-crash, and asynchronous-runaway failures.
+- The production artifact layer stores canonical schema-4 bodies/metadata, reconstructs exact
   artifact and attachable-product authority, generates canonical agent/command/verification/
   measurement evidence, and normalizes nested records/arrays into sorted named manifests. Immutable
   agent-input trees validate every digest and reject plain leaves, lookalikes, nonattachable products,
   unsafe segments, cycles, foreign identity, and filesystem tampering. A protocol-17 test exercises a
   whole agent product from host to worker and back through manifest materialization.
-- The production v17 effect runtime now connects reviewed control calls to cursor effects. Static
+- The production effect runtime connects reviewed control calls to cursor effects. Static
   agent/command/verification bindings are definition-hashed; candidate workspace effects carry exact
   checkpoint authority; `ask` validates response schemas; candidate freeze owns a durable structural
   join; and verification-bound accept/reject/apply restores branded authority from SQLite. Tests cover
   accepted, rejected, unchanged, pending, crashed, forged, and stale-apply paths without weakening the
   independent candidate oracle.
-- The production v17 metric runtime now mints unforgeable run-local metric sets, executes only exact
+- The production metric runtime mints unforgeable run-local metric sets, executes only exact
   launch-pinned profiles through a pinned command/environment substrate, persists grouped baseline and
   candidate cohorts, and finalizes state in the same candidate disposition transaction. Dedicated
   synchronous method transport keeps `policy`, `summary`, `reachedTarget`, and `evaluate` host-
   authoritative. Tests cover acceptance, guardrail rejection, environment drift, profile switching,
   crash recovery, experiment evidence, profile revision identity, and causal baseline materialization.
-- The exact six-workflow corpus is now installed alongside v16 as staged `.flow.ts` builtins with
+- The exact six-workflow corpus is installed as the only production `.flow.ts` builtins with
   explicit model exposure and its own strict production typecheck. End-to-end tests run and crash-
   reconstruct every builtin through control, effects, candidates, measurements, dispositions, and
   apply. Research/package-audit preserve branded products through completed keyed structures;
@@ -219,7 +218,7 @@ No control-flow compiler is required.
   evidence. Keyed lanes, descriptor bindings, dynamic titles, candidates, verification,
   measurements, experiments, dispositions, checkpoints, replay, and apply are bounded plain data;
   four complete builtin renderer snapshots demonstrate that stage/loop syntax is unnecessary.
-- The staged v17 draft/tool path now strictly reviews inert `.flow.ts`, binds promotion to source,
+- The production draft/tool path strictly reviews inert `.flow.ts`, binds promotion to source,
   review, policy preimage, and target exposure, and uses a recoverable fail-closed marker to commit
   source plus `registry.json`. Trust-filtered workflow schemas expose only model-visible definitions
-  and enumerate exact available measurement profiles. Launch remains deferred to atomic cutover.
+  and enumerate exact available measurement profiles. The schema-4 coordinator is the only launcher.

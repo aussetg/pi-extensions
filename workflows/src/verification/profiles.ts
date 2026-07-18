@@ -6,7 +6,8 @@ import { getAgentDir, projectRoot, PROJECT_CONFIG_DIR_NAME } from "../persistenc
 import { readBoundedTextFile } from "../persistence/safe-paths.js";
 import type { JsonValue } from "../types.js";
 import { stableHash } from "../utils/hashes.js";
-import { normalizeCandidateWriteScope, type CandidateWriteScope } from "../candidates/store.js";
+import { normalizeCandidateWriteScope } from "../candidates/runtime.js";
+import type { CandidateWriteScope } from "../runtime/durable-types.js";
 
 export type VerificationProfileNamespace = "builtin" | "user" | "project";
 

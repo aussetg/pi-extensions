@@ -1,441 +1,186 @@
-# Workflows
+## Durable TypeScript workflows
 
-Durable named workflows for Pi. A reviewed JavaScript definition describes deterministic control
-flow; one coordinator owns each run; agents and host effects return through typed receipts. The
-primary Pi session launches and controls runs but does not own their lifetime.
+This extension runs reviewed `.flow.ts` definitions as durable, systemd-owned workflows on one
+Linux/Btrfs machine. Workflow source uses ordinary strict TypeScript control flow. Effects remain
+explicit through the `pi/workflows` API.
 
-> **v17 implementation branch:** the canonical future authoring contract is now
-> [`workflow-api.d.ts`](workflow-api.d.ts), with its pinned language identity in
-> [`src/definition/workflow-language-v17.ts`](src/definition/workflow-language-v17.ts). The executable
-> runtime and the authoring documentation below remain v16 until the atomic cutover; their temporary
-> declaration is [`workflow-api-v16.d.ts`](workflow-api-v16.d.ts). The isolated v17 frontend now
-> strictly typechecks, strips, reviews, and instruments `.flow.ts` source. A separate production v17
-> registry now discovers those definitions, applies fail-safe namespace exposure policy, and writes
-> immutable invocation/source/resource snapshots. A separate schema-4 v17 run database now persists
-> scope-local cursors, keyed child scopes, structural joins, pinned resources, and explicit candidate
-> lifecycle state. Its cursor semantic engine now reconstructs ordinary TypeScript control from
-> durable effect settlements and scope-local calls, runs bounded keyed `parallel`/`map` child scopes,
-> commits deterministic success/failure joins, and consumes causal replay. A separate v17 control
-> process now evaluates the reviewed executable with realm-owned language/schema/descriptor
-> constructors, source-site checks, explicit branded product/reference transport, callback-context
-> propagation, and external memory/segment limits. The v16 launch service still consumes none of the
-> staged v17 path. The staged executable path now also runs invocation-selected trusted measurement
-> profiles through branded metric sets, persists baseline/pending/disposition state, and records
-> canonical experiment evidence. Exact `.flow.ts` rewrites of all six builtins now coexist with the
-> executable v16 `.flow.js` files and run end to end through the staged v17 control/effect runtime.
-> Schema-4 review and inspector projections now render keyed lanes, candidates, measurements,
-> experiments, dispositions, checkpoints, and apply directly from durable evidence. A separate v17
-> draft/tool path strictly reviews inert `.flow.ts`, atomically promotes source plus exposure policy,
-> and generates trust-filtered workflow schemas with exact measurement-profile enums.
-> The v16 coordinator remains the only installed launcher until the atomic cutover.
+Runtime 17 is the only executable runtime. Its SQLite format is schema 4. Schema-3 databases are
+immutable legacy evidence: they may be reported by discovery, but cannot resume or replay.
 
-This extension is intentionally local and Linux-only. It has no compatibility layer for old run or
-definition formats and no portability fallback.
+### Installed surfaces
 
-## Host requirements
+- Model tool `workflow`: launches only definitions exposed as `model` by registry policy.
+- Model tool `workflow_draft`: creates, replaces, or validates inert source. It cannot install,
+  expose, promote, approve, or execute a draft.
+- `/flow`: launch, inspect, control, replay, approve, and promote from the primary session.
+- `/goal` and `/execute-plan`: small aliases for the corresponding built-ins.
 
-- Node 22 or newer, including `node:sqlite` and TypeScript type stripping
-- a systemd user manager on cgroup v2
-- Btrfs, with the project and workflow run root on the same filesystem
-- `/usr/bin/bwrap`, `/usr/bin/systemd-run`, and `/usr/bin/systemctl`
-- unprivileged user namespaces
+Only the primary bound session can launch or control runs. A trusted project is required before
+project definitions, project policy, project command profiles, or project measurement profiles are
+enumerated or used.
 
-On Arch/CachyOS, the non-base package is:
+### Definitions
 
-```bash
-sudo pacman -S bubblewrap
-```
+Definitions live at:
 
-The extension deliberately fails when these assumptions are not met. Project snapshots and
-candidate checkpoints require reflinks; commands never fall back to an uncontained process.
+- built-in: `src/builtins/NAME.flow.ts`
+- user: `~/.pi/agent/workflows/NAME.flow.ts`
+- trusted project: `<project>/.pi/workflows/NAME.flow.ts`
 
-## Public surface
+Each namespace has a strict `registry.json` exposure policy. Missing, malformed, or incomplete
+policy is fail-closed and makes definitions human-only. Installed identity comes from namespace and
+filename, not authored metadata.
 
-The model receives two tools:
+The source language permits erasable TypeScript and exactly one virtual import:
 
-- `workflow({ name, args, mode? })` launches an installed definition. It cannot provide source,
-  choose a model or tools, inject a command, or approve an apply.
-- `workflow_draft({ action, namespace, name, source?, expectedDraftHash? })` creates, replaces, or
-  validates inert source. It cannot install that source.
+```ts
+import { agent, schema as s, workflow } from "pi/workflows";
 
-`mode` is `await` by default and may be `async` in TUI/RPC sessions. Async completion appends one
-bounded notification to the primary session.
+const summarize = agent({
+  profile: "builtin:researcher",
+  output: s.object({ summary: s.string() }),
+});
 
-The human command surface is:
-
-```text
-/flow list [--active] [--namespace builtin|user|project]
-/flow explain NAME
-/flow run NAME [--await|--async] [--args JSON]
-/flow status [RUN]
-/flow open RUN
-/flow pause RUN
-/flow resume RUN
-/flow stop RUN
-/flow stop-effect RUN OPERATION
-/flow respond RUN [CHECKPOINT] [--challenge HASH] [--value JSON_OR_CHOICE]
-/flow approve RUN [--challenge HASH]
-/flow reject RUN [--challenge HASH]
-/flow replay RUN [--await|--async] [--args JSON]
-/flow fresh-run RUN [--await|--async] [--args JSON]
-/flow drafts [user:NAME|project:NAME] [--namespace user|project]
-/flow validate user:NAME|project:NAME
-/flow promote user:NAME|project:NAME [--challenge HASH]
-/flow discard-draft user:NAME|project:NAME [--expected-hash HASH]
-/flow delete RUN [--challenge HASH]
-```
-
-`/goal TEXT` and `/execute-plan TEXT` are only friendly parsers for `builtin:goal` and
-`builtin:execute-plan`. They use the same registry, launch path, database, coordinator, and UI as
-`/flow run`.
-
-## Built-ins
-
-| Name | Input summary | Purpose |
-| --- | --- | --- |
-| `builtin:research` | `question`, optional `angles` | Parallel source gathering, synthesis, and critique |
-| `builtin:package-audit` | `packages` | Concurrent package inventory, risk review, and test planning |
-| `builtin:coding` | `objective` | Candidate implementation, verification, approval, and apply |
-| `builtin:optimize` | `objective`, `writePaths` | Measured candidate experiments and verified apply |
-| `builtin:goal` | `objective` | Fresh-agent handoffs with optional shared candidate work |
-| `builtin:execute-plan` | `objective` | Structured planning and sequential candidate point work |
-
-Use `/flow explain NAME` for the exact input/output schemas and derived authority summary.
-
-## Authoring
-
-Definitions are ordinary `.flow.js` files:
-
-- user: `~/.pi/agent/workflows/NAME.flow.js`
-- trusted project: `<project>/.pi/workflows/NAME.flow.js`
-
-The filename must match `name`. Namespace-qualified selectors (`user:name`, `project:name`) avoid
-ambiguity. Project definitions and profiles are ignored until Pi marks the project trusted.
-
-```js
-const answerSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["answer", "sources"],
-  properties: {
-    answer: { type: "string", minLength: 1, maxLength: 12000 },
-    sources: {
-      type: "array",
-      maxItems: 32,
-      items: { type: "string", minLength: 1, maxLength: 2000 },
-    },
-  },
-};
-
-export default defineWorkflow({
-  name: "answer-question",
-  description: "Research and answer one question.",
-  inputSchema: {
-    type: "object",
-    additionalProperties: false,
-    required: ["question"],
-    properties: { question: { type: "string", minLength: 1, maxLength: 20000 } },
-  },
-  outputSchema: answerSchema,
-  capabilities: ["read-project", "mediated-network"],
-  modelVisible: true,
-  maxParallelism: 2,
-  async run(flow, args) {
-    return await flow.agent("research", {
-      profile: "builtin:researcher",
-      prompt: `Answer with primary sources: ${args.question}`,
-      network: "research",
-      outputSchema: answerSchema,
-    });
+export default workflow({
+  description: "Summarize one subject.",
+  input: s.object({ subject: s.string() }),
+  output: s.object({ summary: s.string() }),
+  async run(flow, input) {
+    const result = await flow.agent(summarize, { prompt: input.subject });
+    return { summary: result.output.summary };
   },
 });
 ```
 
-The available operations are:
+The canonical editor declaration is [`workflow-api.d.ts`](workflow-api.d.ts). Definitions are
+strictly typechecked before TypeScript stripping. Static analysis rejects hidden imports, dynamic
+authority, recursion, escaping effectful helpers, unsafe captures, unreviewed resource selection,
+and candidate-workspace sharing across concurrent lanes.
 
-```text
-flow.stage       flow.loop          flow.parallel      flow.fanOut
-flow.agent       flow.command       flow.checkpoint    flow.measure
-flow.candidate   flow.verify        flow.accept        flow.reject
-flow.recordExperiment               flow.apply
-```
+### Ordinary control flow and durable effects
 
-Operation IDs, profile selectors, command selectors, and authority-bearing options must be
-statically reviewable. The parser rejects imports, ambient Node access, clocks, random values,
-dynamic operation identity, code generation, and undeclared authority. A definition may request
-less parallelism than the machine ceiling, never more. A running workflow cannot launch another
-workflow.
+Branches, loops, helpers, mutation, and `try`/`catch` are ordinary TypeScript. The runtime
+re-executes the exact snapshotted source and reconstructs local state by consuming durable effects
+in encounter order.
 
-The current v16 editor contract is [`workflow-api-v16.d.ts`](workflow-api-v16.d.ts). Built-ins under
-[`src/builtins/`](src/builtins/) are complete examples and are checked with
-`npm run typecheck:flows`.
+Each sequential scope owns a cursor and causal chain. `flow.parallel` and keyed, bounded `flow.map`
+create durable child scopes. Child scopes are preclaimed atomically, output order follows authored
+keys, fail-fast cancellation is durable, and joins are structural. Source-site tokens and display
+titles do not contribute semantic identity.
+
+Physical effect completion and semantic call completion are separate durable settlements. A crash
+between them cannot execute a settled effect twice. Failed effects and apply execute fresh.
+
+Cross-run replay is conservative and causal:
+
+- reuse is lane-local and prefix-only;
+- deterministic structural joins bind child outcomes;
+- source call keys and results are retained as provenance;
+- artifacts and workspace checkpoints are independently verified and imported;
+- changed source, resources, metric profiles, or causal ancestry stop reuse;
+- apply is never replayed.
+
+`/flow replay RUN` permits causal reuse. `/flow fresh-run RUN` uses the source input but executes
+without cross-run reuse.
+
+### Authority and evidence
+
+Descriptors declared with `agent(...)` and `command(...)` are the reviewed authority. Runtime
+values for descriptors, artifacts, products, workspaces, candidates, verification, metrics,
+measurements, acceptance, and apply are host-owned and nonforgeable.
+
+Every invocation snapshots:
+
+- exact source and executable transform;
+- input/output schemas and derived review;
+- runtime API identity and registry policy revision;
+- launch actor, project trust, and canonical input;
+- exact route, tool, command, executor, environment, and selected measurement resources;
+- project Btrfs snapshot identity.
+
+Agent, command, verification, measurement, and experiment outputs become canonical immutable
+artifacts. Artifact manifests accept only branded artifact leaves/products and validated named
+containers; plain JSON lookalikes, cycles, aliases with unsafe names, and path escapes fail closed.
+
+### Candidates and apply
+
+Mutable project work occurs only in a candidate body scope. Candidate callbacks freeze an exact
+tree, lineage, write scope, manifest, and diff. Unchanged candidates are discarded automatically.
+Changed candidates must receive exactly one disposition before successful completion.
+
+Verification binds the candidate tree and profile. Acceptance binds the exact passed evidence.
+Apply requires a durable human challenge and rejects stale project state. Approval changes only the
+working tree represented by that exact candidate; rejection remains durable evidence.
+
+### Generic optimization
+
+The optimizer has no hardcoded benchmark and there is no implicit evaluator. The caller selects a
+registered, trust-filtered measurement profile and supplies:
+
+- exactly one primary metric;
+- optional guardrails and observations;
+- sampling policy;
+- optimization policy.
+
+The selected profile is resolved before launch and snapshotted with its command, extractors,
+environment, output roles, and hash. Workflow code cannot switch profiles at runtime or submit
+arbitrary benchmark commands/argv.
+
+### Human suspension and control
+
+`flow.ask(...)` and `flow.apply(...)` create durable waiting interactions with exact challenge
+hashes. Responses and decisions are committed as control requests. The run becomes paused after a
+human decision and resumes only through an explicit resume request, making the operator boundary
+visible and recoverable.
+
+Pause, resume, stop, and stop-effect are durable database requests. The short-lived coordinator
+drains requests while systemd owns process lifetime. Stopping settles active attempts, cancels scope
+trees, and abandons pending candidate work without erasing evidence.
 
 ### Drafts and promotion
 
-Agent- or user-authored text follows draft → validate → exact human promotion. Validation performs
-static parsing, schema compilation, profile/route resolution, authority derivation, operation-count
-analysis, and a definition-only control load. It launches no workflow effects.
+Draft revisions are immutable `.flow.ts` files under `~/.pi/agent/workflow-drafts`. Validation is
+inert and never invokes `run()`. Human promotion binds the exact draft hash, installed preimage,
+derived review, current policy, target exposure, and challenge hash.
 
-Promotion binds the draft source hash, target namespace/path, installed preimage, and review hash.
-Changing either the draft or installed file invalidates the challenge. TUI promotion uses a human
-confirmation; RPC/headless use a two-step exact challenge.
+Source and `registry.json` are replaced through a fail-closed promotion marker. Discovery is
+unavailable while a transaction is incomplete; exact retry can finish the same transaction after a
+crash.
 
-### Agent profiles and routes
+### Run storage
 
-Semantic profiles live in `~/.pi/agent/agents/*.md` or trusted
-`<project>/.pi/agents/*.md`. They describe role and maximum tool policy only:
-
-```md
----
-name: dependency-auditor
-description: Reviews dependency and supply-chain risk
-tools: [read, grep, find, ls, web_search, web_fetch]
----
-Inspect the supplied project snapshot and artifacts. Cite exact paths and primary URLs.
-```
-
-Exact provider routing is machine policy in `~/.pi/agent/workflow-routes.json`:
-
-```json
-{
-  "formatVersion": 1,
-  "routes": {
-    "user:dependency-auditor": {
-      "model": "anthropic/claude-sonnet-4",
-      "thinking": "medium"
-    }
-  }
-}
-```
-
-Local routes override the current Pi model defaults and are snapshotted at launch. Credential
-contents are neither semantic identity nor persisted evidence.
-
-Agents receive the intersection of their profile policy, operation authority, and the fixed host
-catalog. Inspection, candidate editing, mediated research, and workspace commands are independent
-sets, so a candidate agent may also receive mediated research. Raw workspace commands always run
-without network.
-
-Agent completion requires a valid, durably acknowledged `finish_work` call. `report_progress`,
-`log_result`, and `publish_artifact` update evidence and projections while the agent runs. Assistant
-text is evidence only. After a clean yield without a finish receipt, the same Pi session is reopened
-with one fixed protocol reminder. Three consecutive non-progressing yields pause the operation.
-
-### Command profiles
-
-User command profiles are `~/.pi/agent/commands/*.json`; trusted project profiles are
-`<project>/.pi/commands/*.json`. Workflow source names a profile and supplies only declared scalar
-arguments. A placeholder occupies a complete argv token; no shell parses it.
-
-```json
-{
-  "name": "focused-check",
-  "description": "Run one reviewed check target",
-  "argv": ["/usr/bin/node", "scripts/check.mjs", "${suite}"],
-  "arguments": {
-    "suite": { "type": "string", "enum": ["unit", "integration"] }
-  },
-  "timeoutMs": 30000,
-  "outputLimitBytes": 1048576,
-  "effects": ["read-only", "temporary", "candidate"]
-}
-```
-
-Every command runs as argv in Bubblewrap inside a transient systemd service. Read-only commands see
-the immutable snapshot, temporary commands get a discarded tmp-overlay, and candidate commands bind
-only the candidate tree. Stdout/stderr are bounded and overflow is retained as artifact evidence.
-
-### Measurement and verification profiles
-
-Measurement profiles live under `measurements/` and verification profiles under `verifications/`
-in the same user/project configuration roots. Both are strict JSON and own their exact argv,
-environment, timeouts, extractors, and gate policy. Workflow arguments cannot supply profile bodies
-or raw commands.
-
-Measurements support protocol, JSON-path, and regex extraction, grouped samples, CPU affinity,
-primary/guardrail metric policy, and cgroup/pressure diagnostics. Verification binds ordered tests,
-diagnostics, diff policy, adversarial review, candidate tree/lineage/write scope, project snapshot,
-and environment evidence.
-
-## Persistence and recovery
-
-The staged v17 registry uses `registry.json` beside each namespace's definitions. Its strict shape is
-`{"formatVersion":1,"model":["explicitly-exposed-name"]}`; absent names are human-only. Exposure is
-snapshotted at launch but excluded from executable definition identity. The staged v17 invocation
-writer records the original `.flow.ts`, reviewed executable JavaScript, exact frontend transform,
-language descriptor, policy revision, launch actor/trust, and invocation-selected measurement
-profile snapshots.
-
-The staged v17 `run.sqlite` is a clean schema-4 rebuild. A root, candidate body, parallel branch, or
-mapped item is one sequential scope with its own cursor and call chain. Global operation ordinals are
-retained only for event/UI ordering. Child scopes bind their owner operation, lane key, and seed;
-structural join rows bind exact output order and every child terminal key. Invocation resource rows
-store the exact launch snapshot rather than selectors into a live registry. Candidate workspaces,
-frozen authority, changed paths, pending measurement, verification, one disposition, and apply receipt
-are separate constrained records. Completion discards unchanged candidates, rejects changed pending
-candidates, and failure/stop abandons work and rejects pending measurements atomically. Schema-3 files
-remain untouched legacy evidence and are never migrated in place.
-
-The staged v17 causal replay layer now consumes one explicitly selected schema-4 source run. It uses
-scope-local prefix eligibility, keyed lane seeds, deterministic joins, and source call keys, so sibling
-reuse is independent of scheduler completion order. A changed lane or join ends only its causal parent
-prefix. Successful immutable artifacts and exact workspace checkpoints are validated, materialized,
-restored, and committed atomically with replay evidence; failed and `never` calls execute fresh.
-
-The staged v17 sequential semantic engine owns an encounter cursor and previous call key in each
-`AsyncLocalStorage` scope. Native loops and local mutation reconstruct by re-running source and
-restoring committed calls in order. A separate durable effect-settlement row closes the modeled crash
-boundary between host completion and call-chain commit, so restart does not repeat settled physical
-work. Recorded failures re-enter ordinary `catch`; source/semantic drift fails at its first cursor.
-Operation and agent admission limits pause runaway effectful control. Fresh execution consults causal
-replay before invoking an adapter. Keyed parallel/map groups preclaim every lane atomically, run under
-the workflow and host concurrency ceilings, and preserve target output order independently of
-completion timing. Fail-fast groups durably fail the parent join and cancel sibling scope trees;
-collected groups retain successful siblings and return typed failures. Completed structures restore
-without re-entering capture-boundary callbacks, while incomplete lanes reconstruct from local calls.
-Mutable candidate workspace lane ownership is enforced by the schema-4 database.
-
-The staged v17 control process executes the exact frontend output in a hardened, memory-bounded child.
-Its realm owns `workflow`, the strict schema facade, reviewed agent/command descriptor objects,
-instrumented source-site tokens, flow wrappers, and frozen public authority products. Explicit wire
-variants preserve private host-side descriptor/product/reference authority across callbacks without
-exposing identity fields to workflow source; plain lookalikes remain plain data, and foreign or
-revoked authority fails closed. The host watchdog covers synchronous code and asynchronous runnable
-continuations, while IPC byte/depth/node limits and callback invocation contexts remain bounded.
-All six v17 definitions load in this realm. It remains disconnected from coordinator execution until
-the effect-adapter and atomic cutover phases.
-
-The staged v17 artifact layer now writes schema-4 content-addressed JSON, text, binary, and copied-file
-evidence using the same immutable body/metadata layout consumed by causal replay. Host product
-factories mint agent, command, verification, and measurement results only from exact stored artifact
-authority; every such result owns a canonical host-generated artifact, while published evidence,
-candidate checkpoints, and measurement diagnostics remain separately branded artifacts. Record-
-experiment remains ordinary JSON under the frozen public contract, but its operation receives a
-canonical experiment artifact.
-
-Named artifact inputs use one recursive algebra of exact artifacts, attachable branded products,
-records, and arrays. It emits a sorted path manifest, preserves repeated authority at each path, and
-rejects plain leaves, lookalikes, nonattachable products, cycles, and unsafe segments with their exact
-path. The v17 materializer validates that manifest and every immutable body before constructing a
-read-only nested agent-input tree; it never accepts the old ad-hoc flat input shape. Product authority
-survives the protocol-17 host/worker round trip and resolves back to the same host value before
-manifest admission.
-
-The staged v17 effect runtime now connects that control bridge to the cursor engine. Agent and command
-descriptors resolve only through exact definition-bound static resource snapshots; prompts, scalar
-arguments, artifact manifests, workspace class, profile binding, and candidate authority enter their
-semantic identities while display titles do not. Candidate workspace effects persist exact post-call
-checkpoints for same-run recovery and causal replay. `ask` validates the trusted human response against
-its reviewed schema before settlement.
-
-Candidate callbacks now own real candidate-body scopes and private workspace references. Freeze
-atomically commits the body terminal key, immutable manifest/diff evidence, output, lineage, and
-changed paths; a crash after freeze restores the product without callback re-entry. Empty candidates
-are discarded automatically. Verification products bind exact candidate/profile/environment/evidence
-hashes, acceptance requires the durable passed receipt, and rejection finalizes the same candidate
-evidence. Apply receives only an accepted product, reloads its bound verification, is never replayed,
-and admits a receipt only when candidate, approval, verification binding, and changed paths agree.
-Run completion fails before closing the root scope when a changed candidate remains pending; terminal
-failure/stop behavior continues to abandon pending candidates transactionally.
-
-The staged v17 measurement runtime creates one unforgeable run-local `MetricSet` from a required
-primary policy plus optional guardrails/observations. A selected `s.measurementProfile()` is resolved
-and output-validated at launch, then rechecked against the exact operation site, policy, sampling,
-profile snapshot, command executor, and environment provider at execution. Baselines and candidate
-cohorts are persisted in schema 4; acceptance advances the grouped best state, while rejection or
-abandonment finalizes the same pending cohort without advancing it. Profile/environment changes stop
-comparison and alter causal identity. Measurement products retain canonical observations,
-diagnostics, streams, and artifact authority, and `recordExperiment` binds the exact candidate,
-measurement, disposition, lesson, and artifact. Causal replay can materialize an unchanged baseline
-into a fresh target metric set without running the evaluator.
-
-The six staged v17 builtins are the exact strict conformance corpus and are explicitly model-exposed
-by `src/builtins/registry.json`. Vertical tests execute research, package-audit, coding, optimize,
-goal, and execute-plan through reviewed control, schema-4 SQLite, branded products, candidate
-workspaces, restart reconstruction, verification, and apply. Optimize uses a pinned evaluator that
-reads the candidate workspace, proving measurements respond to actual candidate contents rather than
-an unrelated canned workload.
-
-Those vertical runs exposed and closed two reconstruction gaps. Completed `parallel`/`map` results
-now persist an explicit authority tree when they contain agent/command products, so restart restores
-branded products without callback re-entry or structural lookalikes. Metric methods now read a
-run-local causal view advanced as measurement and disposition operations are encountered, preventing
-future pending observations from changing earlier replayed prompts. Safe artifact bundle keys permit
-ordinary camelCase TypeScript names while still rejecting traversal, punctuation, and ambiguous
-segments.
-
-There is no implicit evaluator in v17. The old `builtin:runtime-baseline` remains reachable only by
-the still-executable v16 optimizer and will be deleted with that runtime at atomic cutover.
-
-The staged v17 projection path reads one coherent schema-4 snapshot and derives its operation tree
-from scope ownership, keyed lanes, source/descriptor sites, and dynamic titles. Candidate,
-verification, measurement, experiment, disposition, workspace checkpoint, causal replay, and apply
-evidence remain explicitly linked. Review projections show derived authority and dynamic resource
-classes before launch, then the exact invocation-selected profile/hash/output binding after launch.
-Keyset-bounded pages cover operations, attempts, artifacts, measurements, experiments, candidates,
-resources, and events. Plain renderer snapshots for research, optimize, goal, and execute-plan prove
-that no authored stage or loop node is needed for a useful inspector.
-
-The staged v17 draft service installs only inert `.flow.ts` definitions. Validation runs the strict
-frontend, schema compilation, helper/authority review, static profile/route checks, and definition-
-only protocol-17 control load without invoking `run()`. Promotion challenges bind the draft,
-installed preimage, review, current registry policy, and target human/model exposure. A durable
-registry transaction marker makes discovery fail closed while source and `registry.json` are replaced
-and permits exact retry after a crash. The model draft tool still cannot promote. The staged workflow
-tool schema contains only model-exposed definitions and replaces protected measurement-resource
-markers with exact profiles available under current project trust. Neither staged tool launches v17;
-primary-session execution remains deferred to the atomic coordinator cutover.
-
-The following describes the currently executable v16 layout.
-
-Runs live at `~/.pi/agent/workflow-runs/flow_<32 hex>/`:
+Runs live under `~/.pi/agent/workflow-runs/flow_<32 hex>/`:
 
 ```text
+source.flow.ts
 run.sqlite
-source.flow.js
 context/
   invocation.json
-  project-manifest.json
-  identity.json
-  resources.json
   project/
+  project-manifest.json
+  static-resources.json
 sessions/
 workspaces/
-  candidates/
-  checkpoints/
-  overlays/
-artifacts/<sha256>/
-  body
-  metadata.json
-outputs/<execution-id>/
+artifacts/
+outputs/
 ```
 
-`run.sqlite` is the only state authority. It uses WAL, foreign keys, full synchronization, bounded
-busy waiting, short immediate transactions, and revision checks. Immediate run directories are the
-catalog; there is no second global index. Artifact bodies are immutable and content-addressed.
+`run.sqlite` uses WAL and revision CAS. Global event sequence is presentation order only and never
+semantic identity. The database stores scopes, local cursors, operations, structural joins,
+settlements, attempts, artifacts, checkpoints, resources, candidates, verification, metric sets,
+measurements, experiments, human interactions, controls, and the final result.
 
-The launch snapshot is one Btrfs reflink tree hashed from admitted destination bytes. Writable
-agents use disposable candidates; every successful mutation gets a restorable reflink checkpoint.
-Replay of a mutating result is impossible without the matching restored checkpoint.
+### Development
 
-Same-run resume returns already committed operations. Explicit `/flow replay` consumes the exact
-matching journal prefix from a selected earlier run and stops at the first semantic mismatch.
-`/flow fresh-run` deliberately ignores that prefix. Live apply is never replayed as a mutation.
-
-Coordinator, agent, command, verification, and measurement processes use deterministic transient
-systemd services. SQLite carries ordinary control requests. Reloading or closing Pi drops only local
-rendering/polling state; it does not stop active services.
-
-## Development
-
-```bash
-npm install
+```sh
+npm run typecheck
+npm run typecheck:flows
+npm run typecheck:conformance:v17
+npm run test:unit
+npm run test:conformance:v17
 npm run check
 ```
 
-`npm run check` runs TypeScript, authoring-interface checks, v16 and strict v17 built-in checks, and
-Vitest. Real
-machine trials are separate; see [`benchmark/README.md`](benchmark/README.md).
-
-Security details are in [`SECURITY.md`](SECURITY.md). Projection and storage costs are in
-[`PERFORMANCE.md`](PERFORMANCE.md).
+The independent oracle remains under `tests/conformance/v17/`. Production tests use real SQLite,
+strict source compilation, crash/replay injection, scheduler permutations, malformed authority and
+wire values, candidate/apply lifecycle checks, and an end-to-end prepared coordinator.

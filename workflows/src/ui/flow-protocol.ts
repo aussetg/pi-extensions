@@ -2,12 +2,11 @@ import type { JsonObject, JsonValue } from "../types.js";
 import { stableJson } from "../utils/stable-json.js";
 import { stableHash } from "../utils/hashes.js";
 import type { WorkflowRunProjection } from "../projection/types.js";
-import type { ArtifactRef } from "../runtime/durable-types.js";
 
 export const FLOW_PROTOCOL_MAX_BYTES = 256 * 1024;
 
 export interface FlowChallengeProjection {
-  kind: "checkpoint-response" | "apply-approval" | "apply-rejection" | "run-deletion";
+  kind: "ask-response" | "apply-approval" | "apply-rejection" | "run-deletion";
   runId: string;
   shortRunId: string;
   revision: number;
@@ -33,8 +32,6 @@ export interface FlowToolResultDetails {
   runId?: string;
   projection?: WorkflowRunProjection;
   resultPreview?: string;
-  resultArtifactId?: string;
-  resultArtifact?: ArtifactRef;
   handoff?: boolean;
   challenge?: FlowChallengeProjection;
   error?: { name: string; message: string };

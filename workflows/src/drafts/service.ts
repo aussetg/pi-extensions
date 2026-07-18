@@ -2,29 +2,42 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { AgentExecutorDescriptor } from "../agents/executor.js";
 import { AgentProfileRegistry } from "../agents/profiles.js";
 import { AgentRouteRegistry } from "../agents/routes.js";
+import { MeasurementProfileRegistry } from "../measurements/profiles.js";
+import type { WorkflowExposure } from "../registry/workflow-policy.js";
 import { stableHash } from "../utils/hashes.js";
 import { reviewWorkflowDraft, type WorkflowDraftReviewOptions } from "./review.js";
 import { WorkflowDraftStore, type WorkflowDraftStoreOptions } from "./store.js";
 import type {
   WorkflowDraftId,
   WorkflowDraftNamespace,
-  WorkflowDraftPromotionChallenge,
-  WorkflowDraftPromotionResult,
-  WorkflowDraftReviewRecord,
   WorkflowDraftRevision,
   WorkflowDraftSummary,
 } from "./types.js";
+import type {
+  WorkflowDraftPromotionChallenge,
+  WorkflowDraftPromotionResult,
+  WorkflowDraftReviewRecord,
+} from "./promotion-types.js";
 
 export interface WorkflowDraftServiceOptions extends WorkflowDraftStoreOptions {
   store?: WorkflowDraftStore;
   executorDescriptor?: AgentExecutorDescriptor;
   routeFile?: string;
+  apiPath?: string;
 }
 
+export function parseDraftSelector(selector: string): { namespace: WorkflowDraftNamespace; name: string; id: WorkflowDraftId } {
+  const match = /^(user|project):([a-z][a-z0-9_-]{0,63})$/.exec(selector);
+  if (!match) throw new Error("Workflow draft selector must be an exact user:NAME or project:NAME id");
+  return { namespace: match[1] as WorkflowDraftNamespace, name: match[2]!, id: selector as WorkflowDraftId };
+}
+
+/** Staged v17 authoring service; it installs only inert .flow.ts definitions. */
 export class WorkflowDraftService {
   readonly store: WorkflowDraftStore;
   private readonly executorDescriptor?: AgentExecutorDescriptor;
   private readonly routeFile?: string;
+  private readonly apiPath?: string;
 
   constructor(
     private readonly pi: Pick<ExtensionAPI, "getThinkingLevel">,
@@ -33,6 +46,7 @@ export class WorkflowDraftService {
     this.store = options.store ?? new WorkflowDraftStore(options);
     this.executorDescriptor = options.executorDescriptor;
     this.routeFile = options.routeFile;
+    this.apiPath = options.apiPath;
   }
 
   async create(
@@ -44,12 +58,7 @@ export class WorkflowDraftService {
   }
 
   async replace(
-    input: {
-      namespace: WorkflowDraftNamespace;
-      name: string;
-      source: string;
-      expectedSourceHash: string;
-    },
+    input: { namespace: WorkflowDraftNamespace; name: string; source: string; expectedSourceHash: string },
     ctx: ExtensionContext,
   ): Promise<WorkflowDraftRevision> {
     this.assertNamespaceAllowed(input.namespace, ctx);
@@ -61,14 +70,10 @@ export class WorkflowDraftService {
     return await reviewWorkflowDraft(draft, await this.reviewOptions(ctx));
   }
 
-  async explain(selector: string, ctx: ExtensionContext): Promise<WorkflowDraftReviewRecord> {
-    return await this.validate(selector, ctx);
-  }
-
   async list(ctx: ExtensionContext, namespace?: WorkflowDraftNamespace): Promise<WorkflowDraftSummary[]> {
     if (namespace) this.assertNamespaceAllowed(namespace, ctx);
     const drafts = await this.store.list(ctx.cwd, namespace);
-    return drafts.filter((draft) => draft.namespace !== "project" || ctx.isProjectTrusted());
+    return drafts.filter(draft => draft.namespace !== "project" || ctx.isProjectTrusted());
   }
 
   async inspect(selector: string, ctx: ExtensionContext): Promise<WorkflowDraftRevision> {
@@ -83,19 +88,23 @@ export class WorkflowDraftService {
     await this.store.discard(namespace, name, ctx.cwd, expectedSourceHash);
   }
 
-  async promotionChallenge(selector: string, ctx: ExtensionContext): Promise<{
-    challenge: WorkflowDraftPromotionChallenge;
-    review: WorkflowDraftReviewRecord;
-  }> {
+  async promotionChallenge(
+    selector: string,
+    targetExposure: WorkflowExposure,
+    ctx: ExtensionContext,
+  ): Promise<{ challenge: WorkflowDraftPromotionChallenge; review: WorkflowDraftReviewRecord }> {
     const review = await this.validate(selector, ctx);
-    if (!review.valid) throw new Error(`Workflow draft ${review.draftId} is invalid and cannot be promoted`);
+    if (!review.valid || !review.definition) throw new Error(`Workflow v17 draft ${review.draftId} is invalid and cannot be promoted`);
     const body = {
       formatVersion: 1 as const,
+      runtimeVersion: 17 as const,
       draftId: review.draftId,
       draftHash: review.sourceHash,
       targetNamespace: review.namespace,
       targetPath: review.targetPath,
       installedSourceHash: review.installedSourceHash,
+      currentPolicyHash: review.definition.policyHash,
+      targetExposure,
       reviewHash: review.reviewHash,
     };
     return { challenge: { ...body, challengeHash: stableHash(body) }, review };
@@ -103,24 +112,46 @@ export class WorkflowDraftService {
 
   async promote(
     selector: string,
+    targetExposure: WorkflowExposure,
     challengeHash: string,
     ctx: ExtensionContext,
   ): Promise<WorkflowDraftPromotionResult> {
-    const { challenge, review } = await this.promotionChallenge(selector, ctx);
-    if (challenge.challengeHash !== challengeHash) {
-      throw new Error("Workflow draft promotion challenge is stale");
-    }
+    const selected = parseDraftSelector(selector);
+    this.assertNamespaceAllowed(selected.namespace, ctx);
+    const resumed = await this.store.resumePromotion({
+      namespace: selected.namespace,
+      name: selected.name,
+      cwd: ctx.cwd,
+      challengeHash,
+      exposure: targetExposure,
+    });
+    if (resumed) return {
+      id: selected.id,
+      sourceHash: resumed.sourceHash,
+      installedPath: resumed.targetPath,
+      exposure: resumed.exposure,
+      policyHash: resumed.policyHash,
+      reviewHash: resumed.reviewHash,
+    };
+    const { challenge, review } = await this.promotionChallenge(selector, targetExposure, ctx);
+    if (challenge.challengeHash !== challengeHash) throw new Error("Workflow v17 draft promotion challenge is stale");
     const installed = await this.store.installAndConsume({
       namespace: review.namespace,
       name: review.name,
       cwd: ctx.cwd,
       expectedDraftHash: challenge.draftHash,
       expectedInstalledSourceHash: challenge.installedSourceHash,
+      expectedPolicyHash: challenge.currentPolicyHash,
+      exposure: challenge.targetExposure,
+      reviewHash: challenge.reviewHash,
+      challengeHash: challenge.challengeHash,
     });
     return {
       id: review.draftId,
       sourceHash: installed.sourceHash,
       installedPath: installed.targetPath,
+      exposure: installed.exposure,
+      policyHash: installed.policyHash,
       reviewHash: review.reviewHash,
     };
   }
@@ -129,35 +160,33 @@ export class WorkflowDraftService {
     const includeProject = ctx.isProjectTrusted();
     const profiles = new AgentProfileRegistry();
     await profiles.refresh(ctx.cwd, { includeProject });
-    const availableModels = ctx.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`);
+    const availableModels = ctx.modelRegistry.getAvailable().map(model => `${model.provider}/${model.id}`);
     const selectedModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : availableModels[0];
     const defaults = selectedModel
-      ? Object.fromEntries(profiles.list().map((profile) => [
-          profile.id,
-          { model: selectedModel, thinking: this.pi.getThinkingLevel() },
-        ]))
+      ? Object.fromEntries(profiles.list().map(profile => [profile.id, {
+          model: selectedModel,
+          thinking: this.pi.getThinkingLevel(),
+        }]))
       : {};
     const routes = new AgentRouteRegistry();
     await routes.refresh({ defaults, ...(this.routeFile ? { filePath: this.routeFile } : {}) });
+    const measurements = new MeasurementProfileRegistry();
+    await measurements.refresh(ctx.cwd, { includeProject });
     return {
       cwd: ctx.cwd,
       includeProjectResources: includeProject,
+      ...(this.apiPath ? { apiPath: this.apiPath } : {}),
       availableModels,
       profileRegistry: profiles,
       routeRegistry: routes,
+      measurementProfileRegistry: measurements,
       ...(this.executorDescriptor ? { executorDescriptor: this.executorDescriptor } : {}),
     };
   }
 
   private assertNamespaceAllowed(namespace: WorkflowDraftNamespace, ctx: ExtensionContext): void {
     if (namespace === "project" && !ctx.isProjectTrusted()) {
-      throw new Error("Project workflow drafts require a trusted project");
+      throw new Error("Project workflow v17 drafts require a trusted project");
     }
   }
-}
-
-export function parseDraftSelector(selector: string): { namespace: WorkflowDraftNamespace; name: string; id: WorkflowDraftId } {
-  const match = /^(user|project):([a-z][a-z0-9_-]{0,63})$/.exec(selector);
-  if (!match) throw new Error("Workflow draft selector must be an exact user:NAME or project:NAME id");
-  return { namespace: match[1] as WorkflowDraftNamespace, name: match[2]!, id: selector as WorkflowDraftId };
 }

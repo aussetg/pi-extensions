@@ -127,7 +127,6 @@ interface AgentExecutionRequestBase {
   tools: AgentToolDescriptor[];
   network: "none" | "research";
   outputSchema?: JsonSchema;
-  resultMode: "value" | "artifact" | "value-and-artifact";
   workspace: AgentWorkspaceHandle;
   inputs: AgentInputBundleHandle;
   context: AgentContextBundle;

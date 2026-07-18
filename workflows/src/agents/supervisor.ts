@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { RunDatabase, RunRevisionConflictError } from "../persistence/run-database.js";
+import { stableJson } from "../utils/stable-json.js";
 import { zeroUsage, type AgentSessionRecord, type StructuredReason, type UsageMeasurement } from "../runtime/durable-types.js";
 import {
   MISSING_RECEIPT_REMINDER,
@@ -77,7 +77,7 @@ export class AgentSessionSupervisor implements AgentExecutionHandle {
 
   private async run(): Promise<AgentExecutionResult> {
     const request = this.options.request;
-    const store = this.options.store ?? new RunDatabaseAgentSupervisionStore(request);
+    const store = this.options.store ?? new FileAgentSupervisionStore(request);
     const now = this.options.now ?? (() => new Date());
     const sleep = this.options.sleep ?? abortableDelay;
     const maximumFailures = this.options.maximumInfrastructureFailures ?? 6;
@@ -179,78 +179,70 @@ export class AgentSessionSupervisor implements AgentExecutionHandle {
   }
 }
 
-export class RunDatabaseAgentSupervisionStore implements AgentSupervisionStore {
-  readonly databasePath: string;
+interface FileSupervisionState {
+  formatVersion: 1;
+  receiptlessStrikes: number;
+  status: "running" | "paused";
+  infrastructureRetries: number;
+  updatedAt: string;
+}
+
+/** Durable, attempt-local supervision state; protocol receipts remain the completion authority. */
+export class FileAgentSupervisionStore implements AgentSupervisionStore {
+  readonly statePath: string;
 
   constructor(private readonly request: AgentExecutionRequest) {
-    this.databasePath = path.join(path.dirname(path.resolve(request.protocol.socketPath)), "run.sqlite");
+    this.statePath = path.join(path.dirname(path.resolve(request.session.piSessionPath)), "supervision.json");
   }
 
   async read(): Promise<Pick<AgentSessionRecord, "receiptlessStrikes" | "status" | "finish">> {
-    return this.withDatabase((database) => {
-      const session = database.readAgentSession(this.request.session.agentSessionId);
-      if (!session) throw new Error(`Unknown supervised agent session ${this.request.session.agentSessionId}`);
-      return {
-        receiptlessStrikes: session.receiptlessStrikes,
-        status: session.status,
-        ...(session.finish ? { finish: session.finish } : {}),
-      };
-    });
+    const state = await this.readState();
+    return { receiptlessStrikes: state.receiptlessStrikes, status: state.status };
   }
 
   async settleYield(meaningfulProgress: boolean, at: string): Promise<Pick<AgentSessionRecord, "receiptlessStrikes" | "status">> {
-    return this.retry((database) => {
-      const session = database.settleAgentYield({
-        expectedRevision: database.readRun().revision,
-        agentSessionId: this.request.session.agentSessionId,
-        executionId: this.request.executionId,
-        meaningfulProgress,
-        at,
-      });
-      return { receiptlessStrikes: session.receiptlessStrikes, status: session.status };
-    });
+    const current = await this.readState();
+    const receiptlessStrikes = meaningfulProgress ? 0 : current.receiptlessStrikes + 1;
+    const next: FileSupervisionState = { ...current, receiptlessStrikes,
+      status: receiptlessStrikes >= 3 ? "paused" : "running", updatedAt: at };
+    await this.writeState(next);
+    return { receiptlessStrikes: next.receiptlessStrikes, status: next.status };
   }
 
-  async recordInfrastructureRetry(reason: StructuredReason, meaningfulProgress: boolean, at: string): Promise<void> {
-    await this.retry((database) => {
-      database.recordAgentInfrastructureRetry({
-        expectedRevision: database.readRun().revision,
-        agentSessionId: this.request.session.agentSessionId,
-        executionId: this.request.executionId,
-        reason,
-        meaningfulProgress,
-        at,
-      });
-    });
+  async recordInfrastructureRetry(_reason: StructuredReason, meaningfulProgress: boolean, at: string): Promise<void> {
+    const current = await this.readState();
+    await this.writeState({ ...current, receiptlessStrikes: meaningfulProgress ? 0 : current.receiptlessStrikes,
+      infrastructureRetries: current.infrastructureRetries + 1, updatedAt: at });
   }
 
-  async pauseInfrastructure(reason: StructuredReason, at: string): Promise<void> {
-    await this.retry((database) => {
-      database.pauseAgentForInfrastructure({
-        expectedRevision: database.readRun().revision,
-        agentSessionId: this.request.session.agentSessionId,
-        executionId: this.request.executionId,
-        reason,
-        meaningfulProgress: false,
-        at,
-      });
-    });
+  async pauseInfrastructure(_reason: StructuredReason, at: string): Promise<void> {
+    const current = await this.readState();
+    await this.writeState({ ...current, status: "paused", updatedAt: at });
   }
 
-  private withDatabase<T>(work: (database: RunDatabase) => T): T {
-    const database = RunDatabase.open(this.databasePath);
-    try { return work(database); } finally { database.close(); }
-  }
-
-  private async retry<T>(work: (database: RunDatabase) => T): Promise<T> {
-    for (let attempt = 0; attempt < 16; attempt += 1) {
-      try { return this.withDatabase(work); }
-      catch (error) {
-        if (error instanceof RunRevisionConflictError) continue;
-        throw error;
+  private async readState(): Promise<FileSupervisionState> {
+    try {
+      const value = JSON.parse(await fs.promises.readFile(this.statePath, "utf8")) as FileSupervisionState;
+      if (value.formatVersion !== 1 || !Number.isSafeInteger(value.receiptlessStrikes)
+        || value.receiptlessStrikes < 0 || !Number.isSafeInteger(value.infrastructureRetries)
+        || value.infrastructureRetries < 0 || (value.status !== "running" && value.status !== "paused")) {
+        throw new Error("Agent supervision state is invalid");
       }
+      return value;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      return { formatVersion: 1, receiptlessStrikes: 0, status: "running", infrastructureRetries: 0,
+        updatedAt: new Date(0).toISOString() };
     }
-    throw new Error("Agent supervision could not commit after 16 revision races");
+  }
+
+  private async writeState(value: FileSupervisionState): Promise<void> {
+    await fs.promises.mkdir(path.dirname(this.statePath), { recursive: true, mode: 0o700 });
+    const temporary = `${this.statePath}.tmp-${process.pid}-${Date.now()}`;
+    const handle = await fs.promises.open(temporary, "wx", 0o600);
+    try { await handle.writeFile(`${stableJson(value)}\n`, "utf8"); await handle.sync(); }
+    finally { await handle.close(); }
+    await fs.promises.rename(temporary, this.statePath);
   }
 }
 
@@ -271,9 +263,8 @@ function resumeRequest(request: AgentExecutionRequest): AgentExecutionRequest {
 }
 
 async function persistedSessionExists(request: AgentExecutionRequest): Promise<boolean> {
-  const runDir = path.dirname(path.resolve(request.protocol.socketPath));
   try {
-    const stat = await fs.promises.lstat(path.join(runDir, ...request.session.piSessionPath.split("/")));
+    const stat = await fs.promises.lstat(path.resolve(request.session.piSessionPath));
     return stat.isFile() && !stat.isSymbolicLink();
   } catch (error: any) {
     if (error?.code === "ENOENT") return false;

@@ -1,23 +1,20 @@
-import type {
-  WorkflowDraftPromotionProjection,
-  WorkflowRunProjection,
-} from "../projection/types.js";
-import { boundedProjectionText } from "../projection/run-projection.js";
+import type { WorkflowRunProjection } from "../projection/types.js";
+import { boundedWorkflowProjectionText } from "../projection/run-projection.js";
 import { truncateToWidth } from "../utils/truncate.js";
 
 /** Exact human-readable binding shown immediately before draft installation. */
 export function renderDraftPromotionConfirmation(
-  promotion: WorkflowDraftPromotionProjection,
+  promotion: ReturnType<typeof import("../projection/approval-inspectors.js")["projectWorkflowDraftPromotion"]>,
   width = 100,
 ): readonly string[] {
   const { validation, challenge } = promotion;
   return bound([
-    `Promote ${validation.draftId} → ${validation.source.targetPath}`,
+    `Promote ${validation.draftId} → ${validation.source.targetPath} (${challenge.targetExposure})`,
     `draft      ${challenge.draftHash}`,
     `installed  ${challenge.installedSourceHash ?? "none"}`,
     `review     ${challenge.reviewHash}`,
     `challenge  ${challenge.challengeHash}`,
-    `authority  ${validation.capabilities.declared.join(", ") || "none"}`,
+    `authority  ${validation.capabilities.join(", ") || "none"}`,
     `profiles   ${validation.profiles.map((entry) => entry.id).join(", ") || "none"}`,
     `commands   ${validation.commandProfiles.join(", ") || "none"}`,
     `operations ${validation.operations.staticSites} static · host limit ${validation.operations.hostAdmissionLimit}`,
@@ -32,22 +29,13 @@ export function renderApplyApprovalConfirmation(
   decision: "approve" | "reject" = "approve",
   width = 100,
 ): readonly string[] {
-  const apply = projection.apply;
-  if (!apply || apply.status !== "waiting") throw new Error("Run has no waiting apply approval");
-  if (apply.challenge.challengeHash !== challengeToken) throw new Error("Apply challenge does not match the projected approval");
+  const apply = projection.humanInteractions.find(item => item.kind === "apply" && item.status === "waiting");
+  if (!apply) throw new Error("Run has no waiting apply approval");
   return bound([
     `${decision === "approve" ? "Apply" : "Reject"} ${projection.workflowId} · run ${projection.shortRunId} · revision ${projection.revision}`,
     `operation    ${apply.operationId}`,
     `approval     ${apply.approvalId}`,
-    `challenge    ${apply.challenge.challengeHash}`,
-    `binding      ${apply.challenge.bindingHash}`,
-    `candidate    ${apply.candidateId}`,
-    `tree         ${apply.candidateTreeHash}`,
-    `lineage      ${apply.candidateLineageHash}`,
-    `write scope  ${apply.candidateWriteScopeHash}`,
-    `verification ${apply.verificationId} · ${apply.verificationProfileHash}`,
-    `summary      ${apply.challenge.summary.digest} · ${apply.challenge.summary.bytes} bytes`,
-    `paths        ${apply.changedPathCount}${apply.changedPathPreview.length ? ` · ${apply.changedPathPreview.join(", ")}` : ""}`,
+    `challenge    ${challengeToken}`,
     decision === "approve"
       ? "This exact verified delta changes working-tree files only."
       : "The candidate and verification remain as durable evidence.",
@@ -60,7 +48,7 @@ export function renderFlowCommandFeedback(
 ): string {
   const projection = value.projection;
   const message = projection
-    ? `${projection.workflowId} (${projection.shortRunId}) · ${projection.status} · r${projection.revision}${projection.attentionReasons[0] ? ` · ${projection.attentionReasons[0].summary}` : ""}`
+    ? `${projection.workflowId} (${projection.shortRunId}) · ${projection.status} · r${projection.revision}${projection.attention[0] ? ` · ${projection.attention[0].summary}` : ""}`
     : value.error?.message ?? value.message;
   return truncateToWidth(safe(message, 2_048), Math.max(1, Math.trunc(width)));
 }
@@ -69,4 +57,4 @@ function bound(lines: string[], width: number, maximumRows: number): readonly st
   const safeWidth = Math.max(20, Math.trunc(width));
   return Object.freeze(lines.flatMap((line) => line.split("\n")).slice(0, maximumRows).map((line) => truncateToWidth(safe(line, 40_000), safeWidth)));
 }
-function safe(value: unknown, maximum: number): string { return boundedProjectionText(value, maximum); }
+function safe(value: unknown, maximum: number): string { return boundedWorkflowProjectionText(value, maximum); }

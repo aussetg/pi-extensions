@@ -1,34 +1,37 @@
+import path from "node:path";
 import { AgentProfileRegistry, snapshotAgentProfile, type AgentProfileRef } from "../agents/profiles.js";
 import { AgentRouteRegistry, type AgentRouteMap } from "../agents/routes.js";
-import { resolveAgentTools } from "../agents/tool-policy.js";
 import type { AgentExecutorDescriptor } from "../agents/executor.js";
-import {
-  assertCommandEffectAllowed,
-  CommandProfileRegistry,
-} from "../commands/profiles.js";
-import type { ParsedStructuredWorkflow } from "../definition/types.js";
-import { parseStructuredWorkflow } from "../definition/workflow-definition.js";
+import { resolveAgentTools } from "../agents/tool-policy.js";
+import { assertCommandEffectAllowed, CommandProfileRegistry } from "../commands/profiles.js";
 import { DEFINITION_LIMITS } from "../definition/limits.js";
+import { parseWorkflow } from "../definition/workflow-frontend.js";
+import type { ParsedWorkflow } from "../definition/workflow-types.js";
 import { MeasurementProfileRegistry } from "../measurements/profiles.js";
 import { readBoundedTextFile } from "../persistence/safe-paths.js";
-import { loadControlDefinition } from "../runtime/control-worker-host.js";
+import {
+  defaultWorkflowRegistryPolicy,
+  readWorkflowRegistryPolicy,
+  workflowExposure,
+} from "../registry/workflow-policy.js";
+import { loadWorkflowControlDefinition } from "../runtime/control-worker-host.js";
 import { WorkflowScriptError } from "../runtime/errors.js";
 import { sha256, stableHash } from "../utils/hashes.js";
 import { stableJson } from "../utils/stable-json.js";
 import { VerificationProfileRegistry } from "../verification/profiles.js";
+import type { WorkflowDraftRevision, WorkflowDraftSourceDiff } from "./types.js";
 import type {
   WorkflowDraftDiagnostic,
   WorkflowDraftOperationAnalysis,
   WorkflowDraftResolvedProfile,
   WorkflowDraftReviewBody,
   WorkflowDraftReviewRecord,
-  WorkflowDraftRevision,
-  WorkflowDraftSourceDiff,
-} from "./types.js";
+} from "./promotion-types.js";
 
 export interface WorkflowDraftReviewOptions {
   cwd: string;
   includeProjectResources?: boolean;
+  apiPath?: string;
   availableModels?: readonly string[];
   routeDefaults?: AgentRouteMap;
   profileRegistry?: AgentProfileRegistry;
@@ -39,7 +42,7 @@ export interface WorkflowDraftReviewOptions {
   executorDescriptor?: AgentExecutorDescriptor;
 }
 
-/** Validate one exact immutable draft revision without running its run() body. */
+/** Review exact inert TypeScript source. No run callback or effect is invoked. */
 export async function reviewWorkflowDraft(
   draft: WorkflowDraftRevision,
   options: WorkflowDraftReviewOptions,
@@ -47,39 +50,37 @@ export async function reviewWorkflowDraft(
   const diagnostics: WorkflowDraftDiagnostic[] = [];
   const installed = await readInstalled(draft.targetPath, diagnostics);
   const sourceDiff = sourceDiffRecord(installed?.source, installed?.hash ?? null, draft.source, draft.sourceHash);
-  let parsed: ParsedStructuredWorkflow | undefined;
+  const directory = path.dirname(draft.targetPath);
+  let policy = defaultWorkflowRegistryPolicy(directory, draft.namespace);
+  try {
+    policy = await readWorkflowRegistryPolicy(directory, draft.namespace);
+    info(diagnostics, "policy", `Current ${workflowExposure(policy, draft.name)} exposure policy ${policy.hash}`);
+  } catch (error) {
+    diagnosticError(diagnostics, "policy", error);
+  }
+
+  let parsed: ParsedWorkflow | undefined;
   let profiles: WorkflowDraftResolvedProfile[] = [];
   let controlLoad: WorkflowDraftReviewBody["definitionControlLoad"] = "skipped";
-
   try {
-    parsed = parseStructuredWorkflow(draft.source);
-    if (parsed.metadata.name !== draft.name) {
-      throw new WorkflowScriptError(`Draft definition name ${parsed.metadata.name} must match draft name ${draft.name}`);
-    }
-    info(diagnostics, "parse", `Parsed ${draft.sourceHash}`);
+    parsed = parseWorkflow(draft.source, {
+      fileName: draft.targetPath,
+      ...(options.apiPath ? { apiPath: options.apiPath } : {}),
+    });
+    if (parsed.installedName !== draft.name) throw new Error("Workflow v17 draft frontend returned another installed name");
+    info(diagnostics, "typecheck", "Strict TypeScript check passed against pi/workflows v17");
+    info(diagnostics, "parse", `Parsed and reviewed ${draft.sourceHash}`);
     info(diagnostics, "schema", "Input and output schemas compiled successfully");
   } catch (error) {
-    diagnosticError(diagnostics, "parse", error);
+    diagnosticError(diagnostics, /TypeScript|typecheck|diagnostic/iu.test(message(error)) ? "typecheck" : "parse", error);
   }
 
   if (parsed) {
     profiles = await validateResources(parsed, options, diagnostics);
-    const operations = operationAnalysis(parsed);
-    if (operations.staticSites > DEFINITION_LIMITS.semanticOperations) {
-      diagnosticError(diagnostics, "operations", new Error(
-        `Workflow has ${operations.staticSites} static operation sites, above the host limit ${DEFINITION_LIMITS.semanticOperations}`,
-      ));
-    } else {
-      info(
-        diagnostics,
-        "operations",
-        `${operations.staticSites} static sites; host admits at most ${operations.hostAdmissionLimit} operations`,
-      );
-    }
     try {
-      await loadControlDefinition(parsed.executableSource, parsed.metadata.name);
+      await loadWorkflowControlDefinition(parsed);
       controlLoad = "passed";
-      info(diagnostics, "control-load", "Definition loaded in the constrained control process without invoking run()");
+      info(diagnostics, "control-load", "Reviewed definition loaded without invoking run()");
     } catch (error) {
       controlLoad = "failed";
       diagnosticError(diagnostics, "control-load", error);
@@ -87,141 +88,130 @@ export async function reviewWorkflowDraft(
   }
 
   const operations = parsed ? operationAnalysis(parsed) : emptyOperationAnalysis();
-  const commandProfiles = parsed ? boundedUnique(parsed.review.commandProfiles, "command profiles", diagnostics) : [];
-  const measurementProfiles = parsed ? boundedUnique(parsed.review.measurementProfiles, "measurement profiles", diagnostics) : [];
-  const verificationProfiles = parsed ? boundedUnique(parsed.review.verificationProfiles, "verification profiles", diagnostics) : [];
-  const declared = parsed ? [...parsed.metadata.capabilities] : [];
-  const derived = parsed ? [...parsed.review.capabilities] : [];
+  const capabilities = parsed ? [...parsed.review.capabilities] : [];
   const body: WorkflowDraftReviewBody = {
     formatVersion: 1,
+    runtimeVersion: 17,
     draftId: draft.id,
     namespace: draft.namespace,
     name: draft.name,
     sourceHash: draft.sourceHash,
     targetPath: draft.targetPath,
     installedSourceHash: installed?.hash ?? null,
-    valid: diagnostics.every((diagnostic) => diagnostic.severity !== "error"),
-    ...(parsed ? {
-      definition: {
-        name: parsed.metadata.name,
-        ...(parsed.metadata.title ? { title: parsed.metadata.title } : {}),
-        description: parsed.metadata.description,
-        modelVisible: parsed.metadata.modelVisible,
-        ...(parsed.metadata.maxParallelism !== undefined ? { maxParallelism: parsed.metadata.maxParallelism } : {}),
-      },
-    } : {}),
+    valid: diagnostics.every(diagnostic => diagnostic.severity !== "error"),
+    ...(parsed ? { definition: {
+      ...(parsed.metadata.title ? { title: parsed.metadata.title } : {}),
+      description: parsed.metadata.description,
+      ...(parsed.metadata.concurrency !== undefined ? { concurrency: parsed.metadata.concurrency } : {}),
+      currentExposure: workflowExposure(policy, draft.name),
+      policyHash: policy.hash,
+    } } : {}),
     sourceDiff,
-    capabilities: { declared, derived },
+    capabilities,
+    descriptors: parsed ? parsed.descriptors.map(descriptor => ({
+      binding: descriptor.binding,
+      kind: descriptor.kind,
+      profile: descriptor.profile,
+      ...(descriptor.kind === "agent-task" ? {
+        workspace: descriptor.workspace,
+        network: descriptor.network,
+      } : { effect: descriptor.effect }),
+      sourceSite: descriptor.identity.sourceSite,
+    })) : [],
     profiles,
-    commandProfiles,
-    measurementProfiles,
-    verificationProfiles,
+    commandProfiles: parsed ? [...parsed.review.commandProfiles] : [],
+    measurementProfiles: parsed ? [...parsed.review.measurementProfiles] : [],
+    verificationProfiles: parsed ? [...parsed.review.verificationProfiles] : [],
+    dynamicResources: parsed ? structuredClone(parsed.review.dynamicResources) : [],
+    candidateWrites: parsed ? structuredClone(parsed.review.candidateWrites) : [],
     authority: {
-      candidateWrite: declared.includes("candidate-write"),
-      mediatedNetwork: declared.includes("mediated-network"),
-      hostCommand: declared.includes("host-command"),
-      humanInput: declared.includes("human-input"),
-      applySites: parsed?.review.applySiteCount ?? 0,
+      candidateWrite: capabilities.includes("candidate-write"),
+      mediatedNetwork: capabilities.includes("mediated-network"),
+      hostCommand: capabilities.includes("host-command"),
+      humanInput: capabilities.includes("human-input"),
+      humanInteractionSites: parsed?.review.humanInteractionSites.length ?? 0,
+      applySites: parsed?.review.applySites.length ?? 0,
     },
     operations,
     definitionControlLoad: controlLoad,
     diagnostics: diagnostics.slice(0, DEFINITION_LIMITS.draftDiagnostics),
   };
   const record = { ...body, reviewHash: stableHash(body) };
-  if (Buffer.byteLength(stableJson(record)) > DEFINITION_LIMITS.draftReviewBytes) {
-    throw new Error(`Workflow draft review exceeds ${DEFINITION_LIMITS.draftReviewBytes} bytes`);
+  if (Buffer.byteLength(stableJson(record), "utf8") > DEFINITION_LIMITS.draftReviewBytes) {
+    throw new Error(`Workflow v17 draft review exceeds ${DEFINITION_LIMITS.draftReviewBytes} bytes`);
   }
   return Object.freeze(record);
 }
 
 async function validateResources(
-  parsed: ParsedStructuredWorkflow,
+  parsed: ParsedWorkflow,
   options: WorkflowDraftReviewOptions,
   diagnostics: WorkflowDraftDiagnostic[],
 ): Promise<WorkflowDraftResolvedProfile[]> {
-  const profileRegistry = options.profileRegistry ?? new AgentProfileRegistry();
   try {
-    if (!options.profileRegistry) {
-      await profileRegistry.refresh(options.cwd, { includeProject: options.includeProjectResources === true });
-    }
-    const invalid = profileRegistry.listInvalid()[0];
-    if (invalid) throw new Error(`Invalid agent profile ${invalid.path}: ${invalid.error}`);
+    const includeProject = options.includeProjectResources === true;
+    const profiles = options.profileRegistry ?? new AgentProfileRegistry();
+    if (!options.profileRegistry) await profiles.refresh(options.cwd, { includeProject });
+    const invalidProfile = profiles.listInvalid()[0];
+    if (invalidProfile) throw new Error(`Invalid agent profile ${invalidProfile.path}: ${invalidProfile.error}`);
 
-    const commandRegistry = options.commandProfileRegistry ?? new CommandProfileRegistry();
-    if (parsed.commandSelections.length > 0 && !options.commandProfileRegistry) {
-      await commandRegistry.refresh(options.cwd, { includeProject: options.includeProjectResources === true });
+    const commands = options.commandProfileRegistry ?? new CommandProfileRegistry();
+    if (parsed.review.commandProfiles.length && !options.commandProfileRegistry) {
+      await commands.refresh(options.cwd, { includeProject });
     }
-    const invalidCommand = commandRegistry.listInvalid()[0];
-    if (parsed.commandSelections.length > 0 && invalidCommand) {
+    const invalidCommand = commands.listInvalid()[0];
+    if (parsed.review.commandProfiles.length && invalidCommand) {
       throw new Error(`Invalid command profile ${invalidCommand.path}: ${invalidCommand.error}`);
     }
-    for (const selection of parsed.commandSelections) {
-      assertCommandEffectAllowed(commandRegistry.resolve(selection.profile), selection.effect);
+    for (const descriptor of parsed.descriptors.filter(value => value.kind === "command-task")) {
+      assertCommandEffectAllowed(commands.resolve(descriptor.profile), descriptor.effect);
     }
 
-    const measurementRegistry = options.measurementProfileRegistry ?? new MeasurementProfileRegistry();
-    if (parsed.measurementSelections.length > 0 && !options.measurementProfileRegistry) {
-      await measurementRegistry.refresh(options.cwd, { includeProject: options.includeProjectResources === true });
+    const measurements = options.measurementProfileRegistry ?? new MeasurementProfileRegistry();
+    if (parsed.review.measurementProfiles.length && !options.measurementProfileRegistry) {
+      await measurements.refresh(options.cwd, { includeProject });
     }
-    const invalidMeasurement = measurementRegistry.listInvalid()[0];
-    if (parsed.measurementSelections.length > 0 && invalidMeasurement) {
-      throw new Error(`Invalid measurement profile ${invalidMeasurement.path}: ${invalidMeasurement.error}`);
-    }
-    for (const selection of parsed.measurementSelections) measurementRegistry.resolve(selection.profile);
+    for (const selector of parsed.review.measurementProfiles) measurements.resolve(selector);
 
-    const verificationRegistry = options.verificationProfileRegistry ?? new VerificationProfileRegistry();
-    if (parsed.verificationSelections.length > 0 && !options.verificationProfileRegistry) {
-      await verificationRegistry.refresh(options.cwd, { includeProject: options.includeProjectResources === true });
+    const verifications = options.verificationProfileRegistry ?? new VerificationProfileRegistry();
+    if (parsed.review.verificationProfiles.length && !options.verificationProfileRegistry) {
+      await verifications.refresh(options.cwd, { includeProject });
     }
-    const invalidVerification = verificationRegistry.listInvalid()[0];
-    if (parsed.verificationSelections.length > 0 && invalidVerification) {
-      throw new Error(`Invalid verification profile ${invalidVerification.path}: ${invalidVerification.error}`);
-    }
-    const verifications = parsed.verificationSelections.map((selection) => verificationRegistry.resolve(selection.profile));
+    const resolvedVerifications = parsed.review.verificationProfiles.map(selector => verifications.resolve(selector));
 
-    const selectors = [
-      ...parsed.agentSelections.map((selection) => ({
-        selector: selection.profile,
-        workspace: selection.workspace,
-        network: selection.network,
+    const selections = [
+      ...parsed.descriptors.filter(value => value.kind === "agent-task").map(descriptor => ({
+        selector: descriptor.profile,
+        workspace: descriptor.workspace,
+        network: descriptor.network,
       })),
-      ...verifications.flatMap((verification) => "profile" in verification.adversarialReview
+      ...resolvedVerifications.flatMap(verification => "profile" in verification.adversarialReview
         ? [{ selector: verification.adversarialReview.profile, workspace: "snapshot" as const, network: "none" as const }]
         : []),
     ];
-    const resolvedSelections = selectors.map((selection) => ({ ...selection, profile: profileRegistry.resolve(selection.selector) }));
-    const uniqueProfiles = new Map<string, AgentProfileRef>();
-    for (const selection of resolvedSelections) uniqueProfiles.set(selection.profile.id, selection.profile);
-    if (uniqueProfiles.size > DEFINITION_LIMITS.profileFilesPerNamespace * 3) {
-      throw new Error("Workflow resolves too many semantic profiles");
-    }
-    info(
-      diagnostics,
-      "profiles",
-      `Resolved ${uniqueProfiles.size} semantic, ${parsed.commandSelections.length} command, ${parsed.measurementSelections.length} measurement, and ${parsed.verificationSelections.length} verification profiles`,
-    );
-
-    if (uniqueProfiles.size === 0) {
+    const resolved = selections.map(selection => ({ ...selection, profile: profiles.resolve(selection.selector) }));
+    const unique = new Map<string, AgentProfileRef>();
+    for (const selection of resolved) unique.set(selection.profile.id, selection.profile);
+    if (unique.size === 0) {
+      info(diagnostics, "profiles", `Resolved ${parsed.review.commandProfiles.length} command, ${parsed.review.measurementProfiles.length} static measurement, and ${parsed.review.verificationProfiles.length} verification profiles`);
       info(diagnostics, "routes", "No agent model routes are required");
+      info(diagnostics, "resources", `${parsed.review.dynamicResources.length} invocation-selected resource site(s) require exact launch binding`);
       return [];
     }
-    if (!options.executorDescriptor) throw new Error("An exact agent executor descriptor is required to validate agent tool authority");
-    const routeRegistry = options.routeRegistry ?? new AgentRouteRegistry();
-    if (!options.routeRegistry) await routeRegistry.refresh({ defaults: options.routeDefaults });
-    const routeSnapshot = routeRegistry.snapshot([...uniqueProfiles.keys()], options.availableModels ?? []);
-    const routes = new Map(routeSnapshot.routes.map((route) => [route.profileId, route]));
-    for (const selection of resolvedSelections) {
+    if (!options.executorDescriptor) throw new Error("An exact agent executor descriptor is required to review agent tool authority");
+    const routes = options.routeRegistry ?? new AgentRouteRegistry();
+    if (!options.routeRegistry) await routes.refresh({ defaults: options.routeDefaults });
+    const routeSnapshot = routes.snapshot([...unique.keys()], options.availableModels ?? []);
+    const routeByProfile = new Map(routeSnapshot.routes.map(route => [route.profileId, route]));
+    for (const selection of resolved) {
       resolveAgentTools(snapshotAgentProfile(selection.profile), {
         workspace: selection.workspace,
         network: selection.network,
       }, options.executorDescriptor);
     }
-    info(diagnostics, "routes", `Resolved ${routeSnapshot.routes.length} exact profile routes`);
-    info(diagnostics, "resources", "Static profile and tool authority is available; no effects were launched");
-
     const bySelector = new Map<string, WorkflowDraftResolvedProfile>();
-    for (const selection of resolvedSelections) {
-      const route = routes.get(selection.profile.id);
+    for (const selection of resolved) {
+      const route = routeByProfile.get(selection.profile.id);
       if (!route) throw new Error(`No exact route was resolved for ${selection.profile.id}`);
       bySelector.set(selection.selector, {
         selector: selection.selector,
@@ -233,50 +223,39 @@ async function validateResources(
         thinking: route.thinking,
       });
     }
+    info(diagnostics, "profiles", `Resolved ${unique.size} semantic, ${parsed.review.commandProfiles.length} command, ${parsed.review.measurementProfiles.length} static measurement, and ${parsed.review.verificationProfiles.length} verification profiles`);
+    info(diagnostics, "routes", `Resolved ${routeSnapshot.routes.length} exact model route(s)`);
+    info(diagnostics, "resources", `${parsed.review.dynamicResources.length} invocation-selected resource site(s) are constrained by input schema`);
     return [...bySelector.values()].sort((left, right) => left.selector.localeCompare(right.selector));
   } catch (error) {
-    const stage = /route|model/i.test(errorMessage(error)) ? "routes" : "profiles";
-    diagnosticError(diagnostics, stage, error);
+    diagnosticError(diagnostics, /route|model/iu.test(message(error)) ? "routes" : "profiles", error);
     return [];
   }
 }
 
-function operationAnalysis(parsed: ParsedStructuredWorkflow): WorkflowDraftOperationAnalysis {
+function operationAnalysis(parsed: ParsedWorkflow): WorkflowDraftOperationAnalysis {
   const byMethod: Record<string, number> = {};
-  for (const operation of parsed.operationLocations) byMethod[operation.method] = (byMethod[operation.method] ?? 0) + 1;
+  for (const operation of parsed.operations) byMethod[operation.method] = (byMethod[operation.method] ?? 0) + 1;
   return {
-    staticSites: parsed.operationLocations.length,
+    staticSites: parsed.operations.length,
     byMethod: Object.fromEntries(Object.entries(byMethod).sort(([left], [right]) => left.localeCompare(right))),
-    dynamicSites: {
-      loops: byMethod.loop ?? 0,
-      parallel: byMethod.parallel ?? 0,
-      fanOut: byMethod.fanOut ?? 0,
-    },
+    concurrentSites: (byMethod.parallel ?? 0) + (byMethod.map ?? 0),
+    nativeLoops: structuredClone(parsed.review.nativeLoops),
+    suspiciousUnboundedLoops: structuredClone(parsed.review.suspiciousUnboundedLoops),
     hostAdmissionLimit: DEFINITION_LIMITS.semanticOperations,
   };
 }
 
 function emptyOperationAnalysis(): WorkflowDraftOperationAnalysis {
-  return {
-    staticSites: 0,
-    byMethod: {},
-    dynamicSites: { loops: 0, parallel: 0, fanOut: 0 },
-    hostAdmissionLimit: DEFINITION_LIMITS.semanticOperations,
-  };
+  return { staticSites: 0, byMethod: {}, concurrentSites: 0, nativeLoops: [], suspiciousUnboundedLoops: [], hostAdmissionLimit: DEFINITION_LIMITS.semanticOperations };
 }
 
-async function readInstalled(
-  filePath: string,
-  diagnostics: WorkflowDraftDiagnostic[],
-): Promise<{ source: string; hash: string } | undefined> {
+async function readInstalled(filePath: string, diagnostics: WorkflowDraftDiagnostic[]) {
   try {
     const source = await readBoundedTextFile(filePath, DEFINITION_LIMITS.sourceBytes);
-    if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(source)) {
-      throw new Error(`Installed workflow ${filePath} contains disallowed control characters`);
-    }
     return { source, hash: sha256(source) };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT" || /ENOENT|no such file/i.test(errorMessage(error))) return undefined;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" || /ENOENT|no such file/iu.test(message(error))) return undefined;
     diagnosticError(diagnostics, "installed", error);
     return undefined;
   }
@@ -288,92 +267,42 @@ function sourceDiffRecord(
   draft: string,
   draftHash: string,
 ): WorkflowDraftSourceDiff {
-  if (installed === draft) {
-    return { installedSourceHash: installedHash, draftSourceHash: draftHash, changed: false, preview: "", truncated: false };
-  }
-  const before = installed?.replace(/\r\n?/g, "\n").split("\n") ?? [];
-  const after = draft.replace(/\r\n?/g, "\n").split("\n");
+  if (installed === draft) return { installedSourceHash: installedHash, draftSourceHash: draftHash, changed: false, preview: "", truncated: false };
+  const before = installed?.replace(/\r\n?/gu, "\n").split("\n") ?? [];
+  const after = draft.replace(/\r\n?/gu, "\n").split("\n");
   let prefix = 0;
   while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix++;
   let suffix = 0;
-  while (
-    suffix < before.length - prefix && suffix < after.length - prefix &&
-    before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
-  ) suffix++;
-  const removed = before.slice(prefix, before.length - suffix);
-  const added = after.slice(prefix, after.length - suffix);
+  while (suffix < before.length - prefix && suffix < after.length - prefix
+    && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix++;
   const lines = [
     `--- ${installed ? "installed" : "/dev/null"}`,
     "+++ draft",
-    `@@ -${prefix + 1},${removed.length} +${prefix + 1},${added.length} @@`,
-    ...removed.map((line) => `-${line}`),
-    ...added.map((line) => `+${line}`),
+    `@@ -${prefix + 1},${before.length - prefix - suffix} +${prefix + 1},${after.length - prefix - suffix} @@`,
+    ...before.slice(prefix, before.length - suffix).map(line => `-${line}`),
+    ...after.slice(prefix, after.length - suffix).map(line => `+${line}`),
   ];
-  const bounded = truncateUtf8(lines.join("\n"), DEFINITION_LIMITS.draftDiffBytes);
-  return {
-    installedSourceHash: installedHash,
-    draftSourceHash: draftHash,
-    changed: true,
-    preview: bounded.text,
-    truncated: bounded.truncated,
-  };
+  const raw = lines.join("\n");
+  const bytes = Buffer.from(raw, "utf8");
+  const truncated = bytes.length > DEFINITION_LIMITS.draftDiffBytes;
+  const preview = truncated ? bytes.subarray(0, DEFINITION_LIMITS.draftDiffBytes - 4).toString("utf8") + "\n…" : raw;
+  return { installedSourceHash: installedHash, draftSourceHash: draftHash, changed: true, preview, truncated };
 }
 
-function boundedUnique(
-  values: readonly string[],
-  label: string,
-  diagnostics: WorkflowDraftDiagnostic[],
-): string[] {
-  const unique = [...new Set(values)].sort();
-  const maximum = DEFINITION_LIMITS.profileFilesPerNamespace * 3;
-  if (unique.length > maximum) {
-    diagnosticError(diagnostics, "profiles", new Error(`Workflow names too many ${label} (${unique.length}/${maximum})`));
-    return unique.slice(0, maximum);
-  }
-  return unique;
+function info(diagnostics: WorkflowDraftDiagnostic[], stage: WorkflowDraftDiagnostic["stage"], messageValue: string): void {
+  diagnostics.push({ stage, severity: "info", message: messageValue });
 }
-
-function info(diagnostics: WorkflowDraftDiagnostic[], stage: WorkflowDraftDiagnostic["stage"], message: string): void {
-  pushDiagnostic(diagnostics, { stage, severity: "info", message });
-}
-
-function diagnosticError(
-  diagnostics: WorkflowDraftDiagnostic[],
-  stage: WorkflowDraftDiagnostic["stage"],
-  error: unknown,
-): void {
-  const location = error instanceof WorkflowScriptError && error.location &&
-    typeof error.location.line === "number" && typeof error.location.column === "number"
+function diagnosticError(diagnostics: WorkflowDraftDiagnostic[], stage: WorkflowDraftDiagnostic["stage"], error: unknown): void {
+  const location = error instanceof WorkflowScriptError
+    && typeof error.location?.line === "number"
+    && typeof error.location.column === "number"
     ? { line: error.location.line, column: error.location.column }
     : undefined;
-  pushDiagnostic(diagnostics, {
+  diagnostics.push({
     stage,
     severity: "error",
-    message: errorMessage(error),
+    message: message(error),
     ...(location ? { location } : {}),
   });
 }
-
-function pushDiagnostic(diagnostics: WorkflowDraftDiagnostic[], diagnostic: WorkflowDraftDiagnostic): void {
-  if (diagnostics.length >= DEFINITION_LIMITS.draftDiagnostics) return;
-  diagnostics.push({ ...diagnostic, message: truncateUtf8(diagnostic.message, 2_048).text });
-}
-
-function truncateUtf8(value: string, maximum: number): { text: string; truncated: boolean } {
-  if (Buffer.byteLength(value) <= maximum) return { text: value, truncated: false };
-  const suffix = "\n[…truncated…]";
-  const capacity = maximum - Buffer.byteLength(suffix);
-  let bytes = 0;
-  let result = "";
-  for (const scalar of value) {
-    const size = Buffer.byteLength(scalar);
-    if (bytes + size > capacity) break;
-    result += scalar;
-    bytes += size;
-  }
-  return { text: `${result}${suffix}`, truncated: true };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
+function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }

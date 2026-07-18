@@ -9,12 +9,12 @@ export type FlowCommand =
   | { action: "open"; runRef: string }
   | { action: "pause" | "resume" | "stop"; runRef: string }
   | { action: "stop-effect"; runRef: string; operationRef: string }
-  | { action: "respond"; runRef: string; checkpointId?: string; challenge?: string; value?: string }
+  | { action: "respond"; runRef: string; interactionId?: string; challenge?: string; value?: string }
   | { action: "approve" | "reject"; runRef: string; challenge?: string }
   | { action: "replay" | "fresh-run"; sourceRunRef: string; args?: Record<string, unknown>; mode: "await" | "async" }
   | { action: "drafts"; draftId?: string; namespace?: "user" | "project" }
   | { action: "validate"; draftId: string }
-  | { action: "promote"; draftId: string; challenge?: string }
+  | { action: "promote"; draftId: string; exposure: "human" | "model"; challenge?: string }
   | { action: "discard-draft"; draftId: string; expectedHash?: string }
   | { action: "delete"; runRef: string; challenge?: string };
 
@@ -103,14 +103,14 @@ export function flowHelpText(): string {
     "/flow resume RUN",
     "/flow stop RUN",
     "/flow stop-effect RUN OPERATION",
-    "/flow respond RUN [CHECKPOINT] [--challenge HASH] [--value JSON_OR_CHOICE]",
+    "/flow respond RUN [INTERACTION] [--challenge HASH] [--value JSON]",
     "/flow approve RUN [--challenge HASH]",
     "/flow reject RUN [--challenge HASH]",
     "/flow replay RUN [--await|--async] [--args JSON]",
     "/flow fresh-run RUN [--await|--async] [--args JSON]",
     "/flow drafts [user:NAME|project:NAME] [--namespace user|project]",
     "/flow validate user:NAME|project:NAME",
-    "/flow promote user:NAME|project:NAME [--challenge HASH]",
+    "/flow promote user:NAME|project:NAME [--exposure human|model] [--challenge HASH]",
     "/flow discard-draft user:NAME|project:NAME [--expected-hash HASH]",
     "/flow delete RUN [--challenge HASH]",
   ].join("\n");
@@ -161,8 +161,8 @@ function launchOptions(argv: string[]): { mode: "await" | "async"; args?: Record
 }
 
 function parseRespond(argv: string[]): FlowCommand {
-  const runRef = positional(argv, "/flow respond RUN [CHECKPOINT] [--challenge HASH] [--value VALUE]");
-  const checkpointId = argv[0] && !argv[0].startsWith("--") ? argv.shift() : undefined;
+  const runRef = positional(argv, "/flow respond RUN [INTERACTION] [--challenge HASH] [--value JSON]");
+  const interactionId = argv[0] && !argv[0].startsWith("--") ? argv.shift() : undefined;
   let challenge: string | undefined;
   let value: string | undefined;
   for (let index = 0; index < argv.length; index++) {
@@ -171,7 +171,7 @@ function parseRespond(argv: string[]): FlowCommand {
     else if (option === "--value" && value === undefined) value = requireValue(argv, ++index, option);
     else throw new Error(`Unknown /flow respond option: ${option}`);
   }
-  return { action: "respond", runRef, ...(checkpointId ? { checkpointId } : {}), ...(challenge ? { challenge } : {}), ...(value !== undefined ? { value } : {}) };
+  return { action: "respond", runRef, ...(interactionId ? { interactionId } : {}), ...(challenge ? { challenge } : {}), ...(value !== undefined ? { value } : {}) };
 }
 
 function parseDecision(action: "approve" | "reject", argv: string[]): FlowCommand {
@@ -195,9 +195,19 @@ function parseDrafts(argv: string[]): FlowCommand {
 }
 
 function parsePromote(argv: string[]): FlowCommand {
-  const draftId = positional(argv, "/flow promote ID [--challenge HASH]");
-  const challenge = oneOption(argv, "--challenge");
-  return { action: "promote", draftId, ...(challenge ? { challenge } : {}) };
+  const draftId = positional(argv, "/flow promote ID [--exposure human|model] [--challenge HASH]");
+  let challenge: string | undefined;
+  let exposureValue: string | undefined;
+  while (argv.length) {
+    const option = argv.shift()!;
+    if (option === "--challenge" && challenge === undefined) challenge = positional(argv, "--challenge HASH");
+    else if (option === "--exposure" && exposureValue === undefined) exposureValue = positional(argv, "--exposure human|model");
+    else throw new Error(`Unknown or duplicate /flow promote option: ${option}`);
+  }
+  if (exposureValue !== undefined && exposureValue !== "human" && exposureValue !== "model") {
+    throw new Error("--exposure must be human or model");
+  }
+  return { action: "promote", draftId, exposure: exposureValue ?? "human", ...(challenge ? { challenge } : {}) };
 }
 
 function parseDiscard(argv: string[]): FlowCommand {

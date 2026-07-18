@@ -80,50 +80,8 @@ const DIAGNOSTIC_FIELDS = new Set(["extract", "schema"]);
 const EXTRACTOR_FIELDS = new Set(["kind", "path", "pattern", "group", "flags"]);
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 
-const RUNTIME_BASELINE_PROGRAM = String.raw`
-const iterations = Number(process.env.FLOW_MEASUREMENT_ITERATIONS || "500000");
-const started = process.hrtime.bigint();
-let checksum = 0;
-for (let index = 0; index < iterations; index++) checksum = (checksum + Math.imul(index ^ 0x5a5a, 2654435761)) | 0;
-const durationNs = Number(process.hrtime.bigint() - started);
-const throughput = iterations * 1e9 / Math.max(1, durationNs);
-const peakRss = process.memoryUsage().rss;
-process.stdout.write(JSON.stringify({ type: "metric", id: "throughput", value: throughput }) + "\n");
-process.stdout.write(JSON.stringify({ type: "metric", id: "peak-rss", value: peakRss }) + "\n");
-process.stdout.write(JSON.stringify({ type: "diagnostic", data: {
-  checksum, durationNs, iterations, runtime: process.version
-} }) + "\n");
-`;
-
-/** A real, self-contained baseline used by the measurement-only flow. */
-export const BUILTIN_MEASUREMENT_PROFILES: readonly MeasurementProfileDefinition[] = Object.freeze([
-  deepFreezeJson({
-    name: "runtime-baseline",
-    title: "Runtime baseline",
-    description: "Measures a fixed integer workload, resident memory, and bounded runtime diagnostics.",
-    argv: [process.execPath, "-e", RUNTIME_BASELINE_PROGRAM],
-    timeoutMs: 30_000,
-    outputs: {
-      "peak-rss": { extract: { kind: "protocol" } },
-      throughput: { extract: { kind: "protocol" } },
-    },
-    diagnostics: {
-      extract: { kind: "protocol" },
-      schema: {
-        type: "object",
-        additionalProperties: false,
-        required: ["checksum", "durationNs", "iterations", "runtime"],
-        properties: {
-          checksum: { type: "integer" },
-          durationNs: { type: "number", minimum: 0 },
-          iterations: { type: "integer", minimum: 1 },
-          runtime: { type: "string", minLength: 1, maxLength: 64 },
-        },
-      },
-    },
-    env: { FLOW_MEASUREMENT_ITERATIONS: "500000" },
-  } as unknown as JsonValue) as unknown as MeasurementProfileDefinition,
-]);
+/** Measurement authority is installed explicitly; there is no implicit executable evaluator. */
+export const BUILTIN_MEASUREMENT_PROFILES: readonly MeasurementProfileDefinition[] = Object.freeze([]);
 
 export class MeasurementProfileRegistry {
   private refs = new Map<string, MeasurementProfileRef>();
