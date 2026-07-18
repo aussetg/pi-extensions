@@ -27,11 +27,11 @@
     "typescript": "6.0.3"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "0.80.6",
+    "@earendil-works/pi-coding-agent": "0.80.10",
     "typebox": "1.1.39"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.80.6",
+    "@earendil-works/pi-coding-agent": "0.80.10",
     "@types/node": "25.9.1",
     "typebox": "1.1.39",
     "vitest": "4.1.7"

@@ -2,10 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  AuthStorage,
   createAgentSession,
   createExtensionRuntime,
-  ModelRegistry,
+  ModelRuntime,
   SessionManager,
   SettingsManager,
   type AgentSessionEvent,
@@ -123,11 +122,16 @@ export async function runSdkAgentWorker(
       ? dependencies.openSessionManager(runDir, request)
       : await openPinnedAgentSession(runDir, request);
     if (request.instruction.kind === "resume") rewindRetryableAssistantFailure(sessionManager);
+    const modelRuntime = await ModelRuntime.create({
+      authPath: path.join(agentDir, "auth.json"),
+      modelsPath: path.join(agentDir, "models.json"),
+      // Agent routes are admitted before the worker starts. Refreshing remote
+      // catalogs here would make an isolated execution depend on ambient I/O.
+      allowModelNetwork: false,
+    });
     const model = dependencies.resolveModel
       ? dependencies.resolveModel(request, agentDir)
-      : resolvePinnedModel(request, agentDir);
-    const authStorage = AuthStorage.create(path.join(agentDir, "auth.json"));
-    const modelRegistry = ModelRegistry.create(authStorage, path.join(agentDir, "models.json"));
+      : resolvePinnedModel(request, modelRuntime);
     const resourceLoader = createIsolatedAgentResourceLoader(buildSystemPrompt(request));
     const createSession = dependencies.createSession ?? (createAgentSession as SdkAgentWorkerDependencies["createSession"]);
     const created = await createSession!({
@@ -135,8 +139,7 @@ export async function runSdkAgentWorker(
       agentDir,
       model,
       thinkingLevel: request.route.thinking,
-      authStorage,
-      modelRegistry,
+      modelRuntime,
       resourceLoader,
       settingsManager,
       sessionManager,
@@ -480,14 +483,12 @@ function assertExactRoute(session: WorkerSession, request: AgentExecutionRequest
   }
 }
 
-function resolvePinnedModel(request: AgentExecutionRequest, agentDir: string): SdkModel {
-  const auth = AuthStorage.create(path.join(agentDir, "auth.json"));
-  const registry = ModelRegistry.create(auth, path.join(agentDir, "models.json"));
+function resolvePinnedModel(request: AgentExecutionRequest, modelRuntime: ModelRuntime): SdkModel {
   const prefix = `${request.route.provider}/`;
   if (!request.route.model.startsWith(prefix) || request.route.model.length === prefix.length) {
     throw new Error(`Pinned route model ${request.route.model} does not belong to ${request.route.provider}`);
   }
-  const model = registry.find(request.route.provider, request.route.model.slice(prefix.length));
+  const model = modelRuntime.getModel(request.route.provider, request.route.model.slice(prefix.length));
   if (!model) throw new Error(`Pinned model ${request.route.model} is unavailable`);
   return model;
 }
