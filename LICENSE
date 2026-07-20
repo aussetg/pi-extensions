@@ -1,21 +1,723 @@
-MIT License
+# OpenAI and Anthropic Exclusion License
 
-Copyright (c) 2026 Guillaume Ausset
+## Version 1.0 — OAAXL-1.0
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+Copyright © 2026 Guillaume AUSSET
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+## Notice
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+This License is intentionally permissive toward every person and entity except the Excluded Persons defined below.
+
+OpenAI, Anthropic, their controlled organizations, certain associated persons, and the Permanently Excluded Individuals listed in Schedule A receive no permission to use the Covered Material.
+
+This is a source-available license. It is not an open-source license, the MIT License, or a BSD license.
+
+---
+
+## 1. Definitions
+
+### 1.1 Licensor
+
+“Licensor” means Guillaume AUSSET and any other copyright holder that validly places material under this License.
+
+### 1.2 Covered Material
+
+“Covered Material” means the software, source code, object code, documentation, comments, examples, tests, build files, configuration files, data files, specifications, diagrams, repository history, patches, and other associated materials accompanied by this License, but only to the extent that a Licensor owns or controls the relevant rights.
+
+Covered Material includes modified, translated, transpiled, compiled, reformatted, minified, obfuscated, annotated, summarized, or otherwise transformed versions of that material to the extent that the Licensor’s protectable expression remains present.
+
+Covered Material does not include separately identified third-party material. Third-party material remains governed by its applicable license.
+
+### 1.3 Excluded Companies
+
+“Excluded Company” means:
+
+1. Anthropic, PBC;
+2. OpenAI Foundation;
+3. OpenAI Group PBC;
+4. OpenAI OpCo, LLC;
+5. any entity directly or indirectly controlling, controlled by, or under common control with an entity listed above;
+6. any entity into which an entity listed above is merged, converted, reorganized, renamed, or reincorporated;
+7. any successor, assignee, purchaser, or transferee carrying on all or a substantial portion of an entity listed above’s artificial-intelligence research, model-development, model-training, model-deployment, or commercial AI business;
+8. any entity established to replace, continue, divide, acquire, or operate such a business; and
+9. any entity conducting substantially the same business primarily under the “Anthropic,” “Claude,” “OpenAI,” or “ChatGPT” name or brand.
+
+“Control” means:
+
+1. direct or indirect ownership of more than fifty percent of voting power or equity;
+2. the direct or indirect power to appoint a majority of an entity’s governing body; or
+3. the direct or indirect contractual, legal, or practical power to direct the entity’s management or material policies.
+
+A non-controlling investment, ordinary commercial agreement, cloud-hosting relationship, supplier relationship, or customer relationship does not by itself constitute control.
+
+Microsoft, Amazon, Google, other investors, cloud providers, suppliers, customers, and business partners are not Excluded Companies solely because of a non-controlling investment in, or commercial relationship with, an Excluded Company.
+
+### 1.4 Excluded Personnel
+
+“Excluded Personnel” means any current:
+
+1. director;
+2. officer;
+3. employee;
+4. worker;
+5. intern;
+6. secondee;
+7. temporary worker;
+8. individual consultant;
+9. individual contractor;
+10. agent; or
+11. representative
+
+of an Excluded Company.
+
+Excluded Personnel are excluded whether acting professionally, personally, academically, independently, experimentally, non-commercially, anonymously, pseudonymously, or through another person.
+
+A former member of Excluded Personnel is not excluded solely because of that former relationship, unless that person is also a Permanently Excluded Individual or remains otherwise covered by the definition of Excluded Person.
+
+### 1.5 Persons Acting for an Excluded Company
+
+A person or entity is “Acting for an Excluded Company” when that person or entity Knowingly:
+
+1. acts on behalf of an Excluded Company;
+2. acts at the request or direction of an Excluded Company;
+3. performs work intended for delivery to an Excluded Company;
+4. uses the Covered Material for the direct or indirect benefit of an Excluded Company;
+5. supplies an Excluded Company with a product, service, dataset, model, benchmark, report, analysis, patch, derivative work, or other deliverable developed using the Covered Material;
+6. conducts research or development sponsored by an Excluded Company where that company receives deliverables, privileged access, ownership, licensing rights, preferential access, or another specific benefit arising from the work;
+7. obtains, processes, or uses the Covered Material through a contractor, supplier, academic institution, nonprofit organization, customer, partner, agent, proxy, or intermediary for the benefit of an Excluded Company; or
+8. serves as an intermediary intended to avoid or circumvent this License.
+
+General funding, an unrestricted donation, ordinary use of an Excluded Company’s publicly available products or APIs, or provision of generally available goods or services does not by itself mean that a person is Acting for an Excluded Company.
+
+### 1.6 Permanently Excluded Individuals
+
+“Permanently Excluded Individual” means each natural person identified in Schedule A.
+
+The exclusion attaches to the identity of the natural person and not merely to the spelling or presentation of that person’s name.
+
+A Permanently Excluded Individual remains excluded notwithstanding:
+
+1. a legal or informal name change;
+2. use of an alias, pseudonym, nickname, professional name, married name, transliteration, abbreviation, initials, or other identifier;
+3. a change of employer, office, occupation, affiliation, citizenship, nationality, domicile, residence, or legal capacity;
+4. resignation, dismissal, retirement, termination, suspension, leave, divestment, or cessation of any relationship with an Excluded Company;
+5. acting personally, professionally, academically, politically, philanthropically, commercially, independently, anonymously, pseudonymously, or through another person;
+6. acting as an employee, director, officer, investor, founder, adviser, consultant, contractor, trustee, partner, agent, representative, beneficiary, or fiduciary;
+7. use of a personal, family, academic, governmental, nonprofit, corporate, contractor, customer, partner, or third-party account;
+8. acquisition of the Covered Material before or after becoming associated with an Excluded Company; or
+9. any merger, restructuring, dissolution, renaming, sale, or reorganization affecting an Excluded Company.
+
+Descriptions in Schedule A are included solely to identify the intended natural person. They are not conditions of exclusion.
+
+No other person is excluded solely because that person has the same or a similar name.
+
+### 1.7 Personal Controlled Vehicle
+
+“Personal Controlled Vehicle” means a corporation, partnership, trust, foundation, fund, association, limited-liability entity, unincorporated organization, family office, investment vehicle, or other legal arrangement that a Permanently Excluded Individual directly or indirectly controls.
+
+For this purpose, “controls” means possessing the practical or legal power to direct the management or material activities of the vehicle, whether through ownership, voting rights, appointment rights, agreement, trusteeship, beneficial ownership, or otherwise.
+
+A company, university, government body, nonprofit organization, or other employer is not an Excluded Person solely because it employs or engages a Permanently Excluded Individual.
+
+However, no such organization receives authority to permit that Permanently Excluded Individual personally to access, use, direct, supervise, commission, benefit from, or participate in activity involving the Covered Material.
+
+### 1.8 Excluded Persons
+
+“Excluded Person” means:
+
+1. every Excluded Company;
+2. every member of Excluded Personnel;
+3. every Permanently Excluded Individual;
+4. every Personal Controlled Vehicle;
+5. every person or entity Acting for an Excluded Company in connection with the Covered Material;
+6. every person or entity Knowingly acting for, at the direction of, on behalf of, or for the specific benefit of a Permanently Excluded Individual in connection with the Covered Material; and
+7. every nominee, proxy, intermediary, agent, trustee, fiduciary, contractor, supplier, or other person Knowingly used to avoid or circumvent an exclusion imposed by this License.
+
+### 1.9 Eligible Person
+
+“Eligible Person” means every natural person and legal entity that is not an Excluded Person.
+
+### 1.10 Derived Training Material
+
+“Derived Training Material” means any material created from, containing, representing, describing, transforming, or encoding Covered Material, including:
+
+1. excerpts and fragments;
+2. patches and diffs;
+3. translations and transpiled versions;
+4. abstract syntax trees;
+5. intermediate representations;
+6. token sequences;
+7. embeddings and feature vectors;
+8. summaries and descriptions;
+9. annotations and labels;
+10. question-and-answer pairs;
+11. prompts and completions;
+12. execution traces;
+13. test cases;
+14. synthetic examples;
+15. rewritten or obfuscated variants;
+16. generated documentation;
+17. code-review data;
+18. preference data;
+19. reward data;
+20. evaluation results;
+21. benchmark results; and
+22. any dataset entry materially derived from Covered Material.
+
+### 1.11 Machine-Learning Activity
+
+“Machine-Learning Activity” means any use or processing of Covered Material or Derived Training Material:
+
+1. to train, pretrain, continue training, fine-tune, align, adapt, optimize, or otherwise develop a model;
+2. for supervised, unsupervised, self-supervised, semi-supervised, contrastive, reinforcement, preference-based, or imitation learning;
+3. to train a reward model, preference model, critic, verifier, classifier, router, retriever, embedding model, reranker, or agent;
+4. for model distillation, extraction, imitation, cloning, compression, quantization-aware training, or knowledge transfer;
+5. to generate synthetic data used in model development;
+6. to evaluate, validate, benchmark, grade, compare, select, reject, modify, align, release, or deploy a model;
+7. to develop or improve code generation, code completion, code review, code search, vulnerability analysis, automated reasoning, or software-development capabilities;
+8. as part of a retrieval-augmented generation system;
+9. as part of a search index, vector database, retrieval corpus, context store, knowledge base, model memory, or model-accessible repository;
+10. to generate embeddings, representations, labels, rewards, rankings, preferences, critiques, summaries, or feedback;
+11. to test memorization, contamination, provenance, safety, capability, reliability, security, or model behavior;
+12. in prompts, system prompts, tool contexts, agent memory, model context, or evaluation contexts;
+13. through crawling, scraping, harvesting, cloning, downloading, indexing, parsing, tokenizing, normalizing, deduplicating, embedding, feature extraction, or data selection; or
+14. at any other stage of an artificial-intelligence or machine-learning data, training, evaluation, alignment, inference, retrieval, deployment, or improvement pipeline.
+
+Machine-Learning Activity includes activity performed manually, automatically, directly, indirectly, internally, externally, or through any contractor, data provider, cloud provider, model provider, agent, service, proxy, or intermediary.
+
+### 1.12 Knowingly
+
+“Knowingly” means with actual knowledge.
+
+A person acquires actual knowledge when the Licensor provides that person with written notice identifying the relevant relationship or prohibited activity.
+
+An Eligible Person is not required to investigate, monitor, identify, screen, audit, or verify customers, users, investors, suppliers, employees, contractors, or counterparties merely to determine whether an unknown relationship exists.
+
+---
+
+## 2. Broad License Grant to Eligible Persons
+
+Subject only to the conditions expressly stated in this License, every Licensor grants every Eligible Person a worldwide, royalty-free, fully paid-up, non-exclusive, perpetual, and irrevocable except as expressly provided by this License, license under the Licensor’s copyright and related rights to:
+
+1. access and use the Covered Material for any purpose;
+2. reproduce and make copies of the Covered Material;
+3. install, execute, run, study, inspect, and analyze the Covered Material;
+4. modify, adapt, translate, annotate, and transform the Covered Material;
+5. create derivative works;
+6. combine, link, embed, or integrate the Covered Material with other material;
+7. compile and distribute source or object forms;
+8. publish, display, perform, communicate, and make the Covered Material available;
+9. distribute, sublicense, rent, lease, sell, and commercialize the Covered Material and derivative works;
+10. provide products and services using the Covered Material;
+11. conduct Machine-Learning Activity;
+12. create, distribute, and use Derived Training Material; and
+13. authorize another Eligible Person to perform any of these activities.
+
+This grant permits commercial, non-commercial, academic, governmental, scientific, medical, military, security, research, educational, artistic, personal, and machine-learning uses.
+
+No royalty, source-availability obligation, network-copyleft obligation, field-of-use restriction, ethical-use restriction, revenue limitation, user-count limitation, commercial-use limitation, or machine-learning restriction applies to an Eligible Person.
+
+### 2.1 Artificial-Intelligence Freedom for Eligible Persons
+
+Eligible Persons may freely use the Covered Material and Derived Training Material to train, evaluate, operate, improve, or provide artificial-intelligence systems.
+
+As to Eligible Persons, the Licensor does not claim that a model, model weight, adapter, embedding model, generated output, or dataset becomes a derivative work of the Covered Material merely because the Covered Material was lawfully used in training or evaluation.
+
+This paragraph does not disclaim any copyright that may independently subsist in a work containing recognizable or protectable expression copied from the Covered Material.
+
+### 2.2 Database Rights
+
+To the extent that a Licensor possesses database rights or similar extraction and reutilization rights in the Covered Material, the Licensor grants every Eligible Person the right to extract, reutilize, reproduce, adapt, analyze, mine, and distribute all or any portion of the relevant database.
+
+### 2.3 Patent Grant
+
+Each Licensor grants every Eligible Person a worldwide, royalty-free, fully paid-up, perpetual, irrevocable except as expressly provided by this License, non-exclusive patent license under patent claims owned or controlled by that Licensor that are necessarily infringed by the unmodified Covered Material or its authorized use.
+
+No patent license is granted for claims infringed only because of an Eligible Person’s independent modifications or combinations.
+
+If an Eligible Person institutes patent litigation alleging that the Covered Material directly or contributorily infringes a patent, the patent license granted to that person under this section terminates as of the date the litigation is filed.
+
+### 2.4 Moral Rights
+
+To the maximum extent permitted by applicable law, each Licensor waives and agrees not to assert moral rights against an Eligible Person’s authorized exercise of this License.
+
+---
+
+## 3. Minimal Conditions Applicable to Eligible Persons
+
+An Eligible Person distributing the Covered Material or a substantial portion of it must:
+
+1. retain the applicable copyright notice;
+2. include the complete text of this License or provide a clear and functional reference to where its complete text is available; and
+3. retain notices identifying separately licensed third-party material.
+
+No other condition is imposed on an Eligible Person except the anti-circumvention obligations in Section 8.
+
+An Eligible Person may license that person’s own modifications, additions, independent components, or derivative contributions under any terms, including proprietary, permissive, copyleft, commercial, or source-available terms.
+
+This License does not require disclosure of source code, modifications, model weights, datasets, prompts, outputs, products, services, or derivative works created by an Eligible Person.
+
+---
+
+## 4. Absolute Exclusion
+
+No license, permission, authorization, consent, covenant not to sue, waiver, patent license, database-right license, moral-right waiver, or other right of any kind is granted under this License to an Excluded Person.
+
+All rights are expressly reserved against every Excluded Person.
+
+An Excluded Person may not rely on:
+
+1. the license granted to an Eligible Person;
+2. a sublicense purportedly granted by an Eligible Person;
+3. a different license applied to a derivative work;
+4. a package-registry entry;
+5. a repository mirror;
+6. a fork;
+7. a cache;
+8. an archive;
+9. a vendor’s standard terms;
+10. a cloud provider’s terms;
+11. an employee’s personal account;
+12. an anonymous or pseudonymous account;
+13. public availability of the Covered Material;
+14. the absence of technical access controls;
+15. a copy received from another person;
+16. a copy included in a larger product or dataset;
+17. an implied license;
+18. acquiescence;
+19. waiver;
+20. estoppel;
+21. industry custom;
+22. prior dealings; or
+23. failure by the Licensor to enforce against another person.
+
+No person other than the relevant Licensor has authority to grant an Excluded Person rights in the Covered Material.
+
+An Excluded Person’s possession or receipt of a copy does not grant any right to retain, reproduce, execute, modify, distribute, analyze, process, or otherwise exploit that copy.
+
+### 4.1 Permanent Named-Person Exclusion
+
+Each Permanently Excluded Individual is personally and unconditionally excluded.
+
+No Permanently Excluded Individual receives any right under this License at any time.
+
+The exclusion:
+
+1. is permanent for the full duration of every applicable right controlled by the Licensor;
+2. is independent of employment or corporate affiliation;
+3. does not expire when the individual leaves an Excluded Company;
+4. does not terminate upon retirement, resignation, dismissal, career change, changed conduct, changed opinion, or changed circumstances;
+5. is not cured by acting through an otherwise Eligible Person;
+6. is not cured by acting through a new employer, company, trust, foundation, university, governmental body, nonprofit organization, family member, contractor, agent, or personal account;
+7. is not cured by acquiring the Covered Material from an Eligible Person;
+8. is not cured by receiving a purported sublicense;
+9. is not cured by modification, translation, transformation, compilation, aggregation, obfuscation, summarization, or incorporation of the Covered Material into another work;
+10. is not cured by public availability or lack of technical access controls;
+11. is not cured by use for personal, charitable, educational, academic, governmental, safety, security, interoperability, experimental, nonprofit, or non-commercial purposes; and
+12. is not subject to any cure, reinstatement, or change-of-status provision available to Eligible Persons.
+
+For avoidance of doubt, a Permanently Excluded Individual receives no authorization to:
+
+1. access or read a non-public copy of the Covered Material;
+2. download, clone, copy, retain, cache, mirror, archive, or reproduce the Covered Material;
+3. install, execute, compile, test, inspect, study, benchmark, debug, or analyze the Covered Material;
+4. submit the Covered Material to a model, agent, code assistant, retrieval system, indexing system, search system, or automated analysis tool;
+5. commission another person to inspect, summarize, modify, test, evaluate, or use the Covered Material;
+6. receive a report, patch, derivative work, dataset, model, embedding, evaluation, analysis, or other deliverable specifically produced through prohibited use of the Covered Material;
+7. participate in, supervise, approve, direct, fund, commission, or materially benefit from Machine-Learning Activity involving the Covered Material;
+8. use the Covered Material through an employer or other organization that would otherwise qualify as an Eligible Person; or
+9. exercise any right withheld elsewhere in this License.
+
+Nothing in this provision claims exclusive rights after the Covered Material enters the public domain or overrides a mandatory, non-waivable statutory right.
+
+---
+
+## 5. Activities Forbidden to Excluded Persons
+
+Without limiting Section 4, an Excluded Person receives no authorization to:
+
+1. clone, fork, download, copy, cache, mirror, archive, or reproduce Covered Material;
+2. install, execute, compile, test, debug, benchmark, inspect, study, or use Covered Material;
+3. modify, translate, adapt, transpile, annotate, summarize, obfuscate, or create derivative works;
+4. incorporate Covered Material into a product, service, internal system, prototype, research project, or development process;
+5. distribute, publish, display, transmit, host, sublicense, sell, lease, lend, or provide Covered Material;
+6. conduct any Machine-Learning Activity;
+7. create, obtain, commission, or use Derived Training Material;
+8. include Covered Material or Derived Training Material in any dataset, corpus, benchmark, index, vector database, retrieval system, knowledge base, model context, agent memory, or data pipeline;
+9. use Covered Material for model training, pretraining, continued pretraining, fine-tuning, alignment, reinforcement learning, evaluation, distillation, synthetic-data generation, model selection, deployment, or product development;
+10. use Covered Material to generate embeddings, labels, summaries, critiques, preferences, rewards, test cases, code transformations, documentation, or analyses;
+11. submit Covered Material to a model, agent, code assistant, analysis system, retrieval system, or automated development tool;
+12. use Covered Material for internal research, safety research, security research, nonprofit research, academic research, red-teaming, benchmarking, interoperability testing, or public-interest research;
+13. use output, analysis, or information commissioned from another person where the Excluded Person requested, directed, encouraged, or expected that Covered Material would be used;
+14. retain Covered Material following actual notice that it is governed by this License;
+15. remove, obscure, alter, falsify, or omit a copyright, license, provenance, or rights-reservation notice;
+16. claim that the Covered Material was lawfully obtained under the MIT License, a BSD license, an open-source license, or any other license;
+17. induce, procure, authorize, request, encourage, direct, or assist another person to perform a prohibited activity;
+18. use a customer, contractor, supplier, researcher, academic institution, nonprofit organization, partner, investor, or other intermediary to obtain access or results;
+19. use a model, service, API, agent, retrieval system, or other tool that has been specifically supplied with Covered Material for the Excluded Person’s benefit; or
+20. knowingly receive or exploit the results of activity that would have been prohibited if performed directly.
+
+There is no research exception, evaluation exception, safety exception, security exception, internal-use exception, experimental exception, nonprofit exception, academic exception, personal-use exception, interoperability exception, or de minimis license granted to an Excluded Person.
+
+Nothing in this License purports to eliminate a right that applicable law makes mandatory and non-waivable. Any such right is limited to its minimum mandatory scope.
+
+---
+
+## 6. Explicit Machine-Learning Prohibition
+
+For avoidance of every possible doubt, every Excluded Person is expressly forbidden from using Covered Material or Derived Training Material:
+
+1. as model-training data;
+2. as pretraining data;
+3. as continued-pretraining data;
+4. as supervised or unsupervised fine-tuning data;
+5. as reinforcement-learning data;
+6. as preference or reward-model data;
+7. as alignment or post-training data;
+8. as evaluation, validation, benchmark, grading, or test data;
+9. as retrieval, grounding, context, or augmentation data;
+10. in prompts, system prompts, tool contexts, agent memory, or model context;
+11. to create synthetic training, evaluation, benchmark, or preference data;
+12. to train or evaluate code-generation or code-analysis models;
+13. to train or evaluate general-purpose models;
+14. to train or evaluate multimodal models;
+15. to train or evaluate agents or agentic systems;
+16. for distillation, extraction, imitation, cloning, or behavioral replication;
+17. to generate embeddings, representations, indexes, summaries, labels, critiques, rankings, or rewards;
+18. to measure or improve model capabilities;
+19. to identify model weaknesses, failures, contamination, memorization, or regressions;
+20. to choose between model checkpoints, architectures, datasets, hyperparameters, prompts, configurations, or releases;
+21. to develop data-selection, filtering, ranking, labeling, deduplication, or curriculum systems;
+22. to populate a vector database, search index, knowledge base, retrieval corpus, or model-accessible repository;
+23. to improve model safety, security, reliability, reasoning, coding, tool use, or agentic behavior; or
+24. for any activity reasonably intended to contribute to the creation, selection, improvement, operation, commercialization, or deployment of an artificial-intelligence or machine-learning system.
+
+These prohibitions apply even when:
+
+1. only a fragment is used;
+2. the Covered Material has been modified;
+3. identifiers, comments, attribution, or formatting have been removed;
+4. the Covered Material has been translated, transpiled, minified, obfuscated, summarized, or rewritten;
+5. an intermediary performs the activity;
+6. the activity occurs outside a production environment;
+7. the resulting model, dataset, benchmark, or analysis is never publicly released;
+8. the activity is described as research, safety, evaluation, policy, governance, experimentation, red-teaming, or public benefit;
+9. no direct revenue is generated;
+10. the Covered Material is mixed with other material;
+11. the Covered Material is obtained from an Eligible Person;
+12. the activity is conducted through a personal, academic, contractor, customer, nonprofit, governmental, or partner account;
+13. the Covered Material is accessed through a third-party service;
+14. only Derived Training Material is used; or
+15. the results are provided indirectly through another person, organization, model, service, API, or agent.
+
+---
+
+## 7. Text-and-Data-Mining Rights Reservation
+
+For purposes of Article 4(3) of Directive (EU) 2019/790 and every implementing, successor, equivalent, or analogous law, the Licensor expressly reserves, in both human-readable and machine-readable form, all rights to reproduce, extract, crawl, scrape, mine, analyze, tokenize, index, embed, transform, or otherwise process Covered Material for text-and-data-mining purposes by or for an Excluded Person.
+
+This reservation covers:
+
+1. all versions and revisions of the Covered Material;
+2. repository history;
+3. commits, patches, and diffs;
+4. documentation and comments;
+5. tests and examples;
+6. issues, discussions, and associated materials included in the Covered Material;
+7. machine-generated representations;
+8. Derived Training Material;
+9. mirrors, archives, caches, package registries, forks, and third-party copies; and
+10. any fragment, transformation, summary, embedding, or representation of the Covered Material.
+
+No text-and-data-mining reservation is made against an Eligible Person. Eligible Persons instead receive the affirmative rights stated in Section 2.
+
+---
+
+## 8. Anti-Circumvention and Downstream Preservation
+
+An Eligible Person may not Knowingly:
+
+1. grant or purport to grant an Excluded Person rights in Covered Material;
+2. provide Covered Material specifically for use by an Excluded Person;
+3. conduct Machine-Learning Activity for an Excluded Person using Covered Material;
+4. act as a nominee, proxy, intermediary, data supplier, contractor, purchasing agent, researcher, or service provider to evade this License;
+5. create a fork, mirror, package, dataset, service, model, benchmark, index, retrieval system, or derivative work for the purpose of supplying Covered Material or its benefits to an Excluded Person;
+6. remove or obscure this License for the purpose of facilitating access by an Excluded Person;
+7. permit an Excluded Person to access Covered Material through credentials, infrastructure, repositories, products, or services controlled by the Eligible Person;
+8. falsely represent that an Excluded Person is eligible;
+9. perform analysis, development, modification, training, evaluation, retrieval, or other work using Covered Material at the request of an Excluded Person;
+10. route an Excluded Person’s request through a company, university, nonprofit organization, contractor, agent, family member, trust, foundation, or other intermediary;
+11. permit a Permanently Excluded Individual to supervise, direct, approve, participate in, or materially benefit from a project involving Covered Material; or
+12. provide an Excluded Person with non-public results materially derived from prohibited access or use.
+
+An Eligible Person has no general duty to investigate, monitor, audit, identify, screen, verify, or report users or customers.
+
+Providing a generally available product or service to the public does not violate this section merely because an unknown Excluded Person accesses it.
+
+Once an Eligible Person has actual knowledge that an Excluded Person is using Covered Material through the Eligible Person’s product, service, account, infrastructure, or organization, the Eligible Person must not knowingly continue enabling that access.
+
+### 8.1 Preservation of the Exclusion
+
+An Eligible Person may license that person’s own modifications and independent additions under any terms.
+
+However, no downstream license, sublicense, contract, package description, repository notice, or other instrument may grant an Excluded Person rights in:
+
+1. the original Covered Material;
+2. a substantial portion of the Covered Material; or
+3. a derivative work to the extent that it contains the Licensor’s protectable expression.
+
+Every distribution of Covered Material remains subject to Sections 4 through 8, regardless of the license applied to independent modifications.
+
+This requirement does not impose copyleft obligations on independent code merely combined, linked, aggregated, interfaced, or distributed with Covered Material.
+
+---
+
+## 9. Change of Status
+
+If an Eligible Person becomes an Excluded Person:
+
+1. the license granted under Section 2 terminates immediately and prospectively for that person;
+2. the person must cease every activity requiring authorization from the Licensor;
+3. the person may not continue using copies lawfully obtained before the change of status;
+4. the person may not continue using Covered Material through a product, service, model, dataset, benchmark, retrieval system, or development system created before the change of status;
+5. the person must cease Machine-Learning Activity involving Covered Material or Derived Training Material; and
+6. Sections 4 through 7 apply immediately.
+
+The change of status does not retroactively invalidate acts lawfully performed while the person was eligible.
+
+It prohibits all continued activity requiring authorization after the change.
+
+Rights previously granted to independent Eligible Persons do not terminate merely because another person becomes excluded.
+
+A former member of Excluded Personnel may become eligible after that relationship ends, provided that:
+
+1. the person is not a Permanently Excluded Individual;
+2. no other part of the Excluded Person definition applies;
+3. the Covered Material is not accessed or used for the benefit of an Excluded Company; and
+4. the person obtains a fresh copy through an authorized channel.
+
+### 9.1 No Change of Status for Permanently Excluded Individuals
+
+A Permanently Excluded Individual may not become eligible under this License.
+
+No passage of time, changed circumstances, changed conduct, changed opinion, changed employment, corporate separation, retirement, resignation, dismissal, or dissolution of an Excluded Company creates eligibility.
+
+No rights automatically vest, revive, attach, or become available to a Permanently Excluded Individual.
+
+---
+
+## 10. Termination Applicable to Eligible Persons
+
+An Eligible Person’s rights terminate if that person materially violates a condition of this License.
+
+For an unintentional violation, rights are automatically reinstated if:
+
+1. the violation is cured within thirty days after the person discovers it or receives written notice; and
+2. the person takes reasonable measures to prevent recurrence.
+
+No automatic cure or reinstatement applies to:
+
+1. deliberate circumvention;
+2. knowing assistance to an Excluded Person;
+3. intentional removal, concealment, or falsification of notices;
+4. fraudulent concealment of an Excluded Person’s involvement; or
+5. repeated violations.
+
+In those cases, reinstatement requires express written authorization from the Licensor.
+
+An Excluded Person has no license capable of termination, cure, or reinstatement unless the Licensor expressly grants that person a separate written license.
+
+### 10.1 No Cure or Reinstatement for Permanently Excluded Individuals
+
+A Permanently Excluded Individual has no public license capable of cure, reinstatement, or restoration.
+
+The cure provisions available to an Eligible Person do not apply to a Permanently Excluded Individual.
+
+A Licensor may grant rights to a Permanently Excluded Individual only through a separate written instrument that:
+
+1. expressly identifies the individual by name;
+2. expressly identifies the Covered Material;
+3. expressly states that it overrides the permanent exclusion in OAAXL-1.0;
+4. states the precise rights granted;
+5. is signed by the relevant Licensor; and
+6. is delivered directly to the individual or the individual’s authorized legal representative.
+
+A general relicensing, public-license notice, package-registry entry, repository setting, README statement, waiver, failure to enforce, settlement with another person, or publication under another standard form does not by itself waive the permanent exclusion.
+
+No employee, contributor, distributor, sublicensee, hosting provider, package registry, or other third party may waive the exclusion on behalf of the Licensor.
+
+---
+
+## 11. Contractual Access Conditions for Excluded Persons
+
+This section is intended to operate as a contractual access condition in addition to the reservation of intellectual-property rights wherever applicable law recognizes such a contract.
+
+An Excluded Person that intentionally accesses, clones, downloads, obtains, or uses Covered Material after receiving actual notice of this License agrees:
+
+1. not to perform any activity prohibited by this License;
+2. immediately to cease unauthorized access and use;
+3. to preserve records reasonably necessary to determine the scope of the unauthorized activity;
+4. not to destroy evidence after receiving notice of a dispute or claim;
+5. upon written demand, to identify repositories, datasets, indexes, retrieval systems, models, checkpoints, adapters, embeddings, services, accounts, and pipelines materially affected by the unauthorized activity;
+6. within ten business days after written demand, to certify cessation of the prohibited activity;
+7. to delete or permanently disable every unauthorized copy under its possession or control;
+8. to remove Covered Material and Derived Training Material from affected datasets, indexes, retrieval systems, knowledge bases, model contexts, and pipelines;
+9. to delete, quarantine, permanently disable, or cease using model artifacts reasonably traceable to prohibited training, fine-tuning, distillation, retrieval, or evaluation;
+10. not to restore deleted material from backups except where strictly required by law;
+11. to reimburse reasonable enforcement costs to the extent permitted and awarded under applicable law; and
+12. to submit contractual disputes governed by this section to Section 18.
+
+An Excluded Person that does not assent to these contractual conditions receives no authorization to access or use the Covered Material.
+
+Failure to establish a contract under this section does not create any license or limit any copyright, patent, database-right, restitutionary, unfair-competition, or other claim available to the Licensor.
+
+---
+
+## 12. Remedies and Enforcement
+
+A violation by an Excluded Person may cause harm that is difficult to quantify.
+
+To the maximum extent permitted by applicable law, the Licensor may seek:
+
+1. preliminary, interim, protective, and permanent injunctive relief;
+2. immediate cessation of unauthorized activities;
+3. impoundment, deletion, disabling, quarantine, or destruction of unauthorized copies;
+4. removal of Covered Material and Derived Training Material from datasets, models, indexes, retrieval systems, knowledge bases, model contexts, and development pipelines;
+5. preservation of relevant evidence;
+6. identification of affected repositories, accounts, systems, datasets, models, checkpoints, adapters, embeddings, indexes, and services;
+7. an accounting of unauthorized access, copying, use, distribution, training, evaluation, retrieval, and resulting benefit;
+8. recovery of profits, unjust enrichment, restitution, actual damages, statutory damages, or other legally available damages;
+9. reasonable legal costs and fees where available;
+10. enforcement of contractual deletion, disclosure, preservation, and certification obligations;
+11. disabling or cessation of use of artifacts materially resulting from prohibited activity; and
+12. any other remedy available under copyright, patent, database, contract, unfair-competition, restitution, or other applicable law.
+
+No warranty disclaimer, liability limitation, or other protection granted to authorized recipients limits an Excluded Person’s liability for unauthorized activity.
+
+Stopping the prohibited activity does not waive claims arising from earlier activity.
+
+Resignation, termination of employment, departure from an Excluded Company, deletion of a repository, deletion of a dataset, or cessation of use does not waive claims arising from earlier conduct.
+
+No delay, silence, failure to investigate, failure to enforce against another person, or isolated permission constitutes waiver.
+
+Any waiver must be explicit, specific, and signed by the relevant Licensor.
+
+---
+
+## 13. No Trademark or Publicity Rights
+
+No trademark, trade-name, service-mark, logo, endorsement, sponsorship, publicity, or personality right is granted.
+
+A recipient may use a Licensor’s name only as reasonably necessary to reproduce copyright and license notices or accurately describe provenance.
+
+---
+
+## 14. Disclaimer of Warranty
+
+THE COVERED MATERIAL IS PROVIDED “AS IS” AND “AS AVAILABLE,” WITHOUT WARRANTY OF ANY KIND, EXPRESS, IMPLIED, STATUTORY, OR OTHERWISE.
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, EVERY LICENSOR DISCLAIMS ALL WARRANTIES, INCLUDING WARRANTIES OF TITLE, MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, ACCURACY, RELIABILITY, SECURITY, QUIET ENJOYMENT, AND NON-INFRINGEMENT.
+
+NO LICENSOR IS REQUIRED TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, CORRECTIONS, DOCUMENTATION, SECURITY FIXES, OR CONTINUED AVAILABILITY.
+
+This section applies to every person, including an Excluded Person, to the maximum extent legally effective.
+
+---
+
+## 15. Limitation of Licensor Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, NO LICENSOR SHALL BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, PUNITIVE, OR CONSEQUENTIAL LOSS ARISING FROM OR RELATED TO THE COVERED MATERIAL, INCLUDING LOSS OF DATA, PROFITS, REVENUE, BUSINESS, GOODWILL, SECURITY, OR USE.
+
+THIS LIMITATION APPLIES REGARDLESS OF LEGAL THEORY AND EVEN IF THE LICENSOR WAS ADVISED OF THE POSSIBILITY OF LOSS.
+
+THIS SECTION LIMITS ONLY LIABILITY OF THE LICENSOR. IT DOES NOT LIMIT THE LIABILITY OF AN EXCLUDED PERSON FOR UNAUTHORIZED ACTIVITY.
+
+---
+
+## 16. Severability and Maximum Enforcement
+
+Every prohibition, condition, category of person, category of use, and listed activity in this License is intended to be independently enforceable.
+
+If a provision is invalid or unenforceable:
+
+1. it shall be interpreted or modified to the minimum extent necessary to make it valid and enforceable;
+2. if modification is impossible, only the minimum invalid portion shall be severed; and
+3. all remaining provisions shall continue in effect.
+
+Every exclusion and prohibition shall be enforced to the maximum extent permitted by applicable law.
+
+A finding that one category of prohibited activity is unenforceable does not imply that another category is unenforceable.
+
+---
+
+## 17. Entire License and Interpretation
+
+This License constitutes the complete public license offered by the Licensor for the Covered Material.
+
+No statement in a README, package description, website, repository interface, marketing page, conversation, issue, pull request, commit message, or other communication modifies this License unless it expressly identifies this License and is signed by the Licensor.
+
+If a separate signed agreement grants additional rights, that agreement controls only for the parties and material expressly identified in it.
+
+Headings are for convenience and do not narrow the operative language.
+
+“Including” means “including without limitation.”
+
+The singular includes the plural and vice versa.
+
+A reference to a person includes a natural person, legal person, organization, and other legally recognized entity where the context permits.
+
+A reference to access, use, processing, or activity includes direct and indirect access, use, processing, or activity.
+
+---
+
+## 18. Governing Law and Forum
+
+To the extent a choice of law is legally effective, this License and any contractual obligation arising under it are governed by the laws of France, without regard to conflict-of-law rules.
+
+To the extent a forum-selection agreement is legally effective, the competent courts located in Paris, France have exclusive jurisdiction over contractual disputes arising under this License.
+
+Nothing in this section prevents a Licensor from:
+
+1. bringing an intellectual-property infringement claim in any court having jurisdiction;
+2. seeking interim, protective, or injunctive relief in any competent jurisdiction; or
+3. relying on mandatory rights or remedies available under applicable law.
+
+---
+
+## 19. License Classification and Identifier
+
+This is a source-available license containing exclusions directed specifically at OpenAI, Anthropic, associated persons, and the Permanently Excluded Individuals listed in Schedule A.
+
+It is not:
+
+1. the MIT License;
+2. a BSD license;
+3. an OSI-approved license;
+4. a Free Software Foundation free-software license; or
+5. an open-source license.
+
+The suggested machine-readable identifier is:
+
+`LicenseRef-OAAXL-1.0`
+
+---
+
+# Schedule A
+
+## Permanently Excluded Individuals
+
+The following natural persons are Permanently Excluded Individuals:
+
+1. **Dario Amodei** — the natural person publicly known under that name as an Anthropic co-founder and executive as of the Identification Date.
+2. **Jack Clark** — the natural person publicly known under that name as an Anthropic co-founder as of the Identification Date.
+3. **Marina Favaro** — the natural person publicly associated with Anthropic under that name as of the Identification Date.
+4. **Sarah Heck** — the natural person publicly associated with Anthropic under that name as of the Identification Date.
+5. **Sam Altman** — the natural person publicly associated with OpenAI under that name as of the Identification Date.
+6. **Greg Brockman** — the natural person publicly associated with OpenAI under that name as of the Identification Date.
+7. **Jakub Pachocki** — the natural person publicly associated with OpenAI under that name as of the Identification Date.
+8. **Chris Lehane** — the natural person publicly associated with OpenAI under that name as of the Identification Date.
+9. **Dean Woodley Ball**, also publicly known as **Dean W. Ball** and **Dean Ball** — the natural person publicly associated with OpenAI and artificial-intelligence policy under those names as of the Identification Date.
+
+“Identification Date” means **20 July 2026**.
+
+The descriptions above identify the intended natural persons. A later change in title, occupation, employer, public profile, name, or organizational affiliation has no effect on their exclusion.
